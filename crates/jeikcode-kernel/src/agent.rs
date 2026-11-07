@@ -77,7 +77,7 @@ impl Default for ToolLoopPolicy {
     fn default() -> Self {
         Self {
             warning_threshold: 3,
-            stop_threshold: 4,
+            stop_threshold: 5,
         }
     }
 }
@@ -120,12 +120,12 @@ const MAX_OVERFLOW_ATTEMPTS: u8 = 3;
 /// waits) so the user perceives a retry is happening AND a fresh connection gets
 /// a real chance to recover (the stale keep-alive class). NON-retryable errors
 /// (auth / 400 / balance) never enter this path — they fail fast.
-const MAX_PROVIDER_RETRIES: u32 = 3;
+const MAX_PROVIDER_RETRIES: u32 = 6;
 /// Max mid-stream RECONNECTS after a stream idle-timeout before failing the turn
 /// (codex parity: 5). Each reconnect re-issues the SAME round from history
 /// (partial output discarded), with exponential backoff. Distinct from
 /// `MAX_PROVIDER_RETRIES` (which covers failures at OPEN, before any token).
-const MAX_STREAM_RETRIES: u32 = 5;
+const MAX_STREAM_RETRIES: u32 = 6;
 
 /// Max round re-issues after a FIRST-TOKEN timeout (model hasn't emitted ANY
 /// token within `first_token_timeout`). Each retry opens a FRESH connection and
@@ -133,7 +133,7 @@ const MAX_STREAM_RETRIES: u32 = 5;
 /// partial output is never double-pushed). After this budget the turn fails with
 /// the explicit "model unresponsive / high latency" terminal error. User-facing
 /// expectation: 180s wait × retry3 → "模型延迟过高,请稍后再试".
-const MAX_FIRST_TOKEN_RETRIES: u32 = 3;
+const MAX_FIRST_TOKEN_RETRIES: u32 = 6;
 
 /// Safety fuse: maximum consecutive `WaitAndRetry` rate-limit sleeps within a
 /// single turn before the kernel forces a `Pause` stop (RateLimited), regardless
@@ -170,7 +170,7 @@ const SILENT_FIRST_RATE_LIMIT_RETRY: std::time::Duration = std::time::Duration::
 /// request resent recovers — so it gets MORE attempts and a much SHORTER backoff
 /// than the generic error path (the empty body returns instantly; a long wait is
 /// pure latency). Mirrors v1's `EMPTY_RESPONSE_MAX_RETRIES`.
-const EMPTY_RESPONSE_MAX_RETRIES: u32 = 5;
+const EMPTY_RESPONSE_MAX_RETRIES: u32 = 6;
 
 /// How many times a turn may auto-continue after the model's output was cut off at
 /// the token limit (`finish_reason=length`) with no tool call. A truncated response
@@ -184,8 +184,8 @@ const MAX_TRUNCATION_CONTINUATIONS: u32 = 2;
 /// compares the executed call, effective cwd, result and success state; this fuse
 /// covers the broader failure mode where the model keeps choosing the same action
 /// even while results change, or when a product has disabled exact detection.
-const MAX_REPEAT_ROUNDS: u32 = 6;
-const REPEAT_NUDGE_AT: u32 = 2;
+const MAX_REPEAT_ROUNDS: u32 = 7;
+const REPEAT_NUDGE_AT: u32 = 3;
 const REPEAT_LOOP_NUDGE: &str =
     "You have issued the SAME tool call with the SAME arguments several rounds in a row. \
      Stop repeating it and change your approach. If you are trying to ask the user something, \
@@ -203,8 +203,8 @@ const REPEAT_LOOP_NUDGE: &str =
 ///
 /// Round 1 is evidence. Rounds 2 and 3 remind. Round 4 stops. Two ignored
 /// reminders is enough to call it stuck without dying on the first retry.
-const ECHO_NUDGE_AT: u32 = 2;
-const ECHO_STOP_AT: u32 = 4;
+const ECHO_NUDGE_AT: u32 = 3;
+const ECHO_STOP_AT: u32 = 5;
 fn echo_loop_nudge() -> String {
     i18n::format_agent_echo_loop_nudge()
 }
@@ -409,7 +409,16 @@ fn strip_leading_parameter_tail(input: &str) -> (String, bool) {
 fn retry_reason(e: &crate::stream::ProviderError) -> String {
     match e.http_status {
         Some(429) => i18n::format_agent_status_rate_limited(),
-        Some(500 | 502 | 503 | 504 | 529) => i18n::format_agent_status_upstream_unavailable(),
+        Some(504) => format!(
+            "{} (HTTP 504)",
+            i18n::format_agent_status_response_timeout()
+        ),
+        Some(code @ (500 | 502 | 503 | 529)) => {
+            format!(
+                "{} (HTTP {code})",
+                i18n::format_agent_status_upstream_unavailable()
+            )
+        }
         _ => {
             let m = e.message.to_ascii_lowercase();
             if m.contains("timeout") || m.contains("timed out") {
@@ -499,10 +508,14 @@ fn empty_retry_wait_secs(thinking_only: bool, empty_retries: u32) -> u64 {
     } else {
         empty_retries
     };
-    if n == 0 {
-        0
-    } else {
-        (((n + 1) / 2).min(3)) as u64
+    match n {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 5,
+        5 => 8,
+        _ => 12,
     }
 }
 
@@ -1056,6 +1069,8 @@ fn cap_tool_result(result: &mut ToolResult, max: usize) {
 pub(crate) struct SteerInput {
     pub text: String,
     pub images: Vec<ImageContent>,
+    /// 客户端铸造的提问 id（`SendMessageWithId` 路径）；折叠后仍用它落盘。
+    pub message_id: Option<String>,
 }
 
 /// Shared, per-turn steer buffer. `process_send_message` pushes; `run_turn`
@@ -1448,7 +1463,9 @@ impl RunningAgent {
             .find(|m| m.role == crate::message::Role::Assistant)
             .and_then(|m| m.meta.as_ref())
             .map(|meta| {
-                let used = if meta.tokens.prompt > 0 {
+                let used = if meta.used_tokens > 0 {
+                    meta.used_tokens
+                } else if meta.tokens.prompt > 0 {
                     meta.tokens.prompt.saturating_add(meta.tokens.completion)
                 } else {
                     convo
@@ -1720,14 +1737,29 @@ impl RunningAgent {
                 // → Null (fail-closed), so a stranded approval oneshot can't linger. A
                 // no-op map (the common case) is harmless.
                 AgentCommand::Cancel => self.rt.cancel_pending(),
-                AgentCommand::CancelSteer { text } => {
-                    if let Some(target) = &text {
+                AgentCommand::CancelSteer { text, message_id } => {
+                    if let Some(id) = message_id.as_deref() {
+                        pending.retain(|cmd| {
+                            !matches!(
+                                cmd,
+                                AgentCommand::SendMessageWithId { message_id: cmd_id, .. }
+                                    if cmd_id == id
+                            )
+                        });
+                    } else if let Some(target) = &text {
                         let trimmed = target.trim();
                         if trimmed.is_empty() {
-                            pending.retain(|cmd| !matches!(cmd, AgentCommand::SendMessage { .. }));
+                            pending.retain(|cmd| {
+                                !matches!(
+                                    cmd,
+                                    AgentCommand::SendMessage { .. }
+                                        | AgentCommand::SendMessageWithId { .. }
+                                )
+                            });
                         } else {
                             pending.retain(|cmd| match cmd {
-                                AgentCommand::SendMessage { text: cmd_text, .. } => {
+                                AgentCommand::SendMessage { text: cmd_text, .. }
+                                | AgentCommand::SendMessageWithId { text: cmd_text, .. } => {
                                     let cmd_trimmed = cmd_text.trim();
                                     !cmd_trimmed.contains(trimmed) && !trimmed.contains(cmd_trimmed)
                                 }
@@ -1735,7 +1767,13 @@ impl RunningAgent {
                             });
                         }
                     } else {
-                        pending.retain(|cmd| !matches!(cmd, AgentCommand::SendMessage { .. }));
+                        pending.retain(|cmd| {
+                            !matches!(
+                                cmd,
+                                AgentCommand::SendMessage { .. }
+                                    | AgentCommand::SendMessageWithId { .. }
+                            )
+                        });
                     }
                 }
                 AgentCommand::Respond { id, value } => self.rt.resolve(id, value),
@@ -1762,6 +1800,7 @@ impl RunningAgent {
                             text,
                             images,
                             None,
+                            None,
                         )
                         .await;
                     if shutdown {
@@ -1769,6 +1808,34 @@ impl RunningAgent {
                     }
                     // DRAIN queued mid-turn commands (FIFO) now that the turn is done
                     // and `convo` is free (see `drain_pending`).
+                    if self
+                        .drain_pending(&mut convo, &mut cmd_rx, &mut pending, &mut tool_loop_state)
+                        .await
+                    {
+                        break;
+                    }
+                }
+                AgentCommand::SendMessageWithId {
+                    text,
+                    images,
+                    message_id,
+                } => {
+                    let shutdown = self
+                        .process_send_message(
+                            &mut convo,
+                            &mut cmd_rx,
+                            &mut pending,
+                            &mut tool_loop_state,
+                            PromptKind::User,
+                            text,
+                            images,
+                            Some(message_id),
+                            None,
+                        )
+                        .await;
+                    if shutdown {
+                        break;
+                    }
                     if self
                         .drain_pending(&mut convo, &mut cmd_rx, &mut pending, &mut tool_loop_state)
                         .await
@@ -1790,6 +1857,7 @@ impl RunningAgent {
                             PromptKind::User,
                             text,
                             images,
+                            None,
                             Some(context),
                         )
                         .await;
@@ -1817,6 +1885,7 @@ impl RunningAgent {
                             PromptKind::Synthetic,
                             text,
                             Vec::new(),
+                            None,
                             None,
                         )
                         .await;
@@ -1849,6 +1918,8 @@ impl RunningAgent {
         kind: PromptKind,
         mut text: String,
         images: Vec<ImageContent>,
+        // 调用方铸造的持久身份；`None` = 内核自行分配。
+        message_id: Option<String>,
         synthetic_context: Option<String>,
     ) -> bool {
         if let Err(reason) = self.hooks.user_prompt_submit(&mut text).await {
@@ -1889,10 +1960,16 @@ impl RunningAgent {
         if let Some(context) = synthetic_context.filter(|context| !context.trim().is_empty()) {
             convo.push(Message::synthetic_user(context));
         }
-        convo.push(match kind {
+        let mut message = match kind {
             PromptKind::User => Message::user_with_images(text, images),
             PromptKind::Synthetic => Message::synthetic_user(text),
-        });
+        };
+        // 身份契约：调用方给的 id 优先。`Conversation::push` 只在缺省时分配，
+        // 因此这个 id 会原样写进 snapshot / display log / 事件帧，跨端可对账。
+        if let Some(id) = message_id {
+            message.id = Some(id);
+        }
+        convo.push(message);
         // Identity boundary: announce the STORED user message so a client can bind
         // its optimistic first-prompt bubble to the same id the transcript carries
         // (id-based merges across refresh / session switch / replay). Synthetic
@@ -1964,16 +2041,24 @@ impl RunningAgent {
                         self.rt.cancel_pending();
                         steer.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     }
-                    Some(AgentCommand::CancelSteer { text }) => {
+                    Some(AgentCommand::CancelSteer { text, message_id }) => {
                         let mut b = steer.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(target) = &text {
+                        if let Some(id) = message_id.as_deref() {
+                            b.retain(|input| input.message_id.as_deref() != Some(id));
+                            pending.retain(|cmd| !matches!(
+                                cmd,
+                                AgentCommand::SendMessageWithId { message_id: cmd_id, .. }
+                                    if cmd_id == id
+                            ));
+                        } else if let Some(target) = &text {
                             let trimmed = target.trim();
                             b.retain(|input| {
                                 let input_text = input.text.trim();
                                 !input_text.contains(trimmed) && !trimmed.contains(input_text)
                             });
                             pending.retain(|cmd| match cmd {
-                                AgentCommand::SendMessage { text: cmd_text, .. } => {
+                                AgentCommand::SendMessage { text: cmd_text, .. }
+                                | AgentCommand::SendMessageWithId { text: cmd_text, .. } => {
                                     let cmd_trimmed = cmd_text.trim();
                                     !cmd_trimmed.contains(trimmed) && !trimmed.contains(cmd_trimmed)
                                 }
@@ -1981,7 +2066,7 @@ impl RunningAgent {
                             });
                         } else {
                             b.clear();
-                            pending.retain(|cmd| !matches!(cmd, AgentCommand::SendMessage { .. }));
+                            pending.retain(|cmd| !matches!(cmd, AgentCommand::SendMessage { .. } | AgentCommand::SendMessageWithId { .. }));
                         }
                     }
                     // QUEUE a mid-turn Snapshot rather than dropping it:
@@ -2011,6 +2096,18 @@ impl RunningAgent {
                         steer.lock().unwrap_or_else(|e| e.into_inner()).push_back(SteerInput {
                             text,
                             images,
+                            message_id: None,
+                        });
+                    }
+                    Some(AgentCommand::SendMessageWithId {
+                        text,
+                        images,
+                        message_id,
+                    }) => {
+                        steer.lock().unwrap_or_else(|e| e.into_inner()).push_back(SteerInput {
+                            text,
+                            images,
+                            message_id: Some(message_id),
                         });
                     }
                     // A Compact mid-turn is QUEUED, not executed: compacting inside a
@@ -2033,9 +2130,16 @@ impl RunningAgent {
         // run_turn (e.g. Task 2 not yet implemented, or a very late arrival) falls
         // back to the pending deque so the user's prompt is NOT silently lost.
         for s in steer.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
-            pending.push_back(AgentCommand::SendMessage {
-                text: s.text,
-                images: s.images,
+            pending.push_back(match s.message_id {
+                Some(message_id) => AgentCommand::SendMessageWithId {
+                    text: s.text,
+                    images: s.images,
+                    message_id,
+                },
+                None => AgentCommand::SendMessage {
+                    text: s.text,
+                    images: s.images,
+                },
             });
         }
         if shutdown {
@@ -2082,6 +2186,29 @@ impl RunningAgent {
                             text,
                             images,
                             None,
+                            None,
+                        )
+                        .await
+                    {
+                        return true;
+                    }
+                }
+                AgentCommand::SendMessageWithId {
+                    text,
+                    images,
+                    message_id,
+                } => {
+                    if self
+                        .process_send_message(
+                            convo,
+                            cmd_rx,
+                            pending,
+                            tool_loop_state,
+                            PromptKind::User,
+                            text,
+                            images,
+                            Some(message_id),
+                            None,
                         )
                         .await
                     {
@@ -2102,6 +2229,7 @@ impl RunningAgent {
                             PromptKind::User,
                             text,
                             images,
+                            None,
                             Some(context),
                         )
                         .await
@@ -2120,6 +2248,7 @@ impl RunningAgent {
                             text,
                             Vec::new(),
                             None,
+                            None,
                         )
                         .await
                     {
@@ -2132,14 +2261,29 @@ impl RunningAgent {
                     self.run_compaction(convo, CompactTrigger::Manual { focus })
                         .await;
                 }
-                AgentCommand::CancelSteer { text } => {
-                    if let Some(target) = &text {
+                AgentCommand::CancelSteer { text, message_id } => {
+                    if let Some(id) = message_id.as_deref() {
+                        pending.retain(|cmd| {
+                            !matches!(
+                                cmd,
+                                AgentCommand::SendMessageWithId { message_id: cmd_id, .. }
+                                    if cmd_id == id
+                            )
+                        });
+                    } else if let Some(target) = &text {
                         let trimmed = target.trim();
                         if trimmed.is_empty() {
-                            pending.retain(|cmd| !matches!(cmd, AgentCommand::SendMessage { .. }));
+                            pending.retain(|cmd| {
+                                !matches!(
+                                    cmd,
+                                    AgentCommand::SendMessage { .. }
+                                        | AgentCommand::SendMessageWithId { .. }
+                                )
+                            });
                         } else {
                             pending.retain(|cmd| match cmd {
-                                AgentCommand::SendMessage { text: cmd_text, .. } => {
+                                AgentCommand::SendMessage { text: cmd_text, .. }
+                                | AgentCommand::SendMessageWithId { text: cmd_text, .. } => {
                                     let cmd_trimmed = cmd_text.trim();
                                     !cmd_trimmed.contains(trimmed) && !trimmed.contains(cmd_trimmed)
                                 }
@@ -2147,7 +2291,13 @@ impl RunningAgent {
                             });
                         }
                     } else {
-                        pending.retain(|cmd| !matches!(cmd, AgentCommand::SendMessage { .. }));
+                        pending.retain(|cmd| {
+                            !matches!(
+                                cmd,
+                                AgentCommand::SendMessage { .. }
+                                    | AgentCommand::SendMessageWithId { .. }
+                            )
+                        });
                     }
                 }
                 // Only snapshot, prompt, and compact commands are ever enqueued.
@@ -2512,10 +2662,12 @@ impl RunningAgent {
                 let n = steered.len();
                 let mut inputs = Vec::with_capacity(n);
                 for input in steered {
-                    convo.push(Message::user_with_images(
-                        input.text.clone(),
-                        input.images.clone(),
-                    ));
+                    let mut message =
+                        Message::user_with_images(input.text.clone(), input.images.clone());
+                    // 身份契约：折叠的转向沿用客户端铸造的 id（若有），
+                    // 否则内核照旧分配。两者都必须进 snapshot/display/事件三处。
+                    message.id = input.message_id.clone();
+                    convo.push(message);
                     // Same identity the persisted steer message will carry, so the
                     // client's pending steer card/bubble adopts it (instead of keeping
                     // its local client id) and id-based merges converge with disk.
@@ -3696,6 +3848,12 @@ impl RunningAgent {
                     convo.push(Message::synthetic_user(text));
                     continue;
                 }
+                // Re-check the steer buffer after `offer_typed_continuation`: a steer
+                // that arrived while the continuation hook was awaiting must fold into
+                // this turn rather than falling out into `drain_pending`.
+                if !steer.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+                    continue;
+                }
                 // The turn is ENDING. If it ends because the output was truncated and
                 // we could NOT recover (auto-continuation budget exhausted, no hook
                 // continuation), surface the warning now — this is the one case the
@@ -4117,6 +4275,15 @@ impl RunningAgent {
                         },
                     };
                     r.call_id = call.id.clone();
+                    // SETTLE FIRST, RESULT LATER: Phase ③ still applies every result
+                    // in emission order (provider pairing / prefix-cache determinism),
+                    // so a fast call in a batch with a slow sibling would keep its row
+                    // spinning until the slow one returns. Announce the completion here
+                    // — the row can settle while the batch is still running.
+                    let _ = events.send(AgentEvent::ToolFinished {
+                        call_id: call.id.clone(),
+                        is_error: r.is_error,
+                    });
                     (
                         idx,
                         Some(ExecutedCallResult {
@@ -4977,20 +5144,20 @@ mod empty_retry_wait_tests {
     #[test]
     fn thinking_only_retries_immediately_then_backs_off() {
         assert_eq!(
-            (1..=5)
+            (1..=6)
                 .map(|n| empty_retry_wait_secs(true, n))
                 .collect::<Vec<_>>(),
-            vec![0, 1, 1, 2, 2]
+            vec![0, 1, 2, 3, 5, 8]
         );
     }
 
     #[test]
     fn empty_and_malformed_keep_the_short_backoff() {
         assert_eq!(
-            (1..=5)
+            (1..=6)
                 .map(|n| empty_retry_wait_secs(false, n))
                 .collect::<Vec<_>>(),
-            vec![1, 1, 2, 2, 3]
+            vec![1, 2, 3, 5, 8, 12]
         );
     }
 }
@@ -6457,6 +6624,7 @@ mod steer_buffer_tests {
                     cmd_tx
                         .send(AgentCommand::CancelSteer {
                             text: Some("DO-NOT-STEER".into()),
+                            message_id: None,
                         })
                         .unwrap();
                 }

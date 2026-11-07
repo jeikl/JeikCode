@@ -541,6 +541,7 @@ fn convert_legacy_session_with_diagnostic(
         turn_stats: normalized_turns.turn_stats,
         detached_model_usage: Vec::new(),
         detached_unattributed_tokens: 0,
+        compacted_context_tokens: None,
         origin: SessionOrigin::Manual,
         preferred_model: None,
         reasoning_effort: None,
@@ -1412,12 +1413,14 @@ pub fn append_catalog_presentation_in_project(
     project_bucket: &str,
     id: &str,
     messages: &[(PresentationRole, String)],
+    client_request_id: Option<&str>,
 ) -> anyhow::Result<usize> {
     append_catalog_presentation_in_root(
         &SessionManager::sessions_root(),
         project_bucket,
         id,
         messages,
+        client_request_id,
     )
 }
 
@@ -1473,6 +1476,7 @@ fn append_catalog_presentation_in_root(
     project_bucket: &str,
     id: &str,
     messages: &[(PresentationRole, String)],
+    client_request_id: Option<&str>,
 ) -> anyhow::Result<usize> {
     validate_project_bucket(project_bucket)?;
     let manager = SessionManager::with_root(sessions_root.join(project_bucket));
@@ -1493,7 +1497,8 @@ fn append_catalog_presentation_in_root(
         }
         None => anyhow::bail!("session {project_bucket}/{id} not found"),
     }
-    let count = manager.append_presentation_at_latest_valid_turn(id, messages)?;
+    let count =
+        manager.append_presentation_at_latest_valid_turn(id, messages, client_request_id)?;
     drop(cutover_lease);
     Ok(count)
 }
@@ -1552,23 +1557,37 @@ fn reject_matching_catalog_diagnostic(
     query: &str,
 ) -> anyhow::Result<()> {
     let mut matches = diagnostics.iter().filter(|diagnostic| {
-        catalog_diagnostic_session_id(&diagnostic.path)
-            .is_some_and(|id| id == query || id.starts_with(query))
+        // Exact identity only. A damaged session must never block a DIFFERENT
+        // session whose id happens to share a prefix; multiple artifacts of the
+        // same session (e.g. a corrupt meta plus its transcript) are reported by
+        // their concrete path/message instead of a synthetic ambiguity error.
+        catalog_diagnostic_session_id(&diagnostic.path).is_some_and(|id| id == query)
     });
     let Some(first) = matches.next() else {
         return Ok(());
     };
-    if matches.next().is_some() {
-        anyhow::bail!("session query {query:?} matches multiple damaged catalog entries")
-    }
     anyhow::bail!("{}: {}", first.path.display(), first.message)
 }
 
 fn catalog_diagnostic_session_id(path: &std::path::Path) -> Option<&str> {
     let name = path.file_name()?.to_str()?;
-    [".ui.json", ".snapshot", ".meta", ".jsonl", ".json"]
-        .into_iter()
-        .find_map(|suffix| name.strip_suffix(suffix))
+    // Longest suffixes first: display artifacts and rewind sidecars would
+    // otherwise shrink to `<id>.display*` / `<id>.rewind*` and stop matching
+    // the owning session id.
+    [
+        ".display.idx.jsonl",
+        ".display.jsonl",
+        ".display.meta.json",
+        ".rewind.txn.json",
+        ".rewind.json",
+        ".snapshot",
+        ".jsonl",
+        ".meta",
+        ".ui.json",
+        ".json",
+    ]
+    .into_iter()
+    .find_map(|suffix| name.strip_suffix(suffix))
 }
 
 fn rename_catalog_entry_in_root(
@@ -1856,6 +1875,33 @@ mod tests {
     }
 
     #[test]
+    fn display_only_new_chat_session_resolves_as_absent_not_damaged() {
+        let root = tempfile::tempdir().unwrap();
+        let bucket = "0123456789abcdef";
+        let bucket_dir = root.path().join(bucket);
+        std::fs::create_dir_all(&bucket_dir).unwrap();
+        let id = "bae75c33-b339-49cd-9e0a-f8dd3ea881a6";
+        // `/chat` admits the user prompt to display.jsonl BEFORE the runtime
+        // persists `.meta`/`.snapshot`. The lookup must treat this as a new
+        // session, not as two damaged catalog entries for the same query.
+        std::fs::write(bucket_dir.join(format!("{id}.display.jsonl")), b"{\n").unwrap();
+        std::fs::write(
+            bucket_dir.join(format!("{id}.display.meta.json")),
+            b"{\"v\":4,\"complete\":true}",
+        )
+        .unwrap();
+
+        let resolved = load_catalog_session_view_in_project_root(root.path(), bucket, id);
+
+        assert!(
+            resolved.is_ok(),
+            "a brand-new /chat session must not be rejected by its own display artifacts: {:?}",
+            resolved.err()
+        );
+        assert!(resolved.unwrap().is_none());
+    }
+
+    #[test]
     fn catalog_diagnostics_only_block_the_damaged_session() {
         use jeikcode_capabilities::session::{CatalogDiagnostic, CatalogDiagnosticKind};
 
@@ -1870,6 +1916,59 @@ mod tests {
             .expect("unrelated valid sessions must remain usable");
         let error = reject_matching_catalog_diagnostic(&[diagnostic], "damaged").unwrap_err();
         assert!(error.to_string().contains("sidecars but no metadata"));
+    }
+
+    #[test]
+    fn catalog_diagnostic_identity_uses_the_owning_session_id() {
+        let id = "bae75c33-b339-49cd-9e0a-f8dd3ea881a6";
+        for file in [
+            format!("{id}.meta"),
+            format!("{id}.snapshot"),
+            format!("{id}.jsonl"),
+            format!("{id}.json"),
+            format!("{id}.rewind.json"),
+            format!("{id}.rewind.txn.json"),
+            format!("{id}.display.jsonl"),
+            format!("{id}.display.idx.jsonl"),
+            format!("{id}.display.meta.json"),
+        ] {
+            let path = std::path::Path::new("/sessions/0123456789abcdef").join(&file);
+            assert_eq!(
+                catalog_diagnostic_session_id(&path),
+                Some(id),
+                "{file} must map back to its owning session"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_diagnostic_multiple_artifacts_report_concrete_damage() {
+        use jeikcode_capabilities::session::{CatalogDiagnostic, CatalogDiagnosticKind};
+
+        let id = "bae75c33-b339-49cd-9e0a-f8dd3ea881a6";
+        let bucket = "/sessions/0123456789abcdef";
+        let diagnostics = vec![
+            CatalogDiagnostic {
+                project_bucket: Some("0123456789abcdef".into()),
+                path: std::path::PathBuf::from(bucket).join(format!("{id}.meta")),
+                kind: CatalogDiagnosticKind::Corrupt,
+                message: "corrupt meta".into(),
+            },
+            CatalogDiagnostic {
+                project_bucket: Some("0123456789abcdef".into()),
+                path: std::path::PathBuf::from(bucket).join(format!("{id}.snapshot")),
+                kind: CatalogDiagnosticKind::Corrupt,
+                message: "sidecars but no metadata".into(),
+            },
+        ];
+
+        let error = reject_matching_catalog_diagnostic(&diagnostics, id).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("corrupt meta"), "{text}");
+        assert!(!text.contains("matches multiple damaged"), "{text}");
+
+        reject_matching_catalog_diagnostic(&diagnostics, "bae75c33-b339-49cd-9e0a-f8dd3ea881a7")
+            .expect("a sibling id sharing a prefix must not be blocked");
     }
 
     #[test]
@@ -3898,6 +3997,7 @@ mod tests {
             bucket,
             id,
             &[(PresentationRole::Assistant, "local note".into())],
+            None,
         )
         .unwrap();
 

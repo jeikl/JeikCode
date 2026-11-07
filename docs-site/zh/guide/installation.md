@@ -52,6 +52,9 @@ JeikCode 提供了开箱即用的跨平台桌面客户端（基于 **Tauri 2.0**
 ### 3. 各平台安装指引
 - **Windows**：下载 `.exe` 安装程序，双击运行并按照向导提示点击“下一步”完成安装；
 - **macOS**：下载对应芯片架构的 `.dmg` 文件，双击挂载后将 **JeikCode** 图标直接拖拽至 **Applications**（应用程序）文件夹；
+  > 💡 **macOS 提示“已损坏，无法打开”的解决方法**：  
+  > 将应用拖入 `/Applications`（应用程序）文件夹后，打开终端运行：  
+  > `xattr -cr "/Applications/JeikCode Desktop.app"` 即可正常使用。
 - **Linux**：
   - *Debian / Ubuntu*：
     ```bash

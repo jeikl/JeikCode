@@ -12,17 +12,31 @@ function isApprovalMode(value: unknown): value is ApprovalMode {
 /** Map the UI approval mode to the daemon queue's existing wire property. */
 export function serializeQueuedCard<T extends { approvalMode?: ApprovalMode; clientInputId?: string }>(
   item: T,
-): Omit<T, 'approvalMode' | 'clientInputId'> & { approval_mode?: ApprovalMode } {
-  const { approvalMode, clientInputId: _localOnlyId, ...rest } = item;
-  return isApprovalMode(approvalMode) ? { ...rest, approval_mode: approvalMode } : rest;
+): Omit<T, 'approvalMode' | 'clientInputId'> & {
+  approval_mode?: ApprovalMode;
+  client_input_id?: string;
+} {
+  const { approvalMode, clientInputId, ...rest } = item;
+  return {
+    ...rest,
+    ...(clientInputId ? { client_input_id: clientInputId } : {}),
+    ...(isApprovalMode(approvalMode) ? { approval_mode: approvalMode } : {}),
+  };
 }
 
 /** Restore a daemon queue card without trusting malformed persisted modes. */
-export function deserializeQueuedCard<T extends { approval_mode?: ApprovalMode }>(
+export function deserializeQueuedCard<T extends { approval_mode?: ApprovalMode; client_input_id?: string }>(
   item: T,
-): Omit<T, 'approval_mode'> & { approvalMode?: ApprovalMode } {
-  const { approval_mode, ...rest } = item;
-  return isApprovalMode(approval_mode) ? { ...rest, approvalMode: approval_mode } : rest;
+): Omit<T, 'approval_mode' | 'client_input_id'> & {
+  approvalMode?: ApprovalMode;
+  clientInputId?: string;
+} {
+  const { approval_mode, client_input_id, ...rest } = item;
+  return {
+    ...rest,
+    ...(client_input_id ? { clientInputId: client_input_id } : {}),
+    ...(isApprovalMode(approval_mode) ? { approvalMode: approval_mode } : {}),
+  };
 }
 
 export const STORAGE_KEY_QUEUED_MESSAGES = 'jeikcode_queued_messages_v2';
@@ -135,11 +149,25 @@ export function restoreSessionQueued<T>(
  * still running. Clearing it hid queued and steered chrome after a sidebar
  * switch even though `postChatSteer` continued to apply at the next step.
  */
-export function queueAfterSessionActiveCheck<T>(input: {
+export function queueAfterSessionActiveCheck<T extends { kind?: string }>(input: {
   restored: T[];
   sessionActive: boolean;
 }): T[] {
-  return input.restored;
+  if (input.sessionActive) return input.restored;
+  // A `steer` / `steering` card is only meaningful while its turn is live.
+  // After a refresh lands on an already-idle session, the in-flight POST and
+  // the kernel fold are gone: downgrade the card to a normal queued turn so
+  // the drain can deliver it instead of leaving a blue "steering" card stuck
+  // at the tail forever. Cards already on canvas are filtered by the caller.
+  let changed = false;
+  const next = input.restored.map((item) => {
+    if (item.kind === 'steer' || item.kind === 'steering') {
+      changed = true;
+      return { ...item, kind: 'queue' } as T;
+    }
+    return item;
+  });
+  return changed ? next : input.restored;
 }
 
 /**

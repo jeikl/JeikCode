@@ -11,6 +11,15 @@ import { showToast } from './Toast';
 import { highlightCode, formatCodeContent } from '../lib/codeHighlight';
 import { changeEditorFontSize } from '../lib/pageZoom';
 import { getCachedFileContent, saveCachedFileContent } from '../lib/sessionCache';
+import {
+  readEditorTabSnapshot,
+  shouldReloadFromDisk,
+  toggleTextMode,
+  writeEditorTabSnapshot,
+  type EditorTabSnapshot,
+} from '../lib/editorTabState';
+import { fileStampFromRead, type FileStamp } from '../lib/fileStamp';
+import { subscribeFileFreshness, type FileFreshnessSubscription } from '../lib/fsFreshness';
 import { useT } from '../settings';
 
 export interface CodeEditorTabProps {
@@ -22,6 +31,23 @@ export interface CodeEditorTabProps {
   hideHeaderToolbar?: boolean;
   startLine?: number;
   endLine?: number;
+  /** 嵌入式（右侧预览）拖入文件时的落点。缺省时保持主编辑器的行为：
+   *  打开主标签页。预览面板必须传 openTab，否则拖入 .md 会同时开主标签。 */
+  onFileDrop?: (path: string) => void;
+  /** Markdown 内文件徽章/链接的默认打开落点：主画布保持 'main'（默认），
+   *  右侧预览面板传 'right'，保证在右侧点开的文件继续在右侧标签区新建标签。
+   *  Ctrl/Cmd/Alt + 点击仍由 Markdown 组件强制送去中间主编辑区。 */
+  linkTargetContext?: 'main' | 'right';
+  /** 标签现场键（main:/preview: 前缀）：卸载后重新挂载时据此恢复草稿、模式、光标与滚动。 */
+  stateKey?: string;
+  /** 是否为所属画布的前台标签。保活的后台标签不响应全局快捷键，也不抢占焦点。 */
+  active?: boolean;
+  /** 外部刷新令牌：自增即代表用户显式要求重读磁盘（允许覆盖未保存草稿）。 */
+  reloadToken?: number;
+  /** 切回前台时是否把焦点还给编辑器。右侧预览等辅助面板应传 false，避免抢走聊天输入焦点。 */
+  restoreFocusOnActivate?: boolean;
+  /** 未保存修改状态变化：预览面板据此显示脏点、关闭/刷新前确认。 */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp', 'avif']);
@@ -42,24 +68,92 @@ export function CodeEditorTab({
   hideHeaderToolbar = false,
   startLine,
   endLine,
+  onFileDrop,
+  linkTargetContext = 'main',
+  stateKey,
+  active = true,
+  reloadToken,
+  restoreFocusOnActivate = true,
+  onDirtyChange,
 }: CodeEditorTabProps) {
   const t = useT();
+  // 事件作用域：同一个文件可能同时打开在主画布与右侧预览，切换/保存指令必须按标签现场隔离。
+  const eventScope = stateKey || filePath;
   const ext = useMemo(() => (filePath.split('.').pop() || '').toLowerCase(), [filePath]);
   const isImage = useMemo(() => IMAGE_EXTS.has(ext), [ext]);
   const isArchive = useMemo(() => ARCHIVE_EXTS.has(ext), [ext]);
   const isBinary = useMemo(() => isArchive || BINARY_EXTS.has(ext), [ext, isArchive]);
   const isSvg = ext === 'svg';
 
-  const [content, setContent] = useState<string>('');
-  const [loading, setLoading] = useState<boolean>(!isImage && !isBinary);
+  // 每个标签实例只读取一次现场；本实例随后的写入不会再回灌自己。
+  const [restoredSnapshot] = useState<EditorTabSnapshot | null>(() => readEditorTabSnapshot(stateKey));
+
+  const [content, setContent] = useState<string>(() => restoredSnapshot?.content ?? '');
+  const [loading, setLoading] = useState<boolean>(() => {
+    if (isImage || isBinary) return false;
+    // 已有标签现场时直接渲染，避免重新挂载瞬间闪一次加载态。
+    return !restoredSnapshot;
+  });
   const [saving, setSaving] = useState<boolean>(false);
-  const [isDirty, setIsDirty] = useState<boolean>(false);
+  const [isDirty, setIsDirty] = useState<boolean>(() => restoredSnapshot?.isDirty ?? false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadTrigger, setReloadTrigger] = useState<number>(0);
 
+  // 追踪当前实例绑定的 filePath 与 stateKey，发生切换时彻底重置现场，绝不串台
+  const boundPathRef = useRef(filePath);
+  useEffect(() => {
+    if (boundPathRef.current !== filePath) {
+      boundPathRef.current = filePath;
+      const freshSnap = readEditorTabSnapshot(stateKey);
+      setContent(freshSnap?.content ?? '');
+      setIsDirty(freshSnap?.isDirty ?? false);
+      isDirtyRef.current = freshSnap?.isDirty ?? false;
+      diskStampRef.current = freshSnap?.diskStamp ?? null;
+      historyRef.current = freshSnap?.isDirty ? [{ text: freshSnap.content, cursor: freshSnap.selectionStart }] : [];
+      historyIndexRef.current = freshSnap?.isDirty ? 0 : -1;
+      setDiskConflict(false);
+      setLoading(!freshSnap);
+      setReloadTrigger((n) => n + 1);
+    }
+  }, [filePath, stateKey]);
+
+  // 磁盘与编辑器的版本分歧：非脏标签静默覆盖，脏标签只提示、绝不丢草稿。
+  const [diskConflict, setDiskConflict] = useState<boolean>(false);
+  // 图片被外部更新时用版本号打穿浏览器缓存。
+  const [assetVersion, setAssetVersion] = useState<number>(0);
+  const diskStampRef = useRef<FileStamp | null>(restoredSnapshot?.diskStamp ?? null);
+  const freshnessSubRef = useRef<FileFreshnessSubscription | null>(null);
+  // 重读后的收尾：external 自动更新需要提示；manual 冲突重载只需把光标夹回有效范围。
+  const externalReloadRef = useRef(false);
+  const manualReloadRef = useRef(false);
+  // 最近一次成功读盘的时刻：回到窗口时的补读过于频繁则跳过。
+  const lastDiskLoadAtRef = useRef(0);
+
+  // 后台刷新守门：用 ref 取最新脏标记，旧闭包绝不能用磁盘内容覆盖未保存草稿。
+  const isDirtyRef = useRef(isDirty);
+  useEffect(() => {
+    isDirtyRef.current = isDirty;
+  }, [isDirty]);
+  // 脏状态上报用 ref 转发：父组件的内联回调每次都换引用，不能让它驱动副作用。
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
+  useEffect(() => {
+    onDirtyChangeRef.current?.(isDirty);
+  }, [isDirty]);
+  const activeRef = useRef(active);
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
+  // 已消费的外部刷新令牌；发生变化即代表用户显式要求重读磁盘。
+  const reloadTokenRef = useRef(reloadToken ?? 0);
+
   // 跨行完备 Undo / Redo 历史快照栈 (彻底解决原生 textarea 跨行回车后无法撤回的痛点)
-  const historyRef = useRef<Array<{ text: string; cursor: number }>>([]);
-  const historyIndexRef = useRef<number>(-1);
+  const historyRef = useRef<Array<{ text: string; cursor: number }>>(
+    restoredSnapshot?.isDirty
+      ? [{ text: restoredSnapshot.content, cursor: restoredSnapshot.selectionStart }]
+      : [],
+  );
+  const historyIndexRef = useRef<number>(restoredSnapshot?.isDirty ? 0 : -1);
   const isUndoRedoActionRef = useRef<boolean>(false);
   const inputDebounceTimerRef = useRef<number | null>(null);
 
@@ -124,14 +218,23 @@ export function CodeEditorTab({
   }, [filePath]);
 
   const [viewMode, setViewModeState] = useState<'edit' | 'preview' | 'image' | 'binary'>(() => {
-    if (isImage && !isSvg) return 'image';
-    if (isSvg) return 'image';
     if (isBinary) return 'binary';
+    // 标签最后停留的模式优先于“按扩展名写死的默认预览”，但必须与文件类型兼容。
+    const restoredMode = restoredSnapshot?.viewMode;
+    if (isImage || isSvg) {
+      if (restoredMode === 'image' || restoredMode === 'edit' || restoredMode === 'preview') return restoredMode;
+      return 'image';
+    }
+    if (restoredMode === 'edit' || restoredMode === 'preview') return restoredMode;
     return defaultViewMode || (isMarkdown ? 'preview' : 'edit');
   });
+  const viewModeRef = useRef(viewMode);
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+  }, [viewMode]);
 
   // 图片预览与缩放状态
-  const [imgScale, setImgScale] = useState<number>(1.0);
+  const [imgScale, setImgScale] = useState<number>(() => restoredSnapshot?.imgScale ?? 1.0);
   const [imgDimensions, setImgDimensions] = useState<{ w: number; h: number } | null>(null);
 
   const onViewModeChangeRef = useRef(onViewModeChange);
@@ -146,7 +249,8 @@ export function CodeEditorTab({
         if (next === 'edit' || next === 'preview') {
           onViewModeChangeRef.current?.(next);
         }
-        if (next === 'edit') {
+        // 只有前台标签切到编辑模式才抢焦点：后台保活标签必须保持安静。
+        if (next === 'edit' && activeRef.current) {
           window.setTimeout(() => {
             textareaRef.current?.focus();
           }, 50);
@@ -157,8 +261,9 @@ export function CodeEditorTab({
     [],
   );
 
-  // 仅在首次挂载或 filePath 真正发生改变时，才重置初始模式，严禁在手动切换模式后因外部重绘而被反复重置
-  const lastFilePathRef = useRef<string | null>(null);
+  // 首次挂载由 useState 从标签现场恢复（有现场就沿用最后模式，没有才按扩展名默认），
+  // 这里只处理同一实例真的换了文件的兜底场景。
+  const lastFilePathRef = useRef<string | null>(filePath);
   useEffect(() => {
     if (lastFilePathRef.current === filePath) return;
     lastFilePathRef.current = filePath;
@@ -180,20 +285,27 @@ export function CodeEditorTab({
     setImgDimensions(null);
   }, [filePath, isImage, isSvg, isBinary, isMarkdown, defaultViewMode]);
 
+  // 挂载（含从标签现场恢复）后把当前模式同步给父级工具栏，避免图标与实际视图脱节。
+  useEffect(() => {
+    if (viewModeRef.current === 'edit' || viewModeRef.current === 'preview') {
+      onViewModeChangeRef.current?.(viewModeRef.current);
+    }
+  }, []);
+
   // 监听外部触发的视图切换广播 (例如右侧面板顶栏铅笔图标点击)
   useEffect(() => {
     const handleToggle = () => {
       setViewMode((prev) => {
-        const next = prev === 'edit' ? 'preview' : 'edit';
+        const next = toggleTextMode(prev);
         showToast(next === 'preview' ? t('editor.switchToPreview') : t('editor.switchToEdit'), 'info');
         return next;
       });
     };
-    window.addEventListener(`jeikcode:editor:toggle_mode:${filePath}`, handleToggle);
+    window.addEventListener(`jeikcode:editor:toggle_mode:${eventScope}`, handleToggle);
     return () => {
-      window.removeEventListener(`jeikcode:editor:toggle_mode:${filePath}`, handleToggle);
+      window.removeEventListener(`jeikcode:editor:toggle_mode:${eventScope}`, handleToggle);
     };
-  }, [filePath, setViewMode, t]);
+  }, [eventScope, setViewMode, t]);
 
   // 图片预览模式下 Ctrl + 鼠标滚轮缩放图片
   const handleImageWheel = (e: WheelEvent) => {
@@ -282,7 +394,164 @@ export function CodeEditorTab({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const preRef = useRef<HTMLPreElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
+  const editorRootRef = useRef<HTMLDivElement>(null);
   const fileName = useMemo(() => filePath.split(/[\\/]/).pop() || filePath, [filePath]);
+
+  // 标签现场的滚动 / 选区记忆：display:none 会让浏览器丢掉滚动盒位置，
+  // 所以离开前持续记住，切回时再原样还回去（初始值来自卸载前的现场）。
+  const editorViewportRef = useRef({
+    start: restoredSnapshot?.selectionStart ?? 0,
+    end: restoredSnapshot?.selectionEnd ?? 0,
+    scrollTop: restoredSnapshot?.scrollTop ?? 0,
+    scrollLeft: restoredSnapshot?.scrollLeft ?? 0,
+    gutterScrollTop: restoredSnapshot?.gutterScrollTop ?? 0,
+    previewScrollTop: restoredSnapshot?.previewScrollTop ?? 0,
+  });
+
+  const rememberEditorViewport = useCallback(() => {
+    const viewport = editorViewportRef.current;
+    const ta = textareaRef.current;
+    if (ta) {
+      viewport.start = ta.selectionStart ?? 0;
+      viewport.end = ta.selectionEnd ?? 0;
+      viewport.scrollTop = ta.scrollTop;
+      viewport.scrollLeft = ta.scrollLeft;
+    }
+    const gutter = lineNumbersRef.current;
+    if (gutter) viewport.gutterScrollTop = gutter.scrollTop;
+    const preview = previewContainerRef.current;
+    if (preview) viewport.previewScrollTop = preview.scrollTop;
+  }, []);
+
+  const isEditorVisible = useCallback(() => {
+    const root = editorRootRef.current;
+    if (!root) return false;
+    // 祖先 display:none 时没有布局盒：保活编辑器不得吞掉前台快捷键。
+    return root.getClientRects().length > 0;
+  }, []);
+
+  // 首次可见与前台切回共用一条还原路径：把离开前的滚动与选区还给用户。
+  const wasActiveRef = useRef(false);
+  useEffect(() => {
+    if (loading) return;
+    const becameActive = active && !wasActiveRef.current;
+    wasActiveRef.current = active;
+    if (!becameActive) return;
+    const viewport = editorViewportRef.current;
+    const frame = requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (ta) {
+        try {
+          ta.setSelectionRange(viewport.start, viewport.end);
+        } catch {}
+        ta.scrollTop = viewport.scrollTop;
+        ta.scrollLeft = viewport.scrollLeft;
+        // 回到前台继续编辑：把焦点还给编辑器，保持与浏览器标签一致的编辑现场。
+        if (viewModeRef.current === 'edit' && restoreFocusOnActivate) ta.focus();
+      }
+      if (preRef.current) {
+        preRef.current.scrollTop = viewport.scrollTop;
+        preRef.current.scrollLeft = viewport.scrollLeft;
+      }
+      if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = viewport.gutterScrollTop;
+      if (previewContainerRef.current) previewContainerRef.current.scrollTop = viewport.previewScrollTop;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active, loading, restoreFocusOnActivate]);
+
+  // 持续把标签现场写进内存簿记：整棵树被替换（落地页 ↔ 会话画布）时据此恢复。
+  const latestTabStateRef = useRef({ content, isDirty, viewMode, imgScale });
+  const persistTabSnapshot = useCallback(() => {
+    if (!stateKey) return;
+    const latest = latestTabStateRef.current;
+    const viewport = editorViewportRef.current;
+    writeEditorTabSnapshot(stateKey, {
+      content: latest.content,
+      isDirty: latest.isDirty,
+      viewMode: latest.viewMode,
+      imgScale: latest.imgScale,
+      selectionStart: viewport.start,
+      selectionEnd: viewport.end,
+      scrollTop: viewport.scrollTop,
+      scrollLeft: viewport.scrollLeft,
+      gutterScrollTop: viewport.gutterScrollTop,
+      previewScrollTop: viewport.previewScrollTop,
+      diskStamp: diskStampRef.current,
+    });
+  }, [stateKey]);
+
+  useEffect(() => {
+    latestTabStateRef.current = { content, isDirty, viewMode, imgScale };
+    persistTabSnapshot();
+  }, [persistTabSnapshot, content, isDirty, viewMode, imgScale]);
+
+  // 卸载（含关闭标签）时补存最后一帧滚动 / 选区；关闭后被墓碑拦截，不会复活。
+  useEffect(() => () => persistTabSnapshot(), [persistTabSnapshot]);
+
+  // 前台切回时重新校验磁盘（AI 可能刚改过这个文件）；未保存草稿优先，不参与刷新。
+  const activationReloadReadyRef = useRef(false);
+  useEffect(() => {
+    if (!active) return;
+    if (!activationReloadReadyRef.current) {
+      activationReloadReadyRef.current = true;
+      return;
+    }
+    if (isDirtyRef.current) return;
+    setReloadTrigger((n) => n + 1);
+  }, [active]);
+
+  // 前台标签的磁盘新鲜度轮询：只有可见编辑器才订阅，切走立即退订。
+  // 全局单例调度器每轮最多查 2 个目标，标签切换不会形成轮询风暴。
+  useEffect(() => {
+    if (!active || isBinary) return;
+    const subscription = subscribeFileFreshness({
+      key: stateKey || filePath,
+      path: filePath,
+      cwd,
+      baseline: diskStampRef.current,
+      onExternalChange: (stamp) => {
+        // 先把本实例的基线推进到新版本：冲突面板跨标签切换/重新挂载后不会重复弹同一版本。
+        diskStampRef.current = stamp;
+        // 图片没有文本内容可重载：换一个版本号让 <img> 重新取图。
+        if (viewModeRef.current === 'image') {
+          setAssetVersion(Date.now());
+          return;
+        }
+        if (isDirtyRef.current) {
+          setDiskConflict(true);
+          return;
+        }
+        // 非脏标签：保持当前编辑/预览模式，静默换上磁盘最新内容。
+        externalReloadRef.current = true;
+        setDiskConflict(false);
+        setReloadTrigger((n) => n + 1);
+      },
+    });
+    freshnessSubRef.current = subscription;
+    return () => {
+      subscription.dispose();
+      if (freshnessSubRef.current === subscription) freshnessSubRef.current = null;
+    };
+  }, [active, isBinary, stateKey, filePath, cwd]);
+
+  // 回到窗口/标签页可见时补一次磁盘校验：不依赖 /fs/stat 是否可用，
+  // 保证“离开一段时间后回来”能看到外部程序/其他工具的落盘结果。
+  useEffect(() => {
+    if (!active) return;
+    const refreshOnReturn = () => {
+      if (document.visibilityState !== 'visible') return;
+      // 草稿优先；刚读过盘（打开/切换标签）则不必重复。
+      if (isDirtyRef.current) return;
+      if (Date.now() - lastDiskLoadAtRef.current < 1500) return;
+      setReloadTrigger((n) => n + 1);
+    };
+    window.addEventListener('focus', refreshOnReturn);
+    document.addEventListener('visibilitychange', refreshOnReturn);
+    return () => {
+      window.removeEventListener('focus', refreshOnReturn);
+      document.removeEventListener('visibilitychange', refreshOnReturn);
+    };
+  }, [active]);
 
   // 语法高亮分词 HTML (与 Markdown 预览模式共享黄色搜索高亮与当前项聚焦高亮！)
   const highlightedHtml = useMemo(() => {
@@ -315,6 +584,7 @@ export function CodeEditorTab({
     if (lineNumbersRef.current) {
       lineNumbersRef.current.scrollTop = ta.scrollTop;
     }
+    rememberEditorViewport();
   };
 
   // 独立的编辑器/文件预览字号滚轮缩放 (全局共享，不影响主画布)
@@ -491,6 +761,11 @@ export function CodeEditorTab({
   useEffect(() => {
     let cancelled = false;
     if ((isImage && !isSvg) || isBinary) {
+      // 图片/二进制没有文本可重读：显式刷新时用版本号打穿缓存（/fs/raw 带 24h 强缓存）。
+      const requestedToken = reloadToken ?? 0;
+      const forced = requestedToken !== reloadTokenRef.current;
+      reloadTokenRef.current = requestedToken;
+      if (forced && isImage) setAssetVersion(Date.now());
       setLoading(false);
       setLoadError(null);
       return;
@@ -503,11 +778,25 @@ export function CodeEditorTab({
       return;
     }
 
+    // 标签现场优先：后台重新挂载 / 项目切换 / cwd 变更都不得静默覆盖未保存草稿，
+    // 只有显式刷新令牌（用户点刷新）才允许让位给磁盘内容。
+    const requestedToken = reloadToken ?? 0;
+    const forcedReload = requestedToken !== reloadTokenRef.current;
+    reloadTokenRef.current = requestedToken;
+    // 冲突面板的“重新加载”是用户显式放弃草稿：绕过脏标记守门，但在真正替换成功前不改脏状态。
+    const manualForce = manualReloadRef.current;
+    if (!shouldReloadFromDisk(isDirtyRef.current, forcedReload || manualForce)) {
+      setLoading(false);
+      setLoadError(null);
+      return;
+    }
+
     setLoadError(null);
 
     // 优先从 L1/L2 IndexedDB 异步直出已缓存内容（1~2ms），杜绝白屏等待与加载中闪烁
     void getCachedFileContent(filePath).then((cached) => {
-      if (!cancelled && cached !== null) {
+      // 用户已开始编辑时，缓存直出不得覆盖本地草稿。
+      if (!cancelled && !isDirtyRef.current && cached !== null) {
         setContent(cached);
         historyRef.current = [{ text: cached, cursor: 0 }];
         historyIndexRef.current = 0;
@@ -515,23 +804,64 @@ export function CodeEditorTab({
       }
     });
 
-    setLoading(true);
+    // 已有标签现场时后台静默校验磁盘，避免重挂载瞬间闪一次加载态。
+    if (!restoredSnapshot) setLoading(true);
     fetchFsRead(filePath, cwd)
       .then((res) => {
-        if (!cancelled) {
+        // 请求期间用户可能已经键入：磁盘旧内容不得覆盖未保存草稿。
+        // 例外：冲突面板的“重新加载”或顶栏刷新（用户已确认）是显式放弃草稿的授权。
+        if (!cancelled && (!isDirtyRef.current || manualForce || forcedReload)) {
           const loaded = res.content || '';
+          const previousContent = latestTabStateRef.current.content;
+          const replaced = loaded !== previousContent;
           setContent(loaded);
           historyRef.current = [{ text: loaded, cursor: 0 }];
           historyIndexRef.current = 0;
           setIsDirty(false);
           setLoadError(null);
+          lastDiskLoadAtRef.current = Date.now();
           void saveCachedFileContent(filePath, loaded);
+          // 记录磁盘基线：轮询据此判断“外部是不是真的改过这个文件”。
+          const stamp = fileStampFromRead(res);
+          if (stamp) {
+            diskStampRef.current = stamp;
+            freshnessSubRef.current?.updateBaseline(stamp);
+          }
+          const wasExternal = externalReloadRef.current;
+          const wasManual = manualReloadRef.current;
+          externalReloadRef.current = false;
+          manualReloadRef.current = false;
+          if (wasExternal && replaced) {
+            setDiskConflict(false);
+            showToast(t('editor.reloadedFromDisk', { name: fileName }), 'info');
+          }
+          if (wasExternal || wasManual || replaced) {
+            // 内容整体替换后把光标夹回有效范围，避免停在已不存在的偏移。
+            requestAnimationFrame(() => {
+              const ta = textareaRef.current;
+              if (!ta) return;
+              const max = loaded.length;
+              try {
+                ta.setSelectionRange(
+                  Math.min(ta.selectionStart ?? 0, max),
+                  Math.min(ta.selectionEnd ?? 0, max),
+                );
+              } catch {}
+            });
+          }
+        } else if (!cancelled) {
+          // 请求期间用户已经键入：草稿优先，绝不静默覆盖；外部更新降级为冲突提示。
+          if (externalReloadRef.current) setDiskConflict(true);
+          externalReloadRef.current = false;
+          manualReloadRef.current = false;
         }
       })
       .catch((err) => {
         if (!cancelled) {
           const errMsg = err?.message || String(err);
           setLoadError(errMsg);
+          // 重载失败时保留原草稿与脏状态，不能假装“已放弃修改”。
+          manualReloadRef.current = false;
           // 在编辑器内部以专业内联卡片展示错误状态与恢复选项，绝不以全局浮动 Toast 骚扰用户
         }
       })
@@ -541,17 +871,33 @@ export function CodeEditorTab({
     return () => {
       cancelled = true;
     };
-  }, [filePath, cwd, reloadTrigger, isImage, isSvg, isBinary]);
+  }, [filePath, cwd, reloadTrigger, reloadToken, isImage, isSvg, isBinary]);
 
   // 保存文件
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(async (e?: any) => {
+    e?.preventDefault?.();
+    e?.stopPropagation?.();
     if (saving) return;
     setSaving(true);
     try {
-      await fetchFsWrite(filePath, content);
+      const res = await fetchFsWrite(filePath, content);
       setIsDirty(false);
+      // 保存本身就是对磁盘冲突的收尾：本地版本已成为最新磁盘版本。
+      setDiskConflict(false);
       void saveCachedFileContent(filePath, content);
+      // 自己的写入也要推进磁盘基线，否则下一次轮询会把这次保存误报成外部更新。
+      const stamp = fileStampFromRead(res);
+      if (stamp) {
+        diskStampRef.current = stamp;
+        freshnessSubRef.current?.updateBaseline(stamp);
+      }
       showToast(t('editor.saveSuccess', { name: fileName }), 'success');
+      // 广播工作区文件变动事件，如果保存的是 gitignore 则派发 gitignore 特别事件
+      window.dispatchEvent(new CustomEvent('jeikcode:worktree_touch'));
+      const lower = (filePath || '').toLowerCase().replace(/\\/g, '/');
+      if (lower.endsWith('.gitignore') || lower.endsWith('/.gitignore')) {
+        window.dispatchEvent(new CustomEvent('jeikcode:gitignore_touch'));
+      }
     } catch (err: any) {
       showToast(t('editor.saveFailed', { error: err?.message || String(err) }), 'error');
     } finally {
@@ -559,23 +905,44 @@ export function CodeEditorTab({
     }
   }, [filePath, content, saving, fileName]);
 
+  // 冲突面板：重新加载 = 明确放弃本地草稿（真正替换成功后才清脏）。
+  const handleReloadFromDisk = useCallback(() => {
+    setDiskConflict(false);
+    manualReloadRef.current = true;
+    setReloadTrigger((n) => n + 1);
+  }, []);
+
+  // 冲突面板：保留本地草稿。调度器已把基线推进到新版本，同一版本不会反复提示。
+  const handleKeepLocalDraft = useCallback(() => {
+    setDiskConflict(false);
+  }, []);
+
   // 监听外部保存指令广播 (例如右侧面板顶栏保存图标点击)
   useEffect(() => {
     const handleExternalSave = () => {
       void handleSave();
     };
-    window.addEventListener(`jeikcode:editor:save:${filePath}`, handleExternalSave);
+    window.addEventListener(`jeikcode:editor:save:${eventScope}`, handleExternalSave);
     return () => {
-      window.removeEventListener(`jeikcode:editor:save:${filePath}`, handleExternalSave);
+      window.removeEventListener(`jeikcode:editor:save:${eventScope}`, handleExternalSave);
     };
-  }, [filePath, handleSave]);
+  }, [eventScope, handleSave]);
 
   // 快捷键监听：Ctrl+S (保存), Ctrl+F (查找), Ctrl+H (替换), Ctrl+Shift+V (MD切换)
   useEffect(() => {
+    // 后台保活的标签不注册全局快捷键，否则一次 Ctrl+S 会同时写多个文件。
+    if (!active) return;
     const onKeyDown = (e: KeyboardEvent) => {
+      // 右侧面板折叠 / 切到其它面板时，保活编辑器仍在 DOM 里但没有布局盒，不得吞掉快捷键。
+      if (!isEditorVisible()) return;
+      // 主画布与右侧预览可能同时各有一个可见编辑器：只有焦点所在的编辑器响应快捷键。
+      // 焦点不在任何编辑器内时一律不响应，避免右侧预览抢走聊天输入框的 Ctrl+F / Ctrl+S。
+      const focused = document.activeElement as HTMLElement | null;
+      if (!focused || !editorRootRef.current?.contains(focused)) return;
       // Ctrl+S
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && !e.shiftKey) {
         e.preventDefault();
+        e.stopPropagation();
         void handleSave();
         return;
       }
@@ -588,7 +955,7 @@ export function CodeEditorTab({
       // Ctrl+Shift+V (切换预览/代码编辑模式，对齐主面板与右侧面板)
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'v') {
         e.preventDefault();
-        const next = viewMode === 'edit' ? 'preview' : 'edit';
+        const next = toggleTextMode(viewMode);
         setViewMode(next);
         showToast(next === 'preview' ? t('editor.switchToPreview') : t('editor.switchToEdit'), 'info');
         return;
@@ -622,7 +989,7 @@ export function CodeEditorTab({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleSave, isMarkdown, viewMode, findOpen]);
+  }, [handleSave, isMarkdown, viewMode, findOpen, active, isEditorVisible]);
 
   // 执行替换
   const handleReplaceOne = () => {
@@ -665,7 +1032,7 @@ export function CodeEditorTab({
 
   // 平滑滚动并高亮选中目标行号范围
   const scrollToTargetLine = useCallback(
-    (targetStart?: number, targetEnd?: number) => {
+    (targetStart?: number, targetEnd?: number, select = true) => {
       if (!targetStart || targetStart <= 0 || !content) return;
       const lines = content.split('\n');
       const startIdx = Math.min(lines.length, Math.max(1, targetStart));
@@ -683,8 +1050,12 @@ export function CodeEditorTab({
       const ta = textareaRef.current;
       if (ta) {
         try {
-          ta.focus();
-          ta.setSelectionRange(charStart, charEnd);
+          // 前台标签才抢焦点；后台保活标签只记录选区，不抢当前画布的焦点。
+          // 延迟重试只修滚动位置，不再改选区，以免用户已经开始输入又被拉回目标行。
+          if (select) {
+            if (activeRef.current) ta.focus();
+            ta.setSelectionRange(charStart, charEnd);
+          }
         } catch {}
         const totalLines = Math.max(1, lines.length);
         const approxLineHeight = ta.scrollHeight / totalLines || 20;
@@ -699,26 +1070,36 @@ export function CodeEditorTab({
         const targetScrollTop = Math.max(0, ((startIdx - 4) / Math.max(1, lines.length)) * container.scrollHeight);
         container.scrollTop = targetScrollTop;
       }
+      if (select) rememberEditorViewport();
     },
-    [content, viewMode],
+    [content, viewMode, rememberEditorViewport],
   );
 
+  // 目标行跳转只响应“打开/跳转到某行”的一次性意图：后续输入引起的 content 变化
+  // 不得反复抢回选区，否则带行号打开的文件根本没法编辑。
+  // 从标签现场恢复时沿用现场光标，不重复跳到当初打开的行号。
+  const appliedLineTargetRef = useRef<string | null>(
+    restoredSnapshot && startLine ? `${startLine}:${endLine ?? ''}` : null,
+  );
   useEffect(() => {
-    if (startLine && content) {
-      requestAnimationFrame(() => {
-        scrollToTargetLine(startLine, endLine);
-      });
-      const t1 = setTimeout(() => {
-        scrollToTargetLine(startLine, endLine);
-      }, 80);
-      const t2 = setTimeout(() => {
-        scrollToTargetLine(startLine, endLine);
-      }, 240);
-      return () => {
-        clearTimeout(t1);
-        clearTimeout(t2);
-      };
+    if (!startLine || startLine <= 0) {
+      appliedLineTargetRef.current = null;
+      return;
     }
+    const target = `${startLine}:${endLine ?? ''}`;
+    if (appliedLineTargetRef.current === target) return;
+    // 内容未就绪时先不消费目标，等它到达再定位一次。
+    if (!content) return;
+    appliedLineTargetRef.current = target;
+    const frame = requestAnimationFrame(() => scrollToTargetLine(startLine, endLine, true));
+    // 延迟重试只为等 Markdown 渲染 / 字体度量就绪后修正滚动，不再重复抢选区。
+    const t1 = setTimeout(() => scrollToTargetLine(startLine, endLine, false), 80);
+    const t2 = setTimeout(() => scrollToTargetLine(startLine, endLine, false), 240);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
   }, [startLine, endLine, content, scrollToTargetLine]);
 
   // 计算行号列表与行号纯文本（将原本上万个 DOM 节点精简为单个 pre 文本节点，大文件缩放性能提升 100 倍！）
@@ -731,8 +1112,6 @@ export function CodeEditorTab({
     }
     return res;
   }, [lines.length]);
-
-  const editorRootRef = useRef<HTMLDivElement>(null);
 
   // 独立的编辑器/文件预览字号滚轮缩放 (在捕获阶段拦截，支持代码编辑模式与 Markdown 预览模式平滑缩放，40ms 防抖杜绝卡顿)
   useEffect(() => {
@@ -777,6 +1156,11 @@ export function CodeEditorTab({
       const data = raw ? JSON.parse(raw) : (window as any).__jeikcode_dragged_tab;
       const targetPath = data?.filePath || e.dataTransfer?.getData('text/plain');
       if (targetPath) {
+        // 预览面板内部：拖入文件继续留在右侧，不能再开一份主标签。
+        if (onFileDrop) {
+          onFileDrop(String(targetPath).trim());
+          return;
+        }
         window.dispatchEvent(new CustomEvent('jeikcode:open_file', { detail: { path: targetPath.trim() } }));
         return;
       }
@@ -785,6 +1169,10 @@ export function CodeEditorTab({
           const file = e.dataTransfer.files[i];
           const p = (file as any).path || file.name;
           if (p) {
+            if (onFileDrop) {
+              onFileDrop(String(p));
+              continue;
+            }
             window.dispatchEvent(new CustomEvent('jeikcode:open_file', { detail: { path: p } }));
           }
         }
@@ -792,10 +1180,20 @@ export function CodeEditorTab({
     } catch {}
   };
 
+  const handleEditorRootMouseDown = (e: MouseEvent) => {
+    // 点击编辑器任意非控件区域时把焦点交给编辑器：快捷键（Ctrl+F/S）只作用于
+    // 焦点所在的编辑器，避免右侧预览抢走聊天输入框的按键。
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('input, textarea, button, a, select')) return;
+    editorRootRef.current?.focus({ preventScroll: true });
+  };
+
   return (
     <div
       class="code-editor-root"
       ref={editorRootRef}
+      tabIndex={0}
+      onMouseDown={handleEditorRootMouseDown}
       onDragOver={handleEditorDragOver}
       onDrop={handleEditorDrop}
     >
@@ -818,17 +1216,17 @@ export function CodeEditorTab({
                   type="button"
                   class="editor-tool-btn"
                   onClick={() => setViewMode('edit')}
-                  title="切换为 SVG 源码编辑"
+                  title={t('editor.svgSourceTitle')}
                 >
                   <span class="editor-btn-icon">✏️</span>
-                  <span class="editor-btn-text">源码</span>
+                  <span class="editor-btn-text">{t('editor.svgSource')}</span>
                 </button>
               )}
               <button
                 type="button"
                 class="editor-tool-btn"
                 onClick={() => setImgScale((s) => Math.max(0.2, s - 0.2))}
-                title="缩小图片"
+                title={t('editor.zoomOut')}
               >
                 <span class="editor-btn-icon">➖</span>
               </button>
@@ -836,7 +1234,7 @@ export function CodeEditorTab({
                 type="button"
                 class="editor-tool-btn"
                 onClick={() => setImgScale(1.0)}
-                title="1:1 原图大小"
+                title={t('editor.actualSize')}
               >
                 <span class="editor-btn-icon">{`${Math.round(imgScale * 100)}%`}</span>
               </button>
@@ -844,7 +1242,7 @@ export function CodeEditorTab({
                 type="button"
                 class="editor-tool-btn"
                 onClick={() => setImgScale((s) => Math.min(5.0, s + 0.2))}
-                title="放大图片"
+                title={t('editor.zoomIn')}
               >
                 <span class="editor-btn-icon">➕</span>
               </button>
@@ -852,10 +1250,10 @@ export function CodeEditorTab({
                 type="button"
                 class="editor-tool-btn"
                 onClick={() => setImgScale(1.0)}
-                title="自适应"
+                title={t('editor.fitToView')}
               >
                 <span class="editor-btn-icon">⤢</span>
-                <span class="editor-btn-text">自适应</span>
+                <span class="editor-btn-text">{t('editor.fitToView')}</span>
               </button>
               <button
                 type="button"
@@ -938,10 +1336,10 @@ export function CodeEditorTab({
                   type="button"
                   class="editor-tool-btn"
                   onClick={() => setViewMode('image')}
-                  title="切换为图片预览模式"
+                  title={t('editor.svgPreviewTitle')}
                 >
                   <span class="editor-btn-icon">🖼️</span>
-                  <span class="editor-btn-text">图片预览</span>
+                  <span class="editor-btn-text">{t('editor.svgPreview')}</span>
                 </button>
               )}
 
@@ -951,10 +1349,10 @@ export function CodeEditorTab({
                   type="button"
                   class={'editor-tool-btn' + (viewMode === 'preview' ? ' active' : '')}
                   onClick={() => setViewMode((m) => (m === 'edit' ? 'preview' : 'edit'))}
-                  title={viewMode === 'edit' ? t('editor.preview') : t('editor.source')}
+                  title={viewMode === 'edit' ? t('editor.switchToPreview') : t('editor.switchToEdit')}
                 >
                   <span class="editor-btn-icon">{viewMode === 'edit' ? '📖' : '✏️'}</span>
-                  <span class="editor-btn-text">{viewMode === 'edit' ? t('editor.preview') : t('editor.source')}</span>
+                  <span class="editor-btn-text">{viewMode === 'edit' ? t('editor.preview') : t('editor.edit')}</span>
                 </button>
               )}
 
@@ -1007,6 +1405,32 @@ export function CodeEditorTab({
       </div>
       )}
 
+      {/* 磁盘 vs 本地草稿冲突：只提示，不自动覆盖用户正在编辑的内容 */}
+      {diskConflict && (
+        <div class="editor-disk-conflict" role="alert">
+          <div class="editor-disk-conflict-text">
+            <span class="editor-disk-conflict-title">{t('editor.diskUpdated')}</span>
+            <span class="editor-disk-conflict-desc">{t('editor.diskUpdatedDesc')}</span>
+          </div>
+          <div class="editor-disk-conflict-actions">
+            <button
+              type="button"
+              class="editor-disk-conflict-btn"
+              onClick={handleKeepLocalDraft}
+            >
+              {t('editor.keepLocalDraft')}
+            </button>
+            <button
+              type="button"
+              class="editor-disk-conflict-btn is-primary"
+              onClick={handleReloadFromDisk}
+            >
+              {t('editor.reloadFromDisk')}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 搜索与替换浮动条 (标准上下双行 VS Code 经典排版) */}
       {findOpen && (
         <div class="editor-find-bar">
@@ -1015,7 +1439,7 @@ export function CodeEditorTab({
               type="button"
               class="find-toggle-chevron"
               onClick={() => setReplaceOpen((v) => !v)}
-              title={replaceOpen ? '收起替换 (Ctrl+H)' : '展开替换 (Ctrl+H)'}
+              title={replaceOpen ? t('editor.replaceCollapse') : t('editor.replaceExpand')}
             >
               {replaceOpen ? '▼' : '▶'}
             </button>
@@ -1054,7 +1478,7 @@ export function CodeEditorTab({
               class="find-nav-btn"
               onClick={handleFindPrev}
               disabled={(viewMode === 'preview' ? previewMatchCount : matchIndices.length) === 0}
-              title="上一个匹配项 (Shift+Enter)"
+              title={t('editor.findPrevTitle')}
             >
               ↑
             </button>
@@ -1063,7 +1487,7 @@ export function CodeEditorTab({
               class="find-nav-btn"
               onClick={handleFindNext}
               disabled={(viewMode === 'preview' ? previewMatchCount : matchIndices.length) === 0}
-              title="下一个匹配项 (Enter)"
+              title={t('editor.findNextTitle')}
             >
               ↓
             </button>
@@ -1074,7 +1498,7 @@ export function CodeEditorTab({
                 setFindOpen(false);
                 setReplaceOpen(false);
               }}
-              title="关闭 (Esc)"
+              title={t('editor.findCloseTitle')}
             >
               ✕
             </button>
@@ -1107,7 +1531,7 @@ export function CodeEditorTab({
                 type="button"
                 class="find-action-btn"
                 onClick={handleReplaceOne}
-                title="替换当前项 (Enter)"
+                title={t('editor.replaceCurrentTitle')}
               >
                 {t('editor.replace') || '替换'}
               </button>
@@ -1115,7 +1539,7 @@ export function CodeEditorTab({
                 type="button"
                 class="find-action-btn"
                 onClick={handleReplaceAll}
-                title="全部替换 (Ctrl+Alt+Enter)"
+                title={t('editor.replaceAllTitle')}
               >
                 {t('editor.replaceAll') || '全部替换'}
               </button>
@@ -1175,7 +1599,7 @@ export function CodeEditorTab({
           <div class="editor-image-stage" onWheel={handleImageWheel}>
             <div class="editor-image-wrapper" style={{ transform: `scale(${imgScale})` }}>
               <img
-                src={getFsRawUrl(filePath)}
+                src={getFsRawUrl(filePath) + (assetVersion ? `&v=${assetVersion}` : '')}
                 alt={fileName}
                 class="editor-image-elem"
                 onLoad={(e) => {
@@ -1209,8 +1633,8 @@ export function CodeEditorTab({
               <div class="editor-binary-title">{fileName}</div>
               <div class="editor-binary-desc">
                 {isArchive
-                  ? '此压缩包为非文本格式，无法在代码编辑器中直接展示内容。'
-                  : '该文件是二进制或非文本格式，无法在文本代码编辑器中直接展示内容。'}
+                  ? t('editor.archiveBinaryDesc')
+                  : t('editor.binaryDesc')}
               </div>
               <div class="editor-binary-path">{filePath}</div>
               <div class="editor-binary-actions">
@@ -1249,22 +1673,9 @@ export function CodeEditorTab({
           <div
             class="editor-markdown-preview"
             ref={previewContainerRef}
-            onDragOver={(e) => {
-              e.preventDefault();
-              if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              try {
-                const raw = e.dataTransfer?.getData('application/jeikcode-tab');
-                const data = raw ? JSON.parse(raw) : (window as any).__jeikcode_dragged_tab;
-                const targetPath = data?.filePath || e.dataTransfer?.getData('text/plain');
-                if (targetPath) {
-                  window.dispatchEvent(new CustomEvent('jeikcode:open_file', { detail: { path: targetPath.trim() } }));
-                }
-              } catch {}
-            }}
+            onScroll={rememberEditorViewport}
+            onDragOver={handleEditorDragOver}
+            onDrop={handleEditorDrop}
           >
             <Markdown
               content={content}
@@ -1272,7 +1683,7 @@ export function CodeEditorTab({
               search={findOpen ? findText : undefined}
               activeSearchIndex={findOpen ? currentMatchIdx : undefined}
               onMatchCountChange={setPreviewMatchCount}
-              targetContext="main"
+              targetContext={linkTargetContext}
             />
           </div>
         ) : (
@@ -1307,6 +1718,8 @@ export function CodeEditorTab({
                 readOnly={viewMode === 'preview'}
                 onDragOver={handleEditorDragOver}
                 onDrop={handleEditorDrop}
+                onSelect={rememberEditorViewport}
+                onKeyUp={rememberEditorViewport}
                 onInput={(e) => {
                   const val = (e.target as HTMLTextAreaElement).value;
                   const cur = (e.target as HTMLTextAreaElement).selectionStart;

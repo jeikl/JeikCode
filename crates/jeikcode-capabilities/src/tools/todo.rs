@@ -129,6 +129,7 @@ pub fn parse_todos(args: &str) -> Result<Vec<TodoItem>, String> {
             }
         }
     }
+    canonicalize_todo_keys(&mut value);
     let a: Args = serde_json::from_value(value)
         .map_err(|e| format!("todowrite: invalid arguments: {e}. Expected {{\"todos\":[{{\"content\":\"…\",\"status\":\"pending|in_progress|completed\"}}]}}."))?;
     let mut out = Vec::with_capacity(a.todos.len());
@@ -188,8 +189,9 @@ pub enum ApplyOutcome {
 /// Apply `action` / `actions[]`. `todos` full-list replace is NOT handled here
 /// (that is a fold baseline / execute plan path). Malformed JSON is `Err`.
 pub fn try_apply_todo_args(list: &mut Vec<TodoItem>, args: &str) -> Result<ApplyOutcome, String> {
-    let v = serde_json::from_str::<serde_json::Value>(args)
+    let mut v = serde_json::from_str::<serde_json::Value>(args)
         .map_err(|e| format!("todowrite: invalid JSON arguments: {e}"))?;
+    canonicalize_todo_keys(&mut v);
     if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
         if arr.is_empty() {
             return Err("todowrite: `actions` must be a non-empty array.".into());
@@ -218,7 +220,9 @@ fn explicit_action(v: &serde_json::Value) -> Option<&str> {
 }
 
 pub fn todo_action_kind(v: &serde_json::Value) -> Option<&'static str> {
-    action_kind(v)
+    let mut v = v.clone();
+    canonicalize_todo_keys(&mut v);
+    action_kind(&v)
 }
 
 fn action_kind(v: &serde_json::Value) -> Option<&'static str> {
@@ -254,19 +258,49 @@ fn infer_action_kind(v: &serde_json::Value) -> Option<&'static str> {
         (false, true, _, false) => Some("add"),
         (true, true, _, false) => Some("update"),
         (true, false, true, false) => Some("update"),
-        (true, false, false, false) => Some("delete"),
+        (true, false, false, false) => has_only_known_action_keys(v).then_some("delete"),
         _ => None,
     }
 }
 
+/// A root object carrying action fields (rather than an `actions`/`todos`
+/// container) is a legacy single-action call. Wrapping it keeps field-level
+/// diagnostics reachable for a typo (`{"id":1,"stauts":"completed"}`).
+fn looks_like_single_action(v: &serde_json::Value) -> bool {
+    v.as_object().is_some_and(|obj| {
+        obj.keys()
+            .any(|key| TODO_ACTION_FIELD_KEYS.contains(&key.as_str()))
+    })
+}
+
 fn unknown_or_uninferable_action(v: &serde_json::Value) -> String {
     if let Some(other) = explicit_action(v) {
-        format!(
-            "`action` must be `add`, `insert`, `update`, `delete`/`remove`, `clear`, or `list` (got `{other}`). Example: {{\"action\": \"add\", \"content\": \"Task text\"}}."
-        )
-    } else {
-        "could not infer `action` from fields. Use {content} to add, {content,position} to insert, {id,status} or {id,content} to update, {id} to delete. `clear` always needs action=\"clear\"".to_string()
+        return format!(
+            "`action` must be `delete` or `clear` (got `{other}`). Every other op is inferred from the fields: {{content}} adds, {{content,position}} inserts, {{id,status|content}} updates."
+        );
     }
+    let unknown = unknown_action_keys(v);
+    let note = if unknown.is_empty() {
+        String::new()
+    } else {
+        let listed = unknown
+            .iter()
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        match unknown
+            .iter()
+            .find_map(|key| suggest_action_key(key).map(|known| (*key, known)))
+        {
+            Some((key, known)) => format!(
+                "unrecognized key(s) {listed} (did you mean `{known}` instead of `{key}`?); "
+            ),
+            None => format!("unrecognized key(s) {listed}; "),
+        }
+    };
+    format!(
+        "{note}could not infer `action` from fields. Use {{content}} to add, {{content,position}} to insert, {{id,status}} or {{id,content}} to update, {{id}} to delete. `clear` always needs action=\"clear\""
+    )
 }
 
 /// Legal `actions` mixes (id-shifting ops cannot share a batch with a different kind):
@@ -285,7 +319,7 @@ fn validate_actions_mix(arr: &[serde_json::Value]) -> Result<(), String> {
             }
             None => {
                 return Err(format!(
-                    "todowrite: actions[{i}] {}.",
+                    "todowrite: actions[{i}]: {}.",
                     unknown_or_uninferable_action(item).trim_end_matches('.')
                 ));
             }
@@ -327,6 +361,147 @@ fn normalize_todo_content(content: &str) -> String {
     content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Every field a task action may carry. Also the allow-list for key repair:
+/// a key that differs from one of these only by stray quoting/escaping is a
+/// serialization slip, never a distinct user field.
+const TODO_ACTION_FIELD_KEYS: &[&str] = &[
+    "action", "id", "position", "status", "content", "after", "after_id",
+];
+
+fn is_root_todo_key(key: &str) -> bool {
+    key == "actions" || key == "todos" || TODO_ACTION_FIELD_KEYS.contains(&key)
+}
+
+/// Exact-match repair for over-escaped keys.
+///
+/// A model/provider occasionally delivers `{"\"status\"":"in_progress"}`: after
+/// JSON parsing the key is the string `"status"` — quotes included — so every
+/// field lookup misses and the action falls through to the bare-`id` rule.
+/// Repairing is safe because no legitimate field starts or ends with a
+/// quote/backslash, and only KNOWN keys are remapped. A real typo (`stauts`)
+/// is left untouched so validation can report it instead of guessing.
+fn canonicalize_todo_keys(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    canonicalize_key_map(obj, is_root_todo_key);
+    if let Some(items) = obj
+        .get_mut("actions")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for item in items {
+            if let Some(item) = item.as_object_mut() {
+                canonicalize_key_map(item, |key| TODO_ACTION_FIELD_KEYS.contains(&key));
+            }
+        }
+    }
+    if let Some(items) = obj
+        .get_mut("todos")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for item in items {
+            if let Some(item) = item.as_object_mut() {
+                canonicalize_key_map(item, |key| key == "content" || key == "status");
+            }
+        }
+    }
+}
+
+fn canonicalize_key_map<F>(obj: &mut serde_json::Map<String, serde_json::Value>, is_known: F)
+where
+    F: Fn(&str) -> bool,
+{
+    let repairs: Vec<(String, String)> = obj
+        .keys()
+        .filter_map(|original| {
+            let trimmed = original
+                .trim_matches(|c: char| c == '"' || c == '\\' || c.is_whitespace())
+                .to_string();
+            if trimmed.is_empty() || trimmed == *original {
+                return None;
+            }
+            // Case-insensitive exact match is still deterministic; fuzzy
+            // edit-distance repair is deliberately NOT done here — the error
+            // path suggests it instead (`suggest_action_key`).
+            let canonical = if is_known(&trimmed) {
+                trimmed
+            } else {
+                let lower = trimmed.to_ascii_lowercase();
+                TODO_ACTION_FIELD_KEYS
+                    .iter()
+                    .find(|known| known.eq_ignore_ascii_case(&lower))
+                    .map(|known| (*known).to_string())?
+            };
+            is_known(&canonical).then_some((original.clone(), canonical))
+        })
+        .collect();
+    for (original, canonical) in repairs {
+        // A correctly-spelled field wins over a damaged duplicate.
+        if obj.contains_key(&canonical) {
+            obj.remove(&original);
+        } else if let Some(value) = obj.remove(&original) {
+            obj.insert(canonical, value);
+        }
+    }
+}
+
+fn unknown_action_keys(v: &serde_json::Value) -> Vec<&str> {
+    v.as_object()
+        .map(|obj| {
+            obj.keys()
+                .filter(|key| !TODO_ACTION_FIELD_KEYS.contains(&key.as_str()))
+                .map(String::as_str)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A bare `{id}` is a delete ONLY when nothing else is present. An unknown
+/// field means the payload is malformed (usually a misspelled `status`), and
+/// guessing `delete` there would silently destroy a task.
+fn has_only_known_action_keys(v: &serde_json::Value) -> bool {
+    v.as_object().is_some_and(|obj| {
+        obj.keys()
+            .all(|key| TODO_ACTION_FIELD_KEYS.contains(&key.as_str()))
+    })
+}
+
+/// Nearest known field for a typo, used ONLY in the error text — never to
+/// rewrite the payload. Bounded to Levenshtein distance ≤ 2 over keys of at
+/// least four chars so short/ambiguous names (`id`) never get a guess.
+fn suggest_action_key(key: &str) -> Option<&'static str> {
+    let key = key
+        .trim_matches(|c: char| c == '"' || c == '\\' || c.is_whitespace())
+        .to_ascii_lowercase();
+    if key.chars().count() < 4 {
+        return None;
+    }
+    TODO_ACTION_FIELD_KEYS
+        .iter()
+        .copied()
+        .filter(|known| known.chars().count() >= 4)
+        .map(|known| (edit_distance(&key, known), known))
+        .filter(|(distance, _)| *distance <= 2)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, known)| known)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = substitution.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 fn find_todo_index(list: &[TodoItem], content: &str) -> Option<usize> {
     list.iter().position(|item| item.content == content)
 }
@@ -346,7 +521,7 @@ fn unknown_task_id(id: u64, list: &[TodoItem]) -> String {
         if n == 1 { "" } else { "s" }
     );
     if n > 0 && list.iter().all(|item| item.status == TodoStatus::Completed) {
-        msg.push_str(" Every task is completed, so the next `add` starts a NEW plan at id 1.");
+        msg.push_str(" Every task is completed, so the next new task starts a NEW plan at id 1.");
     }
     msg
 }
@@ -566,7 +741,7 @@ fn apply_add(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Result<usize, S
         .and_then(|c| c.as_str())
         .map(normalize_todo_content)
         .filter(|c| !c.is_empty())
-        .ok_or_else(|| "todowrite: `add` needs non-empty `content`. Example: {\"action\": \"add\", \"content\": \"Implement feature X\"}.".to_string())?;
+        .ok_or_else(|| "todowrite: adding a task needs non-empty `content`. Example: {\"content\": \"Implement feature X\"}.".to_string())?;
     Ok(upsert_todo(list, content, action_status(v), None))
 }
 
@@ -576,7 +751,7 @@ fn apply_insert(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Result<usize
         .and_then(|c| c.as_str())
         .map(normalize_todo_content)
         .filter(|c| !c.is_empty())
-        .ok_or_else(|| "todowrite: `insert` needs non-empty `content`. Example: {\"action\": \"insert\", \"content\": \"Task description\", \"position\": 1}.".to_string())?;
+        .ok_or_else(|| "todowrite: inserting needs non-empty `content`. Example: {\"content\": \"Task description\", \"position\": 1}.".to_string())?;
     Ok(upsert_todo(
         list,
         content,
@@ -591,7 +766,7 @@ fn apply_update(
     visible_len: usize,
     add_landings: &[usize],
 ) -> Result<(), String> {
-    let id = json_id(v).ok_or_else(|| "todowrite: `update` needs a valid `id` (1-based task number). Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}.".to_string())?;
+    let id = json_id(v).ok_or_else(|| "todowrite: updating needs a valid `id` (1-based task number). Example: {\"id\": 1, \"status\": \"in_progress\"}.".to_string())?;
     let Some(resolved) = resolve_update_id(id, visible_len, add_landings, list.len()) else {
         // Empty/closed list, or the next append slot: a content-bearing "update"
         // is a seed/add, not a missing-id error.
@@ -612,7 +787,7 @@ fn apply_update(
         .filter(|c| !c.is_empty());
     if status.is_none() && new_content.is_none() {
         return Err(
-            "todowrite: `update` needs at least one of `status` (pending|in_progress|completed) or `content`. Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}.".into(),
+            "todowrite: updating needs at least one of `status` (pending|in_progress|completed) or `content`. Example: {\"id\": 1, \"status\": \"in_progress\"}.".into(),
         );
     }
     if let Some(content) = new_content {
@@ -674,9 +849,10 @@ fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Resu
 }
 
 pub fn is_batch_plan_establishment(args: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(args) else {
         return false;
     };
+    canonicalize_todo_keys(&mut v);
     if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
         let add_count = arr
             .iter()
@@ -704,9 +880,10 @@ pub fn is_todo_plan(args: &str) -> bool {
 /// Incremental patch shape: a single `action` or a non-absent `actions` array.
 /// False for full-list `todos` plans (use [`is_todo_plan`]).
 pub fn is_todo_action_args(args: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(args) else {
         return false;
     };
+    canonicalize_todo_keys(&mut v);
     if is_todo_plan(args) {
         return false;
     }
@@ -766,9 +943,10 @@ fn replay_of_closed(list: &[TodoItem], closed: &[TodoItem]) -> bool {
 }
 
 fn args_have_explicit_add(args: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(args) else {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(args) else {
         return false;
     };
+    canonicalize_todo_keys(&mut value);
     if action_kind(&value) == Some("add") {
         return true;
     }
@@ -1219,10 +1397,6 @@ const TODOWRITE_DESCRIPTION: &str = "Create or maintain a multi-step checklist f
 Checklists are automatically cleared once all items are completed. \
 Use to plan tasks, track progress, and improve delivery quality.";
 
-const TODO_ACTION_FIELD_KEYS: &[&str] = &[
-    "action", "id", "position", "status", "content", "after", "after_id",
-];
-
 /// Absorb stringified / single-object / hybrid `actions` payloads. Idempotent.
 pub(crate) fn normalize_todo_write_args(args: &str) -> String {
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(args) else {
@@ -1230,12 +1404,22 @@ pub(crate) fn normalize_todo_write_args(args: &str) -> String {
     };
     crate::tools::repair::decode_lenient_array_field(&mut v, "actions", false);
     crate::tools::repair::decode_lenient_array_field(&mut v, "todos", false);
+    canonicalize_todo_keys(&mut v);
 
     let usable_actions = v
         .get("actions")
         .and_then(|a| a.as_array())
         .is_some_and(|a| !a.is_empty() && a.iter().any(|item| action_kind(item).is_some()));
-    if !usable_actions && v.get("todos").is_none() && action_kind(&v).is_some() {
+    // A non-array `actions` (truncated stringified field) yields to sibling
+    // fields, matching the hybrid repair contract. A real array that failed
+    // inference is NOT replaced: keeping it makes the error actionable.
+    if !usable_actions
+        && v.get("todos").is_none()
+        && v.get("actions")
+            .and_then(serde_json::Value::as_array)
+            .is_none()
+        && looks_like_single_action(&v)
+    {
         let action = {
             let mut action = serde_json::Map::new();
             if let Some(obj) = v.as_object() {
@@ -1329,31 +1513,34 @@ impl Tool for TodoTool {
             "properties": {
                 "actions": {
                     "type": "array",
-                    "description": "Array of task action objects to apply in sequence. Each item specifies an action ('add', 'insert', 'update', 'delete', 'remove', 'clear'); the read-only 'list' must be the only item.",
+                    "minItems": 1,
+                    "description": "Batch of task changes, applied in order.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["add", "insert", "update", "delete", "remove", "clear", "list"],
-                                "description": "Optional when fields uniquely determine the op: {content}→add, {content,position}→insert, {id,status|content}→update, {id}→delete. Required for `clear` and for the read-only `list` (returns the current tasks). Explicit value always wins."
+                                "enum": ["delete", "clear"],
+                                "description": "For destructive ops only: `clear` wipes the list (runs first); `delete` needs `id`."
                             },
                             "id": {
                                 "type": "integer",
-                                "description": "1-based task number. Required for 'update', 'delete', 'remove'; omitted for 'add', 'clear'."
+                                "minimum": 1,
+                                "description": "1-based task number. With `status` or `content` → update; alone → delete."
                             },
                             "position": {
                                 "type": "integer",
-                                "description": "1-based insert slot. Required for 'insert'; omitted for other actions."
+                                "minimum": 1,
+                                "description": "1-based insert slot for `content`; omitted → append."
                             },
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
-                                "description": "Task status. Required when 'update' modifies status; optional for 'add' (default: pending); omitted for 'delete', 'clear'."
+                                "description": "New status. At most one item stays in_progress; demoting the others is automatic."
                             },
                             "content": {
                                 "type": "string",
-                                "description": "Task description text. Required for 'add', 'insert'; optional for 'update' (when changing text); omitted for 'delete', 'clear'."
+                                "description": "Task text. Alone → add; with `position` → insert; with `id` → retitle that task."
                             }
                         },
                         "required": []
@@ -1371,7 +1558,10 @@ impl Tool for TodoTool {
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
         let args = normalize_todo_write_args(args);
         let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&args) else {
-            return err("todowrite: invalid JSON arguments.".to_string());
+            return err(with_current_list_for_args(
+                "todowrite: invalid JSON arguments.",
+                &self.board_items(),
+            ));
         };
         let mut list = self.board_items();
 
@@ -1383,7 +1573,7 @@ impl Tool for TodoTool {
                     let stored = self.commit_and_read(&todos);
                     ok(render_todos_numbered(&stored, false))
                 }
-                Err(e) => err(with_current_list(e, &self.board_items())),
+                Err(e) => err(with_current_list_for_args(e, &self.board_items())),
             };
         }
 
@@ -1414,7 +1604,7 @@ impl Tool for TodoTool {
         }
 
         if v.get("actions").and_then(|a| a.as_array()).is_none() {
-            return err(with_current_list(
+            return err(with_current_list_for_args(
                 "todowrite: provide a non-empty `actions` array of task action objects.",
                 &self.board_items(),
             ));
@@ -1422,7 +1612,7 @@ impl Tool for TodoTool {
 
         let summary = match todo_change_summary(&v) {
             Ok(s) => s,
-            Err(e) => return err(with_current_list(e, &self.board_items())),
+            Err(e) => return err(with_current_list_for_args(e, &self.board_items())),
         };
 
         match try_apply_todo_args(&mut list, &args) {
@@ -1448,6 +1638,16 @@ impl Tool for TodoTool {
 fn with_current_list(msg: impl std::fmt::Display, list: &[TodoItem]) -> String {
     format!(
         "{msg}\n\nCurrent list (unchanged):\n{}\nUse these 1-based ids. Do not retry a failed id.",
+        render_todos_numbered(list, false)
+    )
+}
+
+/// Schema/shape failure: the call never named a valid action, so "do not retry
+/// a failed id" is misleading and can make the model give up instead of fixing
+/// the fields. The list stays visible so ids can still be derived correctly.
+fn with_current_list_for_args(msg: impl std::fmt::Display, list: &[TodoItem]) -> String {
+    format!(
+        "{msg}\n\nCurrent list (unchanged):\n{}\nNo changes were applied. Correct the arguments and re-send the call.",
         render_todos_numbered(list, false)
     )
 }
@@ -1478,7 +1678,7 @@ fn summarize_todo_action(v: &serde_json::Value) -> Result<String, String> {
     match action_kind(v) {
         Some("add") => match v.get("content").and_then(|c| c.as_str()) {
             Some(c) if !c.trim().is_empty() => Ok(format!("Added task: {}", c.trim())),
-            _ => Err("`add` needs non-empty `content`. Example: {\"action\": \"add\", \"content\": \"Implement feature X\"}".into()),
+            _ => Err("adding a task needs non-empty `content`. Example: {\"content\": \"Implement feature X\"}".into()),
         },
         Some("insert") => {
             let content = v
@@ -1486,7 +1686,7 @@ fn summarize_todo_action(v: &serde_json::Value) -> Result<String, String> {
                 .and_then(|c| c.as_str())
                 .map(str::trim)
                 .filter(|c| !c.is_empty())
-                .ok_or_else(|| "`insert` needs non-empty `content`. Example: {\"action\": \"insert\", \"content\": \"New task\", \"position\": 1}".to_string())?;
+                .ok_or_else(|| "inserting needs non-empty `content`. Example: {\"content\": \"New task\", \"position\": 1}".to_string())?;
             let pos = insert_position(v).unwrap_or(1).max(1);
             Ok(format!("#{pos} \u{2192} inserted: {content}"))
         }
@@ -1502,19 +1702,19 @@ fn summarize_todo_action(v: &serde_json::Value) -> Result<String, String> {
                 .is_some();
 
             if id.is_none() {
-                return Err("`update` needs a valid `id` (1-based task number). Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}".into());
+                return Err("updating needs a valid `id` (1-based task number). Example: {\"id\": 1, \"status\": \"in_progress\"}".into());
             }
             let task_id = id.unwrap();
             if raw_status.is_some() && parsed_status.is_none() {
                 return Err(format!(
-                    "`update` has invalid `status`: `{}`. Must be `pending`, `in_progress`, or `completed`. Example: {{\"action\": \"update\", \"id\": {}, \"status\": \"in_progress\"}}",
+                    "`update` has invalid `status`: `{}`. Must be `pending`, `in_progress`, or `completed`. Example: {{\"id\": {}, \"status\": \"in_progress\"}}",
                     raw_status.unwrap(),
                     task_id
                 ));
             }
             if parsed_status.is_none() && !has_content {
                 return Err(format!(
-                    "`update` needs at least one of `status` ('pending'|'in_progress'|'completed') or `content` (non-empty text). Example: {{\"action\": \"update\", \"id\": {}, \"status\": \"in_progress\"}}",
+                    "updating needs at least one of `status` ('pending'|'in_progress'|'completed') or `content` (non-empty text). Example: {{\"id\": {}, \"status\": \"in_progress\"}}",
                     task_id
                 ));
             }
@@ -1527,7 +1727,7 @@ fn summarize_todo_action(v: &serde_json::Value) -> Result<String, String> {
         }
         Some("delete") => match json_id(v) {
             Some(id) if id >= 1 => Ok(format!("#{id} \u{2192} removed")),
-            _ => Err("`delete`/`remove` needs a valid `id` (1-based task number). Example: {\"action\": \"delete\", \"id\": 1}".into()),
+            _ => Err("`delete` needs a valid `id` (1-based task number). Example: {\"action\": \"delete\", \"id\": 1}".into()),
         },
         Some("clear") => Ok("all tasks cleared".to_string()),
         // Reachable only through a direct call: `execute` short-circuits a lone `list` before
@@ -2921,6 +3121,26 @@ mod tests {
         assert!(d.contains("task"), "covers task: {d}");
     }
 
+    /// Advertised surface: one array, two explicit verbs, everything else inferred.
+    #[test]
+    fn schema_advertises_only_destructive_verbs() {
+        let t = TodoTool::new();
+        let s = t.parameters_schema();
+        let items = &s["properties"]["actions"]["items"]["properties"];
+        assert_eq!(s["required"], serde_json::json!(["actions"]));
+        assert_eq!(s["properties"]["actions"]["minItems"].as_u64(), Some(1));
+        assert_eq!(
+            items["action"]["enum"],
+            serde_json::json!(["delete", "clear"])
+        );
+        assert_eq!(
+            items["status"]["enum"],
+            serde_json::json!(["pending", "in_progress", "completed"])
+        );
+        assert_eq!(items["id"]["minimum"].as_u64(), Some(1));
+        assert_eq!(items["position"]["minimum"].as_u64(), Some(1));
+    }
+
     #[tokio::test]
     async fn todowrite_execute_accepts_insert() {
         let t = TodoTool::new();
@@ -2985,13 +3205,14 @@ mod tests {
         let res = t.execute(r#"{"actions":[{"action":"add"}]}"#, &ctx()).await;
         assert!(res.is_error);
         assert!(
-            res.content.contains("`add` needs non-empty `content`"),
+            res.content
+                .contains("adding a task needs non-empty `content`"),
             "{}",
             res.content
         );
         assert!(
             res.content
-                .contains("Example: {\"action\": \"add\", \"content\": \"Implement feature X\"}"),
+                .contains("Example: {\"content\": \"Implement feature X\"}"),
             "{}",
             res.content
         );
@@ -3008,14 +3229,13 @@ mod tests {
             .await;
         assert!(res.is_error);
         assert!(
-            res.content.contains("`update` needs a valid `id`"),
+            res.content.contains("updating needs a valid `id`"),
             "{}",
             res.content
         );
         assert!(
-            res.content.contains(
-                "Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}"
-            ),
+            res.content
+                .contains("Example: {\"id\": 1, \"status\": \"in_progress\"}"),
             "{}",
             res.content
         );
@@ -3036,7 +3256,7 @@ mod tests {
         assert!(res.is_error);
         assert!(
             res.content
-                .contains("`update` needs at least one of `status`"),
+                .contains("updating needs at least one of `status`"),
             "{}",
             res.content
         );
@@ -3143,6 +3363,133 @@ mod tests {
         assert!(!del.is_error, "{}", del.content);
         assert!(del.content.contains("#1"), "{}", del.content);
         assert!(!del.content.contains("1. one"), "{}", del.content);
+    }
+
+    #[tokio::test]
+    async fn escaped_status_key_is_repaired_like_a_normal_update() {
+        // The provider double-escaped the tail of the payload: after JSON parsing
+        // the key is literally `"status"` (quotes included). It must repair to
+        // `status`, not fall through to the bare-`id` delete rule.
+        let t = TodoTool::new();
+        let r = t
+            .execute(
+                r#"{"actions":[
+                    {"content":"one"},
+                    {"content":"two"},
+                    {"\"status\"":"in_progress","id":1}
+                ]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(
+            !r.is_error,
+            "escaped `status` key must be repaired: {}",
+            r.content
+        );
+        assert!(r.content.contains("[~] 1. one"), "{}", r.content);
+        assert!(r.content.contains("[ ] 2. two"), "{}", r.content);
+    }
+
+    #[test]
+    fn escaped_status_key_folds_to_the_same_list_as_execute() {
+        // Live execution normalizes at the tool boundary; replay/resume folds the
+        // RAW transcript call, so the same repair must also live in
+        // `try_apply_todo_args` or the two views diverge.
+        let args = r#"{"actions":[{"content":"one"},{"content":"two"},{"\"status\"":"in_progress","id":1}]}"#;
+        let folded = reduce_todos([("todo_write", args)]);
+        assert_eq!(folded.len(), 2, "{folded:?}");
+        assert_eq!(folded[0].content, "one");
+        assert_eq!(folded[0].status, TodoStatus::InProgress);
+        assert_eq!(folded[1].status, TodoStatus::Pending);
+    }
+
+    #[test]
+    fn escaped_status_key_in_plan_is_repaired() {
+        let plan = r#"{"todos":[{"content":"a","\"status\"":"in_progress"}]}"#;
+        let parsed = parse_todos(plan).expect("plan with an escaped status key must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn escaped_root_actions_key_is_repaired() {
+        let normalized = normalize_todo_write_args(r#"{"\"actions\"":[{"content":"a"}]}"#);
+        let v: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        assert!(v.get("actions").is_some(), "{normalized}");
+        assert_eq!(v["actions"][0]["content"], "a");
+    }
+
+    #[tokio::test]
+    async fn misspelled_status_key_is_reported_not_treated_as_delete() {
+        let t = TodoTool::new();
+        let seeded = t
+            .execute(
+                r#"{"actions":[{"content":"keep"},{"content":"also"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!seeded.is_error, "{}", seeded.content);
+
+        let r = t
+            .execute(r#"{"actions":[{"id":1,"stauts":"completed"}]}"#, &ctx())
+            .await;
+        assert!(r.is_error, "a typo must not be applied: {}", r.content);
+        assert!(
+            r.content.contains("unrecognized key(s) `stauts`"),
+            "{}",
+            r.content
+        );
+        assert!(
+            r.content
+                .contains("did you mean `status` instead of `stauts`"),
+            "{}",
+            r.content
+        );
+        assert!(
+            r.content.contains("No changes were applied"),
+            "{}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("Do not retry a failed id"),
+            "schema errors must not reuse the id-retry hint: {}",
+            r.content
+        );
+
+        let list = t.execute(r#"{"action":"list"}"#, &ctx()).await;
+        assert!(
+            list.content.contains("1. keep") && list.content.contains("2. also"),
+            "the typo must not delete anything: {}",
+            list.content
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_id_with_unknown_key_is_not_a_delete() {
+        // Only an object whose sole field is `id` is destructive. Unknown keys
+        // (here `note`) mean the payload is malformed, not a delete request.
+        let t = TodoTool::new();
+        let seeded = t
+            .execute(r#"{"actions":[{"content":"a"},{"content":"b"}]}"#, &ctx())
+            .await;
+        assert!(!seeded.is_error, "{}", seeded.content);
+
+        let r = t
+            .execute(r#"{"actions":[{"id":1,"note":"x"}]}"#, &ctx())
+            .await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("unrecognized key(s) `note`"),
+            "{}",
+            r.content
+        );
+
+        let list = t.execute(r#"{"action":"list"}"#, &ctx()).await;
+        assert!(
+            list.content.contains("1. a") && list.content.contains("2. b"),
+            "an unknown key must never silently delete a task: {}",
+            list.content
+        );
     }
 
     #[tokio::test]

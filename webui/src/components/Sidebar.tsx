@@ -2,7 +2,7 @@
 // new-conversation row, live-filtered session list, settings at the bottom;
 // collapses to an icon rail).
 
-import { useEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
 import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
@@ -16,7 +16,17 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { GitWebhookDialog } from './GitWebhookDialog';
 import { showToast } from './Toast';
 import { CwdPicker } from './CwdPicker';
-import { mergeOptimisticSession, mergeOptimisticSessions } from '../lib/sessionList';
+import { mergeOptimisticSession, mergeOptimisticSessions, uniqueSessionsById } from '../lib/sessionList';
+import {
+  loadSidebarMemory,
+  loadSidebarSnapshot,
+  saveExpandedProjects,
+  saveManuallyCollapsedProjects,
+  saveShowAllProjects,
+  saveSidebarSnapshot,
+  type SidebarMemory,
+  type SidebarSnapshot,
+} from '../lib/navState';
 import { mcpAutoTrustSignature, mcpEnableNeedsTrust } from '../lib/mcpTrust';
 import { sessionMessagesToMarkdownLines } from '../lib/historyMessages';
 import { collapseHomePath as collapseHomePathShared, displayPath, isLoopbackHost, stripExtendedPathPrefix } from '../lib/displayPath';
@@ -25,6 +35,9 @@ import { getPageZoom } from '../lib/pageZoom';
 
 interface SidebarProps {
   activeSessionId: string | null;
+  /** 当前会话所属项目桶。刷新恢复时它可能先于会话列表就绪，
+   *  用它立即展开正确的项目分组，避免空闲会话的分组一直保持折叠。 */
+  activeProjectHash?: string;
   onSelect: (session: SessionMetaWithProject) => void;
   onNew: (targetDir?: string) => void;
   /** Open a specific settings dialog (theme / language / model). */
@@ -65,6 +78,8 @@ interface SidebarProps {
   onSwitchProject?: (workingDir: string) => void;
   /** Live / `--host` 正在跑的 session，立刻转圈，不必等 5s 的 /chat/active。 */
   extraRunningIds?: string[];
+  /** 刚真正完成（内核权威终态 completed）、还没被点开看过的 session：圈圈换成绿色对勾。 */
+  completedIds?: string[];
   /** 从资源管理器打开文件 */
   onOpenFile?: (filePath: string) => void;
   activeFilePath?: string | null;
@@ -203,6 +218,24 @@ function CheckIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  );
+}
+
+/**
+ * 刚完成徽标：与运行圈圈同位置的绿色对勾（成功色跟随主题）。
+ * 只用来标记「圈圈任务真正跑完」，点一下即进入会话并消失。
+ */
+function CompletedCheckIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M3.3 8.5l3 3 6.4-6.9"
+        stroke="currentColor"
+        stroke-width="2.2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
     </svg>
   );
 }
@@ -422,6 +455,7 @@ function GithubLogo() {
 
 export function Sidebar({
   activeSessionId,
+  activeProjectHash,
   onSelect,
   onNew,
   onOpenSettings,
@@ -441,6 +475,7 @@ export function Sidebar({
   onOpenCwd,
   onSwitchProject,
   extraRunningIds,
+  completedIds,
   onOpenFile,
   activeFilePath,
 }: SidebarProps) {
@@ -472,8 +507,21 @@ export function Sidebar({
     } catch {}
   };
   const [appVersion, setAppVersion] = useState(bakedAppVersion());
-  const [sessions, setSessions] = useState<SessionMetaWithProject[]>([]);
-  const [loading, setLoading] = useState(true);
+  // 首屏快照：列表/项目/选中行直接画上次那一份，随后服务端数据就地校准。
+  const initialSidebarSnapshotRef = useRef<SidebarSnapshot | null | undefined>(undefined);
+  if (initialSidebarSnapshotRef.current === undefined) {
+    initialSidebarSnapshotRef.current = loadSidebarSnapshot();
+  }
+  const initialSidebarSnapshot = initialSidebarSnapshotRef.current;
+  // 旧版快照没有 scrollTop：那种情况沿用“居中选中行”行为；
+  // 新版快照则原地恢复滚动位置，避免刷新时列表再跳一次。
+  const restoredScrollTopRef = useRef<number | null>(
+    typeof initialSidebarSnapshot?.scrollTop === 'number' ? initialSidebarSnapshot.scrollTop : null,
+  );
+  const [sessions, setSessions] = useState<SessionMetaWithProject[]>(
+    () => initialSidebarSnapshot?.sessions ?? [],
+  );
+  const [loading, setLoading] = useState(() => !initialSidebarSnapshot);
   // 活跃（正在运行 turn）的会话 id，来自 GET /chat/active；配合 5s 轮询，
   // 让「哪个会话正在执行」实时显示在侧栏行右侧的圈圈里。
   const [activeIds, setActiveIds] = useState<string[]>([]);
@@ -482,11 +530,17 @@ export function Sidebar({
   // Selection is an explicit navigation intent, unlike a background reload.
   // Keep it pending across a cross-project fetch until the destination row
   // actually exists; ordinary reloads must not steal the user's scroll.
-  const pendingCenterSessionIdRef = useRef<string | null>(activeSessionId);
+  const pendingCenterSessionIdRef = useRef<string | null>(
+    restoredScrollTopRef.current != null ? null : activeSessionId,
+  );
+  // 首帧若已有保存的滚动位置，就不要再居中选中行（否则会把恢复的位置顶掉）。
+  const initialScrollWasRestoredRef = useRef(restoredScrollTopRef.current != null);
   const previousActiveSessionIdRef = useRef<string | null>(activeSessionId);
   // Project sessions accordion
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [projectSessionsMap, setProjectSessionsMap] = useState<Record<string, SessionMetaWithProject[]>>({});
+  const [projects, setProjects] = useState<ProjectInfo[]>(() => initialSidebarSnapshot?.projects ?? []);
+  const [projectSessionsMap, setProjectSessionsMap] = useState<Record<string, SessionMetaWithProject[]>>(
+    () => initialSidebarSnapshot?.projectSessions ?? {},
+  );
 
   const allOptimistic = useMemo<SessionMetaWithProject[]>(() => {
     const list: SessionMetaWithProject[] = [];
@@ -502,10 +556,23 @@ export function Sidebar({
     }
     return list;
   }, [optimisticSessions, optimisticSession]);
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
-  const [showAllProjects, setShowAllProjects] = useState<Set<string>>(() => new Set());
-  const [hiddenProjectHashes, setHiddenProjectHashes] = useState<Set<string>>(() => new Set());
-  const [pinnedProjects, setPinnedProjects] = useState<ProjectInfo[]>([]);
+  // 同一浏览器刷新必须原样恢复上次展开的分组；只有跨设备/无痕冷启动
+  // （localStorage 为空）才退回 daemon 的默认展开行为。
+  const initialSidebarMemoryRef = useRef<SidebarMemory | null>(null);
+  if (!initialSidebarMemoryRef.current) initialSidebarMemoryRef.current = loadSidebarMemory();
+  const initialSidebarMemory = initialSidebarMemoryRef.current;
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
+    () => new Set(initialSidebarMemory.expanded),
+  );
+  const [showAllProjects, setShowAllProjects] = useState<Set<string>>(
+    () => new Set(initialSidebarMemory.showAll),
+  );
+  const [hiddenProjectHashes, setHiddenProjectHashes] = useState<Set<string>>(
+    () => new Set(initialSidebarSnapshot?.hidden ?? []),
+  );
+  const [pinnedProjects, setPinnedProjects] = useState<ProjectInfo[]>(
+    () => initialSidebarSnapshot?.pinned ?? [],
+  );
   const [removeProjectTarget, setRemoveProjectTarget] = useState<ProjectInfo | null>(null);
   const [gitWebhookProject, setGitWebhookProject] = useState<ProjectInfo | null>(null);
   const [webPickerOpen, setWebPickerOpen] = useState(false);
@@ -513,6 +580,24 @@ export function Sidebar({
   const pendingRevealRef = useRef<Set<string>>(new Set());
   const revealingRef = useRef<Set<string>>(new Set());
   const prevHiddenRef = useRef<Set<string>>(new Set());
+  // 记录用户主动手动折叠的项目（防止忙碌自动展开强制覆盖用户意图）。
+  // 这个意图同样要跨刷新保留：刷新后自动展开不得把用户刚折叠的分组重新打开。
+  const manuallyCollapsedProjectsRef = useRef<Set<string>>(
+    new Set(initialSidebarMemory.collapsed),
+  );
+  // 记录冷启动时因保底而自动展开的项目 hash（用于后续发现真正忙碌项目时自动收起）
+  const initialAutoExpandedHashRef = useRef<string | null>(null);
+  const projectSessionsMapRef = useRef(projectSessionsMap);
+  projectSessionsMapRef.current = projectSessionsMap;
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const lastActiveSessionIdRef = useRef<string | null>(null);
+  // 当前会话所属项目在数据就绪前的待展开目标（列表晚到时继续重试）。
+  const pendingAutoExpandSessionRef = useRef<{ id: string; projectHash?: string } | null>(null);
+  const expandedProjectsRef = useRef(expandedProjects);
+  expandedProjectsRef.current = expandedProjects;
+  // 首次恢复用瞬时定位，之后的用户切换才使用平滑滚动，避免刷新时列表来回滚动。
+  const initialCenterDoneRef = useRef(false);
   const [query, setQuery] = useState('');
   // Capability menu (unified MCP server + skills list): fetched lazily; the count
   // badges show once loaded.
@@ -707,7 +792,7 @@ export function Sidebar({
     };
     document.addEventListener('visibilitychange', onVisibility);
 
-    // 当 reloadKey 变更时（例如回合结束 onLiveTurnDone、删除会话、新建会话触发）即时核验一次
+    // 当 reloadKey 变更时（例如回合结束 onTurnDone、删除会话、新建会话触发）即时核验一次
     refresh();
 
     return () => {
@@ -785,6 +870,15 @@ export function Sidebar({
         void deleteSessionCache(event.project_hash, event.session_id);
         return;
       }
+      if (event.type === 'runtime_activity') {
+        setActiveIds((cur) => {
+          const has = cur.includes(event.session_id);
+          if (event.running && !has) return [...cur, event.session_id];
+          if (!event.running && has) return cur.filter((id) => id !== event.session_id);
+          return cur;
+        });
+        return;
+      }
       if (event.type === 'activity') {
         setActiveIds((cur) => {
           const has = cur.includes(event.session_id);
@@ -814,15 +908,87 @@ export function Sidebar({
     }
   }, [activeSessionId]);
 
+  // 首帧恢复上次的列表滚动位置（在浏览器绘制前完成，避免先看到顶部再跳）。
+  useLayoutEffect(() => {
+    const top = restoredScrollTopRef.current;
+    if (top == null) return;
+    const container = sessionListBodyRef.current;
+    if (!container) return;
+    container.scrollTop = Math.max(0, Math.min(top, container.scrollHeight - container.clientHeight));
+    restoredScrollTopRef.current = null; // 只恢复一次，后续网络更新不再拉回旧位置
+    pendingCenterSessionIdRef.current = null;
+  }, [sidebarTab, collapsed, sessions.length, projectSessionsMap, expandedProjects, projects]);
+
+  // 展开状态属于「本浏览器上次看到的样子」，刷新后原样恢复；跨设备冷启动
+  // 没有本地记忆，才由下方的活跃/忙碌自动展开兜底决定。
+  useEffect(() => {
+    saveExpandedProjects(expandedProjects);
+  }, [expandedProjects]);
+
+  useEffect(() => {
+    saveShowAllProjects(showAllProjects);
+  }, [showAllProjects]);
+
+  // 每次侧栏真实渲染后把这一屏存成快照；刷新首帧先还原它，
+  // 服务端数据到达后再按 id 就地合并，绝不再经历“空列表 → 重排 → 选中”。
+  const sidebarSnapshotRef = useRef<SidebarSnapshot | null>(null);
+  sidebarSnapshotRef.current = {
+    projects,
+    pinned: pinnedProjects,
+    sessions,
+    projectSessions: projectSessionsMap,
+    hidden: [...hiddenProjectHashes],
+  };
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const snapshot = sidebarSnapshotRef.current;
+      if (snapshot) {
+        saveSidebarSnapshot({
+          ...snapshot,
+          scrollTop: sessionListBodyRef.current?.scrollTop ?? snapshot.scrollTop ?? 0,
+        });
+      }
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [projects, pinnedProjects, sessions, projectSessionsMap, hiddenProjectHashes]);
+
+  // 刷新/关闭页面前同步落盘，避免刚好赶在 250ms 防抖窗口内丢掉最后一次状态。
+  useEffect(() => {
+    const flush = () => {
+      const snapshot = sidebarSnapshotRef.current;
+      if (!snapshot) return;
+      saveSidebarSnapshot({
+        ...snapshot,
+        scrollTop: sessionListBodyRef.current?.scrollTop ?? snapshot.scrollTop ?? 0,
+      });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('pagehide', flush);
+    window.addEventListener('beforeunload', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      window.removeEventListener('beforeunload', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
+
   useEffect(() => {
     const pendingId = pendingCenterSessionIdRef.current;
     if (loading || collapsed || !pendingId || pendingId !== activeSessionId) return;
     const container = sessionListBodyRef.current;
     const item = activeSessionItemRef.current;
     if (!container || !item || !container.contains(item)) return;
-    item.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    item.scrollIntoView({
+      behavior: initialCenterDoneRef.current ? 'smooth' : 'auto',
+      block: 'center',
+      inline: 'nearest',
+    });
+    initialCenterDoneRef.current = true;
     pendingCenterSessionIdRef.current = null;
-  }, [activeSessionId, collapsed, loading, sessions, projectHash]);
+  }, [activeSessionId, activeProjectHash, collapsed, loading, sessions, projectSessionsMap, expandedProjects, projectHash]);
 
   useEffect(() => {
     getProjects()
@@ -831,12 +997,9 @@ export function Sidebar({
   }, [reloadKey]);
 
   useEffect(() => {
-    if (projectHash) {
-      setExpandedProjects((prev) => {
-        const next = new Set(prev);
-        next.add(projectHash);
-        return next;
-      });
+    if (!projectHash) return;
+    // 静默预加载当前项目的会话列表缓存，不强行默认自动展开空闲项目
+    if (!projectSessionsMapRef.current[projectHash]) {
       listProjectSessions(projectHash)
         .then((list) => {
           setProjectSessionsMap((m) => ({ ...m, [projectHash]: list }));
@@ -844,6 +1007,53 @@ export function Sidebar({
         .catch(() => {});
     }
   }, [projectHash]);
+
+  // 当前会话所属项目必须在会话数据就绪后自动展开。刷新时 activeSessionId 往往
+  // 先于 /sessions 与 /projects/:hash/sessions 到达；旧实现只跑一次、拿不到 hash
+  // 就永久放弃，于是空闲会话的分组一直折叠（忙碌会话只是被忙碌兜底碰巧展开）。
+  // 这里保留待展开目标，等列表/元数据任一到达后再完成一次，不重复覆盖用户操作。
+  useEffect(() => {
+    if (!activeSessionId) {
+      pendingAutoExpandSessionRef.current = null;
+      lastActiveSessionIdRef.current = null;
+      return;
+    }
+    if (lastActiveSessionIdRef.current !== activeSessionId) {
+      const isInitialSelection = lastActiveSessionIdRef.current === null;
+      lastActiveSessionIdRef.current = activeSessionId;
+      pendingAutoExpandSessionRef.current = { id: activeSessionId, projectHash: activeProjectHash };
+      if (!(isInitialSelection && initialScrollWasRestoredRef.current)) {
+        pendingCenterSessionIdRef.current = activeSessionId;
+      }
+    }
+    const pending = pendingAutoExpandSessionRef.current;
+    if (!pending || pending.id !== activeSessionId) return;
+    if (!pending.projectHash && activeProjectHash) pending.projectHash = activeProjectHash;
+
+    let targetHash = pending.projectHash;
+    if (!targetHash) {
+      for (const s of sessionsRef.current) {
+        if (s.id === activeSessionId && s.project_hash) {
+          targetHash = s.project_hash;
+          break;
+        }
+      }
+    }
+    if (!targetHash) {
+      for (const [pHash, pList] of Object.entries(projectSessionsMapRef.current)) {
+        if (pList.some((s) => s.id === activeSessionId)) {
+          targetHash = pHash;
+          break;
+        }
+      }
+    }
+    if (!targetHash) return; // 列表尚未就绪：等 sessions / projectSessionsMap 变化后重试。
+    pendingAutoExpandSessionRef.current = null;
+    if (!manuallyCollapsedProjectsRef.current.has(targetHash)) {
+      openProjectInSidebar(targetHash);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId, activeProjectHash, sessions, projectSessionsMap, projects, allOptimistic]);
 
   // 当有乐观会话产生时，自动展开其归属的项目文件夹，确保新会话立即呈现在视线中
   useEffect(() => {
@@ -860,20 +1070,28 @@ export function Sidebar({
   }, [allOptimistic]);
 
   function toggleProjectExpand(hash: string) {
-    setExpandedProjects((prev) => {
-      const next = new Set(prev);
-      if (next.has(hash)) {
-        next.delete(hash);
-      } else {
-        next.add(hash);
+    initialAutoExpandedHashRef.current = null;
+    const next = new Set(expandedProjectsRef.current);
+    if (next.has(hash)) {
+      next.delete(hash);
+      manuallyCollapsedProjectsRef.current.add(hash);
+    } else {
+      next.add(hash);
+      manuallyCollapsedProjectsRef.current.delete(hash);
+      if (!projectSessionsMapRef.current[hash]) {
         listProjectSessions(hash)
           .then((list) => {
             setProjectSessionsMap((m) => ({ ...m, [hash]: list }));
           })
           .catch(() => {});
       }
-      return next;
-    });
+    }
+    expandedProjectsRef.current = next;
+    setExpandedProjects(next);
+    // 同步落盘：折叠/展开与外层的展开记忆必须一起更新，
+    // 否则紧接着的刷新可能读到「既展开又手动折叠」的冲突快照。
+    saveExpandedProjects(next);
+    saveManuallyCollapsedProjects(manuallyCollapsedProjectsRef.current);
   }
 
   function toggleShowAll(hash: string) {
@@ -896,13 +1114,15 @@ export function Sidebar({
   }
 
   function openProjectInSidebar(hash: string) {
-    if (!hash) return;
-    setExpandedProjects((prev) => {
-      if (prev.has(hash)) return prev;
-      const next = new Set(prev);
+    if (!hash || manuallyCollapsedProjectsRef.current.has(hash)) return;
+    if (!expandedProjectsRef.current.has(hash)) {
+      const next = new Set(expandedProjectsRef.current);
       next.add(hash);
-      return next;
-    });
+      expandedProjectsRef.current = next;
+      setExpandedProjects(next);
+      saveExpandedProjects(next);
+    }
+    if (projectSessionsMapRef.current[hash]) return;
     listProjectSessions(hash)
       .then((list) => {
         setProjectSessionsMap((m) => ({ ...m, [hash]: list }));
@@ -1002,59 +1222,80 @@ export function Sidebar({
     const take = (session: { id: string; project_hash?: string }) => {
       if (session.id && session.project_hash) known.set(session.id, session.project_hash);
     };
-    for (const session of sessions) take(session);
-    for (const list of Object.values(projectSessionsMap)) {
+    for (const session of sessionsRef.current) take(session);
+    for (const list of Object.values(projectSessionsMapRef.current)) {
       for (const session of list) take(session);
     }
     for (const session of allOptimistic) take(session);
 
-    const hashes = new Set<string>();
+    // 收集所有包含忙碌会话或乐观会话的项目 hash
+    const busyHashes = new Set<string>();
     for (const id of running) {
       const hash = known.get(id);
-      if (hash && hiddenProjectHashes.has(hash)) hashes.add(hash);
+      if (hash) busyHashes.add(hash);
     }
     for (const session of allOptimistic) {
-      if (session.project_hash && hiddenProjectHashes.has(session.project_hash)) {
-        hashes.add(session.project_hash);
+      if (session.project_hash) {
+        busyHashes.add(session.project_hash);
       }
     }
+
     const missing = [...running].filter((id) => !known.has(id));
     void (async () => {
       for (const id of missing) {
         try {
           const found = await resolveSession(id);
           if (cancelled || !found?.project_hash) continue;
-          if (hiddenProjectHashes.has(found.project_hash)) hashes.add(found.project_hash);
+          busyHashes.add(found.project_hash);
+          // 预注入项目会话列表缓存，让忙碌项与 projectIsRunning 立即就位
+          setProjectSessionsMap((prev) => {
+            const list = prev[found.project_hash!] ?? [];
+            if (list.some((s) => s.id === found.id)) return prev;
+            return { ...prev, [found.project_hash!]: [found, ...list] };
+          });
         } catch {
           /* the next poll retries */
         }
       }
       if (cancelled) return;
-      for (const hash of hashes) {
-        if (revealingRef.current.has(hash)) continue;
-        revealingRef.current.add(hash);
-        pendingRevealRef.current.add(hash);
-        pendingHideRef.current.delete(hash);
-        setHiddenProjectHashes((prev) => {
-          if (!prev.has(hash)) return prev;
-          const next = new Set(prev);
-          next.delete(hash);
-          return next;
-        });
-        openProjectInSidebar(hash);
-        revealSidebarProject(hash)
-          .then((view) => {
-            pendingRevealRef.current.delete(hash);
-            applySidebarView(view);
-          })
-          .catch(() => {})
-          .finally(() => revealingRef.current.delete(hash));
+
+      // 1. 如果有包含忙碌会话的项目被隐藏（hidden），自动解除隐藏
+      for (const hash of busyHashes) {
+        if (hiddenProjectHashes.has(hash)) {
+          if (revealingRef.current.has(hash)) continue;
+          revealingRef.current.add(hash);
+          pendingRevealRef.current.add(hash);
+          pendingHideRef.current.delete(hash);
+          setHiddenProjectHashes((prev) => {
+            if (!prev.has(hash)) return prev;
+            const next = new Set(prev);
+            next.delete(hash);
+            return next;
+          });
+          revealSidebarProject(hash)
+            .then((view) => {
+              pendingRevealRef.current.delete(hash);
+              applySidebarView(view);
+            })
+            .catch(() => {})
+            .finally(() => revealingRef.current.delete(hash));
+        }
+      }
+
+      // 2. 自动展开所有包含忙碌会话的项目（支持展开多个）
+      if (busyHashes.size > 0) {
+        for (const hash of busyHashes) {
+          if (!manuallyCollapsedProjectsRef.current.has(hash)) {
+            openProjectInSidebar(hash);
+          }
+        }
       }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [activeIds, extraRunningIds, sessions, projectSessionsMap, allOptimistic, hiddenProjectHashes, applySidebarView]);
+  }, [activeIds, extraRunningIds, allOptimistic, hiddenProjectHashes, applySidebarView]);
 
   // The kebab menu is fixed-positioned (so the list's overflow can't clip it);
   // close it on outside click, scroll, or resize since it won't track anchors.
@@ -1859,6 +2100,7 @@ export function Sidebar({
     return ts;
   };
   const activeSet = new Set(extraRunningIds !== undefined ? extraRunningIds : activeIds);
+  const completedSet = new Set(completedIds ?? []);
   const projectIsRunning = (p: ProjectInfo) => {
     const rows = [
       ...sessions.filter((s) => s.project_hash === p.hash),
@@ -1876,6 +2118,23 @@ export function Sidebar({
     return projectActivity(b) - projectActivity(a);
   });
   const visibleProjects = allProjects.filter((p) => !hiddenProjectHashes.has(p.hash));
+
+  // 会话行归属去重：同一 id 只归第一个包含它的项目分组。
+  // 项目桶缓存过期或乐观条目同时命中两个分组时，同一条会话会被渲染两遍；
+  // 完成徽标便一次亮两处、点一次消两处。
+  const projectOwnerById = new Map<string, string>();
+  for (const p of visibleProjects) {
+    const rows = [
+      ...(projectSessionsMap[p.hash] ?? sessions.filter((s) => s.project_hash === p.hash)),
+      ...allOptimistic.filter(
+        (opt) =>
+          opt.project_hash === p.hash || sameProjectDir(opt.working_dir, p.working_dir),
+      ),
+    ];
+    for (const row of rows) {
+      if (row.id && !projectOwnerById.has(row.id)) projectOwnerById.set(row.id, p.hash);
+    }
+  }
 
   const sortSessions = (list: SessionMetaWithProject[]) => {
     return list.slice().sort((a, b) => {
@@ -1902,14 +2161,24 @@ export function Sidebar({
 
   const knownHashes = new Set(allProjects.map((p) => p.hash));
   const recentsList = sortSessions(
-    merged.filter((s) => !s.project_hash || !knownHashes.has(s.project_hash))
+    merged.filter((s) => {
+      if (s.project_hash && knownHashes.has(s.project_hash)) return false;
+      // 已被某个项目分组认领的会话不再进“最近”，避免同一 id 出现两行。
+      return !projectOwnerById.has(s.id);
+    })
   );
 
   const filtered = q ? searchFiltered : merged;
 
+  // 兜底：即使上游仍送来重复行，同一个会话也只画一个完成徽标。
+  const completedRendered = new Set<string>();
+
   const renderItem = (s: SessionMetaWithProject) => {
     const active = s.id === activeSessionId;
     const running = activeSet.has(s.id);
+    // 圈圈消失的同一瞬间换绿勾：运行中永远优先于完成徽标。
+    const justCompleted = !running && completedSet.has(s.id) && !completedRendered.has(s.id);
+    if (justCompleted) completedRendered.add(s.id);
     const selected = selectedIds.has(s.id);
     const label = s.name || s.id.slice(0, 8);
     const dir = shortDir(s.working_dir);
@@ -1952,13 +2221,27 @@ export function Sidebar({
             {formatTime(s.updated_at || s.created_at, t)}
           </span>
         </button>
-        {running && (
+        {running ? (
           <span
             class="session-item-running"
             title={t('sidebar.running')}
             aria-label={t('sidebar.running')}
           />
-        )}
+        ) : justCompleted ? (
+          <button
+            type="button"
+            class="session-item-completed"
+            title={t('sidebar.completed')}
+            aria-label={t('sidebar.completed')}
+            onClick={(e) => {
+              e.stopPropagation();
+              // 点勾 = 点进去：进入该会话的同时徽标自行熄灭。
+              onSelect(s);
+            }}
+          >
+            <CompletedCheckIcon />
+          </button>
+        ) : null}
         {!selectMode && (
           <button
             class="session-item-kebab"
@@ -2252,7 +2535,7 @@ export function Sidebar({
             {searchFiltered.length === 0 && (
               <div class="session-empty">{t('sidebar.noMatch')}</div>
             )}
-            {sortSessions(searchFiltered).map(renderItem)}
+            {uniqueSessionsById(sortSessions(searchFiltered)).map(renderItem)}
           </div>
         ) : (
           <>
@@ -2396,7 +2679,9 @@ export function Sidebar({
                   </div>
                   {isExpanded && (
                     <div class="project-sessions-list">
-                      {displayList.map(renderItem)}
+                      {uniqueSessionsById(
+                        displayList.filter((s) => projectOwnerById.get(s.id) === p.hash),
+                      ).map(renderItem)}
                       {sorted.length > 5 && (
                         <button
                           type="button"
@@ -2423,7 +2708,7 @@ export function Sidebar({
                   <span class="sidebar-section-title">{t('sidebar.recents')}</span>
                 </div>
                 <div class="project-sessions-list" style={{ paddingLeft: 0 }}>
-                  {recentsList.slice(0, 10).map(renderItem)}
+                  {uniqueSessionsById(recentsList.slice(0, 10)).map(renderItem)}
                 </div>
               </div>
             )}

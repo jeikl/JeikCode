@@ -1,9 +1,17 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'preact/hooks';
-import { useT, useSettings } from '../settings';
-import { Markdown } from './Markdown';
+import { useT } from '../settings';
+import { modalConfirm } from './ConfirmDialog';
 import { CodeEditorTab } from './CodeEditorTab';
 import { showToast } from './Toast';
 import { parseFilePathAndLines } from '../lib/displayPath';
+import {
+  bumpReloadToken,
+  dropEditorTabSnapshot,
+  previewEditorStateKey,
+  withTabViewMode,
+  withVisitedTab,
+  withoutTabEntry,
+} from '../lib/editorTabState';
 
 export interface PreviewTab {
   id: string;
@@ -16,8 +24,9 @@ export interface PreviewTab {
 
 export interface PreviewPanelProps {
   cwd?: string;
-  onOpenInMainEditor?: (filePath: string) => void;
   onTabsCountChange?: (count: number) => void;
+  /** 面板整体是否可见（折叠 / 切到其它面板标签）：隐藏时不抢焦点，恢复可见时还原滚动。 */
+  surfaceActive?: boolean;
 }
 
 export function getSavedPreviewCount(projectCwd?: string): number {
@@ -36,6 +45,9 @@ export function getSavedPreviewCount(projectCwd?: string): number {
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp']);
 
+/** 常驻保活的标签上限：超出后淘汰最久未激活的（脏标签有快照，可安全重挂载）。 */
+const MAX_VISITED_PREVIEW_TABS = 8;
+
 function normalizeToAbsolute(filePath: string, cwd?: string): string {
   let p = (filePath || '').trim().replace(/\\/g, '/');
   if (/^[a-zA-Z]:\//.test(p) || p.startsWith('/')) {
@@ -45,10 +57,8 @@ function normalizeToAbsolute(filePath: string, cwd?: string): string {
   return base ? `${base}/${p.replace(/^\.?\/+/, '')}` : p;
 }
 
-export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: PreviewPanelProps) {
+export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: PreviewPanelProps) {
   const t = useT();
-  const { theme, effectiveTheme } = useSettings();
-  const isDark = effectiveTheme ? effectiveTheme === 'dark' : (theme === 'dark');
 
   const normCwd = useMemo(() => (cwd || 'default').replace(/\\/g, '/').toLowerCase(), [cwd]);
   const storageKeyTabs = `jeikcode:right_preview_tabs:${normCwd}`;
@@ -73,23 +83,65 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
     return '';
   });
 
-  // 右侧面板当前激活标签的模式：默认从各处点进来的均为预览模式 ('preview')
-  const [activeViewMode, setActiveViewMode] = useState<'preview' | 'edit'>('preview');
-
-  const handleViewModeChange = useCallback((m: 'edit' | 'preview' | 'image' | 'binary') => {
-    if (m === 'edit' || m === 'preview') {
-      setActiveViewMode(m);
-    }
+  // 右侧面板当前激活标签的编辑/预览模式：新标签仍从预览进入（保持原有入口体验），
+  // 但每个标签此后各自记住最后一轮模式，不再随标签切换被写死回预览。
+  const [tabViewModes, setTabViewModes] = useState<Record<string, 'preview' | 'edit'>>({});
+  // 首次激活后才挂载并保活：未被访问过的标签不预加载文件内容。
+  const [visitedTabIds, setVisitedTabIds] = useState<Record<string, true>>({});
+  const [reloadTokens, setReloadTokens] = useState<Record<string, number>>({});
+  // 标签脏状态由各编辑器实例上报；关闭/清空/刷新前据此确认，标签上也显示脏点。
+  const [dirtyTabIds, setDirtyTabIds] = useState<Record<string, true>>({});
+  const markTabDirty = useCallback((tabId: string, dirty: boolean) => {
+    setDirtyTabIds((prev) => {
+      if (!!prev[tabId] === dirty) return prev;
+      const next = { ...prev };
+      if (dirty) next[tabId] = true;
+      else delete next[tabId];
+      return next;
+    });
   }, []);
 
+  const activeViewMode: 'preview' | 'edit' =
+    (activeTabId ? tabViewModes[activeTabId] : undefined) || 'preview';
+
+  const handleViewModeChange = useCallback(
+    (tabId: string, m: 'edit' | 'preview' | 'image' | 'binary') => {
+      if (m !== 'edit' && m !== 'preview') return;
+      setTabViewModes((prev) => withTabViewMode(prev, tabId, m));
+    },
+    [],
+  );
+
   useEffect(() => {
-    setActiveViewMode('preview');
+    if (!activeTabId) return;
+    setVisitedTabIds((prev) => {
+      const next = withVisitedTab(prev, activeTabId);
+      const keys = Object.keys(next);
+      if (keys.length <= MAX_VISITED_PREVIEW_TABS) return next;
+      const keep: Record<string, true> = {};
+      for (const key of keys.slice(-MAX_VISITED_PREVIEW_TABS)) keep[key] = true;
+      keep[activeTabId] = true;
+      return keep;
+    });
   }, [activeTabId]);
 
+  // 关闭标签时同步清掉它的模式 / 刷新令牌 / 挂载记录 / 脏标记，重新打开时回到全新预览。
+  const forgetTab = useCallback((tabId: string) => {
+    setTabViewModes((prev) => withoutTabEntry(prev, tabId));
+    setVisitedTabIds((prev) => withoutTabEntry(prev, tabId));
+    setReloadTokens((prev) => withoutTabEntry(prev, tabId));
+    setDirtyTabIds((prev) => withoutTabEntry(prev, tabId));
+  }, []);
+
   const hydratedKeyRef = useRef<string>('');
+  // 只有真正切换项目时才清空跨项目簿记；首次挂载不能清掉首个激活标签的保活记录。
+  const previousCwdKeyRef = useRef<string | null>(null);
 
   // 当项目/工作目录切换时，自动同步对应项目的独立预览标签列表，彻底杜绝跨项目同名文件混淆
   useEffect(() => {
+    const projectChanged =
+      previousCwdKeyRef.current !== null && previousCwdKeyRef.current !== storageKeyTabs;
+    previousCwdKeyRef.current = storageKeyTabs;
     try {
       const savedTabs = localStorage.getItem(storageKeyTabs);
       const parsedTabs = savedTabs ? JSON.parse(savedTabs) : [];
@@ -97,6 +149,13 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
 
       const savedActive = localStorage.getItem(storageKeyActive) || '';
       setActiveTabId(savedActive);
+      if (projectChanged) {
+        // 避免 map 无限增长、旧项目标签被提前挂载；脏标签的快照仍在，重建后可恢复。
+        setTabViewModes({});
+        setVisitedTabIds({});
+        setReloadTokens({});
+        setDirtyTabIds({});
+      }
     } catch {
       setTabs([]);
       setActiveTabId('');
@@ -132,7 +191,6 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
   }, [tabs, activeTabId]);
 
   const activeTab = useMemo(() => tabs.find((t) => t.id === activeTabId), [tabs, activeTabId]);
-  const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
 
   // 打开或追加一个标签页
   const openTab = useCallback(
@@ -215,9 +273,11 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
     };
   }, [openTab]);
 
-  // 关闭标签
-  const handleCloseTab = (tabId: string, e?: MouseEvent) => {
-    e?.stopPropagation();
+  // 关闭标签：有未保存修改时先确认，避免静默丢草稿。
+  const closeTabNow = (tabId: string) => {
+    const closing = tabs.find((t) => t.id === tabId);
+    if (closing) dropEditorTabSnapshot(previewEditorStateKey(closing.filePath));
+    forgetTab(tabId);
     setTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
       if (activeTabId === tabId) {
@@ -231,8 +291,37 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
     });
   };
 
-  // 清空所有标签
-  const handleClearAll = () => {
+  const handleCloseTab = async (tabId: string, e?: MouseEvent) => {
+    e?.stopPropagation();
+    if (dirtyTabIds[tabId]) {
+      const ok = await modalConfirm({
+        title: t('preview.closeDirtyTitle'),
+        body: t('preview.closeDirtyDesc'),
+        confirmLabel: t('preview.closeDirtyConfirm'),
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    closeTabNow(tabId);
+  };
+
+  // 清空所有标签（有脏标签时先确认）
+  const handleClearAll = async () => {
+    const dirtyCount = tabs.reduce((n, tab) => n + (dirtyTabIds[tab.id] ? 1 : 0), 0);
+    if (dirtyCount > 0) {
+      const ok = await modalConfirm({
+        title: t('preview.clearDirtyTitle'),
+        body: t('preview.clearDirtyDesc', { n: String(dirtyCount) }),
+        confirmLabel: t('preview.clearDirtyConfirm'),
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    for (const tab of tabs) dropEditorTabSnapshot(previewEditorStateKey(tab.filePath));
+    setTabViewModes({});
+    setVisitedTabIds({});
+    setReloadTokens({});
+    setDirtyTabIds({});
     setTabs([]);
     setActiveTabId('');
   };
@@ -463,12 +552,19 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
               >
                 <span class="preview-tab-icon">{getTabIcon(tab.filePath)}</span>
                 <span class="preview-tab-name">{tab.fileName}</span>
+                {dirtyTabIds[tab.id] && (
+                  <span
+                    class="preview-tab-dirty"
+                    title={t('preview.tabDirty')}
+                    aria-label={t('preview.tabDirty')}
+                  />
+                )}
                 <button
                   type="button"
                   class="preview-tab-close"
                   onClick={(e) => handleCloseTab(tab.id, e as unknown as MouseEvent)}
-                  title={t('preview.closeTab') || '关闭标签'}
-                  aria-label="Close tab"
+                  title={t('preview.closeTab')}
+                  aria-label={t('preview.closeTab')}
                 >
                   ×
                 </button>
@@ -478,7 +574,7 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
 
           {tabs.length === 0 && (
             <div class="preview-tabs-empty-hint">
-              <span>{t('preview.dropHint') || '按住顶部标签拖至此处预览'}</span>
+              <span>{t('preview.dropHint')}</span>
             </div>
           )}
         </div>
@@ -489,12 +585,22 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
             <button
               type="button"
               class="preview-action-btn"
-              onClick={() => {
-                setRefreshTrigger((n) => n + 1);
-                showToast(t('preview.refresh') || '已刷新预览', 'info');
+              onClick={async () => {
+                if (!activeTab) return;
+                if (dirtyTabIds[activeTab.id]) {
+                  const ok = await modalConfirm({
+                    title: t('preview.refreshDirtyTitle'),
+                    body: t('preview.refreshDirtyDesc'),
+                    confirmLabel: t('preview.refreshDirtyConfirm'),
+                    danger: true,
+                  });
+                  if (!ok) return;
+                }
+                setReloadTokens((prev) => bumpReloadToken(prev, activeTab.id));
+                showToast(t('preview.refreshed'), 'info');
               }}
-              title={t('preview.refresh') || '刷新预览'}
-              aria-label="Refresh"
+              title={t('preview.refresh')}
+              aria-label={t('preview.refresh')}
             >
               🔄
             </button>
@@ -505,14 +611,14 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
               type="button"
               class={'preview-action-btn' + (activeViewMode === 'edit' ? ' active' : '')}
               onClick={() => {
-                window.dispatchEvent(new CustomEvent(`jeikcode:editor:toggle_mode:${activeTab.filePath}`));
+                window.dispatchEvent(new CustomEvent(`jeikcode:editor:toggle_mode:${previewEditorStateKey(activeTab.filePath)}`));
               }}
               title={
                 activeViewMode === 'edit'
                   ? `${t('editor.switchToPreview')} (Ctrl+Shift+V)`
                   : `${t('editor.switchToEdit')} (Ctrl+Shift+V)`
               }
-              aria-label="Toggle editor/preview mode"
+              aria-label={t('preview.toggleMode')}
             >
               {activeViewMode === 'edit' ? '📖' : '✏️'}
             </button>
@@ -523,10 +629,10 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
               type="button"
               class="preview-action-btn"
               onClick={() => {
-                window.dispatchEvent(new CustomEvent(`jeikcode:editor:save:${activeTab.filePath}`));
+                window.dispatchEvent(new CustomEvent(`jeikcode:editor:save:${previewEditorStateKey(activeTab.filePath)}`));
               }}
-              title={`${t('editor.save') || '保存'} (Ctrl+S)`}
-              aria-label="Save"
+              title={`${t('editor.save')} (Ctrl+S)`}
+              aria-label={t('editor.save')}
             >
               💾
             </button>
@@ -537,8 +643,8 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
               type="button"
               class="preview-action-btn preview-clear-btn"
               onClick={handleClearAll}
-              title={t('preview.clearAll') || '清空全部预览'}
-              aria-label="Clear all"
+              title={t('preview.clearAll')}
+              aria-label={t('preview.clearAll')}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <polyline points="3 6 5 6 21 6" />
@@ -586,25 +692,47 @@ export function PreviewPanel({ cwd, onOpenInMainEditor, onTabsCountChange }: Pre
             <div class="preview-empty-box">
               <div class="preview-empty-icon">👁️</div>
               <div class="preview-empty-title">
-                {t('preview.emptyTitle') || '右侧预览面板已就绪'}
+                {t('preview.emptyTitle')}
               </div>
               <div class="preview-empty-desc">
-                {t('preview.emptyDesc') || '按住顶部文件标签拖拽至此处或眼睛图标，边与 AI 交流边对照查阅文档与代码'}
+                {t('preview.emptyDesc')}
               </div>
             </div>
           </div>
         ) : (
-          <CodeEditorTab
-            key={`${activeTab.filePath}_${activeTab.id}_${activeTab.startLine || 0}_${activeTab.endLine || 0}_${refreshTrigger}`}
-            filePath={activeTab.filePath}
-            cwd={cwd}
-            startLine={activeTab.startLine}
-            endLine={activeTab.endLine}
-            defaultViewMode="preview"
-            onViewModeChange={handleViewModeChange}
-            hideHeaderToolbar={true}
-            onClose={() => handleCloseTab(activeTab.id)}
-          />
+          // 标签保活：已访问过的标签常驻 DOM，只做 CSS 显隐切换。
+          // 与浏览器标签一致，切走再切回会保留编辑/预览模式、未保存草稿、光标与滚动位置。
+          tabs
+            .filter((tab) => visitedTabIds[tab.id] || tab.id === activeTabId)
+            .map((tab) => {
+              const isActiveTab = tab.id === activeTabId;
+              return (
+                <div
+                  key={tab.id}
+                  class="preview-editor-slot"
+                  style={{ display: isActiveTab ? 'flex' : 'none' }}
+                >
+                  <CodeEditorTab
+                    key={tab.id}
+                    filePath={tab.filePath}
+                    cwd={cwd}
+                    startLine={tab.startLine}
+                    endLine={tab.endLine}
+                    stateKey={previewEditorStateKey(tab.filePath)}
+                    defaultViewMode={tabViewModes[tab.id] ?? 'preview'}
+                    active={surfaceActive && isActiveTab}
+                    restoreFocusOnActivate={false}
+                    reloadToken={reloadTokens[tab.id] ?? 0}
+                    onViewModeChange={(mode) => handleViewModeChange(tab.id, mode)}
+                    onDirtyChange={(dirty) => markTabDirty(tab.id, dirty)}
+                    hideHeaderToolbar={true}
+                    onFileDrop={(path) => openTab({ filePath: path })}
+                    linkTargetContext="right"
+                    onClose={() => handleCloseTab(tab.id)}
+                  />
+                </div>
+              );
+            })
         )}
       </div>
     </div>

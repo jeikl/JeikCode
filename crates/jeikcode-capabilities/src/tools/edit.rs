@@ -23,6 +23,13 @@ use async_trait::async_trait;
 use jeikcode_kernel::tool::{RiskLevel, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
+use std::time::Duration;
+use tokio::sync::OwnedMutexGuard;
 
 pub struct EditFileTool;
 
@@ -107,7 +114,11 @@ impl Tool for EditFileTool {
     }
     fn always_grant_scope(&self, _args: &str) -> String {
         // Tool-wide: "总是 / Always" approves every edit this session (v1 parity),
-        // not just this one exact file/old/new triple.
+        // not just this one exact file/old/new triple. NOTE: this is only the
+        // fallback for the generic ApprovalMiddleware; the coding assembly
+        // registers WriteApprovalGate FIRST (assemble.rs), which scopes
+        // out-of-workspace edits per canonical directory and always re-prompts
+        // for sensitive targets.
         String::new()
     }
     fn coalesce_group_key(&self, args: &str) -> Option<String> {
@@ -234,112 +245,201 @@ impl Tool for EditFileTool {
             }
         }
         let path = resolve_path(&a.path, &ctx.working_dir);
-        let raw = match tokio::fs::read(&path).await {
-            Ok(b) => b,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    return err(format_path_not_found(
-                        "edit",
-                        &a.path,
-                        &path,
-                        &ctx.working_dir,
-                    ));
-                }
-                return err(format!(
-                    "edit: cannot read {}: {e}",
-                    crate::pathnorm::to_display(&path)
-                ));
-            }
+        // Snapshot + decode ONCE. The same snapshot is used for matching, for the
+        // no-op check, and for the pre-write fingerprint comparison.
+        let snapshot = match read_edit_snapshot(&path, &a.path, &ctx.working_dir).await {
+            Ok(snapshot) => snapshot,
+            Err(e) => return err(e),
         };
-        // Decode to UTF-8 for matching, remembering the on-disk encoding so the edit is
-        // written back in the SAME encoding. A GBK/GB18030 file (Chinese Windows) is
-        // edited in place; an ambiguous non-UTF-8 file is refused, not corrupted.
-        let decoded = match crate::tools::encoding::decode_for_edit(&path, &raw) {
-            Some(d) => d,
-            None => {
-                return err(format!(
-                    "edit: cannot read {} as UTF-8 or a supported legacy text encoding \
-                     (GBK/GB18030). Convert it to UTF-8 first. The file was NOT modified.",
-                    crate::pathnorm::to_display(&path)
-                ))
-            }
-        };
-        let content = decoded.text;
-        let file_encoding = decoded.encoding;
 
         // CPU-bound heal / diagnose / 3-way rebase MUST NOT run on the async worker:
         // the old Levenshtein diagnostic pinned the runtime for minutes, so Esc/Ctrl-C
         // (ctx.cancel) could not be polled — a user-visible deadlock. spawn_blocking
-        // plus cooperative cancel checks keep the event loop live.
+        // plus cooperative cancel checks keep the event loop live. The timeout is a
+        // last-resort guard: a timed-out task never writes (writes happen below).
         let cancel = ctx.cancel.clone();
         let path_cpu = path.clone();
-        let original = content.clone();
-        let applied = match tokio::task::spawn_blocking(move || {
-            apply_hunks_cpu(&path_cpu, content, hunks, &cancel)
-        })
+        let workspace_root = ctx.working_dir.clone();
+        let text_for_cpu = snapshot.text.clone();
+        let hunks_for_retry = hunks.clone();
+        let applied = match tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || {
+                apply_hunks_cpu(&path_cpu, text_for_cpu, hunks, &cancel, &workspace_root)
+            }),
+        )
         .await
         {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => return err(e),
-            Err(e) => {
-                return err(format!("edit: apply task failed: {e}"));
+            Ok(Ok(Ok(v))) => v,
+            Ok(Ok(Err(e))) => return err(e),
+            Ok(Err(e)) => return err(format!("edit: apply task failed: {e}")),
+            Err(_) => {
+                return err(
+                    "edit: timed out while applying hunks; the file was NOT modified.".to_string(),
+                )
             }
         };
-        let HunkApplyResult {
-            buf,
-            total,
-            kinds,
-            auto_healed_old_strings,
-            skipped,
-        } = applied;
-        if total == 0 && buf == original {
-            let skip_note = if skipped.is_empty() {
+        if applied.total == 0 && applied.buf == snapshot.text {
+            let skip_note = if applied.skipped.is_empty() {
                 String::new()
             } else {
-                format!(" skipped hunks: {}.", skipped.join(", "))
+                format!(" skipped hunks: {}.", applied.skipped.join(", "))
             };
             return ok(format!(
                 "edit: no replacements applied; the file was not modified.{skip_note}"
             ));
         }
-        if let Err(msg) = write_encoded(&path, &buf, file_encoding).await {
-            return err(msg);
+
+        // Serialize the read-modify-write window. Re-read AFTER acquiring the lock:
+        // another session/process may have changed the file while we were healing.
+        let lock_key = crate::pathnorm::path_case_key(&snapshot.canonical);
+        let _lock = match acquire_edit_lock(&lock_key, &ctx.cancel).await {
+            Ok(lock) => lock,
+            Err(e) => return err(e),
+        };
+        let fresh = match read_edit_snapshot(&path, &a.path, &ctx.working_dir).await {
+            Ok(snapshot) => snapshot,
+            Err(e) => return err(e),
+        };
+        // A concurrent rename/symlink retarget changes the file the lock protects.
+        // Fail closed instead of writing to an unguarded new target.
+        if crate::pathnorm::path_case_key(&fresh.canonical)
+            != crate::pathnorm::path_case_key(&snapshot.canonical)
+        {
+            return err(
+                "edit: the target file changed identity while editing; retry the edit. \
+                 The file was NOT modified."
+                    .to_string(),
+            );
         }
-        // Record the newly edited version into VersionRing
-        crate::tools::edit_history::record_version(&path, &buf);
+        let (final_applied, write_stat, write_encoding, diff_base) = if fresh.bytes
+            == snapshot.bytes
+        {
+            (
+                applied,
+                fresh.stat.clone(),
+                fresh.encoding,
+                snapshot.text.clone(),
+            )
+        } else {
+            // The file changed after our snapshot. Re-apply the same hunks to the
+            // fresh content instead of overwriting the other writer.
+            let cancel = ctx.cancel.clone();
+            let path_cpu = path.clone();
+            let workspace_root = ctx.working_dir.clone();
+            let text_for_cpu = fresh.text.clone();
+            let retry = match tokio::time::timeout(
+                    Duration::from_secs(30),
+                    tokio::task::spawn_blocking(move || {
+                        apply_hunks_cpu(
+                            &path_cpu,
+                            text_for_cpu,
+                            hunks_for_retry,
+                            &cancel,
+                            &workspace_root,
+                        )
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(Ok(v))) => v,
+                    Ok(Ok(Err(e))) => return err(e),
+                    Ok(Err(e)) => return err(format!("edit: apply task failed: {e}")),
+                    Err(_) => {
+                        return err(
+                            "edit: timed out while re-applying hunks after a concurrent change; the file was NOT modified."
+                                .to_string(),
+                        )
+                    }
+                };
+            if retry.total == 0 && retry.buf == fresh.text {
+                let skip_note = if retry.skipped.is_empty() {
+                    String::new()
+                } else {
+                    format!(" skipped hunks: {}.", retry.skipped.join(", "))
+                };
+                return ok(format!(
+                        "edit: the file changed concurrently; after re-reading, no replacements were needed. The file was NOT modified.{skip_note}"
+                    ));
+            }
+            (
+                retry,
+                fresh.stat.clone(),
+                fresh.encoding,
+                fresh.text.clone(),
+            )
+        };
+
+        let bytes = match crate::tools::encoding::encode(&final_applied.buf, write_encoding) {
+            Some(bytes) => bytes,
+            None => {
+                return err(format!(
+                    "edit: cannot re-encode the edit to {}'s original encoding; the file was \
+                     NOT modified. Convert it to UTF-8 first.",
+                    crate::pathnorm::to_display(&path)
+                ))
+            }
+        };
+        // Write to the CANONICAL target: renaming over a symlink path would replace
+        // the link itself instead of the file the user asked to edit.
+        let write_path = fresh.canonical.clone();
+        let path_atomic = write_path.clone();
+        let stat_atomic = write_stat.clone();
+        let bytes_atomic = bytes.clone();
+        match tokio::task::spawn_blocking(move || {
+            atomic_replace(&path_atomic, &bytes_atomic, &stat_atomic)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return err(e),
+            Err(e) => return err(format!("edit: write task failed: {e}")),
+        }
+        // The write critical section is over. Release the per-file lock BEFORE
+        // history/diff work so a slow copy cannot stall other sessions.
+        drop(_lock);
+
+        // Record the newly edited version under the same size policy.
+        let plan = crate::tools::edit_history::plan_for(&path, final_applied.buf.len());
+        crate::tools::edit_history::record_version(&path, &final_applied.buf, plan);
         crate::tools::write_state::record_edit(&path);
         #[cfg(feature = "codeintel")]
-        crate::codeintel::notify_code_index_file_changed(&path, Some(&buf));
-        let diff = build_compact_diff(&original, &buf, Some(&path));
-        let kind_note = if kinds.len() == 1 {
-            if kinds[0] == "exact" {
+        crate::codeintel::notify_code_index_file_changed(&path, Some(&final_applied.buf));
+        let diff = build_compact_diff(&diff_base, &final_applied.buf, Some(&path));
+        let kind_note = if final_applied.kinds.len() == 1 {
+            if final_applied.kinds[0] == "exact" {
                 String::new()
             } else {
-                format!(" ({})", kinds[0])
+                format!(" ({})", final_applied.kinds[0])
             }
         } else {
-            format!(" ({} hunks: {})", kinds.len(), kinds.join(", "))
+            format!(
+                " ({} hunks: {})",
+                final_applied.kinds.len(),
+                final_applied.kinds.join(", ")
+            )
         };
 
         let mut out = String::new();
 
-        if !auto_healed_old_strings.is_empty() {
+        if !final_applied.auto_healed_old_strings.is_empty() {
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            let latest_str = auto_healed_old_strings.join("\n---\n");
+            let latest_str = final_applied.auto_healed_old_strings.join("\n---\n");
             out.push_str(&format!(
                 "⚠️ **[Auto-heal Note]**: A conflict in old_string was safely resolved and applied. If future edits touch this section, use the latest content below:\n```{ext}\n{latest_str}\n```\n\nEdit applied successfully!\n\n"
             ));
         }
 
-        if !skipped.is_empty() {
+        if !final_applied.skipped.is_empty() {
             out.push_str("skipped hunks: ");
-            out.push_str(&skipped.join(", "));
+            out.push_str(&final_applied.skipped.join(", "));
             out.push('\n');
         }
         out.push_str(&format!(
-            "The file {} has been updated successfully ({total} replacement{}{kind_note}). Edited successfully.",
+            "The file {} has been updated successfully ({} replacement{}{kind_note}). Edited successfully.",
             crate::pathnorm::to_display(&path),
-            if total == 1 { "" } else { "s" },
+            final_applied.total,
+            if final_applied.total == 1 { "" } else { "s" },
         ));
         if !diff.is_empty() {
             out.push('\n');
@@ -364,11 +464,13 @@ fn apply_hunks_cpu(
     content: String,
     hunks: Vec<EditHunk>,
     cancel: &tokio_util::sync::CancellationToken,
+    workspace_root: &std::path::Path,
 ) -> Result<HunkApplyResult, String> {
     if cancel.is_cancelled() {
         return Err("edit: cancelled.".into());
     }
-    crate::tools::edit_history::record_version(path, &content);
+    let history_plan = crate::tools::edit_history::plan_for(path, content.len());
+    crate::tools::edit_history::record_version(path, &content, history_plan);
     let mut hunks = hunks;
     for (idx, h) in hunks.iter_mut().enumerate() {
         if h.original_index == 0 {
@@ -377,13 +479,16 @@ fn apply_hunks_cpu(
     }
 
     // 强化 3：在多 hunk 情形下，利用已有明确锚定点的行号区间对多匹配的 hunk 做拓扑消歧
-    disambiguate_hunks_topologically(&content, &mut hunks);
+    disambiguate_hunks_topologically(&content, &mut hunks, cancel);
 
     let hunks = if hunks.len() > 1 {
-        sort_hunks_topologically(&content, &hunks)
+        sort_hunks_topologically(&content, &hunks, cancel)
     } else {
         hunks
     };
+    if cancel.is_cancelled() {
+        return Err("edit: cancelled.".into());
+    }
 
     // 强化 1：预检校验 / 试运行流水线。如果发现错误，收集全部失败 hunk 的精准诊断，聚合输出
     let mut test_buf = content.clone();
@@ -420,6 +525,7 @@ fn apply_hunks_cpu(
             &h.new_string,
             h.replace_all,
             h.occurrence,
+            workspace_root,
         ) {
             Ok((next, n, kind, actual_matched)) => {
                 let (s, e) = locate_hunk_lines(&orig_lines, &h.old_string).unwrap_or((0, 0));
@@ -506,6 +612,7 @@ fn apply_hunks_cpu(
                             &victim_hunk.old_string,
                             &test_buf,
                             Some(path),
+                            workspace_root,
                         );
                     }
                 }
@@ -748,6 +855,7 @@ fn apply_hunk(
     new_string: &str,
     replace_all: bool,
     occurrence: u32,
+    workspace_root: &std::path::Path,
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
     // User-facing path: heal, then diagnose at most once on the current file.
     apply_hunk_with(
@@ -758,6 +866,7 @@ fn apply_hunk(
         replace_all,
         occurrence,
         true,
+        workspace_root,
     )
 }
 
@@ -770,7 +879,16 @@ pub(crate) fn apply_hunk_direct(
     new_string: &str,
     replace_all: bool,
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
-    apply_hunk_with(None, content, old_string, new_string, replace_all, 0, false)
+    apply_hunk_with(
+        None,
+        content,
+        old_string,
+        new_string,
+        replace_all,
+        0,
+        false,
+        std::path::Path::new(""),
+    )
 }
 
 fn apply_hunk_with(
@@ -781,6 +899,7 @@ fn apply_hunk_with(
     replace_all: bool,
     occurrence: u32,
     diagnose: bool,
+    workspace_root: &std::path::Path,
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
     if !old_string.is_empty() {
         return apply_text_hunk(
@@ -791,6 +910,7 @@ fn apply_hunk_with(
             replace_all,
             occurrence,
             diagnose,
+            workspace_root,
         );
     }
     Err("edit: provide a non-empty `old_string` in each edit hunk.".into())
@@ -798,8 +918,12 @@ fn apply_hunk_with(
 
 /// 强化 3：在多 hunk 批量编辑中，当某 hunk 出现多个完全相同的匹配点且 caller 未指定 occurrence 时，
 /// 结合前后其它已有明确锚定点的 hunk 所在行号区间，进行拓扑消歧。
-fn disambiguate_hunks_topologically(content: &str, hunks: &mut [EditHunk]) {
-    if hunks.len() <= 1 {
+fn disambiguate_hunks_topologically(
+    content: &str,
+    hunks: &mut [EditHunk],
+    cancel: &tokio_util::sync::CancellationToken,
+) {
+    if hunks.len() <= 1 || cancel.is_cancelled() {
         return;
     }
 
@@ -840,6 +964,9 @@ fn disambiguate_hunks_topologically(content: &str, hunks: &mut [EditHunk]) {
 
     // 2. 尝试为具有多处匹配且 occurrence == 0 的 hunk 做拓扑定界消歧
     for i in 0..n {
+        if cancel.is_cancelled() {
+            return;
+        }
         if hunks[i].occurrence != 0 || match_spans[i].len() <= 1 {
             continue;
         }
@@ -899,8 +1026,12 @@ fn disambiguate_hunks_topologically(content: &str, hunks: &mut [EditHunk]) {
 ///    Hunk A must execute before Hunk B (WAR: Write-After-Read).
 /// 3. For disjoint/independent hunks, orders bottom-up (higher line numbers first)
 ///    so modifications deeper in the file do not perturb line offsets for earlier hunks.
-fn sort_hunks_topologically(content: &str, hunks: &[EditHunk]) -> Vec<EditHunk> {
-    if hunks.len() <= 1 {
+fn sort_hunks_topologically(
+    content: &str,
+    hunks: &[EditHunk],
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Vec<EditHunk> {
+    if hunks.len() <= 1 || cancel.is_cancelled() {
         return hunks.to_vec();
     }
 
@@ -1012,6 +1143,9 @@ fn sort_hunks_topologically(content: &str, hunks: &[EditHunk]) -> Vec<EditHunk> 
     let mut available: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
 
     while !available.is_empty() {
+        if cancel.is_cancelled() {
+            return hunks.to_vec();
+        }
         available.sort_by(|&a, &b| {
             spans[b]
                 .read_start
@@ -1125,6 +1259,7 @@ fn apply_text_hunk(
     replace_all: bool,
     occurrence: u32,
     diagnose: bool,
+    workspace_root: &std::path::Path,
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
     if old_string == new_string {
         return Err("old_string and new_string are identical — nothing to change.".into());
@@ -1158,6 +1293,7 @@ fn apply_text_hunk(
                 replace_all,
                 occurrence,
                 false,
+                workspace_root,
             ) {
                 let actual = res.3.unwrap_or(clean_old);
                 return Ok((res.0, res.1, "stripped-arrow prefix match", Some(actual)));
@@ -1218,7 +1354,9 @@ fn apply_text_hunk(
             }
         }
         if diagnose {
-            let hint = find_closest_match_snippet(path, &file, old_string).unwrap_or_default();
+            let hint =
+                find_closest_match_snippet_with_root(path, &file, old_string, workspace_root)
+                    .unwrap_or_default();
             return Err(format!("old_string not found in file.\n{hint}"));
         }
         return Err("old_string not found in file.".into());
@@ -1315,29 +1453,6 @@ fn format_match_sites(content: &str, needle: &str) -> String {
     out
 }
 
-/// Write edited text back to `path` in its original on-disk `encoding`. Refuses (Err
-/// with a user-facing message) rather than write replacement bytes if the text cannot
-/// be represented — so a failed re-encode leaves the file untouched, never corrupted.
-async fn write_encoded(
-    path: &std::path::Path,
-    text: &str,
-    encoding: crate::tools::encoding::FileEncoding,
-) -> Result<(), String> {
-    let bytes = crate::tools::encoding::encode(text, encoding).ok_or_else(|| {
-        format!(
-            "edit: cannot re-encode the edit to {}'s original encoding; the file was \
-             NOT modified. Convert it to UTF-8 first.",
-            crate::pathnorm::to_display(path)
-        )
-    })?;
-    tokio::fs::write(path, bytes).await.map_err(|e| {
-        format!(
-            "edit: failed to write {}: {e}",
-            crate::pathnorm::to_display(path)
-        )
-    })
-}
-
 /// A compact GIT UNIFIED DIFF (`@@` hunks, 3 lines of context) between the OLD
 /// and NEW whole-file contents, capped so a large edit can't flood the model
 /// context / transcript. The TUI re-parses this into a line-numbered, color-
@@ -1350,7 +1465,7 @@ pub(crate) fn build_compact_diff(
     const MAX_DIFF_LINES: usize = 60;
     let mut config = similar::TextDiff::configure();
     config.timeout(std::time::Duration::from_millis(200));
-    let mut diff = config.diff_lines(old_file, new_file);
+    let diff = config.diff_lines(old_file, new_file);
     let mut unified = diff.unified_diff();
     unified.context_radius(3);
     if let Some(p) = path {
@@ -2125,19 +2240,25 @@ fn format_cascade_conflict_diagnostic(
     victim_old_string: &str,
     test_buf: &str,
     path: Option<&std::path::Path>,
+    workspace_root: &std::path::Path,
 ) -> String {
     let cause_json = cause_orig_idx.saturating_sub(1);
     let victim_json = victim_orig_idx.saturating_sub(1);
 
     let test_buf_norm = NormalizedFile::new(test_buf);
-    let diff_block = find_closest_match_snippet(path, &test_buf_norm, victim_old_string)
-        .unwrap_or_else(|| {
-            format!(
-                "```````diff\n- {}\n+ {}\n```````",
-                victim_old_string.trim(),
-                cause_new_string.trim()
-            )
-        });
+    let diff_block = find_closest_match_snippet_with_root(
+        path,
+        &test_buf_norm,
+        victim_old_string,
+        workspace_root,
+    )
+    .unwrap_or_else(|| {
+        format!(
+            "```````diff\n- {}\n+ {}\n```````",
+            victim_old_string.trim(),
+            cause_new_string.trim()
+        )
+    });
 
     format!(
         "⚠️ Cascading Overlap Conflict (Hunk {cause_orig_idx} ➔ Hunk {victim_orig_idx}):\n\
@@ -2481,10 +2602,11 @@ fn build_structured_mismatch_diff(
 /// 1. scores every window with a rolling token-bag (O(file lines));
 /// 2. refines only tiny hunks (≤ 8 non-empty lines) with per-line similarity;
 /// 3. emits one bounded `similar` TextDiff of the winning window.
-fn find_closest_match_snippet(
+fn find_closest_match_snippet_with_root(
     path: Option<&std::path::Path>,
     file: &NormalizedFile<'_>,
     old_string: &str,
+    workspace_root: &std::path::Path,
 ) -> Option<String> {
     let old_lines: Vec<&str> = old_string.lines().collect();
     let old_tokens: Vec<String> = old_lines
@@ -2516,6 +2638,7 @@ fn find_closest_match_snippet(
             if let Some(recent_file) = crate::tools::edit_history::find_exact_match_in_recent_files(
                 target_path,
                 old_string,
+                workspace_root,
             ) {
                 let current_display = crate::pathnorm::to_display(target_path);
                 let recent_display = crate::pathnorm::to_display(&recent_file);
@@ -2544,6 +2667,477 @@ fn find_closest_match_snippet(
     Some(build_structured_mismatch_diff(
         path, file, old_string, start, end, score,
     ))
+}
+
+/// Metadata captured with a snapshot: preserves mode and refuses hard-linked /
+/// non-regular targets before any write.
+#[derive(Debug, Clone)]
+struct EditFileStat {
+    permissions: std::fs::Permissions,
+    is_file: bool,
+    nlink: u64,
+    /// Unix owner. Atomic replace creates a temp owned by this process; if the
+    /// target is owned by someone else we refuse rather than silently chown it.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    owner: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct EditSnapshot {
+    canonical: PathBuf,
+    bytes: Vec<u8>,
+    text: String,
+    encoding: crate::tools::encoding::FileEncoding,
+    stat: EditFileStat,
+}
+
+fn file_nlink(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.nlink()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        1
+    }
+}
+
+fn file_owner(meta: &std::fs::Metadata) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(meta.uid())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// Reject a path that resolved through a symlink/junction to an out-of-workspace
+/// or sensitive target. `canonical == lexical` (the normal no-symlink case) is
+/// always allowed: the approval gate classified that same explicit path.
+fn validate_resolved_target(resolved: &Path, canonical: &Path, cwd: &Path) -> Result<(), String> {
+    let lexical = crate::pathnorm::lexical_normalize(resolved);
+    if crate::pathnorm::path_case_key(&lexical) == crate::pathnorm::path_case_key(canonical) {
+        return Ok(());
+    }
+    let inside = crate::tools::write_approval::path_in_workspace(&canonical.to_string_lossy(), cwd);
+    let sensitive = crate::tools::path_is_sensitive(canonical);
+    // Platform aliases make an explicit in-workspace path differ from its
+    // canonical form even when no user-created link exists: macOS resolves
+    // `/var/...` to `/private/var/...`, and Windows may expand an 8.3 short
+    // name (`RUNNER~1`) to the long user name. If the exact path the approval
+    // gate classified was already sensitive and the final component is a real
+    // file (not a symlink), allow it; only a final-component link is a
+    // redirect. A parent junction still has to resolve inside the workspace.
+    let lexical_sensitive = crate::tools::path_is_sensitive(&lexical);
+    let final_is_symlink = std::fs::symlink_metadata(resolved)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false);
+    if inside && lexical_sensitive && !final_is_symlink {
+        return Ok(());
+    }
+    if inside && !sensitive {
+        return Ok(());
+    }
+    Err(format!(
+        "edit: {} resolves through a symlink/junction to {} ({}). \
+         Use the explicit target path so approval can classify it. \
+         The file was NOT modified.",
+        crate::pathnorm::to_display(resolved),
+        crate::pathnorm::to_display(canonical),
+        if sensitive {
+            "sensitive target"
+        } else {
+            "outside the workspace"
+        }
+    ))
+}
+
+/// Read + decode one stable snapshot. If the file changes between `stat` and
+/// `read` (same-length in-place rewrite is not detectable here, but the content
+/// comparison before write is), retry once and then fail closed.
+async fn read_edit_snapshot(
+    path: &Path,
+    raw_path: &str,
+    cwd: &Path,
+) -> Result<EditSnapshot, String> {
+    for attempt in 0..2 {
+        let meta = match tokio::fs::metadata(path).await {
+            Ok(meta) => meta,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Err(format_path_not_found("edit", raw_path, path, cwd));
+                }
+                return Err(format!(
+                    "edit: cannot read {}: {e}",
+                    crate::pathnorm::to_display(path)
+                ));
+            }
+        };
+        if !meta.is_file() {
+            return Err(format!(
+                "edit: {} is not a regular file; refusing to edit it.",
+                crate::pathnorm::to_display(path)
+            ));
+        }
+        let nlink = file_nlink(&meta);
+        if nlink > 1 {
+            return Err(format!(
+                "edit: {} has {nlink} hard links; refusing to edit it in place. \
+                 Copy it to a standalone file first (the file was NOT modified).",
+                crate::pathnorm::to_display(path)
+            ));
+        }
+        // Validate the FINAL target BEFORE reading its bytes. This is the
+        // approval → snapshot TOCTOU guard: a benign in-workspace name swapped
+        // to a symlink/junction must not silently read/write an outside or
+        // sensitive file that the gate never classified.
+        let canonical_before =
+            crate::pathnorm::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        validate_resolved_target(path, &canonical_before, cwd)?;
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Err(format_path_not_found("edit", raw_path, path, cwd));
+                }
+                return Err(format!(
+                    "edit: cannot read {}: {e}",
+                    crate::pathnorm::to_display(path)
+                ));
+            }
+        };
+        let after = match tokio::fs::metadata(path).await {
+            Ok(meta) => meta,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Err(format_path_not_found("edit", raw_path, path, cwd));
+                }
+                return Err(format!(
+                    "edit: cannot re-read metadata for {}: {e}",
+                    crate::pathnorm::to_display(path)
+                ));
+            }
+        };
+        if after.len() != bytes.len() as u64 {
+            if attempt == 0 {
+                continue;
+            }
+            return Err(format!(
+                "edit: {} changed while being read; retry the edit.",
+                crate::pathnorm::to_display(path)
+            ));
+        }
+        let canonical = crate::pathnorm::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if crate::pathnorm::path_case_key(&canonical)
+            != crate::pathnorm::path_case_key(&canonical_before)
+        {
+            if attempt == 0 {
+                continue;
+            }
+            return Err(format!(
+                "edit: {} changed identity while being read; retry the edit.",
+                crate::pathnorm::to_display(path)
+            ));
+        }
+        validate_resolved_target(path, &canonical, cwd)?;
+        let decoded = match crate::tools::encoding::decode_for_edit(path, &bytes) {
+            Some(decoded) => decoded,
+            None => {
+                return Err(format!(
+                    "edit: cannot read {} as UTF-8 or a supported legacy text encoding \
+                     (GBK/GB18030). Convert it to UTF-8 first. The file was NOT modified.",
+                    crate::pathnorm::to_display(path)
+                ))
+            }
+        };
+        let stat = EditFileStat {
+            permissions: after.permissions(),
+            is_file: after.is_file(),
+            nlink: file_nlink(&after),
+            owner: file_owner(&after),
+        };
+        return Ok(EditSnapshot {
+            canonical,
+            bytes,
+            text: decoded.text,
+            encoding: decoded.encoding,
+            stat,
+        });
+    }
+    Err("edit: file changed while being read; retry the edit.".to_string())
+}
+
+/// Write to a same-directory temp file, fsync, preserve mode, then atomically
+/// replace the target. Readers see either the old or the new file, never a
+/// half-written one. Windows sharing violations are retried (25..400 ms).
+fn atomic_replace(path: &Path, bytes: &[u8], stat: &EditFileStat) -> Result<(), String> {
+    if !stat.is_file {
+        return Err(format!(
+            "edit: {} is not a regular file; refusing to edit it.",
+            crate::pathnorm::to_display(path)
+        ));
+    }
+    if stat.nlink > 1 {
+        return Err(format!(
+            "edit: {} has {} hard links; refusing to replace it atomically.",
+            crate::pathnorm::to_display(path),
+            stat.nlink
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if stat.permissions.mode() & 0o222 == 0 {
+            return Err(format!(
+                "edit: {} is read-only; the file was NOT modified.",
+                crate::pathnorm::to_display(path)
+            ));
+        }
+    }
+    #[cfg(windows)]
+    if stat.permissions.readonly() {
+        return Err(format!(
+            "edit: {} is read-only; the file was NOT modified.",
+            crate::pathnorm::to_display(path)
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "edit: {} has no parent directory; the file was NOT modified.",
+            crate::pathnorm::to_display(path)
+        )
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
+        format!(
+            "edit: cannot create a temporary file next to {}: {e}. The file was NOT modified.",
+            crate::pathnorm::to_display(path)
+        )
+    })?;
+    #[cfg(unix)]
+    if let Some(owner) = stat.owner {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(temp_meta) = tmp.as_file().metadata() {
+            if temp_meta.uid() != owner {
+                return Err(format!(
+                    "edit: {} is owned by uid {owner}, but this process runs as uid {}; \
+                     refusing to change ownership. The file was NOT modified.",
+                    crate::pathnorm::to_display(path),
+                    temp_meta.uid()
+                ));
+            }
+        }
+    }
+    tmp.write_all(bytes).map_err(|e| {
+        format!(
+            "edit: cannot write the temporary file for {}: {e}. The file was NOT modified.",
+            crate::pathnorm::to_display(path)
+        )
+    })?;
+    tmp.as_file_mut().sync_all().map_err(|e| {
+        format!(
+            "edit: cannot fsync the temporary file for {}: {e}. The file was NOT modified.",
+            crate::pathnorm::to_display(path)
+        )
+    })?;
+    tmp.as_file()
+        .set_permissions(stat.permissions.clone())
+        .map_err(|e| {
+            format!(
+                "edit: cannot preserve permissions for {}: {e}. The file was NOT modified.",
+                crate::pathnorm::to_display(path)
+            )
+        })?;
+    persist_with_retries(tmp, path)?;
+    fsync_parent(parent)?;
+    Ok(())
+}
+
+fn persist_with_retries(mut tmp: tempfile::NamedTempFile, path: &Path) -> Result<(), String> {
+    const RETRY_DELAYS_MS: [u64; 5] = [25, 50, 100, 200, 400];
+    let mut last = String::new();
+    for (attempt, delay) in RETRY_DELAYS_MS.iter().enumerate() {
+        match tmp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                last = error.error.to_string();
+                tmp = error.file;
+                if attempt + 1 < RETRY_DELAYS_MS.len() {
+                    std::thread::sleep(Duration::from_millis(*delay));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "edit: failed to replace {} atomically: {last}. The file was NOT modified.",
+        crate::pathnorm::to_display(path)
+    ))
+}
+
+#[cfg(unix)]
+fn fsync_parent(parent: &Path) -> Result<(), String> {
+    use std::fs::File;
+    File::open(parent)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| format!("edit: failed to fsync {}: {e}", parent.display()))
+}
+
+#[cfg(not(unix))]
+fn fsync_parent(_parent: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+const EDIT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const EDIT_LOCK_RETRY: Duration = Duration::from_millis(25);
+
+static EDIT_LOCKS: LazyLock<StdMutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Holds BOTH the in-process per-path mutex and the cross-process sidecar lock.
+/// Dropping it releases the OS lock first, then the in-process guard.
+struct EditLockGuard {
+    _os: EditOsLock,
+    _in_process: OwnedMutexGuard<()>,
+}
+
+struct EditOsLock {
+    file: std::fs::File,
+}
+
+impl Drop for EditOsLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
+async fn acquire_edit_lock(
+    key: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<EditLockGuard, String> {
+    let mutex = {
+        let mut map = EDIT_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() > 1024 {
+            map.retain(|_, weak| weak.strong_count() > 0);
+        }
+        match map.get(key).and_then(Weak::upgrade) {
+            Some(mutex) => mutex,
+            None => {
+                let mutex = Arc::new(tokio::sync::Mutex::new(()));
+                map.insert(key.to_string(), Arc::downgrade(&mutex));
+                mutex
+            }
+        }
+    };
+    let in_process = tokio::select! {
+        guard = mutex.lock_owned() => guard,
+        _ = cancel.cancelled() => {
+            return Err(
+                "edit: cancelled while waiting for the file lock. The file was NOT modified."
+                    .to_string(),
+            )
+        }
+        _ = tokio::time::sleep(EDIT_LOCK_TIMEOUT) => {
+            return Err(
+                "edit: timed out waiting for the file lock. The file was NOT modified."
+                    .to_string(),
+            )
+        }
+    };
+    let os = acquire_os_lock(key, cancel).await?;
+    Ok(EditLockGuard {
+        _os: os,
+        _in_process: in_process,
+    })
+}
+
+async fn acquire_os_lock(
+    key: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<EditOsLock, String> {
+    let path = edit_lock_path(key)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| {
+            format!(
+                "edit: cannot open the file lock {}: {e}. The file was NOT modified.",
+                path.display()
+            )
+        })?;
+    let deadline = std::time::Instant::now() + EDIT_LOCK_TIMEOUT;
+    loop {
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => return Ok(EditOsLock { file }),
+            Err(e) if is_lock_contended(&e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(
+                        "edit: timed out waiting for the cross-process file lock. The file was NOT modified."
+                            .to_string(),
+                    );
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(EDIT_LOCK_RETRY) => {}
+                    _ = cancel.cancelled() => {
+                        return Err(
+                            "edit: cancelled while waiting for the cross-process file lock. The file was NOT modified."
+                                .to_string(),
+                        )
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "edit: cannot lock {}: {e}. The file was NOT modified.",
+                    path.display()
+                ))
+            }
+        }
+    }
+}
+
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // LockFileEx reports contention as ERROR_LOCK_VIOLATION (33), which the
+        // std error kind does not map to WouldBlock.
+        error.raw_os_error() == Some(33)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn edit_lock_path(key: &str) -> Result<PathBuf, String> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    let dir = std::env::temp_dir().join("jeikcode-edit-locks");
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "edit: cannot create the file lock directory {}: {e}. The file was NOT modified.",
+            dir.display()
+        )
+    })?;
+    Ok(dir.join(format!("{:016x}.lock", hasher.finish())))
+}
+
+#[cfg(test)]
+fn find_closest_match_snippet(
+    path: Option<&Path>,
+    file: &NormalizedFile<'_>,
+    old_string: &str,
+) -> Option<String> {
+    find_closest_match_snippet_with_root(path, file, old_string, Path::new(""))
 }
 
 #[cfg(test)]
@@ -4543,7 +5137,11 @@ fn b() { 2 }
         std::fs::write(&file_b, chat_code).unwrap();
 
         // 记录 GitPanel.tsx 为最近成功修改过的文件
-        crate::tools::edit_history::record_version(&file_a, git_panel_code);
+        crate::tools::edit_history::record_version(
+            &file_a,
+            git_panel_code,
+            crate::tools::edit_history::HistoryPlan::Full,
+        );
 
         let file_b_norm = NormalizedFile::new(chat_code);
         let old_str_from_a = "  // 彻底移除盲目轮询，仅在窗口切回时刷新\n  useEffect(() => {\n    gitStore.scheduleRefresh();\n  }, []);";
@@ -5106,5 +5704,226 @@ fn b() { 2 }
         // File must stay 100% untouched on disk
         let on_disk = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(on_disk, initial);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_linked_file_is_refused_without_writing() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("linked.rs");
+        let sibling = d.path().join("sibling.rs");
+        std::fs::write(&target, "fn main() {}\n").unwrap();
+        std::fs::hard_link(&target, &sibling).unwrap();
+
+        let r = EditFileTool
+            .execute(
+                r#"{"path":"linked.rs","edits":[{"old_string":"main","new_string":"run"}]}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r.is_error, "hard links must be refused: {}", r.content);
+        assert!(r.content.contains("hard links"), "{}", r.content);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "fn main() {}\n");
+        assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "fn main() {}\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_replace_preserves_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("script.sh");
+        std::fs::write(&target, "#!/bin/sh\necho old\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let r = EditFileTool
+            .execute(
+                r#"{"path":"script.sh","edits":[{"old_string":"echo old","new_string":"echo new"}]}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "atomic replace must preserve the executable bit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_file_is_refused_without_writing() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("readonly.rs");
+        std::fs::write(&target, "const A: u8 = 1;\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let r = EditFileTool
+            .execute(
+                r#"{"path":"readonly.rs","edits":[{"old_string":"1","new_string":"2"}]}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r.is_error, "read-only files must be refused: {}", r.content);
+        assert!(r.content.contains("read-only"), "{}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "const A: u8 = 1;\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_lock_serializes_same_key_and_releases_on_drop() {
+        let key = format!(
+            "edit-lock-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let first = acquire_edit_lock(&key, &cancel).await.expect("first lock");
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            acquire_edit_lock(&key, &cancel),
+        )
+        .await;
+        assert!(blocked.is_err(), "same-key acquisition must wait");
+
+        drop(first);
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            acquire_edit_lock(&key, &cancel),
+        )
+        .await
+        .expect("same-key lock should be released")
+        .expect("second lock");
+        drop(second);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_to_outside_workspace_is_refused_before_write() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let real = outside.path().join("secret.rs");
+        std::fs::write(&real, "const SECRET: &str = \"old\";\n").unwrap();
+        let link = ws.path().join("notes.rs");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let r = EditFileTool
+            .execute(
+                r#"{"path":"notes.rs","edits":[{"old_string":"old","new_string":"new"}]}"#,
+                &ctx(ws.path()),
+            )
+            .await;
+        assert!(r.is_error, "symlink escape must be refused: {}", r.content);
+        assert!(
+            r.content.contains("resolves through a symlink"),
+            "{}",
+            r.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "const SECRET: &str = \"old\";\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_to_sensitive_in_workspace_file_is_refused() {
+        let ws = tempfile::tempdir().unwrap();
+        let secret = ws.path().join(".env");
+        std::fs::write(&secret, "SECRET=old\n").unwrap();
+        let link = ws.path().join("notes.txt");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let r = EditFileTool
+            .execute(
+                r#"{"path":"notes.txt","edits":[{"old_string":"old","new_string":"new"}]}"#,
+                &ctx(ws.path()),
+            )
+            .await;
+        assert!(
+            r.is_error,
+            "sensitive symlink target must be refused: {}",
+            r.content
+        );
+        assert!(r.content.contains("sensitive target"), "{}", r.content);
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "SECRET=old\n");
+    }
+
+    #[tokio::test]
+    async fn explicit_sensitive_path_is_not_blocked_by_symlink_guard() {
+        let ws = tempfile::tempdir().unwrap();
+        let env = ws.path().join(".env");
+        std::fs::write(&env, "SECRET=old\n").unwrap();
+
+        let r = EditFileTool
+            .execute(
+                r#"{"path":".env","edits":[{"old_string":"old","new_string":"new"}]}"#,
+                &ctx(ws.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(std::fs::read_to_string(&env).unwrap(), "SECRET=new\n");
+    }
+
+    #[test]
+    fn final_target_outside_workspace_is_rejected() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let resolved = ws.path().join("a.rs");
+        let canonical = outside.path().join("b.rs");
+        let err = validate_resolved_target(&resolved, &canonical, ws.path()).unwrap_err();
+        assert!(err.contains("outside the workspace"), "{err}");
+    }
+
+    #[test]
+    fn final_target_sensitive_is_rejected() {
+        let ws = tempfile::tempdir().unwrap();
+        let resolved = ws.path().join("notes.txt");
+        let canonical = ws.path().join(".env");
+        let err = validate_resolved_target(&resolved, &canonical, ws.path()).unwrap_err();
+        assert!(err.contains("sensitive target"), "{err}");
+    }
+
+    #[test]
+    fn final_target_inside_workspace_is_allowed() {
+        let ws = tempfile::tempdir().unwrap();
+        let resolved = ws.path().join("link.rs");
+        let canonical = ws.path().join("target.rs");
+        validate_resolved_target(&resolved, &canonical, ws.path())
+            .expect("benign in-workspace target");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn benign_workspace_symlink_is_allowed_and_preserved() {
+        let ws = tempfile::tempdir().unwrap();
+        let target = ws.path().join("target.rs");
+        std::fs::write(&target, "const A: u8 = 1;\n").unwrap();
+        let link = ws.path().join("link.rs");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let r = EditFileTool
+            .execute(
+                r#"{"path":"link.rs","edits":[{"old_string":"1","new_string":"2"}]}"#,
+                &ctx(ws.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "const A: u8 = 2;\n"
+        );
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "the workspace symlink must be preserved"
+        );
     }
 }

@@ -203,8 +203,8 @@ fn target_tag(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
-/// Release artifact filename for a given version + target, matching
-/// what `scripts/release.sh` publishes to `dist/<version>/`.
+/// Release artifact filename for a given version + target, matching the
+/// assets published by the GitHub release workflow to `dist/<version>/`.
 pub fn binary_filename(version: &str, target: &str) -> String {
     let tag = if version.starts_with('v') {
         version.to_string()
@@ -4074,6 +4074,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
     async fn offline_suppression_guards_manifest_and_deferred_upgrade() {
         use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
         seed_offline_verdict(OfflineMode::On, None);

@@ -16,7 +16,9 @@ use chrono::{Local, TimeZone};
 use jeikcode_kernel::tool::{RiskLevel, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 
+use super::display::DisplayRecord;
 use super::manager::{for_each_jsonl_line, regular_file_len, MAX_JSONL_BYTES, MAX_JSONL_LINES};
+use super::transcript::UsageRecord;
 use super::{SessionManager, SessionResult, SessionStoreError, TurnRecord};
 
 /// A parsed recall query: lowercased keyword terms + a result cap.
@@ -262,6 +264,8 @@ fn load_records(dir: &Path) -> SessionResult<Vec<TurnRecord>> {
     };
     let mut total_bytes = 0usize;
     let mut total_lines = 0usize;
+    let mut display_files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut transcript_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for entry in rd {
         let entry = entry.map_err(|source| SessionStoreError::Io {
             path: dir.to_path_buf(),
@@ -270,6 +274,23 @@ fn load_records(dir: &Path) -> SessionResult<Vec<TurnRecord>> {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
+        }
+        // `display.jsonl` / `display.idx.jsonl` are display/index projections,
+        // not TurnRecord transcript lines. Prefer a real transcript; if one is
+        // absent (v4-only session), derive a recall record below.
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if file_name.ends_with(".display.idx.jsonl") {
+            continue;
+        }
+        if let Some(base) = file_name.strip_suffix(".display.jsonl") {
+            display_files.push((base.to_string(), path));
+            continue;
+        }
+        if let Some(base) = file_name.strip_suffix(".jsonl") {
+            transcript_ids.insert(base.to_string());
         }
         let file_bytes = regular_file_len(&path)?;
         let projected_bytes =
@@ -339,6 +360,73 @@ fn load_records(dir: &Path) -> SessionResult<Vec<TurnRecord>> {
             });
         }
     }
+    for (session_id, path) in display_files {
+        if transcript_ids.contains(&session_id) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.len() as usize > MAX_JSONL_BYTES {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut by_turn: std::collections::BTreeMap<u64, Vec<DisplayRecord>> =
+            std::collections::BTreeMap::new();
+        for line in text.lines() {
+            if let Ok(record) = serde_json::from_str::<DisplayRecord>(line) {
+                by_turn.entry(record.turn_id).or_default().push(record);
+            }
+        }
+        for (turn_id, records) in by_turn {
+            let mut user = String::new();
+            let mut assistant = String::new();
+            let mut reasoning = String::new();
+            let mut ts = 0i64;
+            for record in records {
+                if let Some(created_at) = record.created_at {
+                    ts = ts.max(i64::try_from(created_at).unwrap_or(0));
+                }
+                if record.role.eq_ignore_ascii_case("user") {
+                    if !record.content.trim().is_empty() {
+                        user = record.content;
+                    }
+                } else if record.role.eq_ignore_ascii_case("assistant") {
+                    if !record.content.trim().is_empty() {
+                        if !assistant.is_empty() {
+                            assistant.push('\n');
+                        }
+                        assistant.push_str(&record.content);
+                    }
+                    if let Some(thought) = record.reasoning {
+                        if !thought.trim().is_empty() {
+                            if !reasoning.is_empty() {
+                                reasoning.push('\n');
+                            }
+                            reasoning.push_str(&thought);
+                        }
+                    }
+                }
+            }
+            if user.trim().is_empty() && assistant.trim().is_empty() {
+                continue;
+            }
+            out.push(TurnRecord {
+                v: 1,
+                ts,
+                iso: String::new(),
+                session_id: session_id.clone(),
+                turn_id,
+                user,
+                assistant,
+                reasoning,
+                tools: Vec::new(),
+                usage: UsageRecord::default(),
+            });
+        }
+    }
     Ok(out)
 }
 
@@ -381,9 +469,8 @@ fn format_hits(hits: &[&TurnRecord]) -> String {
         let date = chrono::DateTime::from_timestamp_millis(h.ts)
             .map(|d| d.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| h.iso.clone());
-        let undone = if h.undone { " (undone)" } else { "" };
         out.push_str(&format!(
-            "[session {short} · {date}{undone}] {}\n    {}\n",
+            "[session {short} · {date}] {}\n    {}\n",
             truncate(&h.user, 140),
             truncate(&h.assistant, 240),
         ));
@@ -412,7 +499,6 @@ mod tests {
             iso: String::new(),
             session_id: session.into(),
             turn_id: 1,
-            undone: false,
             user: user.into(),
             assistant: assistant.into(),
             reasoning: String::new(),
@@ -497,6 +583,57 @@ mod tests {
             .unwrap();
         assert!(out.contains("Recalled 1 matching"), "got: {out}");
         assert!(out.contains("alpha mid"));
+    }
+
+    #[test]
+    fn recall_ignores_display_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        write_jsonl(
+            dir.path(),
+            "s1.jsonl",
+            &[rec("s1", 1, "needle question", "answer")],
+        );
+        std::fs::write(
+            dir.path().join("s1.display.jsonl"),
+            "{\"v\":4,\"role\":\"user\",\"content\":\"display row\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("s1.display.idx.jsonl"),
+            "{\"seq\":1,\"offset\":0}\n",
+        )
+        .unwrap();
+        let out = RecallTool::new()
+            .search_dir(dir.path(), "needle", None, None, 8)
+            .unwrap();
+        assert!(out.contains("needle question"), "got: {out}");
+    }
+
+    #[test]
+    fn recall_derives_v4_display_when_transcript_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = [
+            serde_json::json!({
+                "v": 4, "session_id": "s1", "turn_id": 1, "index": 0, "seq": 1,
+                "role": "user", "id": "u1", "content": "derived needle question",
+                "synthetic": false, "created_at": 1000
+            }),
+            serde_json::json!({
+                "v": 4, "session_id": "s1", "turn_id": 1, "index": 1, "seq": 2,
+                "role": "assistant", "id": "a1", "content": "derived answer",
+                "synthetic": false, "created_at": 1001
+            }),
+        ];
+        std::fs::write(
+            dir.path().join("s1.display.jsonl"),
+            format!("{}\n{}\n", rows[0], rows[1]),
+        )
+        .unwrap();
+        let out = RecallTool::new()
+            .search_dir(dir.path(), "derived needle", None, None, 8)
+            .unwrap();
+        assert!(out.contains("derived needle question"), "got: {out}");
+        assert!(out.contains("derived answer"), "got: {out}");
     }
 
     #[test]

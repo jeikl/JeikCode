@@ -65,6 +65,10 @@ Out-of-the-box cross-platform desktop application with embedded WebUI and automa
 | **macOS** (Apple Silicon / Intel) | [🍏 **Download macOS Installer (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | Native M1~M4 & Intel packages |
 | **Linux** (Debian / Ubuntu / Universal) | [🐧 **Download Linux Package (.deb / .AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | Standalone portable executable |
 
+> 🍎 **macOS: Fix for "JeikCode Desktop.app is damaged and cannot be opened"**:  
+> Drag the app into `/Applications`, then open Terminal and run:  
+> `xattr -cr "/Applications/JeikCode Desktop.app"`
+
 ### 2. Official Terminal One-Liner (CLI)
 
 ```bash
@@ -77,13 +81,9 @@ curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install
 irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 ```
 
-> 💡 **For Advanced Installation & Deployment (Source compilation, Headless Daemon, Docker, etc.)**: Please refer to the official documentation portal 👉 **[https://jeikcode.top/guide/installation](https://jeikcode.top/guide/installation)**
-
 ---
 
-## 💡 Quick Start & Full Documentation & Advanced Guides
-
-### 1. Launching
+## 💡 Quick Start
 
 Navigate to any codebase directory and start:
 
@@ -109,23 +109,6 @@ jeikcode -p "Investigate and fix OAuth callback 404 issue"
 # One-click seamless upgrade to latest version
 jeikcode update
 ```
-
-Update, rollback, and uninstall commands: https://jeikcode.top/guide/updates.html
-
-### 2. Full Documentation & Tutorials
-
-> 💡 **Tutorials & Guides**: Please visit the official documentation portal 👉 **[https://jeikcode.top](https://jeikcode.top)**
-
-For comprehensive tutorials, architectural specifications, and ecosystem integrations, visit the official docs:
-
-- 📖 **Official Documentation Site**: [https://jeikcode.top](https://jeikcode.top)
-- 🚀 [Installation & Quickstart Guide](https://jeikcode.top/guide/getting-started)
-- 🔄 [Updates, Rollback & Uninstall](https://jeikcode.top/guide/updates.html)
-- ⚙️ [Model Provider Configuration](https://jeikcode.top/guide/login)
-- 🔌 [Model Context Protocol (MCP) Integration](https://jeikcode.top/advanced/mcp)
-- 🧩 [Agent Skills System](https://jeikcode.top/advanced/skills)
-- 🖥️ [WebUI, Desktop App & Background Daemon](https://jeikcode.top/deploy/daemon)
-- 📝 [Full Changelog & Releases History](https://github.com/jeikl/JeikCode/releases)
 
 ---
 

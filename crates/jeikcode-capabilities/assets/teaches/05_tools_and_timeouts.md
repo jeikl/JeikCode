@@ -135,7 +135,7 @@ mode = "follow_system"          # 模式："follow_system" (跟随系统) | "def
 
 ```toml
 # 顶层标量配置（必须在所有 [table] 之前）
-keep_interrupted_context = true # 按 Ctrl+C 中断时保留已生成上下文，方便无缝续接
+keep_interrupted_context = true # 按 Ctrl+C 中断时保留已生成上下文，方便无缝续接（WebUI / HTTP 回合始终开启）
 
 [ui]
 theme = "auto"                  # 终端主题："auto" | "dark" | "light"

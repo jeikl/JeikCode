@@ -74,7 +74,7 @@ pub struct CodingConfig {
     /// Env `JEIKCODE_STREAMING_SECS` / `JEIKCODE_STREAM_TIMEOUT_SECS`. Default 120.
     pub streaming_sliding_secs: u64,
     /// How many times the round is re-issued after a first-token timeout.
-    /// Env `JEIKCODE_FIRST_TOKEN_RETRIES` overrides. Default 3.
+    /// Env `JEIKCODE_FIRST_TOKEN_RETRIES` overrides. Default 6.
     pub first_token_timeout_retries: u32,
 }
 
@@ -462,7 +462,7 @@ impl Default for CodingConfig {
             ttft_secs: 180,
             transition_secs: 180,
             streaming_sliding_secs: 120,
-            first_token_timeout_retries: 3,
+            first_token_timeout_retries: 6,
         }
     }
 }

@@ -329,9 +329,51 @@ pub async fn handle_git_webhook_api(
         }
     }
 
-    // 8. 过滤新 PR 自动审查开关
-    if event.event_kind == GitEventKind::PullRequestOpened && !binding_config.auto_review_new_pr {
-        return (StatusCode::OK, "Auto review on new PR is disabled").into_response();
+    // 8. 过滤 Pull Request 事件（检查开关、有效动作与 SHA 去重）
+    if event.is_pull_request && event.event_kind != GitEventKind::IssueCommentCreated {
+        if !binding_config.events.pull_request {
+            return (
+                StatusCode::OK,
+                "Pull request review is disabled by project config",
+            )
+                .into_response();
+        }
+
+        match &event.event_kind {
+            GitEventKind::PullRequestOpened => {
+                if !binding_config.auto_review_new_pr {
+                    return (StatusCode::OK, "Auto review on new PR is disabled").into_response();
+                }
+            }
+            GitEventKind::PullRequestSynchronize => {
+                // 代码提交更新，继续执行增量审查
+            }
+            _ => {
+                // 过滤非代码改动事件（如 pr_labeled, pr_assigned, pr_edited, pr_review_requested 等）
+                return (StatusCode::OK, "Non-code PR event ignored").into_response();
+            }
+        }
+
+        // 统一对齐 Head SHA 去重逻辑，根除重复审查
+        if let (Some(pr_number), Some(ref head_sha)) =
+            (event.issue_or_pr_number, event.head_sha.as_deref())
+        {
+            if !crate::git_adapter::polling::check_and_update_pr_sha(
+                &event.repo_full_name,
+                pr_number,
+                head_sha,
+            ) {
+                tracing::info!(
+                    "[git_webhook] PR #{pr_number} in `{}` already reviewed at SHA {head_sha}. Skipping duplicate review.",
+                    event.repo_full_name
+                );
+                return (
+                    StatusCode::OK,
+                    "PR commit SHA already reviewed (deduplicated)",
+                )
+                    .into_response();
+            }
+        }
     }
 
     // 9. 立即向远端返回 HTTP 202 Accepted，避免 GitHub 超时重发

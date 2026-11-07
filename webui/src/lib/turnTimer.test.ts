@@ -179,6 +179,51 @@ test('rootTurnUserTs preserves continuation across disk-restored messages where 
   assert.equal(turnTotalElapsedMs(rootTs, tEnd, undefined), 300_000, '总用时必须是延续后的 300 秒');
 });
 
+test('rootTurnUserTs can start a NEW turn at a steer delivered after a real terminal', () => {
+  const tRoot = 1_000_000;
+  const tStop = 1_120_000;
+  const tSteer = 1_150_000;
+  const messages = [
+    { role: 'user', ts: tRoot, parts: [{ kind: 'text', text: '最初任务' }] },
+    { role: 'assistant', ts: tStop, parts: [{ kind: 'text', text: '上一轮最终回答' }] },
+    {
+      role: 'user',
+      ts: tSteer,
+      isSteer: true,
+      parts: [{ kind: 'text', text: '转向后的新任务' }],
+    },
+    { role: 'assistant', parts: [] },
+  ];
+
+  // Mid-turn semantics (default): a steer continues the continuous work timer.
+  assert.equal(rootTurnUserTs(messages, 4), tRoot);
+  // The previous turn already stopped: the steer is a NEW root, not a continuation.
+  assert.equal(rootTurnUserTs(messages, 4, { penetrateSteers: false }), tSteer);
+});
+
+test('durable turnId separates a post-stop steer turn from a mid-turn steer', () => {
+  const tRoot = 1_000_000;
+  const tStop = 1_100_000;
+  const tSteer = 1_150_000;
+  const base = [
+    { role: 'user', ts: tRoot, turnId: 10, parts: [{ kind: 'text', text: '最初任务' }] },
+    { role: 'assistant', ts: tStop, turnId: 10, parts: [{ kind: 'text', text: '上一轮回答' }] },
+  ];
+  const newTurn = [
+    ...base,
+    { role: 'user', ts: tSteer, turnId: 11, isSteer: true, parts: [{ kind: 'text', text: 'stop 后转向' }] },
+    { role: 'assistant', turnId: 11, parts: [] },
+  ];
+  assert.equal(rootTurnUserTs(newTurn, 4), tSteer, 'new turn id is a new root');
+
+  const midTurn = [
+    ...base,
+    { role: 'user', ts: tSteer, turnId: 10, isSteer: true, parts: [{ kind: 'text', text: '运行中转向' }] },
+    { role: 'assistant', turnId: 10, parts: [] },
+  ];
+  assert.equal(rootTurnUserTs(midTurn, 4), tRoot, 'same turn id keeps the continuous timer');
+});
+
 test('stampLastAssistantElapsed with overwrite updates cumulative duration at final stop', () => {
   const msgs = [
     { role: 'user' as const, ts: 1_000_000 },

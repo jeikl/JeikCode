@@ -1,7 +1,11 @@
 import {
+  legacyUserTextsMatch as userTextsMatch,
   stripInjectedRemindersForDisplay,
   stripSteerEnvelopeForDisplay,
-} from './historyMessages.ts';
+  visibleUserText,
+} from './wire/legacy.ts';
+
+export { legacyUserTextsMatch as userTextsMatch, visibleUserText } from './wire/legacy.ts';
 
 export interface ChatDoneTerminal {
   stopReason?: string;
@@ -10,6 +14,8 @@ export interface ChatDoneTerminal {
 
 export type ChatDoneDisposition =
   | { kind: 'completed'; discardQueued: false }
+  /** 用户主动取消（停止按钮 / 立即发送交接 / 撞上回合边界的转向）：收尾但不报异常。 */
+  | { kind: 'cancelled'; discardQueued: true; detail: string }
   | { kind: 'incomplete'; discardQueued: true; detail: string };
 
 /**
@@ -17,8 +23,15 @@ export type ChatDoneDisposition =
  *
  * Older daemons did not include `stop_reason`, so an absent reason remains a
  * natural completion for wire compatibility. Once a reason is present, only
- * kernel `Stopped` (`stopped` on the wire) means the model finished normally;
- * every other current or future reason is incomplete and must fail closed.
+ * kernel `Stopped` (`stopped` on the wire) means the model finished normally.
+ *
+ * `cancelled` is the kernel's explicit cancel — the Stop button, the send-now
+ * handover, or a steer that raced the turn boundary. It settles the turn like
+ * any other terminal but is NOT an abnormal ending: rendering the yellow
+ * "turn incomplete" notice for it turned every Stop press and every mid-turn
+ * steer into a fake failure banner.
+ *
+ * Every other current or future reason is incomplete and must fail closed.
  */
 export function classifyChatDone(terminal: ChatDoneTerminal): ChatDoneDisposition {
   if (terminal.stopReason === undefined || terminal.stopReason === 'stopped') {
@@ -26,11 +39,15 @@ export function classifyChatDone(terminal: ChatDoneTerminal): ChatDoneDispositio
   }
 
   const message = terminal.message?.trim();
-  return {
-    kind: 'incomplete',
-    discardQueued: true,
-    detail: message || terminal.stopReason || 'unknown_terminal',
-  };
+  const detail = message || terminal.stopReason || 'unknown_terminal';
+  if (
+    terminal.stopReason === 'cancelled'
+    || terminal.stopReason === 'manual_stop'
+    || terminal.stopReason === 'interrupted_by_user'
+  ) {
+    return { kind: 'cancelled', discardQueued: true, detail };
+  }
+  return { kind: 'incomplete', discardQueued: true, detail };
 }
 
 export interface LiveLifecycleState {
@@ -42,21 +59,10 @@ export function createLiveLifecycleState(): LiveLifecycleState {
   return { running: false, terminalConsumed: false };
 }
 
-/** Saved transcript is ahead of the canvas. Used while a turn is running so the
- *  open page tracks disk the same way a reload does, even if the live socket
- *  is only sending keepalives. */
-export function shouldAdoptDiskTranscript(input: {
-  diskText: number;
-  canvasText: number;
-  diskHasUser: boolean;
-}): boolean {
-  return input.diskHasUser && input.diskText > input.canvasText;
-}
-
 import { spliceAuthoritativeDiskTail } from './sessionProjection.ts';
 
 type TailPart = { kind: string; text?: string };
-type TailMessage = { role: string; parts: TailPart[]; images?: unknown[]; id?: string };
+type TailMessage = { role: string; parts: TailPart[]; images?: unknown[]; id?: string; clientInputId?: string };
 
 function tailPlain(message: TailMessage | undefined): string {
   if (!message) return '';
@@ -64,23 +70,6 @@ function tailPlain(message: TailMessage | undefined): string {
     .filter((part) => part.kind === 'text')
     .map((part) => part.text || '')
     .join('');
-}
-
-function sameTailImages(
-  a?: unknown[],
-  b?: unknown[],
-): boolean {
-  const left = a ?? [];
-  const right = b ?? [];
-  if (left.length !== right.length) return false;
-  return left.every((img: any, i) => img?.media_type === (right[i] as any)?.media_type && img?.data === (right[i] as any)?.data);
-}
-
-function lastTailUser(messages: TailMessage[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === 'user') return tailPlain(messages[i]);
-  }
-  return '';
 }
 
 /**
@@ -96,17 +85,25 @@ export function diskCoversCanvasTail(disk: TailMessage[], canvas: TailMessage[])
   if (canvas.length === 0) return true;
   const last = canvas[canvas.length - 1];
   if (!last) return true;
-  if (last.id && disk.some((message) => message.id === last.id)) return true;
+  // 用户行必须走下面的“提问 + 回答都在切片里”判定：
+  // 只看 id 命中会把“提问已落盘、回答被取消/未写”的回合误判为已覆盖。
+  if (last.role !== 'user' && last.id && disk.some((message) => message.id === last.id)) return true;
+  if (last.role === 'user') {
+    // 用户回合只认身份：没有 id 就不是同一行，绝不按文本猜测。
+    // “覆盖”意味着**这一提问及其后的内容都在切片里**：提问在切片中间、但回答
+    // 没落盘（回合被取消/限流/重启收尾时只写了 user 行）不算覆盖，
+    // 否则 splice 会把这条旧提问直接接到最新一轮上，中间整段消失。
+    if (!last.id) return false;
+    const at = disk.findIndex((message) => message.id === last.id);
+    if (at < 0) return false;
+    if (at === disk.length - 1) return true;
+    const next = disk[at + 1];
+    return !!next && next.role !== 'user';
+  }
   const diskLast = disk[disk.length - 1];
   if (!diskLast || diskLast.role !== last.role) return false;
   const canvasText = tailPlain(last).trim();
   const diskText = tailPlain(diskLast).trim();
-  if (last.role === 'user') {
-    if (!canvasText) return false;
-    // Disk text may carry an injected prefix; canvas text must be its suffix.
-    // Do NOT treat a longer canvas as covered: that is an unpersisted tail.
-    return diskText === canvasText || diskText.endsWith(canvasText);
-  }
   if (last.role === 'assistant') {
     if (!canvasText) return false;
     // Disk may hold the complete answer while the stopped canvas has only a
@@ -134,13 +131,19 @@ export function tailCoverage<T extends TailMessage>(rows: T[]): TailCoverage {
   const ids = new Set<string>();
   const keys = new Set<string>();
   for (const row of rows) {
+    // 同一条提问在生命周期里有两个身份：落盘前是 `clientInputId`，落盘后是 `id`。
+    // 两者必须同时算作“已覆盖”，否则磁盘切片里的提问和画布上的本地副本会各留一份。
     if (row.id) ids.add(row.id);
+    if (row.clientInputId) ids.add(row.clientInputId);
     for (const key of rowContentKeys(row)) keys.add(key);
   }
   return { ids, keys };
 }
 
 function rowContentKeys(row: TailMessage): string[] {
+  // 用户提问只认身份（`id` / `clientInputId`）：同一句话连发多次是**多条真实提问**，
+  // 绝不能因为内容相同就被判定为“磁盘切片已覆盖”。
+  if (row.role === 'user') return [];
   const parts = ((row as { parts?: Array<{ kind?: string; text?: string; tool?: { id?: string } }> })
     .parts ?? []);
   const keys: string[] = [];
@@ -159,6 +162,7 @@ function rowContentKeys(row: TailMessage): string[] {
 /** 这一行是否已经被权威切片完整覆盖（行 id 或全部内容键均命中）。 */
 export function tailRowCovered<T extends TailMessage>(row: T, coverage: TailCoverage): boolean {
   if (row.id && coverage.ids.has(row.id)) return true;
+  if (row.clientInputId && coverage.ids.has(row.clientInputId)) return true;
   const keys = rowContentKeys(row);
   return keys.length > 0 && keys.every((key) => coverage.keys.has(key));
 }
@@ -171,8 +175,7 @@ export function tailRowCovered<T extends TailMessage>(row: T, coverage: TailCove
  * 里的多个 steer 只有最后一个能留下，更早的会被整段丢掉。
  * 返回 -1 表示画布与磁盘没有交集（旧 daemon 无 id / 纯直播行）。
  */
-function unpersistedTailStart(disk: TailMessage[], canvas: TailMessage[]): number {
-  const coverage = tailCoverage(disk);
+function unpersistedTailStart(canvas: TailMessage[], coverage: TailCoverage): number {
   if (coverage.ids.size === 0 && coverage.keys.size === 0) return -1;
   for (let i = canvas.length - 1; i >= 0; i--) {
     const row = canvas[i];
@@ -210,53 +213,159 @@ export function mergeDiskWithUnpersistedTail<T extends TailMessage>(
     transcriptHasOpenUserTurn(canvas) || transcriptHasInFlightAssistant(canvas);
   if (!openTail && opts?.diskCoversTail !== false) return disk;
 
-  // 身份定位优先：从「最后一条与磁盘共有的消息」之后整段接回（支持多个中途转向）。
-  const byIdentity = unpersistedTailStart(disk, canvas);
-  if (byIdentity >= 0) {
-    // spliced 已经按锚点放回过本地通知行（压缩标记等），接尾巴时避免同一对象再插一遍。
-    const tail = canvas.slice(byIdentity).filter((row) => !disk.includes(row));
-    return tail.length > 0 ? [...disk, ...tail] : disk;
-  }
-
-  let lastUser = -1;
-  for (let i = canvas.length - 1; i >= 0; i--) {
-    if (canvas[i]?.role === 'user') {
-      lastUser = i;
-      break;
-    }
-  }
-  if (lastUser < 0) return disk;
-
-  const lastUserMsg = canvas[lastUser];
-  const canvasUser = visibleUserText(tailPlain(lastUserMsg));
-  const hasCanvasImages = Array.isArray(lastUserMsg?.images) && lastUserMsg.images.length > 0;
-  if (!canvasUser && !hasCanvasImages) return disk;
-
-  let lastDiskUser = -1;
-  for (let i = disk.length - 1; i >= 0; i--) {
-    if (disk[i]?.role === 'user') {
-      lastDiskUser = i;
-      break;
-    }
-  }
-  if (lastDiskUser >= 0) {
-    const lastDiskUserMsg = disk[lastDiskUser];
-    const diskUser = visibleUserText(tailPlain(lastDiskUserMsg));
-    const hasDiskImages = Array.isArray(lastDiskUserMsg?.images) && lastDiskUserMsg.images.length > 0;
-
-    const textMatches = !!canvasUser && !!diskUser && (diskUser === canvasUser || userTextsMatch(diskUser, canvasUser));
-    const imageMatches = !canvasUser && !diskUser && hasCanvasImages && hasDiskImages && sameTailImages(lastDiskUserMsg.images, lastUserMsg?.images);
-    if (textMatches || imageMatches) return disk;
-  }
-
-  // 最后一道兜底：只接回**磁盘尚未覆盖**的行。
-  // 直接按“最后一条用户消息之后全接”会把已经上屏（且已落盘）的早期工具轮
-  // 整段追加到回答下面，长回合收尾时就是“底部被之前的消息灌一遍”。
   const coverage = tailCoverage(disk);
-  const tail = canvas
-    .slice(lastUser)
-    .filter((row) => !disk.includes(row) && !tailRowCovered(row, coverage));
-  return tail.length > 0 ? [...disk, ...tail] : disk;
+  const byIdentity = unpersistedTailStart(canvas, coverage);
+  // 画布里早于磁盘窗口的行必须保留：断网期间跑完多个回合、重连只拿到最新窗口时，
+  // 直接返回 disk 会把旧历史（甚至 c 的提问）整段抖掉，看起来就是 c 直接接最新一轮。
+  const head = earlierCanvasHead(disk, canvas, coverage.ids);
+  if (byIdentity >= 0) {
+    // 只接回“磁盘确实还没落盘”的尾巴：
+    // 1) 与磁盘同身份的旧副本不得再追加一次（否则就是 a b c d b）；
+    // 2) **按因果位次插入**：画布上带 sourceIndex 的行如果落在磁盘窗口覆盖的区间
+    //    之外（磁盘缺这个位置，比如后台期间工具行没被写进窗口），必须插回
+    //    它自己的位置，而不是被丢掉、也不能一律拼到末尾；
+    // 3) 未落盘的本地行（无 sourceIndex）照常接在末尾。
+    const diskLastUserTs = (() => {
+      for (let i = disk.length - 1; i >= 0; i--) {
+        const row = disk[i];
+        if (row?.role === 'user' && typeof (row as { ts?: number }).ts === 'number') {
+          return (row as { ts?: number }).ts!;
+        }
+      }
+      return 0;
+    })();
+
+    const seenTailIds = new Set<string>();
+    const tail: T[] = [];
+    const insertBefore: Array<{ row: T; at: number }> = [];
+    const diskUserTurns = disk.filter((m) => m.role === 'user');
+    const diskLastUser = diskUserTurns[diskUserTurns.length - 1];
+
+    for (let i = byIdentity; i < canvas.length; i++) {
+      const row = canvas[i];
+      if (!row) continue;
+      if (disk.includes(row)) continue;
+      if ((row.id && coverage.ids.has(row.id)) || (row.clientInputId && coverage.ids.has(row.clientInputId))) continue;
+      if (row.id) {
+        if (seenTailIds.has(row.id)) continue;
+        seenTailIds.add(row.id);
+      }
+      // 关键防倒挂：如果该行是助手/工具消息，但它所属的用户提问并非磁盘最新轮次
+      // （磁盘已经推进到了更新的用户轮次），说明它属于更早轮次的推流残影，
+      // 绝对不能跨轮次倒挂追加到新轮次（如轮次 c）的下方！
+      if (row.role !== 'user' && diskLastUser) {
+        let owningUser: T | undefined;
+        for (let j = i; j >= 0; j--) {
+          if (canvas[j]?.role === 'user') {
+            owningUser = canvas[j];
+            break;
+          }
+        }
+        if (owningUser && owningUser.id !== diskLastUser.id) {
+          const owningSrc = (owningUser as { sourceIndex?: number }).sourceIndex;
+          const diskLastSrc = (diskLastUser as { sourceIndex?: number }).sourceIndex;
+          if (typeof diskLastSrc === 'number' && typeof owningSrc === 'number' && diskLastSrc > owningSrc) {
+            continue;
+          }
+          if (diskUserTurns.some((u) => u.id === owningUser!.id && u !== diskLastUser)) {
+            continue;
+          }
+        }
+      }
+      // 关键防线：没有可信下标的本地未落盘行，若其时间戳明显早于磁盘已落盘的最早提问/最新提问，
+      // 说明它属于更早的中断孤儿提问，绝不能倒挂追加到新一轮回答的最下方！
+      const rowTs = (row as { ts?: number }).ts;
+      if (diskLastUserTs > 0 && typeof rowTs === 'number' && rowTs < diskLastUserTs - 5000) {
+        continue;
+      }
+      const src = (row as { sourceIndex?: number }).sourceIndex;
+      if (typeof src === 'number') insertBefore.push({ row, at: src });
+      else tail.push(row);
+    }
+    let merged = [...head, ...disk];
+    // 带因果下标的行先按位次插回；无下标的本地尾行最后接上（它们属于正在进行的回合）。
+    for (const { row, at } of insertBefore.sort((a, b) => a.at - b.at)) {
+      const index = merged.findIndex((candidate) => {
+        const src = (candidate as { sourceIndex?: number }).sourceIndex;
+        return typeof src === 'number' && src > at;
+      });
+      merged = index < 0
+        ? [...merged, row]
+        : [...merged.slice(0, index), row, ...merged.slice(index)];
+    }
+    return tail.length > 0 ? [...merged, ...tail] : merged;
+  }
+  // 身份优先：没有共同身份时，磁盘切片是权威，但仍保留窗口之前的头部。
+  return head.length > 0 ? [...head, ...disk] : disk;
+}
+
+/**
+ * 画布里**早于磁盘窗口**的行（按 sourceIndex 判定），按身份去重。
+ * 窗口从中间开始时，这些行只能从画布/缓存里来，绝不能被“磁盘权威”覆盖掉。
+ */
+function earlierCanvasHead<T extends TailMessage>(
+  disk: T[],
+  canvas: T[],
+  diskIds: ReadonlySet<string>,
+): T[] {
+  let diskFirstIndex: number | undefined;
+  for (const row of disk) {
+    const src = (row as { sourceIndex?: number }).sourceIndex;
+    if (typeof src === 'number' && (diskFirstIndex === undefined || src < diskFirstIndex)) {
+      diskFirstIndex = src;
+    }
+  }
+  if (typeof diskFirstIndex !== 'number') return [];
+  // 只有「最后一个明确落在 diskFirstIndex 之前的带可信下标行」及它之前的区段才属于
+  // 窗口前的旧历史头部；尾部的无下标直播行 / steer 行属于未落盘尾巴，绝不能塞进 head
+  // 排到 disk 前面（否则 16:56 的新转向气泡会倒挂在 16:45 旧提问上方）。
+  let lastEarlierIdx = -1;
+  for (let i = 0; i < canvas.length; i++) {
+    const row = canvas[i]!;
+    if (row.id && diskIds.has(row.id)) break;
+    if (row.clientInputId && diskIds.has(row.clientInputId)) break;
+    const src = (row as { sourceIndex?: number }).sourceIndex;
+    if (typeof src === 'number') {
+      if (src >= diskFirstIndex) break;
+      if ((row as { isSteer?: boolean }).isSteer !== true) {
+        lastEarlierIdx = i;
+      }
+    }
+  }
+  if (lastEarlierIdx < 0) return [];
+  const head: T[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i <= lastEarlierIdx; i++) {
+    const row = canvas[i]!;
+    if (row.id && (diskIds.has(row.id) || seen.has(row.id))) continue;
+    if (row.clientInputId && diskIds.has(row.clientInputId)) continue;
+    if (row.id) seen.add(row.id);
+    head.push(row);
+  }
+  return head;
+}
+
+/**
+ * 合并结果里的“因果洞”：两行 sourceIndex 之间缺了至少一整段。
+ *
+ * 断网期间跑完多个回合、重连只拿到最新窗口时会出现：缓存的头停在 c 的提问，
+ * 窗口从更晚的行开始，中间的回答在磁盘上但没人拉 —— 画面就是 c 直接接到最新一轮。
+ * 调用方据此用 `older` 模式补一页（有界，只补一次）。
+ */
+export function findCausalGap<T extends { sourceIndex?: number }>(
+  rows: T[],
+  threshold = 0,
+): { before: number; after: number } | null {
+  let previous: number | undefined;
+  for (const row of rows) {
+    const src = row.sourceIndex;
+    if (typeof src !== 'number') continue;
+    if (typeof previous === 'number' && src - previous - 1 > threshold) {
+      return { before: previous, after: src };
+    }
+    previous = src;
+  }
+  return null;
 }
 
 /**
@@ -306,61 +415,191 @@ type CanvasPart = {
   text?: string;
   tool?: { id?: string; output?: string; status?: string };
 };
-type CanvasMessage = { role: string; parts: CanvasPart[]; ts?: number };
+type CanvasMessage = { role: string; id?: string; parts: CanvasPart[]; ts?: number };
 
-function canvasUserText(message: CanvasMessage | undefined): string | undefined {
-  if (!message) return undefined;
-  const joined = message.parts
-    .filter((part) => part.kind === 'text')
-    .map((part) => part.text || '')
-    .join('');
-  return joined || undefined;
+/** The optimistic user row painted by send-now / a queued send. */
+export interface PaintedUserRow {
+  role: string;
+  id?: string;
+  clientInputId?: string;
+  parts?: Array<{ kind: string; text?: string }>;
+  images?: Array<{ media_type?: string; data?: string }>;
 }
 
-const VISION_ANNOTATION_MARKERS = [
-  '\n\n[图片内容（由',
-  '[图片内容（由',
-  '\n\n[图片识别失败]',
-  '[图片识别失败]',
-];
-
-export function visibleUserText(text: string): string {
-  let cut = -1;
-  for (const marker of VISION_ANNOTATION_MARKERS) {
-    const idx = text.indexOf(marker);
-    if (idx >= 0 && (cut < 0 || idx < cut)) cut = idx;
+/**
+ * Find the optimistic user row that belongs to THIS send request.
+ *
+ * Identity first: a same-text prompt from the previous turn (e.g. the queue card
+ * that was just auto-drained) is a different message and must never be claimed by
+ * the send-now request. The text fallback exists only for legacy callers that do
+ * not mint a request id before painting.
+ */
+export function findPaintedUserRow<T extends PaintedUserRow>(
+  messages: T[],
+  requestId: string | undefined,
+  cleanText: string,
+  images?: PaintedUserRow['images'],
+): T | undefined {
+  if (requestId) {
+    return messages.find(
+      (m) => m.role === 'user' && (m.id === requestId || m.clientInputId === requestId),
+    );
   }
-  const raw = cut >= 0 ? text.slice(0, cut) : text;
-  return stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(raw))
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .trim();
+  const sameImages = (a?: PaintedUserRow['images'], b?: PaintedUserRow['images']) => {
+    const left = a ?? [];
+    const right = b ?? [];
+    return left.length === right.length
+      && left.every((img, i) => img.media_type === right[i]?.media_type && img.data === right[i]?.data);
+  };
+  return messages.find((m) => {
+    if (m.role !== 'user') return false;
+    if (cleanText) {
+      return (m.parts ?? []).some((p) => p.kind === 'text' && userTextsMatch(p.text ?? '', cleanText));
+    }
+    return !!images?.length && sameImages(m.images, images);
+  });
 }
 
-export function userTextsMatch(a: string, b: string): boolean {
-  const left = visibleUserText(a);
-  const right = visibleUserText(b);
-  if (left === right) return true;
-  if (!left || !right) return left === right;
+/**
+ * A stale queue card whose text was already auto-drained into the running turn.
+ * The matching user row must be NEWER than the card; otherwise it is the turn's
+ * own prompt (or a legitimate repeated message) and the card still owns a send.
+ */
+export function queueCardAlreadyDelivered(input: {
+  running: boolean;
+  latestUserTs?: number;
+  cardCreatedAt?: number;
+  /** Identity proof: the newest user row is the card's persisted id. */
+  sameIdentity?: boolean;
+  sameText: boolean;
+}): boolean {
+  if (!input.running) return false;
+  if (!input.sameIdentity && !input.sameText) return false;
+  const latest = input.latestUserTs ?? 0;
+  const card = input.cardCreatedAt ?? 0;
+  return latest > 0 && latest >= card;
+}
 
-  // 深度归一化比对 (去除所有连续空白和换行差异)
-  const normLeft = left.replace(/\s+/g, ' ').trim().toLowerCase();
-  const normRight = right.replace(/\s+/g, ' ').trim().toLowerCase();
-  if (normLeft === normRight) return true;
+export interface QueueCardOnCanvas {
+  text: string;
+  images?: PaintedUserRow['images'];
+  clientInputId?: string;
+  createdAt?: number;
+}
 
-  // Disk history is stripped; live/watch echo may still carry the caption.
-  if (left.startsWith(right) || right.startsWith(left)) {
-    const longer = left.length >= right.length ? left : right;
-    const shorter = left.length >= right.length ? right : left;
-    const rest = longer.slice(shorter.length);
-    if (rest.trim() === '') return true;
-    return VISION_ANNOTATION_MARKERS.some((m) => rest.includes(m.replace(/^\n\n/, '')));
+/**
+ * Is THIS queue/steer card already represented on the canvas?
+ *
+ * Identity first: a text-identical prompt from an earlier turn is a different
+ * message and must never swallow a later steer/queue card. Only legacy cards
+ * without an id fall back to text/images, and then only a row created at or
+ * after the card can be its delivered copy. Missing timestamps keep the card
+ * (silently dropping real user input is worse than a rare duplicate).
+ */
+export function queueCardAlreadyOnCanvas<T extends PaintedUserRow & { ts?: number }>(
+  messages: T[],
+  card: QueueCardOnCanvas,
+): boolean {
+  const cid = card.clientInputId;
+  if (cid) {
+    return messages.some(
+      (m) => m.role === 'user' && (m.id === cid || m.clientInputId === cid),
+    );
   }
-  // 到这里说明两条文本既不完全相同、也不互为前缀（尾部纯空白 / 视觉标记的重放
-  // 形态已在上面收敛）。旧实现在这里再按「前 40 字符一致」兜底判同一条，会把
-  // 「前缀相同、只改末尾」的真实追问（路径/参数/文件名）误判成重放而吞掉。
-  // 用户提问的去重只能靠精确相等 / 严格前缀 / 消息身份，绝不能靠模糊前缀。
-  return false;
+  const clean = visibleUserText(card.text).trim();
+  const cardImages = card.images ?? [];
+  const sameImages = (images?: PaintedUserRow['images']) => {
+    const other = images ?? [];
+    return cardImages.length > 0
+      && cardImages.length === other.length
+      && cardImages.every(
+        (img, i) => img.media_type === other[i]?.media_type && img.data === other[i]?.data,
+      );
+  };
+  return messages.some((m) => {
+    if (m.role !== 'user') return false;
+    if (clean) {
+      const text = (m.parts ?? [])
+        .filter((part) => part.kind === 'text')
+        .map((part) => part.text ?? '')
+        .join('');
+      if (!userTextsMatch(text, clean)) return false;
+    } else if (!sameImages(m.images)) {
+      return false;
+    }
+    if (m.ts != null && card.createdAt != null) return m.ts >= card.createdAt;
+    return false;
+  });
+}
+
+/**
+ * A steer card's client-minted id and the persisted bubble's kernel message id
+ * can diverge after a reconnect (another tab folded it, display.jsonl only
+ * knows the kernel id, or a reconnect lost the correlation). Identity first;
+ * only when that misses do we fall back to exact display text + images + a
+ * close timestamp. This is deliberately steer-only: ordinary queue cards must
+ * stay identity-first so repeated identical prompts are not swallowed.
+ */
+export function steerCardBubbleOnCanvas(
+  messages: Array<{
+    role?: string;
+    id?: string;
+    clientInputId?: string;
+    parts?: Array<{ kind: string; text?: string }>;
+    images?: Array<{ media_type: string; data: string }>;
+    ts?: number;
+  }>,
+  card: {
+    clientInputId?: string;
+    text: string;
+    images?: Array<{ media_type: string; data: string }>;
+    createdAt?: number;
+  },
+): boolean {
+  const cid = card.clientInputId;
+  if (
+    cid &&
+    messages.some(
+      (message) =>
+        message.role === 'user' &&
+        (message.id === cid || message.clientInputId === cid),
+    )
+  ) {
+    return true;
+  }
+  const clean = stripSteerEnvelopeForDisplay(visibleUserText(card.text)).trim();
+  const cardImages = card.images ?? [];
+  if (!clean && cardImages.length === 0) return false;
+  return messages.some((message) => {
+    if (message.role !== 'user') return false;
+    const text = (message.parts ?? [])
+      .filter((part) => part.kind === 'text')
+      .map((part) => part.text ?? '')
+      .join('');
+    const bubble = stripSteerEnvelopeForDisplay(text).trim();
+    if (clean) {
+      if (!userTextsMatch(bubble, clean)) return false;
+    } else {
+      const images = message.images ?? [];
+      const same =
+        cardImages.length > 0 &&
+        cardImages.length === images.length &&
+        cardImages.every(
+          (image, index) =>
+            image.media_type === images[index]?.media_type &&
+            image.data === images[index]?.data,
+        );
+      if (!same) return false;
+    }
+    // The text fallback is only safe with both timestamps: a steer bubble is
+    // created at/after the card. Missing timestamps stay identity-only rather
+    // than guessing and swallowing a legitimate same-text prompt.
+    if (message.ts == null || card.createdAt == null) return false;
+    // Allow a small clock skew and a bounded delay for the kernel fold.
+    if (message.ts < card.createdAt - 10_000) return false;
+    if (message.ts > card.createdAt + 30 * 60_000) return false;
+    return true;
+  });
 }
 
 /**
@@ -374,16 +613,8 @@ export function findPendingSelfEchoIndex(
   pending: ReadonlyArray<{ id: string; text: string }>,
   event: { client_input_id?: string; content: string },
 ): number {
-  // 1. 身份优先：服务端回声带回了发出去时的关联键，命中即精确消费，无需猜文本。
-  if (event.client_input_id) {
-    const byId = pending.findIndex((item) => item.id === event.client_input_id);
-    if (byId >= 0) return byId;
-  }
-  // 2. 文本兜底（无 id 的旧服务端/第三方端）：完全一致或归一化后一致。
-  const want = visibleUserText(event.content);
-  return pending.findIndex(
-    (item) => userTextsMatch(item.text, event.content) || visibleUserText(item.text) === want,
-  );
+  if (!event.client_input_id) return -1;
+  return pending.findIndex((item) => item.id === event.client_input_id);
 }
 
 /** True when `userText` is already the latest user turn on the canvas.
@@ -393,60 +624,11 @@ export function findPendingSelfEchoIndex(
  * the original user prompt must not re-append it below the steer. */
 export function userMessageAlreadyOnCanvas(
   messages: CanvasMessage[],
-  userText: string,
-  userTs?: number,
+  _userText: string,
+  _userTs?: number,
+  messageId?: string,
 ): boolean {
-  const want = visibleUserText(userText);
-  if (!want && want !== '') return false;
-  const matches = (message: CanvasMessage | undefined): boolean =>
-    !!message && message.role === 'user' && userTextsMatch(canvasUserText(message) ?? '', want);
-
-  // 1. 若提供了时间戳且历史气泡有对应时间戳（误差 3s 内），优先基于时间戳和内容精准匹配
-  if (userTs && userTs > 0) {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (message && message.role === 'user' && matches(message)) {
-        if (message.ts && Math.abs(message.ts - userTs) < 3000) return true;
-      }
-    }
-  }
-
-  // 2. 查找画布上最靠后的匹配项与最靠后的 user 消息
-  let matchIndex = -1;
-  let lastUserIndex = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === 'user') {
-      if (lastUserIndex === -1) lastUserIndex = i;
-      if (matchIndex === -1 && matches(messages[i])) {
-        matchIndex = i;
-      }
-    }
-  }
-  if (matchIndex === -1) return false;
-  if (matchIndex === lastUserIndex) return true;
-
-  // 3. 若 matchIndex 之后存在后续的 user 消息：
-  // 仅当末尾的用户提问内容与当前检查的完全不同，且中间的助手已经产生最终回答时，
-  // 才说明 matchIndex 属于过去的旧轮次（例如用户又输入了全新的后续问题）。
-  // 关键防线：如果当前检查的消息内容与末尾开放提问是一样的，绝对判定为已在画布上（true），杜绝重放追加克隆！
-  const trailingUser = messages[lastUserIndex];
-  const trailingUserText = visibleUserText(canvasUserText(trailingUser) ?? '');
-  if (trailingUserText === want || userTextsMatch(trailingUserText, want)) {
-    return true;
-  }
-
-  const hasOpenTrailingUser = messages.length > 0 && messages[messages.length - 1]?.role === 'user';
-  if (hasOpenTrailingUser && lastUserIndex === messages.length - 1) {
-    const nextAssistant = messages.slice(matchIndex + 1, lastUserIndex).find((m) => m.role === 'assistant');
-    const nextAssistantSettled = nextAssistant && nextAssistant.parts.some(
-      (part) => part.kind === 'text' && (part.text || '').trim().length > 0,
-    );
-    if (nextAssistantSettled) {
-      return false;
-    }
-  }
-
-  return true;
+  return !!messageId && messages.some((message) => message.id === messageId);
 }
 
 /** The newest row is a user prompt that does not yet have assistant text,
@@ -485,313 +667,6 @@ export function sessionAssignedClaimsLocalTurn(input: {
   previousIdIsLocalTurn: boolean;
 }): boolean {
   return input.ownsOpenStream || input.previousIdIsLocalTurn;
-}
-
-/** 归属消息优先：多回合 turn 中每一轮都是独立的 assistant 消息；只认“最后一条”
- *  会把早先回合的日志重放判成新内容（幽灵思考块 / 幽灵正文）。
- *  先按 message_id 定位回合，再按 tool call id 定位，最后回退到最后一条 assistant。 */
-type ReconcilePart = {
-  kind: string;
-  text?: string;
-  tool?: { id?: string; output?: string; status?: string };
-};
-type ReconcileMessage = { role: string; parts: ReconcilePart[]; id?: string };
-
-function reconcileUserText(message: ReconcileMessage): string {
-  const text = message.parts
-    .filter((part) => part.kind === 'text')
-    .map((part) => part.text || '')
-    .join('');
-  return visibleUserText(text);
-}
-
-function transcriptTurns<T extends ReconcileMessage>(messages: T[]): Array<{ user: T; rest: T[] }> {
-  const starts: number[] = [];
-  messages.forEach((message, index) => {
-    if (message.role === 'user') starts.push(index);
-  });
-  return starts.map((start, index) => {
-    const end = index + 1 < starts.length ? starts[index + 1]! : messages.length;
-    return { user: messages[start]!, rest: messages.slice(start + 1, end) };
-  });
-}
-
-function joinedTurnText(rest: ReconcileMessage[]): string {
-  let text = '';
-  for (const message of rest) {
-    for (const part of message.parts) {
-      if ((part.kind === 'text' || part.kind === 'reasoning') && part.text) text += part.text;
-    }
-  }
-  return text;
-}
-
-/** Settled disk text must fill a tool-only canvas, and live tokens already
- *  ahead of the file must stay. Unique tool rows from the other side are kept. */
-function mergeTurnRest<T extends ReconcileMessage>(diskRest: T[], canvasRest: T[]): T[] {
-  if (diskRest.length === 0) return canvasRest;
-  if (canvasRest.length === 0) return diskRest;
-
-  const diskText = joinedTurnText(diskRest);
-  const canvasText = joinedTurnText(canvasRest);
-  const canvasInFlight = transcriptHasInFlightAssistant(canvasRest as unknown as Array<{ role: string; parts: InFlightPart[] }>);
-  const canvasAhead = (canvasText.startsWith(diskText) && canvasText.length >= diskText.length) || canvasInFlight;
-  // 上下文压缩：磁盘被摘要替换后**比画布更短**（而且不再是画布的前缀）。
-  // 显示只增不减 —— 画布是权威，绝不能用更短的磁盘去覆盖，
-  // 否则一次刷新就把画布里的历史显示成了压缩版。
-  const diskCompacted =
-    diskText.length > 0 && canvasText.length > diskText.length && !canvasText.startsWith(diskText);
-
-  // 1. 若前端画布处于活跃进行中（in-flight）或文本已经领先/包含落盘文本：
-  // 画布是正在流式生成的绝对真实源！严禁从落后的 diskRest 抽取旧思考块追加到末尾！
-  // 仅将 diskRest 中已结算的 tool 状态同步到 canvasRest 对应的 tool 调用中。
-  if (canvasAhead || diskCompacted) {
-    const diskToolsById = new Map<string, ReconcilePart['tool']>();
-    for (const m of diskRest) {
-      for (const p of m.parts) {
-        if (p.kind === 'tool' && p.tool?.id && p.tool.status && p.tool.status !== 'pending' && p.tool.status !== 'running') {
-          diskToolsById.set(p.tool.id, p.tool);
-        }
-      }
-    }
-    if (diskToolsById.size === 0) return canvasRest;
-    return canvasRest.map((msg) => {
-      if (msg.role !== 'assistant') return msg;
-      let changed = false;
-      const parts = msg.parts.map((p) => {
-        if (p.kind === 'tool' && p.tool?.id && diskToolsById.has(p.tool.id)) {
-          const settled = diskToolsById.get(p.tool.id)!;
-          if (p.tool.status !== settled.status || (!p.tool.output && settled.output)) {
-            changed = true;
-            return { ...p, tool: { ...p.tool, status: settled.status, output: settled.output ?? p.tool.output } };
-          }
-        }
-        return p;
-      });
-      return changed ? { ...msg, parts } : msg;
-    });
-  }
-
-  // 2. 若磁盘历史明显比画布更新且已落盘结算（如离开页面期间后台已完成整轮输出）：
-  // 磁盘历史包含更完整的正文与思考，以 diskRest 为准。
-  const base = diskRest;
-  const added = continuationNotOnTranscript(base, canvasRest);
-  if (added.length === 0) return base;
-  const last = base[base.length - 1];
-  if (last && last.role === 'assistant' && added.every((message) => message.role === 'assistant')) {
-    return [
-      ...base.slice(0, -1),
-      { ...last, parts: [...last.parts, ...added.flatMap((message) => message.parts)] },
-    ];
-  }
-  return [...base, ...added];
-}
-
-/**
- * Merge a running canvas with a disk snapshot without reordering turns.
- *
- * Disk owns settled turns (it has the assistant text that was not flushed
- * when the page first painted). The canvas keeps a newer tail the file does
- * not have yet — the steer the user just sent, and tokens still ahead of
- * disk. A watch echo of a user message that is already in the snapshot is
- * not appended again at the bottom.
- */
-export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T[], disk: T[]): T[] {
-  if (disk.length === 0) return canvas;
-  if (canvas.length === 0) return disk;
-  const diskTurns = transcriptTurns(disk);
-  const canvasTurns = transcriptTurns(canvas);
-  if (diskTurns.length === 0) return canvas.length >= disk.length ? canvas : disk;
-  if (canvasTurns.length === 0) return disk;
-
-  // 1. 保留前置 assistant/system 消息（即在第一个 user 提问之前的开场白）
-  const firstDiskUser = disk.findIndex((message) => message.role === 'user');
-  const firstCanvasUser = canvas.findIndex((message) => message.role === 'user');
-  let lead: T[] = [];
-  if (firstDiskUser > 0 && firstCanvasUser > 0) {
-    const diskLead = disk.slice(0, firstDiskUser);
-    const canvasLead = canvas.slice(0, firstCanvasUser);
-    lead = joinedTurnText(diskLead).length >= joinedTurnText(canvasLead).length ? diskLead : canvasLead;
-  } else if (firstDiskUser > 0) {
-    lead = disk.slice(0, firstDiskUser);
-  } else if (firstCanvasUser > 0) {
-    lead = canvas.slice(0, firstCanvasUser);
-  }
-
-  // 2. 顺序对齐全局 Turns，杜绝因单向指针错位导致的整段历史重复追加。
-  // 优先按用户消息的稳定 id 对齐（重复文本/纯图片时唯一无歧义），文本匹配作回退。
-  const matches: Array<{ d: number; c: number }> = [];
-  let cSearch = 0;
-  for (let d = 0; d < diskTurns.length; d++) {
-    const dUser = diskTurns[d]!.user;
-    const dText = reconcileUserText(dUser);
-    const dId = dUser.id;
-    let found = -1;
-    if (dId) {
-      for (let c = cSearch; c < canvasTurns.length; c++) {
-        if (canvasTurns[c]!.user.id === dId) {
-          found = c;
-          break;
-        }
-      }
-    }
-    if (found < 0) {
-      for (let c = cSearch; c < canvasTurns.length; c++) {
-        if (userTextsMatch(reconcileUserText(canvasTurns[c]!.user), dText)) {
-          found = c;
-          break;
-        }
-      }
-    }
-    if (found >= 0) {
-      matches.push({ d, c: found });
-      cSearch = found + 1;
-    }
-  }
-
-  const matchedC = new Set(matches.map((m) => m.c));
-  const matchedD = new Set(matches.map((m) => m.d));
-  const outTurns: Array<{ user: T; rest: T[] }> = [];
-
-  let nextC = 0;
-  let nextD = 0;
-  for (const { d, c } of matches) {
-    // 放入 d 之前未匹配的 disk turns
-    while (nextD < d) {
-      if (!matchedD.has(nextD)) {
-        outTurns.push(diskTurns[nextD]!);
-      }
-      nextD++;
-    }
-    // 放入 c 之前未匹配的 canvas turns (例如 disk tail 分页截断前更早的历史)
-    while (nextC < c) {
-      if (!matchedC.has(nextC)) {
-        const text = reconcileUserText(canvasTurns[nextC]!.user);
-        const alreadyInDisk = diskTurns.some((dt) => userTextsMatch(reconcileUserText(dt.user), text));
-        const alreadyOut = outTurns.some((rt) => userTextsMatch(reconcileUserText(rt.user), text));
-        if (!alreadyInDisk && !alreadyOut) {
-          outTurns.push(canvasTurns[nextC]!);
-        }
-      }
-      nextC++;
-    }
-    // 合并当前匹配的 (d, c) 轮次 (保留引用并在需要时安全保留本地画布中的多模态图片)
-    const diskTurn = diskTurns[d]!;
-    const canvasTurn = canvasTurns[c]!;
-    const diskUser = diskTurn.user;
-    const canvasUser = canvasTurn.user as any;
-    const canvasImages = canvasUser.images && canvasUser.images.length > 0 ? canvasUser.images : undefined;
-    const mergedUser = (canvasImages && !(diskUser as any).images) || (canvasUser.id && !diskUser.id)
-      ? {
-          ...diskUser,
-          ...(canvasImages ? { images: canvasImages } : {}),
-          ...(canvasUser.id && !diskUser.id ? { id: canvasUser.id } : {}),
-        }
-      : diskUser;
-    outTurns.push({
-      user: mergedUser,
-      rest: mergeTurnRest(diskTurn.rest, canvasTurn.rest),
-    });
-    nextD = d + 1;
-    nextC = c + 1;
-  }
-
-  // 处理剩余未匹配的 disk turns
-  while (nextD < diskTurns.length) {
-    if (!matchedD.has(nextD)) {
-      outTurns.push(diskTurns[nextD]!);
-    }
-    nextD++;
-  }
-
-  // 处理剩余未匹配的 canvas turns（新发送的 live tail / steer）
-  while (nextC < canvasTurns.length) {
-    const cTurn = canvasTurns[nextC]!;
-    nextC++;
-    const text = reconcileUserText(cTurn.user);
-    const cId = (cTurn.user as any).id || (cTurn.user as any).pendingSteerId;
-    const targetTurn = outTurns.find((rt) => {
-      const rId = (rt.user as any).id || (rt.user as any).pendingSteerId;
-      if (cId && rId && cId === rId) return true;
-      return userTextsMatch(reconcileUserText(rt.user), text);
-    });
-    if (targetTurn) {
-      // 绝对防重放防线：只要该提问已经在输出中存在，坚决禁止作为新轮次追加到末尾！
-      // 只能将未落盘的增量内容合入对应的 targetTurn.rest
-      const continuation = continuationNotOnTranscript(targetTurn.rest, cTurn.rest);
-      if (continuation.length > 0) {
-        targetTurn.rest.push(...continuation);
-      }
-      continue;
-    }
-    // 若当前末尾轮次尚未结算且与 cTurn 提问匹配，合入当前末尾轮次
-    const lastTurn = outTurns[outTurns.length - 1];
-    const lastTurnInFlight = lastTurn && (!lastTurn.rest.length || !lastTurn.rest.some((m) => m.role === 'assistant' && m.parts?.some((p) => p.kind === 'text' && (p.text || '').trim().length > 0)));
-    if (lastTurn && lastTurnInFlight && userTextsMatch(reconcileUserText(lastTurn.user), text)) {
-      const continuation = continuationNotOnTranscript(lastTurn.rest, cTurn.rest);
-      if (continuation.length > 0) {
-        lastTurn.rest.push(...continuation);
-      }
-    } else {
-      // 仅当在整个输出中均不存在该提问时，才作为真正的新提问轮次追加
-      outTurns.push(cTurn);
-    }
-  }
-
-  const out: T[] = [...lead];
-  for (const turn of outTurns) {
-    out.push(turn.user, ...turn.rest);
-  }
-
-  if (out.length === canvas.length && out.every((message, index) => message === canvas[index])) {
-    return canvas;
-  }
-  return out;
-}
-
-function continuationNotOnTranscript<T extends ReconcileMessage>(base: T[], extra: T[]): T[] {
-  const toolIds = new Set<string>();
-  const reasoningTexts: string[] = [];
-  let text = '';
-  for (const message of base) {
-    for (const part of message.parts) {
-      if (part.kind === 'tool' && part.tool?.id) toolIds.add(part.tool.id);
-      if (part.kind === 'reasoning' && part.text) reasoningTexts.push(part.text.trim());
-      if (part.kind === 'text' && part.text) text += part.text;
-    }
-  }
-  const kept: T[] = [];
-  for (const message of extra) {
-    const parts = message.parts.flatMap((part) => {
-      if (part.kind === 'tool' && part.tool?.id) {
-        return toolIds.has(part.tool.id) ? [] : [part];
-      }
-      // 思考块去重防线：严格区分 reasoning 与 text，若 base 中已有完全相同或相互包含的思考块，严禁重复追加！
-      if (part.kind === 'reasoning' && part.text) {
-        const clean = part.text.trim();
-        if (!clean) return [];
-        const alreadyExists = reasoningTexts.some(
-          (existing) => existing === clean || existing.includes(clean) || clean.includes(existing),
-        );
-        if (alreadyExists) return [];
-        reasoningTexts.push(clean);
-        return [part];
-      }
-      // 正文去重防线：若已有正文包含该文本，直接过滤；若为未渲染后缀则保留增量
-      if (part.kind === 'text' && part.text) {
-        const clean = part.text.trim();
-        if (!clean) return [];
-        if (text.includes(clean)) return [];
-        const suffix = unpaintedReplaySuffix(text, part.text);
-        if (!suffix) return [];
-        text += suffix;
-        return suffix === part.text ? [part] : [{ ...part, text: suffix }];
-      }
-      return [part];
-    });
-    if (parts.length > 0) kept.push({ ...message, parts });
-  }
-  return kept;
 }
 
 /** Legacy session detail capped a field at 24KB and appended this marker. New
@@ -867,13 +742,18 @@ export function unpaintedReplaySuffix(existing: string, incoming: string): strin
  * TWICE at the bottom of the canvas. User text is therefore the fallback
  * identity — same content on the snapshot means the row is already there.
  */
-export function dropSnapshotDuplicates<T extends { id?: string; role?: string; parts?: InFlightPart[] }>(
+export function dropSnapshotDuplicates<T extends { id?: string; clientInputId?: string; role?: string; parts?: InFlightPart[] }>(
   snapshot: T[],
   tail: T[],
 ): T[] {
-  const ids = new Set(snapshot.map((m) => m.id).filter((value): value is string => !!value));
+  const ids = new Set<string>();
+  for (const m of snapshot) {
+    if (m.id) ids.add(m.id);
+    if (m.clientInputId) ids.add(m.clientInputId);
+  }
   return tail.filter((m) => {
     if (m.id && ids.has(m.id)) return false;
+    if (m.clientInputId && ids.has(m.clientInputId)) return false;
     if (m.role !== 'user') return true;
     const text = m.parts?.filter((part) => part.kind === 'text').map((part) => part.text || '').join('') ?? '';
     return !text || !userMessageAlreadyOnCanvas(snapshot as unknown as CanvasMessage[], text);
@@ -927,6 +807,30 @@ export function shouldKeepCachedTranscript(input: {
   return input.cacheInFlight || input.cacheLen >= input.diskLen;
 }
 
+/**
+ * 切到一个**新会话**（sessionId === null 的草稿态）时，画布该不该清空。
+ *
+ * 关键场景：在旧会话发完消息立刻点「新建会话」。此时旧会话的回合还在跑，
+ * 画布上就是那一轮的乐观提问 + Working。旧实现用目标 sessionId 判活跃，
+ * sessionId 为 null 时恒为 false → 直接清屏，表现成“老会话记录被清空，
+ * 只剩用户气泡和 Working”；刷新后又从磁盘恢复。
+ * 活跃判定必须看**来源会话**（prevId），不是看即将进入的新会话。
+ */
+export function shouldClearCanvasOnSwitch(input: {
+  targetSessionId: string | null;
+  sourceSessionId: string | null;
+  canvasLen: number;
+  sourceActive: boolean;
+}): boolean {
+  if (input.canvasLen <= 0) return false;
+  // 新建会话（草稿态）必须是**空白 landing 页**：landing 判定是 messages.length === 0，
+  // 保留旧画布会让新会话直接显示上一会话的记录。
+  // 旧会话的在途记录不靠“留着画布”保存，而是在切走前已经写入它自己的缓存
+  // （`messageCacheRef.set(prevId, cached)`），回来时原样恢复。
+  if (!input.targetSessionId) return true;
+  return !input.sourceActive;
+}
+
 /** This tab started the turn or is attached to its live stream. */
 export function thisTabOwnsTurn(input: {
   isLiveSession: boolean;
@@ -952,11 +856,14 @@ function collapseWs(value: string): string {
 
 export function isWatchTurnActivationEvent(type: string): boolean {
   switch (type) {
+    case 'steered':
+    case 'user_identified':
     case 'text':
     case 'reasoning':
     case 'tool_start':
     case 'tool_output':
     case 'tool_progress':
+    case 'tool_finished':
     case 'tool_result':
     case 'permission_request':
     case 'user_input_request':

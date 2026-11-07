@@ -228,6 +228,7 @@ async fn unsupported_snapshot_version_errors_and_starts_empty() {
         version: 9999,
         messages: vec![Message::system("should be ignored"), Message::user("ghost")],
         cache_epoch: 0,
+        model: None,
         turn_counter: 0,
         request_counter: 0,
     };
@@ -427,6 +428,7 @@ async fn unsupported_snapshot_fallback_seeds_persona_like_fresh() {
         version: 9999,
         messages: vec![Message::user("ghost")],
         cache_epoch: 0,
+        model: None,
         turn_counter: 0,
         request_counter: 0,
     };

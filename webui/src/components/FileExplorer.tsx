@@ -265,7 +265,7 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
       const res = await fetchFsTree(rootPath);
       const currentTree = treeRef.current;
 
-      const syncNodes = async (entries: FsEntry[], oldNodes: TreeNode[]): Promise<TreeNode[]> => {
+      const syncNodes = async (entries: FsEntry[], oldNodes: TreeNode[], parentIgnored = false): Promise<TreeNode[]> => {
         const result: TreeNode[] = [];
         for (const e of entries) {
           const old = oldNodes.find((n) => n.path === e.path);
@@ -273,10 +273,17 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
           let children = old?.children;
           let loaded = Boolean(old?.loaded);
 
+          const isBuiltinIgnored = e.name === 'target' || e.name === 'node_modules' || e.name === 'dist' || e.name.startsWith('.');
+          const isIgnored = e.is_ignored === true
+            ? true
+            : e.is_ignored === false
+              ? false
+              : (parentIgnored || isBuiltinIgnored);
+
           if (e.is_dir && isExpanded) {
             try {
               const subRes = await fetchFsTree(e.path);
-              children = await syncNodes(subRes.entries, old?.children || []);
+              children = await syncNodes(subRes.entries, old?.children || [], isIgnored);
               loaded = true;
             } catch {}
           }
@@ -289,7 +296,7 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
             loading: false,
             children: e.is_dir ? (children || []) : undefined,
             loaded,
-            is_ignored: e.is_ignored ?? (e.name === 'target' || e.name === 'node_modules' || e.name === 'dist' || e.name.startsWith('.')),
+            is_ignored: isIgnored,
           });
         }
         return result;
@@ -305,29 +312,38 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
     }
   }, [rootPath]);
 
-  // 对齐 Git 面板：监听窗口回焦 (focus)、页面可见性恢复 (visibilitychange)、Agent 写文件完成 (jeikcode:worktree_touch)
+  // 对齐 Git 面板：监听窗口回焦 (focus)、页面可见性恢复 (visibilitychange)、Agent 写文件完成 (jeikcode:worktree_touch)、.gitignore 变动 (jeikcode:gitignore_touch)
   useEffect(() => {
     let timer: number | null = null;
-    const scheduleRefresh = () => {
+    const scheduleRefresh = (forceCleanCache = false) => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
       if (timer !== null) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = null;
+        if (forceCleanCache) {
+          setCachedTree(rootPath, []);
+          void saveCachedDirectoryTree(rootPath, []);
+        }
         void refreshTree(true);
-      }, 500); // 500ms 动态防抖排队
+      }, forceCleanCache ? 200 : 500); // 针对 gitignore 变更给予 200ms 高优先级刷新
     };
 
-    window.addEventListener('focus', scheduleRefresh);
-    document.addEventListener('visibilitychange', scheduleRefresh);
-    window.addEventListener('jeikcode:worktree_touch', scheduleRefresh);
+    const onWorktreeOrFocus = () => scheduleRefresh(false);
+    const onGitIgnoreTouch = () => scheduleRefresh(true);
+
+    window.addEventListener('focus', onWorktreeOrFocus);
+    document.addEventListener('visibilitychange', onWorktreeOrFocus);
+    window.addEventListener('jeikcode:worktree_touch', onWorktreeOrFocus);
+    window.addEventListener('jeikcode:gitignore_touch', onGitIgnoreTouch);
 
     return () => {
       if (timer !== null) window.clearTimeout(timer);
-      window.removeEventListener('focus', scheduleRefresh);
-      document.removeEventListener('visibilitychange', scheduleRefresh);
-      window.removeEventListener('jeikcode:worktree_touch', scheduleRefresh);
+      window.removeEventListener('focus', onWorktreeOrFocus);
+      document.removeEventListener('visibilitychange', onWorktreeOrFocus);
+      window.removeEventListener('jeikcode:worktree_touch', onWorktreeOrFocus);
+      window.removeEventListener('jeikcode:gitignore_touch', onGitIgnoreTouch);
     };
-  }, [refreshTree]);
+  }, [refreshTree, rootPath]);
 
   // 加载根目录
   const loadRoot = useCallback(async (force = false) => {
@@ -459,6 +475,7 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
     const nextTree = [...tree];
     setTree(nextTree);
     setCachedTree(rootPath, nextTree);
+    void saveCachedDirectoryTree(rootPath, nextTree);
   };
 
   const revealAndExpandToPath = useCallback(
@@ -859,7 +876,11 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
             <button
               type="button"
               class="explorer-mode-btn"
-              onClick={() => void loadRoot(true)}
+              onClick={() => {
+                setCachedTree(rootPath, []);
+                void saveCachedDirectoryTree(rootPath, []);
+                void loadRoot(true);
+              }}
               title="刷新文件树"
             >
               🔄

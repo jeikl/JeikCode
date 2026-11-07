@@ -87,6 +87,19 @@ pub enum AgentCommand {
         #[serde(default)]
         images: Vec<ImageContent>,
     },
+    /// Same execution path as [`SendMessage`], but the stored user message keeps
+    /// the caller-minted identity (`message_id`). ADDITIVE: drivers that do not
+    /// need cross-end identity keep sending `SendMessage` unchanged.
+    ///
+    /// `Conversation::push` only assigns an id when the message has none, so the
+    /// id supplied here survives into the snapshot, the display transcript and
+    /// the wire — that is the whole point of the contract.
+    SendMessageWithId {
+        text: String,
+        #[serde(default)]
+        images: Vec<ImageContent>,
+        message_id: String,
+    },
     /// One real user prompt with host-owned synthetic context prepended to the
     /// SAME turn. The context is stored as `Message::synthetic_user`, then the
     /// real prompt is stored normally; one command therefore has one turn and one
@@ -126,6 +139,10 @@ pub enum AgentCommand {
     CancelSteer {
         #[serde(default)]
         text: Option<String>,
+        /// Stable client identity. When present it wins over `text`; text
+        /// fallback is kept for older clients that only send the message.
+        #[serde(default)]
+        message_id: Option<String>,
     },
     Shutdown,
 }
@@ -209,6 +226,16 @@ pub enum AgentEvent {
     ToolProgress {
         call_id: String,
         message: String,
+    },
+    /// This call's EXECUTION returned (its Phase ② future resolved) — emitted the
+    /// moment it happens, per call, so a driver can settle that row while a SLOW
+    /// sibling in the same concurrent batch is still running. Purely
+    /// observational: the AUTHORITATIVE [`AgentEvent::ToolResult`] (post
+    /// `after`-middleware chain + size cap, and the only carrier of the result
+    /// content) still follows in batch emission order. A driver may ignore it.
+    ToolFinished {
+        call_id: String,
+        is_error: bool,
     },
     ToolResult {
         result: ToolResult,

@@ -140,7 +140,7 @@ pub struct CodingAgentConfig {
     pub timeouts: jeikcode_kernel::timeouts::TimeoutPolicy,
     /// How many times the round is re-issued after a first-token timeout.
     /// Config `[coding] first_token_timeout_retries`; env
-    /// `JEIKCODE_FIRST_TOKEN_RETRIES` wins. Default 3.
+    /// `JEIKCODE_FIRST_TOKEN_RETRIES` wins. Default 6.
     pub first_token_timeout_retries: u32,
     /// Liveness: max wait for a driver approval response before it degrades to deny.
     /// `Some(d)` ⇒ fail-closed after `d` — for HEADLESS / no-human drivers where a never-
@@ -792,7 +792,7 @@ impl CodingAgentConfig {
             working_dir: working_dir.into(),
             context_window: 128_000,
             timeouts: TimeoutPolicy::production(),
-            first_token_timeout_retries: 3,
+            first_token_timeout_retries: 6,
             request_timeout: Some(Duration::from_secs(300)),
             max_continuations: 50,
             max_rounds: default_turn_max_rounds(),

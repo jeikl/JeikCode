@@ -14,10 +14,11 @@ RUN useradd -r -s /bin/bash jeikcode
 
 WORKDIR /home/jeikcode
 
-# Copy pre-built Linux binaries from dist directory
-COPY dist/v*/jeikcode-daemon-*-linux-x64 /tmp/jeikcode-daemon
+# Copy the pre-built Linux binary (path supplied via --build-arg)
+ARG JEIKCODE_DAEMON_BIN
+COPY ${JEIKCODE_DAEMON_BIN} /tmp/jeikcode-daemon
 
-# Install binaries
+# Install binary
 RUN chmod +x /tmp/jeikcode-daemon && \
     mv /tmp/jeikcode-daemon /usr/local/bin/jeikcode-daemon
 

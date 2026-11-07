@@ -217,15 +217,10 @@ struct ParsedHttpAuth {
 
 /// Load and merge MCP configurations from project and user levels.
 ///
-/// Project config (`.mcp.json` in project root) overrides user config
-/// (`JEIKCODE_HOME/mcp.json`) for a server's DEFINITION (command/url) when both
-/// name it. The DISABLED state is a UNION across scopes: a server is disabled when
-/// EITHER scope disables it (GLOBAL = master switch, PROJECT = per-project switch),
-/// matching the unified capability UI ([`crate::control`]).
-pub fn load_mcp_config(project_dir: &Path) -> Result<Vec<McpServerConfig>> {
-    // Names disabled at EITHER scope. Scan the RAW files so a disabled-only marker
-    // (`{ "disabled": true }`, which `load_config_file` skips as a non-server) still
-    // registers as a disable.
+/// Load all configured MCP servers from project and user levels, including disabled servers.
+///
+/// Disabled status reflects union across scopes (disabled at either scope ⇒ `disabled: true`).
+pub fn load_all_mcp_configs(project_dir: &Path) -> Result<Vec<McpServerConfig>> {
     let mut disabled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for path in [
         crate::mcp::util::config_dir().join("mcp.json"),
@@ -246,7 +241,6 @@ pub fn load_mcp_config(project_dir: &Path) -> Result<Vec<McpServerConfig>> {
     let project_config =
         load_config_file(&project_dir.join(".mcp.json"), McpConfigSource::Project)?;
 
-    // Merge: project overrides user (definition precedence only).
     let mut merged: BTreeMap<String, McpServerConfig> = BTreeMap::new();
 
     for config in user_config {
@@ -259,7 +253,26 @@ pub fn load_mcp_config(project_dir: &Path) -> Result<Vec<McpServerConfig>> {
 
     Ok(merged
         .into_values()
-        .filter(|c| !disabled.contains(&c.name))
+        .map(|mut c| {
+            if disabled.contains(&c.name) {
+                c.disabled = true;
+            }
+            c
+        })
+        .collect())
+}
+
+/// Load and merge MCP configurations from project and user levels, filtering out disabled servers.
+///
+/// Project config (`.mcp.json` in project root) overrides user config
+/// (`JEIKCODE_HOME/mcp.json`) for a server's DEFINITION (command/url) when both
+/// name it. The DISABLED state is a UNION across scopes: a server is disabled when
+/// EITHER scope disables it (GLOBAL = master switch, PROJECT = per-project switch),
+/// matching the unified capability UI ([`crate::control`]).
+pub fn load_mcp_config(project_dir: &Path) -> Result<Vec<McpServerConfig>> {
+    Ok(load_all_mcp_configs(project_dir)?
+        .into_iter()
+        .filter(|c| !c.disabled)
         .collect())
 }
 
@@ -355,6 +368,9 @@ fn has_json_comments(text: &str) -> bool {
 fn read_json_for_rewrite(path: &Path) -> Result<Value> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read MCP config from {}", path.display()))?;
+    if text.trim().is_empty() {
+        return Ok(json!({}));
+    }
     if has_json_comments(&text) {
         bail!(
             "{} contains comments, and rewriting it would delete them. \
@@ -531,9 +547,26 @@ pub fn merge_stdio_mcp_server_into_json_file(
     program: &str,
     args: &[String],
 ) -> Result<()> {
+    merge_stdio_mcp_server_with_options_into_json_file(
+        path, server_key, program, args, None, None, None,
+    )
+}
+
+/// Add or replace a **stdio** MCP server entry with optional env, trust, and autoApprove settings.
+pub fn merge_stdio_mcp_server_with_options_into_json_file(
+    path: &Path,
+    server_key: &str,
+    program: &str,
+    args: &[String],
+    env: Option<&BTreeMap<String, String>>,
+    trust: Option<bool>,
+    auto_approve: Option<&[String]>,
+) -> Result<()> {
+    let server_key = server_key.trim();
     if server_key.is_empty() {
         bail!("MCP server name must not be empty");
     }
+    let program = program.trim();
     if program.is_empty() {
         bail!("command must not be empty");
     }
@@ -549,11 +582,33 @@ pub fn merge_stdio_mcp_server_into_json_file(
         .ok_or_else(|| anyhow::anyhow!("MCP config root must be a JSON object"))?;
 
     let mut servers = collect_merged_mcp_server_maps(root_obj);
-    let entry = json!({
-        "command": program,
-        "args": args,
-    });
-    servers.insert(server_key.to_string(), entry);
+    let mut entry_map = Map::new();
+    entry_map.insert("command".to_string(), Value::String(program.to_string()));
+    entry_map.insert(
+        "args".to_string(),
+        Value::Array(args.iter().map(|s| Value::String(s.clone())).collect()),
+    );
+    if let Some(env_map) = env {
+        if !env_map.is_empty() {
+            let mut env_obj = Map::new();
+            for (k, v) in env_map {
+                env_obj.insert(k.clone(), Value::String(v.clone()));
+            }
+            entry_map.insert("env".to_string(), Value::Object(env_obj));
+        }
+    }
+    if let Some(t) = trust {
+        entry_map.insert("trust".to_string(), Value::Bool(t));
+    }
+    if let Some(aa) = auto_approve {
+        if !aa.is_empty() {
+            entry_map.insert(
+                "autoApprove".to_string(),
+                Value::Array(aa.iter().map(|s| Value::String(s.clone())).collect()),
+            );
+        }
+    }
+    servers.insert(server_key.to_string(), Value::Object(entry_map));
     root_obj.insert("mcpServers".to_string(), Value::Object(servers));
     root_obj.remove("servers");
 
@@ -572,6 +627,122 @@ pub fn merge_stdio_mcp_server_into_json_file(
     Ok(())
 }
 
+/// Add or replace an **HTTP / SSE** MCP server entry in a JSON config file (`.mcp.json` or `$JEIKCODE_HOME/mcp.json`).
+///
+/// Merges existing `servers` and `mcpServers` maps, then writes a single `mcpServers` object (drops the legacy
+/// `servers` key). Other top-level JSON keys are preserved.
+pub fn merge_http_mcp_server_into_json_file(
+    path: &Path,
+    server_key: &str,
+    url: &str,
+    headers: Option<&BTreeMap<String, String>>,
+) -> Result<()> {
+    merge_http_mcp_server_with_options_into_json_file(path, server_key, url, headers, None, None)
+}
+
+/// Add or replace an **HTTP / SSE** MCP server entry with optional trust and autoApprove settings.
+pub fn merge_http_mcp_server_with_options_into_json_file(
+    path: &Path,
+    server_key: &str,
+    url: &str,
+    headers: Option<&BTreeMap<String, String>>,
+    trust: Option<bool>,
+    auto_approve: Option<&[String]>,
+) -> Result<()> {
+    let server_key = server_key.trim();
+    if server_key.is_empty() {
+        bail!("MCP server name must not be empty");
+    }
+    let url = url.trim();
+    if url.is_empty() {
+        bail!("url must not be empty");
+    }
+
+    let mut root: Value = if path.exists() {
+        read_json_for_rewrite(path)?
+    } else {
+        json!({})
+    };
+
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("MCP config root must be a JSON object"))?;
+
+    let mut servers = collect_merged_mcp_server_maps(root_obj);
+    let mut entry_map = Map::new();
+    entry_map.insert("url".to_string(), Value::String(url.to_string()));
+    if let Some(hdrs) = headers {
+        if !hdrs.is_empty() {
+            let mut hdr_obj = Map::new();
+            for (k, v) in hdrs {
+                hdr_obj.insert(k.clone(), Value::String(v.clone()));
+            }
+            entry_map.insert("headers".to_string(), Value::Object(hdr_obj));
+        }
+    }
+    if let Some(t) = trust {
+        entry_map.insert("trust".to_string(), Value::Bool(t));
+    }
+    if let Some(aa) = auto_approve {
+        if !aa.is_empty() {
+            entry_map.insert(
+                "autoApprove".to_string(),
+                Value::Array(aa.iter().map(|s| Value::String(s.clone())).collect()),
+            );
+        }
+    }
+    servers.insert(server_key.to_string(), Value::Object(entry_map));
+    root_obj.insert("mcpServers".to_string(), Value::Object(servers));
+    root_obj.remove("servers");
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory for {}", path.display())
+            })?;
+        }
+    }
+
+    let pretty = serde_json::to_string_pretty(&root).context("Failed to serialize MCP config")?;
+    std::fs::write(path, format!("{pretty}\n"))
+        .with_context(|| format!("Failed to write MCP config to {}", path.display()))?;
+    Ok(())
+}
+
+/// Remove an MCP server entry by name from a JSON config file (`.mcp.json` or `$JEIKCODE_HOME/mcp.json`).
+///
+/// Returns `Ok(true)` if the server was found and removed, or `Ok(false)` if the file does not exist
+/// or the server was not present. Legacy `servers` keys are merged and rewritten to `mcpServers`.
+pub fn remove_mcp_server_from_json_file(path: &Path, server_key: &str) -> Result<bool> {
+    let server_key = server_key.trim();
+    if server_key.is_empty() {
+        bail!("MCP server name must not be empty");
+    }
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let mut root: Value = read_json_for_rewrite(path)?;
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("MCP config root must be a JSON object"))?;
+
+    let mut servers = collect_merged_mcp_server_maps(root_obj);
+    let removed = servers.remove(server_key).is_some();
+    if !removed {
+        return Ok(false);
+    }
+
+    root_obj.insert("mcpServers".to_string(), Value::Object(servers));
+    root_obj.remove("servers");
+
+    let text = serde_json::to_string_pretty(&root).context("Failed to serialize MCP config")?;
+    std::fs::write(path, format!("{text}\n"))
+        .with_context(|| format!("Failed to write MCP config to {}", path.display()))?;
+
+    Ok(true)
+}
+
 /// Add or replace an **HTTP OAuth** MCP server entry in a JSON config file.
 pub fn merge_http_oauth_mcp_server_into_json_file(
     path: &Path,
@@ -579,12 +750,15 @@ pub fn merge_http_oauth_mcp_server_into_json_file(
     url: &str,
     provider: &str,
 ) -> Result<()> {
+    let server_key = server_key.trim();
     if server_key.is_empty() {
         bail!("MCP server name must not be empty");
     }
+    let url = url.trim();
     if url.is_empty() {
         bail!("url must not be empty");
     }
+    let provider = provider.trim();
     if provider.is_empty() {
         bail!("provider must not be empty");
     }
@@ -785,7 +959,7 @@ pub struct McpServerState {
 
 /// Read a config file's merged `mcpServers`/`servers` map (comments tolerated; a
 /// missing or malformed file reads as empty rather than erroring a UI listing).
-fn read_raw_servers(path: &Path) -> Map<String, Value> {
+pub fn read_raw_servers(path: &Path) -> Map<String, Value> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Map::new();
     };
@@ -1574,5 +1748,167 @@ mod capability_tests {
         let configs = load_config_file(&dir.path().join(".mcp.json"), McpConfigSource::Project)
             .expect("a disabled-only marker must not fail the file");
         assert!(configs.is_empty(), "marker contributes no enabled server");
+    }
+
+    #[test]
+    fn merge_http_creates_and_updates_mcp_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+
+        // 1. Initial creation
+        let mut headers = BTreeMap::new();
+        headers.insert("Authorization".to_string(), "Bearer test-key".to_string());
+        merge_http_mcp_server_into_json_file(
+            &path,
+            "remote-fetch",
+            "https://mcp.example.com/sse",
+            Some(&headers),
+        )
+        .unwrap();
+
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let srv = &raw["mcpServers"]["remote-fetch"];
+        assert_eq!(srv["url"], "https://mcp.example.com/sse");
+        assert_eq!(srv["headers"]["Authorization"], "Bearer test-key");
+
+        // 2. Options variant with trust and autoApprove
+        merge_http_mcp_server_with_options_into_json_file(
+            &path,
+            "trusted-api",
+            "https://api.example.com",
+            None,
+            Some(true),
+            Some(&["query".to_string()]),
+        )
+        .unwrap();
+
+        let raw2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw2["mcpServers"]["remote-fetch"]["url"],
+            "https://mcp.example.com/sse"
+        );
+        assert_eq!(
+            raw2["mcpServers"]["trusted-api"]["url"],
+            "https://api.example.com"
+        );
+        assert_eq!(raw2["mcpServers"]["trusted-api"]["trust"], true);
+        assert_eq!(raw2["mcpServers"]["trusted-api"]["autoApprove"][0], "query");
+
+        // 3. Validation
+        assert!(merge_http_mcp_server_into_json_file(&path, "", "https://a.com", None).is_err());
+        assert!(merge_http_mcp_server_into_json_file(&path, "a", "", None).is_err());
+    }
+
+    #[test]
+    fn remove_mcp_server_removes_from_mcp_servers_and_legacy_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+
+        // File does not exist yet -> returns Ok(false)
+        assert!(!remove_mcp_server_from_json_file(&path, "srv1").unwrap());
+
+        // Create file with both legacy `servers` and modern `mcpServers`
+        std::fs::write(
+            &path,
+            r#"{
+                "servers": {
+                    "legacy_srv": { "command": "python", "args": [] }
+                },
+                "mcpServers": {
+                    "modern_srv": { "command": "node", "args": [] },
+                    "keep_me": { "url": "https://example.com" }
+                },
+                "other_field": 123
+            }"#,
+        )
+        .unwrap();
+
+        // 1. Remove modern server
+        assert!(remove_mcp_server_from_json_file(&path, "modern_srv").unwrap());
+
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            raw.get("servers").is_none(),
+            "legacy servers key should be collapsed"
+        );
+        assert!(raw["mcpServers"].get("modern_srv").is_none());
+        assert!(
+            raw["mcpServers"].get("legacy_srv").is_some(),
+            "legacy server preserved in mcpServers"
+        );
+        assert!(raw["mcpServers"].get("keep_me").is_some());
+        assert_eq!(raw["other_field"], 123, "top level fields preserved");
+
+        // 2. Remove legacy server
+        assert!(remove_mcp_server_from_json_file(&path, "legacy_srv").unwrap());
+        let raw2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(raw2["mcpServers"].get("legacy_srv").is_none());
+        assert!(raw2["mcpServers"].get("keep_me").is_some());
+
+        // 3. Remove non-existent server -> returns Ok(false)
+        assert!(!remove_mcp_server_from_json_file(&path, "not_there").unwrap());
+
+        // 4. Empty name validation
+        assert!(remove_mcp_server_from_json_file(&path, "").is_err());
+        assert!(remove_mcp_server_from_json_file(&path, "   ").is_err());
+    }
+
+    #[test]
+    fn merge_into_empty_file_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".mcp.json");
+
+        // 0-byte file (e.g. created by `touch`)
+        std::fs::write(&path, "").unwrap();
+
+        // 1. merge_stdio on empty file
+        merge_stdio_mcp_server_into_json_file(&path, "local", "python", &[]).unwrap();
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["mcpServers"]["local"]["command"], "python");
+
+        // 2. merge_http on existing file
+        merge_http_mcp_server_into_json_file(&path, "remote", "https://example.com/sse", None)
+            .unwrap();
+        let raw2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw2["mcpServers"]["remote"]["url"],
+            "https://example.com/sse"
+        );
+
+        // 3. remove on 0-byte file returns Ok(false)
+        let empty_path = dir.path().join("empty.json");
+        std::fs::write(&empty_path, "   \n").unwrap();
+        assert!(!remove_mcp_server_from_json_file(&empty_path, "any").unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_all_mcp_configs_preserves_disabled_status() {
+        let config = tempfile::tempdir().unwrap();
+        let _home = jeikcode_config::test_util::IsolatedHome::at(config.path());
+        let dir = tempfile::tempdir().unwrap();
+        let proj_mcp = dir.path().join(".mcp.json");
+        std::fs::write(
+            &proj_mcp,
+            r#"{
+                "mcpServers": {
+                    "enabled_srv": { "command": "python", "args": [] },
+                    "disabled_srv": { "command": "node", "args": [], "disabled": true }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let all = load_all_mcp_configs(dir.path()).unwrap();
+        let enabled = all.iter().find(|s| s.name == "enabled_srv").unwrap();
+        assert!(!enabled.disabled);
+
+        let disabled = all.iter().find(|s| s.name == "disabled_srv").unwrap();
+        assert!(disabled.disabled);
+
+        // load_mcp_config filters out disabled
+        let filtered = load_mcp_config(dir.path()).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "enabled_srv");
     }
 }

@@ -130,7 +130,7 @@ mode = "follow_system"          # Proxy mode: "follow_system" (default) | "defau
 
 ```toml
 # Top-level scalar configurations (MUST precede all [table] sections)
-keep_interrupted_context = true # Preserve generated context upon Ctrl+C interruption for seamless continuation
+keep_interrupted_context = true # Preserve generated context upon Ctrl+C interruption for seamless continuation (always on for WebUI/HTTP turns)
 
 [ui]
 theme = "auto"                  # Terminal theme: "auto" | "dark" | "light"

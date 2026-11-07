@@ -4,6 +4,7 @@ import { AuthExpiredDialog } from './components/AuthExpiredDialog';
 import { SettingsProvider } from './settings';
 import { ensureRandomUUIDPolyfill } from './lib/randomId';
 import { initPageZoom, initEditorFontSize } from './lib/pageZoom';
+import { installViewportSync } from './lib/viewport';
 // Bundled serif for the landing greeting (close to claude.ai's display serif).
 import '@fontsource/source-serif-4/400.css';
 import '@fontsource/source-serif-4/500.css';
@@ -22,6 +23,14 @@ if (typeof window !== 'undefined') {
   window.addEventListener('vite:preloadError', () => {
     window.location.reload();
   });
+
+  // Preact Suspense 用“抛出 Promise”作为控制流。若 lazy 组件在边界重试时
+  // 再次抛出 pending Promise，浏览器会把它记为 unhandled rejection；它既不是
+  // Error 也不是业务失败。这里只吞掉 Promise 类型的原因，真实 chunk 加载错误
+  // （Error）仍然会走上面的 vite:preloadError。
+  window.addEventListener('unhandledrejection', (event) => {
+    if (event.reason instanceof Promise) event.preventDefault();
+  });
 }
 
 // http://LAN-IP (jeikcode serve remote clients) is not a secure context —
@@ -32,6 +41,8 @@ ensureRandomUUIDPolyfill();
 initPageZoom();
 // 初始化代码编辑/预览全局字号
 initEditorFontSize();
+// 同步移动端可视视口：软键盘收起后不残留底部黑边 / 顶部裁切
+installViewportSync();
 
 render(
   <SettingsProvider>

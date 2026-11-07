@@ -6,19 +6,41 @@ import {
   canvasHistoryHead,
   dedupeTurnOutline,
   filterTurnNavItems,
+  fullerOutline,
   hasOlderVisibleMessages,
   historyCursorFor,
   mergeServerWithLocalOutline,
   remainingUnloadedTurns,
+  canvasAtVeryBeginning,
   resolveActiveTurnId,
   turnNavId,
   turnNavScrollTop,
   visibleOlderRemainingCount,
 } from './turnNav.ts';
 
-test('turnNavId is stable per user-turn ordinal', () => {
-  assert.equal(turnNavId(3), 'turn-nav-3');
+test('turnNavId prefers the persisted message id and falls back to index', () => {
+  assert.equal(turnNavId(undefined, 3), 'turn-nav-3');
+  assert.equal(turnNavId('m-abc', 3), 'turn-nav-m-abc');
 });
+
+test('persisted outline index wins over a provisional pending index', () => {
+  const serverFirst = dedupeTurnOutline([
+    { index: 10, id: 'm1', label: 'Q', pending: false },
+    { index: 9, id: 'm1', label: 'Q', pending: true },
+  ]);
+  assert.equal(serverFirst.length, 1);
+  assert.equal(serverFirst[0]!.index, 10);
+  assert.equal(serverFirst[0]!.pending, false);
+
+  const pendingFirst = dedupeTurnOutline([
+    { index: 9, id: 'm1', label: 'Q', pending: true },
+    { index: 10, id: 'm1', label: 'Q', pending: false },
+  ]);
+  assert.equal(pendingFirst.length, 1);
+  assert.equal(pendingFirst[0]!.index, 10);
+  assert.equal(pendingFirst[0]!.pending, false);
+});
+
 
 // 右栏死链的根因回归：画布被权威尾部对账裁回窗口后，分页游标必须跟着画布头部走。
 // 真实会话（1918 行 / 110 个提问）：用户点开过更早历史（游标=6），随后一次终态
@@ -73,12 +95,12 @@ test('capped outline labels keep distinct long questions', () => {
   ]);
   assert.equal(out.length, 2);
 
-  // Full (uncapped) duplicates still fold as before.
+  // Full (uncapped) same-text questions with distinct indices are two real turns.
   const full = dedupeTurnOutline([
     { index: 0, text: 'same question' },
     { index: 1, text: 'same question' },
   ]);
-  assert.equal(full.length, 1);
+  assert.equal(full.length, 2);
 });
 
 test('buildTurnNavItems keeps user questions in order and skips empty/system', () => {
@@ -183,6 +205,19 @@ test('outline ids do not shift when failed turns insert diagnostic rows', () => 
       { id: 'turn-nav-15', ordinal: 6, index: 15 },
     ],
   );
+});
+
+test('fullerOutline never lets a tail-window cache replace a complete rail', () => {
+  const complete = Array.from({ length: 30 }, (_, i) => ({
+    index: i * 10,
+    label: `q${i}`,
+    ordinal: i,
+  }));
+  const tail = complete.slice(-2);
+  assert.equal(fullerOutline(tail, complete), complete);
+  assert.equal(fullerOutline(complete, tail), complete);
+  assert.deepEqual(fullerOutline([], complete), complete);
+  assert.deepEqual(fullerOutline(complete, []), complete);
 });
 
 test('outline and message fallback agree on the anchor id for the same absolute index', () => {
@@ -290,23 +325,53 @@ test('remainingUnloadedTurns counts questions, not raw tool rows', () => {
   assert.equal(remainingUnloadedTurns([], messages), 0);
 });
 
-test('dedupeTurnOutline cleans duplicate trailing questions from optimistic echo races', () => {
-  // 真实复现截图中的大纲末尾重复条目：
+test('buildTurnNavItemsFromOutline keeps pending input rows with their seq', () => {
+  const items = buildTurnNavItemsFromOutline([
+    { index: 10, id: 'i-1', label: '中途转向', pending: true, seq: 7 },
+    { index: 11, id: 'm-1', label: '已落盘提问' },
+  ]);
+  assert.equal(items[0]?.pending, true);
+  assert.equal(items[0]?.seq, 7);
+  assert.equal(items[1]?.pending, undefined);
+});
+
+test('dedupeTurnOutline never merges two different ids that share a provisional index', () => {
+  // A provisional/outline index is a coordinate, not an identity. Two real
+  // questions can collide on an index while a page is being reconciled.
+  const out = dedupeTurnOutline([
+    { index: 69, id: 'u-provisional', label: '最新提问' },
+    { index: 69, id: 'u-old', label: '第 69 行的旧提问' },
+  ]);
+  assert.equal(out.length, 2, 'different ids are different questions even at the same index');
+  assert.deepEqual(out.map((t) => t.id).sort(), ['u-old', 'u-provisional']);
+});
+
+test('dedupeTurnOutline folds the same id even when provisional and flushed indexes differ', () => {
+  const out = dedupeTurnOutline([
+    { index: 69, id: 'u-1', label: '最新提问' },
+    { index: 1857, id: 'u-1', label: '最新提问（完整版）' },
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]?.id, 'u-1');
+  assert.ok(out[0]?.label.includes('完整版'), 'the richer label wins');
+});
+
+test('dedupeTurnOutline folds duplicate ids and keeps the richer label', () => {
   const dirtyTurns = [
-    { ordinal: 42, index: 1179, text: '现在还有个问题 就是点击会话的时候 会话比较长的时候速度很慢' },
-    { ordinal: 43, index: 1198, text: '<user-query> 要对比延迟数据测试方案对比 看看怎' },
-    { ordinal: 44, index: 1211, text: '<user-query> 直接找几个大历史列表的sessio' },
-    { ordinal: 45, index: 1217, text: '现在还有个问题 就是点击会话的时候 会话比较长的时候速度很慢' },
-    { ordinal: 46, index: 1218, text: '要对比延迟数据测试方案对比 看看怎么保证我们状态一致性的情况' },
-    { ordinal: 47, index: 1220, text: '直接找几个大历史列表的session之间的来回切换 对照试验' },
+    { id: 'q1', ordinal: 42, index: 1179, label: '现在还有个问题 就是点击会话的时候 会话比较长的时候速度很慢' },
+    { id: 'q2', ordinal: 43, index: 1198, label: '<user-query> 要对比延迟数据测试方案对比 看看怎' },
+    { id: 'q3', ordinal: 44, index: 1211, label: '<user-query> 直接找几个大历史列表的sessio' },
+    { id: 'q1', ordinal: 45, index: 1217, label: '现在还有个问题 就是点击会话的时候 会话比较长的时候速度很慢' },
+    { id: 'q2', ordinal: 46, index: 1218, label: '要对比延迟数据测试方案对比 看看怎么保证我们状态一致性的情况' },
+    { id: 'q3', ordinal: 47, index: 1220, label: '直接找几个大历史列表的session之间的来回切换 对照试验' },
   ];
 
   const deduped = dedupeTurnOutline(dirtyTurns);
-  assert.equal(deduped.length, 3, '重复条目必须被彻底去重，由 6 条变为 3 条');
+  assert.equal(deduped.length, 3, '同一 id 必须去重，由 6 条变为 3 条');
   assert.equal(deduped[0].index, 1179);
   assert.equal(deduped[1].index, 1198);
   assert.equal(deduped[2].index, 1211);
-  assert.ok(deduped[1].text.includes('状态一致性'), '被截断的 steer 提问应自动升级为完整文本');
+  assert.ok(deduped[1].label.includes('状态一致性'), '被截断的 steer 提问应自动升级为完整文本');
 });
 
 test('mergeServerWithLocalOutline 保护在途/尚未落盘的最新用户提问不被覆盖丢失', () => {
@@ -324,4 +389,45 @@ test('mergeServerWithLocalOutline 保护在途/尚未落盘的最新用户提问
   assert.equal(merged.length, 3, '最新提问必须保留');
   assert.equal(merged[2]?.label, '你重启了网关jeikclaw吗');
   assert.equal(merged[2]?.index, 32);
+});
+
+test('mergeServerWithLocalOutline 按 id 合并错位下标，避免同一提问双写', () => {
+  // 运行中服务端注入的临时大纲下标可能还没对齐；只要 id 相同就是同一条。
+  const server = [{ index: 81, id: 'u-1', label: '第一问' }];
+  const local = [{ index: 82, id: 'u-1', label: '第一问' }];
+  const merged = mergeServerWithLocalOutline(server, local);
+  assert.equal(merged.length, 1, '同一 id 不得因为 index 不同而保留两份');
+  assert.equal(merged[0]?.index, 81, '保留服务端的权威下标');
+});
+
+test('mergeServerWithLocalOutline 不把同文案的不同 id 误并', () => {
+  const server = [{ index: 81, id: 'u-1', label: '继续' }];
+  const local = [{ index: 90, id: 'u-2', label: '继续' }];
+  const merged = mergeServerWithLocalOutline(server, local);
+  assert.equal(merged.length, 2, '两次真实的「继续」是两个提问');
+});
+
+test('刷新后本地大纲为空时，服务端 pending steer 仍必须保留', () => {
+  // /sessions 会把 durable admitted/promoted steer 作为 pending 大纲行返回；
+  // 缓存丢失/版本变化时，冷启动绝不能把它整份替换掉。
+  const server = [
+    { index: 10, id: 'u-open', label: '主提问' },
+    { index: 12, id: 'steer-1', label: '中途转向', pending: true, seq: 7 },
+  ];
+  const merged = mergeServerWithLocalOutline(server, []);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[1]?.id, 'steer-1');
+  assert.equal(merged[1]?.pending, true);
+  assert.equal(merged[1]?.index, 12);
+});
+
+test('画布已到会开头：offset 仍声称有更早时也不得留下“向上展开”幽灵入口', () => {
+  // 同步异常后画布被回灌了全量历史：首行 seq 就是会话最小 seq。
+  // 此时分页只会返回重复行（合并不增长），入口必须收起。
+  assert.equal(canvasAtVeryBeginning({ offset: 0 }), true);
+  assert.equal(canvasAtVeryBeginning({ offset: 658, canvasHeadSeq: 1, pageHeadSeq: 602 }), true);
+  assert.equal(canvasAtVeryBeginning({ offset: 658, canvasHeadSeq: 1, firstTurnSeq: 1 }), true);
+  // 画布真的缺更早历史时，入口必须保留
+  assert.equal(canvasAtVeryBeginning({ offset: 658, canvasHeadSeq: 651, pageHeadSeq: 602 }), false);
+  assert.equal(canvasAtVeryBeginning({ offset: 658 }), false, '没有身份时不做猜测');
 });

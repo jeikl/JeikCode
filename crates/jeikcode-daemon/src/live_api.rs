@@ -26,11 +26,11 @@ use std::sync::OnceLock;
 
 /// One `/sync` live-wire SSE payload.
 ///
-/// `replay: true` marks a frame from the snapshot/replay head — the WebUI must
-/// merge it idempotently. Live frames stay UNTAGGED because they are true deltas
-/// and must be painted verbatim: a live delta routed through the replay heuristics
-/// gets swallowed, which is how thinking/body after a tool round used to vanish
-/// from the canvas until a manual refresh. Mirrors `chat_watch_frame_json`.
+/// Every frame carries an explicit `replay` boolean. `true` marks a frame from
+/// the snapshot/replay head — the WebUI must merge it idempotently. `false` is
+/// a true live delta and must be painted verbatim. The explicit false matters:
+/// clients must never infer replay from `seq` presence, because live frames now
+/// carry the same session seq (that heuristic moved live steers to an old anchor).
 fn live_wire_frame_json<W: serde::Serialize>(wire: &W, replay: bool) -> String {
     let mut val = match serde_json::to_value(wire) {
         Ok(val) => val,
@@ -45,12 +45,26 @@ fn live_wire_frame_json<W: serde::Serialize>(wire: &W, replay: bool) -> String {
             })
         }
     };
-    if replay {
-        if let serde_json::Value::Object(ref mut map) = val {
-            map.insert("replay".to_string(), serde_json::Value::Bool(true));
-        }
+    if let serde_json::Value::Object(ref mut map) = val {
+        map.insert("replay".to_string(), serde_json::Value::Bool(replay));
     }
     serde_json::to_string(&val).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod live_wire_replay_flag_tests {
+    use super::live_wire_frame_json;
+
+    #[test]
+    fn every_live_frame_carries_an_explicit_replay_boolean() {
+        let wire = serde_json::json!({ "type": "steered", "inputs": [] });
+        let live: serde_json::Value =
+            serde_json::from_str(&live_wire_frame_json(&wire, false)).unwrap();
+        assert_eq!(live["replay"], serde_json::Value::Bool(false));
+        let replay: serde_json::Value =
+            serde_json::from_str(&live_wire_frame_json(&wire, true)).unwrap();
+        assert_eq!(replay["replay"], serde_json::Value::Bool(true));
+    }
 }
 
 /// Truncate a value for the file-sink diagnostic log at a char boundary (CJK-safe).
@@ -865,7 +879,12 @@ pub(crate) fn chat_runtime_config(
         // Interactive cards park with no deadline once a responder is registered.
         // Headless turns never enter that wait.
         interactive: false,
-        keep_interrupted_context: config.keep_interrupted_context,
+        // HTTP/WebUI turns MUST be resumable: every interruption (manual stop,
+        // steer, send-now, provider error, watchdog) commits the partial
+        // conversation through SnapshotHook/DisplayHook. A rollback would make
+        // the next message lose all prior thinking/tool context. The TUI keeps
+        // the user-configurable knob; this interactive transport does not.
+        keep_interrupted_context: true,
         user_agent: p.and_then(|p| p.user_agent.clone()),
         skip_tls_verify: p.map(|p| p.skip_tls_verify).unwrap_or(false),
         loop_max_rounds: jeikcode_coding::resolve_loop_max_rounds(
@@ -1178,6 +1197,8 @@ async fn submit_as_new_turn(
 pub(crate) struct PendingChatSteer {
     pub text: String,
     pub images: Vec<ImageContent>,
+    /// 客户端关联键 = 落盘消息 id（新契约下两者同值）。
+    pub client_input_id: Option<String>,
     pub done: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
@@ -1186,6 +1207,7 @@ pub(crate) enum ChatSteerSignal {
     Submit(PendingChatSteer),
     Cancel {
         text: Option<String>,
+        message_id: Option<String>,
         done: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
 }
@@ -1197,12 +1219,17 @@ pub(crate) async fn steer_into_running_turn(
     handle: &jeikcode_coding::CodingRuntimeHandle,
     text: String,
     images: Vec<ImageContent>,
+    client_input_id: Option<String>,
 ) -> Result<(), String> {
     if !phase_blocks_new_turn(handle.status().phase) {
         return Err("turn is not running".into());
     }
     match handle
-        .submit(jeikcode_coding::UserInput { text, images })
+        .submit(jeikcode_coding::UserInput {
+            text,
+            images,
+            id: client_input_id,
+        })
         .await
     {
         Ok(jeikcode_coding::SubmitReceipt::Steered { .. }) => Ok(()),
@@ -1243,6 +1270,7 @@ pub(crate) async fn run_chat_turn_v2(
     user_input_responders: Option<crate::permission_bridge::UserInputResponders>,
     approval_mode: ApprovalMode,
     mut steer_rx: mpsc::UnboundedReceiver<ChatSteerSignal>,
+    client_input_id: Option<String>,
 ) {
     use jeikcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
     use jeikcode_coding::TurnCompletion;
@@ -1335,8 +1363,11 @@ pub(crate) async fn run_chat_turn_v2(
     let input = jeikcode_coding::UserInput {
         text: user_text,
         images: user_images,
+        // 身份契约：`/chat` 的 request_id 即落盘消息 id。
+        id: client_input_id,
     };
-    let expected_turn_id = match submit_as_new_turn(&handle, &mut events, input, &cancel).await {
+    let mut expected_turn_id = match submit_as_new_turn(&handle, &mut events, input, &cancel).await
+    {
         Ok(turn_id) => turn_id,
         Err(error) => {
             send_chat_start_failure(&runtime_event_tx, error);
@@ -1350,6 +1381,7 @@ pub(crate) async fn run_chat_turn_v2(
 
     let mut cancelled = false;
     let mut steer_open = true;
+    let unfolded_steers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut persist_after_start: HashMap<String, String> = HashMap::new();
     let final_messages = loop {
         let ev = tokio::select! {
@@ -1364,15 +1396,32 @@ pub(crate) async fn run_chat_turn_v2(
                 match steer {
                     Some(ChatSteerSignal::Submit(req)) => {
                         let handle = handle.clone();
+                        let counter = unfolded_steers.clone();
                         tokio::spawn(async move {
-                            let outcome = steer_into_running_turn(&handle, req.text, req.images).await;
+                            let outcome =
+                                steer_into_running_turn(&handle, req.text, req.images, req.client_input_id)
+                                    .await;
+                            if outcome.is_ok() {
+                                counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            }
                             let _ = req.done.send(outcome);
                         });
                     }
-                    Some(ChatSteerSignal::Cancel { text, done }) => {
+                    Some(ChatSteerSignal::Cancel { text, message_id, done }) => {
                         let handle = handle.clone();
+                        let counter = unfolded_steers.clone();
                         tokio::spawn(async move {
-                            let outcome = handle.cancel_steer(text).await.map_err(|e| e.to_string());
+                            let outcome = handle
+                                .cancel_steer(text, message_id)
+                                .await
+                                .map_err(|e| e.to_string());
+                            if outcome.is_ok() {
+                                let _ = counter.fetch_update(
+                                    std::sync::atomic::Ordering::AcqRel,
+                                    std::sync::atomic::Ordering::Acquire,
+                                    |cur| Some(cur.saturating_sub(1)),
+                                );
+                            }
                             let _ = done.send(outcome);
                         });
                     }
@@ -1393,6 +1442,17 @@ pub(crate) async fn run_chat_turn_v2(
         };
         match ev {
             event @ CodingRuntimeEvent::Agent(_) => {
+                if let CodingRuntimeEvent::Agent(
+                    jeikcode_kernel::event::AgentEvent::Steered { count, .. },
+                ) = &event
+                {
+                    let n = *count;
+                    let _ = unfolded_steers.fetch_update(
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                        |cur| Some(cur.saturating_sub(n)),
+                    );
+                }
                 if let CodingRuntimeEvent::Agent(
                     jeikcode_kernel::event::AgentEvent::ToolStarted { call },
                 ) = &event
@@ -1649,6 +1709,25 @@ pub(crate) async fn run_chat_turn_v2(
                 if turn_completion_id(&completion) != expected_turn_id {
                     continue;
                 }
+                let reason = match &completion {
+                    TurnCompletion::Completed { reason, .. } => *reason,
+                    TurnCompletion::SnapshotUnavailable { .. } => unreachable!(),
+                };
+                if !cancelled
+                    && reason == jeikcode_kernel::event::StopReason::Stopped
+                    && unfolded_steers.load(std::sync::atomic::Ordering::Acquire) > 0
+                {
+                    // A steer arrived right as the turn was finishing and fell into
+                    // the kernel's `drain_pending` as an immediate continuation turn.
+                    // Keep the operation and event pump alive for that follow-up turn.
+                    let _ = unfolded_steers.fetch_update(
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                        |cur| Some(cur.saturating_sub(1)),
+                    );
+                    expected_turn_id = expected_turn_id.wrapping_add(1);
+                    continue;
+                }
                 let snapshot = match &completion {
                     TurnCompletion::Completed { snapshot, .. } => snapshot.clone(),
                     TurnCompletion::SnapshotUnavailable { .. } => unreachable!(),
@@ -1831,6 +1910,9 @@ pub(crate) enum LiveWireEvent {
     UserMessage {
         text: String,
         images: Vec<crate::ImageData>,
+        /// 客户端关联键 = 落盘消息 id（新契约下两者同值）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         client_input_id: Option<String>,
     },
@@ -1950,9 +2032,6 @@ pub(crate) enum LiveWireEvent {
     UserIdentified {
         message_id: String,
         turn_ordinal: u32,
-        /// 绝对转录下标（= 客户端的 `sourceIndex`），回放时用于归位被折叠线切掉的提问。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        absolute_index: Option<usize>,
     },
     /// One or more live inputs were folded into the active turn. The exact
     /// payload lets browser clients acknowledge their FIFO pending-steer UI
@@ -2073,13 +2152,12 @@ impl NativeLiveWireProjector {
         if let crate::live_hub::LiveViewEvent::Runtime(Runtime::Agent(Kernel::UserMessage {
             message_id,
             turn_ordinal,
-            message_index,
+            ..
         })) = &event
         {
             return Some(LiveWireEvent::UserIdentified {
                 message_id: message_id.clone(),
                 turn_ordinal: *turn_ordinal,
-                absolute_index: Some(*message_index),
             });
         }
 
@@ -2101,6 +2179,7 @@ impl NativeLiveWireProjector {
                         missing: false,
                     })
                     .collect(),
+                message_id: client_input_id.clone(),
                 client_input_id,
             },
             crate::live_hub::LiveViewEvent::Steered {
@@ -2200,12 +2279,11 @@ impl NativeLiveWireProjector {
                     committed: true,
                     ..
                 } => {
-                    crate::publish_global(crate::GlobalWireEvent::Activity {
-                        session_id: self.session_id.clone(),
-                        running: true,
-                        terminal: None,
-                        status: None,
-                    });
+                    crate::finish_compaction_phase(
+                        &self.session_id,
+                        crate::COMPACTION_OWNER_LIVE,
+                        true,
+                    );
                     let before_tokens = (bytes_before as f32 / 3.5).ceil() as usize;
                     let after_tokens = (bytes_after as f32 / 3.5).ceil() as usize;
                     let mark = jeikcode_config::i18n::format_compaction_mark(
@@ -2213,6 +2291,9 @@ impl NativeLiveWireProjector {
                         before_tokens,
                         after_tokens,
                     );
+                    // live 路径也必须落盘：否则刷新/异地端只剩瞬态 Warning，
+                    // 紫色压缩边界会随页面重建而消失。
+                    let _ = crate::persist_session_display_notice(&self.session_id, &mark, None);
                     LiveWireEvent::Warning {
                         message: mark,
                         tokens_after: Some(after_tokens as u32),
@@ -2220,12 +2301,11 @@ impl NativeLiveWireProjector {
                     }
                 }
                 Kernel::CompactionFailed { error, .. } => {
-                    crate::publish_global(crate::GlobalWireEvent::Activity {
-                        session_id: self.session_id.clone(),
-                        running: true,
-                        terminal: None,
-                        status: None,
-                    });
+                    crate::finish_compaction_phase(
+                        &self.session_id,
+                        crate::COMPACTION_OWNER_LIVE,
+                        true,
+                    );
                     LiveWireEvent::Warning {
                         message: format!("Compaction failed: {error}"),
                         tokens_after: None,
@@ -2233,16 +2313,21 @@ impl NativeLiveWireProjector {
                     }
                 }
                 Kernel::CompactionStarted { .. } => {
-                    crate::publish_global(crate::GlobalWireEvent::Activity {
-                        session_id: self.session_id.clone(),
-                        running: true,
-                        terminal: None,
-                        status: Some("compacting".to_string()),
-                    });
+                    crate::note_compaction_started(&self.session_id, crate::COMPACTION_OWNER_LIVE);
                     LiveWireEvent::SessionStatus {
                         session_id: self.session_id.clone(),
                         status: "compacting".to_string(),
                     }
+                }
+                Kernel::Compacted { .. } => {
+                    // 空操作压缩同样发出过 CompactionStarted：必须结束阶段，
+                    // 否则 `Compacting…` 会一直挂到回合/运行时结束。
+                    crate::finish_compaction_phase(
+                        &self.session_id,
+                        crate::COMPACTION_OWNER_LIVE,
+                        true,
+                    );
+                    return None;
                 }
                 Kernel::Error { message, .. } => LiveWireEvent::Error { message },
                 Kernel::Warning(message) => LiveWireEvent::Warning {
@@ -2270,8 +2355,7 @@ impl NativeLiveWireProjector {
                 | Kernel::Request { .. }
                 | Kernel::Snapshot { .. }
                 | Kernel::TurnComplete { .. }
-                | Kernel::Cancelled
-                | Kernel::Compacted { .. } => return None,
+                | Kernel::Cancelled => return None,
                 Kernel::Steered { count, inputs } => LiveWireEvent::Steered {
                     count,
                     inputs,
@@ -2393,6 +2477,11 @@ impl NativeLiveWireProjector {
                 LiveWireEvent::PersistenceWarning { message }
             }
             crate::live_hub::LiveViewEvent::Runtime(Runtime::RuntimeStopped(exit)) => {
+                crate::finish_compaction_phase(
+                    &self.session_id,
+                    crate::COMPACTION_OWNER_LIVE,
+                    false,
+                );
                 self.tools.clear();
                 LiveWireEvent::State {
                     running: false,
@@ -2404,22 +2493,55 @@ impl NativeLiveWireProjector {
                     )),
                 }
             }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::CompactionStarted { .. }) => {
+                // 内核事件已在 runtime 层换成 CodingRuntimeEvent::CompactionStarted。
+                crate::note_compaction_started(&self.session_id, crate::COMPACTION_OWNER_LIVE);
+                LiveWireEvent::SessionStatus {
+                    session_id: self.session_id.clone(),
+                    status: "compacting".to_string(),
+                }
+            }
             crate::live_hub::LiveViewEvent::Runtime(Runtime::CompactionFinished {
                 completion: CompactionCompletion::Completed(outcome),
-            }) if outcome.committed => LiveWireEvent::Warning {
-                message: jeikcode_config::i18n::format_compaction_mark(
+            }) if outcome.committed => {
+                crate::finish_compaction_phase(
+                    &self.session_id,
+                    crate::COMPACTION_OWNER_LIVE,
+                    true,
+                );
+                let mark = jeikcode_config::i18n::format_compaction_mark(
                     outcome.removed_messages,
                     outcome.estimated_tokens_before,
                     outcome.estimated_tokens_after,
-                ),
-                tokens_after: Some(outcome.estimated_tokens_after as u32),
-                message_id: self.notice_anchor(),
-            },
+                );
+                let _ = crate::persist_session_display_notice(&self.session_id, &mark, None);
+                LiveWireEvent::Warning {
+                    message: mark,
+                    tokens_after: Some(outcome.estimated_tokens_after as u32),
+                    message_id: self.notice_anchor(),
+                }
+            }
             crate::live_hub::LiveViewEvent::Runtime(Runtime::CompactionFinished {
                 completion: CompactionCompletion::Failed { error, .. },
-            }) => LiveWireEvent::Error {
-                message: format!("compact failed: {error}"),
-            },
+            }) => {
+                crate::finish_compaction_phase(
+                    &self.session_id,
+                    crate::COMPACTION_OWNER_LIVE,
+                    true,
+                );
+                LiveWireEvent::Error {
+                    message: format!("compact failed: {error}"),
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::CompactionFinished { .. }) => {
+                // 自动压缩的空操作 / 中断：清阶段但不额外刷屏。
+                crate::finish_compaction_phase(
+                    &self.session_id,
+                    crate::COMPACTION_OWNER_LIVE,
+                    true,
+                );
+                return None;
+            }
             crate::live_hub::LiveViewEvent::Runtime(Runtime::ProviderUnavailable {
                 reason,
                 ..
@@ -2601,16 +2723,23 @@ fn live_stream_from_registry(
     working_dir: std::path::PathBuf,
     session_id: String,
 ) -> axum::response::Response {
-    let snapshot = match crate::native_live::registry_session_snapshot(&working_dir, &session_id) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": error })),
-            )
-                .into_response();
-        }
-    };
+    let mut snapshot =
+        match crate::native_live::registry_session_snapshot(&working_dir, &session_id) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": error })),
+                )
+                    .into_response();
+            }
+        };
+    // `/live` is another resume entrypoint: a `/chat` crash checkpoint must be
+    // overlaid here too, before the snapshot becomes the runtime prefix.
+    if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&session_id) {
+        let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
+        jeikcode_capabilities::session::partial::clear_global(&session_id);
+    }
     let session_name = {
         let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&working_dir);
         match crate::legacy_convert::load_catalog_session_view_in_project(&bucket, &session_id) {
@@ -2723,8 +2852,17 @@ fn live_stream_from_registry(
     resp
 }
 
-fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response::Response {
+fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::response::Response {
     let snapshot_wd = join.binding.working_dir.clone();
+    let mut snapshot = (*join.snapshot).clone();
+    // `/live` is another resume entrypoint: overlay any per-token checkpoint from
+    // a crashed `/chat` turn before handing the snapshot to the runtime.
+    if let Some(partial) =
+        jeikcode_capabilities::session::partial::load_global(&join.binding.session_id)
+    {
+        let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
+        jeikcode_capabilities::session::partial::clear_global(&join.binding.session_id);
+    }
     let session_name = {
         let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&snapshot_wd);
         match crate::legacy_convert::load_catalog_session_view_in_project(
@@ -2747,8 +2885,8 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
     // Snapshot + replay head is emitted ahead of the live bus and tagged
     // `replay: true`; only those frames may be de-duplicated client-side.
     let mut head: Vec<LiveWireEvent> = Vec::new();
-    let snapshot_count = join.snapshot.messages.len();
-    let (snapshot_offset, snapshot_tail) = snapshot_tail(&join.snapshot.messages);
+    let snapshot_count = snapshot.messages.len();
+    let (snapshot_offset, snapshot_tail) = snapshot_tail(&snapshot.messages);
     let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot_tail
         .iter()
         .map(crate::MessageInfo::from_kernel)
@@ -3368,10 +3506,12 @@ fn split_live_inputs(
         jeikcode_coding::UserInput {
             text: runtime_text,
             images: original_images.clone(),
+            id: None,
         },
         jeikcode_coding::UserInput {
             text: message,
             images: original_images,
+            id: None,
         },
     )
 }
@@ -4304,6 +4444,8 @@ mod tests {
     // ORIGINAL bytes were stashed to the display-only sidecar during the turn.
     fn missing_user_msg() -> crate::MessageInfo {
         crate::MessageInfo {
+            turn_id: None,
+            seq: None,
             role: "user".into(),
             content: "识别一下".into(),
             reasoning: None,
@@ -4320,6 +4462,7 @@ mod tests {
             created_at: None,
             elapsed_ms: None,
             id: None,
+            ..Default::default()
         }
     }
 
@@ -5561,7 +5704,10 @@ mod tests {
         assert_eq!(json["type"], "user_identified");
         assert_eq!(json["message_id"], "m-user-1");
         assert_eq!(json["turn_ordinal"], 4);
-        assert_eq!(json["absolute_index"], 11);
+        assert!(
+            json.get("absolute_index").is_none(),
+            "absolute_index 是内核 snapshot 下标，不是 display 下标，不得下发"
+        );
     }
 
     #[test]
