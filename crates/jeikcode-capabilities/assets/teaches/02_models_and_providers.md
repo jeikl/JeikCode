@@ -115,9 +115,9 @@ reasoning_history = "exclude"
 | `max_tokens` | 整数 | **模型输出能力声明**（面板档位：32K / 64K / 128K / 256K / 384K / 自定义；未配置时默认 64K），作为各协议的 max budget 原样下发给模型，模型真实输出以实际生成为准。**完全不参与上下文统计与压缩水位计算**。 |
 | `reasoning_model` | 布尔值 | 声明是否为深度推理模型（如 DeepSeek R1、o1、GLM-Zero 等）。 |
 | **`reasoning_history`** | `"exclude"` \| `"include"` | **思考历史多轮回传控制**：<br>• `"exclude"`（默认）：多轮对话中不把前序轮次的 `<think>` 内容发回后端，大幅节省 Token 且避免多数模型 API 报错。<br>• `"include"`：保留并回传思考历史。Gemini 2.5/3、DeepSeek 官方或要求 `thoughtSignature` 校验的中转网关必须开启。 |
-| **`reasoning_effort`** | `"low"` \| `"medium"` \| `"high"` \| `"max"` | **推理深度档位**。用于 OpenAI、DeepSeek 及 Gemini 3+（自动映射为 `thinkingLevel: LOW/MEDIUM/HIGH`）。 |
+| **`reasoning_effort`** | `"low"` \| `"medium"` \| `"high"` \| `"max"` | **推理深度档位**。用于 OpenAI、DeepSeek、Gemini 3+（自动映射为 `thinkingLevel: LOW/MEDIUM/HIGH`），以及 Claude 4.7+（adaptive + `output_config.effort`）。 |
 | `reasoning_levels` | 字符串数组 | TUI 界面中通过快捷键 `Ctrl+T` 循环切换思考强度的候选列表（如 `["low", "medium", "high", "max"]`）。 |
-| **`thinking_budget`** | 整数 | **数值型思考 Token 预算**。Claude 设置 `thinking.budget_tokens`；Gemini 2.5 映射为 `thinkingBudget`（设为 0 关闭思考）；OpenAI 兼容协议会自动校验提升 `max_tokens > budget` 防报错。 |
+| **`thinking_budget`** | 整数 | **数值型思考 Token 预算**。Claude ≤4.6 设置 `thinking.budget_tokens`；Gemini 2.5 映射为 `thinkingBudget`（设为 0 关闭思考）。预算只会向下夹取（始终保留 1024 答案空间），**绝不抬升 `max_tokens`**。Claude 4.7+、Gemini 3+、OpenAI、Responses 不使用该字段。 |
 | `thinking_enabled` | 布尔值 | 显式思考开关。Claude 未指定时跟随 budget；Gemini 2.5 与 3+ 默认开启思考。 |
 | **`coalesce_system`** | 布尔值 | **系统提示词合并开关**：<br>• `false`（默认）：向后端保留多条独立 `role: "system"` 消息，便于命中模型前缀 KV 缓存；<br>• `true`：出站前将多段合并为单条 system 消息，仅在接入不支持多 System 消息的老旧网关时使用。 |
 | **`image_input`** | 布尔值 | 别名 `supports_vision`。设为 `true` 允许模型直接输入图片。纯文本模型若设为 `false`，可配置顶层 `vision_preprocessor_provider = "xxx"` 自动调用该视觉模型 OCR 提取文本后代答。 |

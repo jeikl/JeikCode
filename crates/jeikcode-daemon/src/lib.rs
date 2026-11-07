@@ -108,6 +108,22 @@ use jeikcode_telemetry::{
 
 const CHAT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
+/// Build a `MessageInfo` with the additive display-metadata fields defaulted.
+/// Legacy call sites (tests, backfill helpers) keep the old behavior; the two
+/// canonical projections set `display_text/internal/editable` explicitly.
+macro_rules! message_info {
+    ($($field:ident $(: $value:expr)?),* $(,)?) => {
+        MessageInfo { $($field $(: $value)?,)* ..Default::default() }
+    };
+}
+
+/// Build a `SessionDetailQuery` with the additive window fields defaulted.
+macro_rules! session_query {
+    ($($field:ident $(: $value:expr)?),* $(,)?) => {
+        SessionDetailQuery { $($field $(: $value)?,)* ..Default::default() }
+    };
+}
+
 // ============================================================================
 // Shared DTOs for P0 API endpoints
 // ============================================================================
@@ -312,6 +328,10 @@ pub struct AppendSessionMessagesRequest {
     /// Optional working directory (uses current project dir if not provided)
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
+    /// Client-generated idempotency key. A retry with the same key returns the
+    /// already-applied state instead of appending the UI-only rows twice.
+    #[serde(default)]
+    pub client_request_id: Option<String>,
     pub messages: Vec<AppendSessionMessage>,
 }
 
@@ -337,6 +357,18 @@ struct SessionDetailQuery {
     tail: Option<usize>,
     offset: Option<usize>,
     limit: Option<usize>,
+    /// Incremental v4 delta cursor: return rows with `seq > after_seq`.
+    /// Takes precedence over tail/offset/limit.
+    after_seq: Option<u64>,
+    /// Older-history cursor: return at most `limit` rows with `seq < before_seq`.
+    /// Replaces the positional `offset` for identity-first pagination.
+    before_seq: Option<u64>,
+    /// Jump to the page containing this record id (right-rail navigation).
+    around: Option<String>,
+    /// Outline-only read: skip the transcript entirely and return just the turn
+    /// list (plus session metadata). Used by the right rail on wake, so
+    /// refreshing the outline costs no transcript bytes on a weak network.
+    turns_only: Option<bool>,
 }
 
 /// `tail` is a hard page cap. Do not walk the cut back through every tool row:
@@ -421,6 +453,202 @@ fn first_visible_user_from(messages: &[MessageInfo], start: usize) -> Option<usi
     (start..messages.len()).find(|&index| is_visible_user_turn_start(&messages[index]))
 }
 
+fn take_session_after(
+    messages: Vec<MessageInfo>,
+    after_seq: u64,
+) -> (usize, usize, Vec<MessageInfo>, Option<usize>) {
+    let total = messages.len();
+    let offset = messages
+        .iter()
+        .position(|message| message.seq.is_some_and(|seq| seq > after_seq))
+        .unwrap_or(total);
+    let window: Vec<MessageInfo> = messages
+        .into_iter()
+        .filter(|message| message.seq.is_some_and(|seq| seq > after_seq))
+        .collect();
+    (total, offset, window, None)
+}
+
+struct DisplayTailView {
+    turns: Vec<SessionTurnOutline>,
+    message_count: usize,
+    offset: usize,
+    messages: Vec<MessageInfo>,
+    pinned_user_index: Option<usize>,
+}
+
+/// Segmented v4 read for the first-paint `tail=N` query. Uses the v4 offset
+/// index to seek to the tail and rebuilds the rail from indexed user rows,
+/// avoiding a full log parse. Returns None on any inconsistency so the caller
+/// can fall back to the canonical full read.
+fn read_display_tail_view(
+    manager: &NativeSessionManager,
+    session: &crate::legacy_convert::CatalogSessionView,
+    tail: usize,
+    operation_id: Option<&str>,
+    turn_running: bool,
+    snapshot_last_turn: u64,
+) -> Option<DisplayTailView> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if tail == 0 || turn_running {
+        return None;
+    }
+    let (meta, index) = manager
+        .ensure_display_index(&session.meta.id)
+        .ok()
+        .flatten()?;
+    let display_ids: std::collections::HashSet<String> =
+        index.iter().filter_map(|row| row.id.clone()).collect();
+    if index.is_empty()
+        || meta.v != jeikcode_capabilities::session::DISPLAY_VERSION
+        || !v4_display_covers_completed_user_turns(
+            &meta,
+            &display_ids,
+            &session.snapshot.messages,
+            &session.meta.turn_stats,
+            snapshot_last_turn,
+        )
+    {
+        return None;
+    }
+    let total = index.len();
+    let mut start = total.saturating_sub(tail);
+    let is_visible_user = |row: &jeikcode_capabilities::session::DisplayIndexRow| {
+        row.role.eq_ignore_ascii_case("user") && !row.synthetic
+    };
+    if start > 0 && !is_visible_user(&index[start]) {
+        if let Some(position) = index[..start].iter().rposition(is_visible_user) {
+            start = position;
+        }
+    }
+    let path = manager.display_path(&session.meta.id).ok()?;
+    let mut file = std::fs::File::open(&path).ok()?;
+    file.seek(SeekFrom::Start(index[start].offset)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let records: Vec<jeikcode_capabilities::session::DisplayRecord> = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            serde_json::from_slice::<jeikcode_capabilities::session::DisplayRecord>(line).ok()
+        })
+        .collect();
+    if records.len() != total - start {
+        return None;
+    }
+    // A stale/same-length index must not paint the wrong window: verify every
+    // parsed record against the index identity (seq + role + id).
+    for (offset, record) in records.iter().enumerate() {
+        let indexed = &index[start + offset];
+        if record.seq != indexed.seq
+            || !record.role.eq_ignore_ascii_case(&indexed.role)
+            || record.id != indexed.id
+        {
+            return None;
+        }
+    }
+
+    let already_prefixed = meta.backfilled
+        || index.first().is_some_and(|row| {
+            row.role.eq_ignore_ascii_case("system")
+                || (row.role.eq_ignore_ascii_case("user") && row.synthetic)
+        });
+    let prefix = if already_prefixed {
+        Vec::new()
+    } else {
+        display_prefix_messages(session)
+    };
+    let prefix_len = prefix.len();
+    let mut turns = session_user_outline(&prefix);
+    for (position, row) in index.iter().enumerate() {
+        if !is_visible_user(row) {
+            continue;
+        }
+        let label = outline_label(&row.content);
+        if label.is_empty() {
+            continue;
+        }
+        turns.push(SessionTurnOutline {
+            ordinal: turns.len(),
+            id: row.id.clone(),
+            index: prefix_len + position,
+            label,
+            pending: false,
+            seq: None,
+        });
+    }
+
+    // A hard kill mid-turn never produces a completed `turn_stat`, so the
+    // coverage check above cannot see the crashed turn. If the display does not
+    // end at the snapshot's last message, it may be missing that in-flight tail
+    // (the snapshot/inflight file already has it). Fall back to the full read,
+    // which appends the snapshot tail idempotently.
+    let display_last_id = records.last().and_then(|record| record.id.as_deref());
+    if let Some(snapshot_last_id) = session
+        .snapshot
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| message.id.as_deref())
+    {
+        if display_last_id != Some(snapshot_last_id) {
+            return None;
+        }
+    }
+
+    let elapsed = display_turn_elapsed_overrides(&records, &session.meta.turn_stats);
+    let mut window: Vec<MessageInfo> = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let mut message = display_record_to_message_info(record);
+            if let Some(duration) = elapsed.get(&index) {
+                message.elapsed_ms = Some(*duration);
+            }
+            message
+        })
+        .collect();
+    let snapshot_ids: std::collections::HashSet<&str> = session
+        .snapshot
+        .messages
+        .iter()
+        .filter_map(|message| message.id.as_deref())
+        .collect();
+    mark_display_only_archive_rows(
+        &records,
+        &mut window,
+        &snapshot_ids,
+        snapshot_last_turn,
+        meta.last_turn_id <= snapshot_last_turn,
+    );
+    let offset = if start == 0 { 0 } else { prefix_len + start };
+    let mut messages = if start == 0 { prefix } else { Vec::new() };
+    messages.extend(window);
+    append_pending_inputs(
+        &mut messages,
+        &mut turns,
+        &session.meta.id,
+        operation_id,
+        std::path::Path::new(&session.meta.working_dir),
+        offset,
+    );
+    append_interrupted_partial(&mut messages, &session.meta.id, turn_running);
+    attach_display_images(
+        &mut messages,
+        std::path::Path::new(&session.meta.working_dir),
+        &session.meta.id,
+    );
+    repair_display_clock(&mut messages);
+    Some(DisplayTailView {
+        turns,
+        message_count: prefix_len + total,
+        offset,
+        messages,
+        pinned_user_index: None,
+    })
+}
+
 /// Tail/older page snapped to complete user turns. A pathological turn is
 /// loaded whole instead of pinning its question and leaving an unloaded middle:
 /// "load older" walks backward from the cached head and could never fill that
@@ -429,6 +657,41 @@ fn take_session_page(
     mut messages: Vec<MessageInfo>,
     query: &SessionDetailQuery,
 ) -> (usize, usize, Vec<MessageInfo>, Option<usize>) {
+    let total = messages.len();
+    // Identity-first pagination: `before_seq` is exclusive and independent of
+    // array/sourceIndex position. Snap the page start down to a visible user
+    // turn so an older page never begins mid-answer.
+    if let Some(before) = query.before_seq {
+        let limit = query.limit.unwrap_or(48).max(1);
+        let end = messages
+            .iter()
+            .position(|message| message.seq.is_some_and(|seq| seq >= before))
+            .unwrap_or(total);
+        let mut start = end.saturating_sub(limit);
+        if start > 0 && !is_visible_user_turn_start(&messages[start]) {
+            if let Some(position) = messages[..start]
+                .iter()
+                .rposition(is_visible_user_turn_start)
+            {
+                start = position;
+            }
+        }
+        return (total, start, messages.drain(start..end).collect(), None);
+    }
+    // Right-rail jump: start exactly at the requested identity and return its
+    // whole turn so the client never has to translate it back into a fragile
+    // positional index.
+    if let Some(around) = query.around.as_deref() {
+        if let Some(start) = messages
+            .iter()
+            .position(|message| message.id.as_deref() == Some(around))
+        {
+            let end = (start + 1..total)
+                .find(|&index| is_visible_user_turn_start(&messages[index]))
+                .unwrap_or(total);
+            return (total, start, messages.drain(start..end).collect(), None);
+        }
+    }
     let (total, offset, start, end, pinned) =
         resolve_page_indices(&messages, is_visible_user_turn_start, query);
     if let Some(idx) = pinned {
@@ -449,12 +712,75 @@ fn take_session_page(
 mod session_window_tests {
     use super::*;
 
+    fn seq_rows(n: usize) -> Vec<MessageInfo> {
+        (0..n)
+            .map(|i| {
+                let mut row = page_msg(
+                    if i % 2 == 0 { "user" } else { "assistant" },
+                    &format!("m{i}"),
+                );
+                row.seq = Some(u64::try_from(i + 1).unwrap());
+                row.id = Some(format!("id-{i}"));
+                row
+            })
+            .collect()
+    }
+
+    #[test]
+    fn before_seq_pages_older_by_identity_not_position() {
+        let q = session_query! { before_seq: Some(5), limit: Some(2) };
+        let (total, offset, window, pinned) = take_session_page(seq_rows(6), &q);
+        assert_eq!(total, 6);
+        assert_eq!(offset, 2);
+        assert_eq!(pinned, None);
+        assert_eq!(
+            window.iter().map(|m| m.seq.unwrap()).collect::<Vec<_>>(),
+            vec![3, 4],
+            "before_seq is exclusive and never uses sourceIndex"
+        );
+    }
+
+    #[test]
+    fn around_starts_at_the_requested_record_identity() {
+        // Right-rail targets are user rows; the whole turn (question + answer)
+        // comes back so the jump never lands on a half-loaded page.
+        let q = session_query! { around: Some("id-2".into()) };
+        let (total, offset, window, pinned) = take_session_page(seq_rows(6), &q);
+        assert_eq!(total, 6);
+        assert_eq!(offset, 2);
+        assert_eq!(pinned, None);
+        assert_eq!(
+            window
+                .iter()
+                .map(|m| m.id.clone().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["id-2", "id-3"]
+        );
+    }
+
+    #[test]
+    fn after_seq_returns_only_newer_rows() {
+        let mut first = page_msg("user", "q1");
+        first.seq = Some(1);
+        let mut second = page_msg("assistant", "a1");
+        second.seq = Some(2);
+        let mut third = page_msg("user", "q2");
+        third.seq = Some(3);
+        let (total, offset, window, pinned) = take_session_after(vec![first, second, third], 2);
+        assert_eq!(total, 3);
+        assert_eq!(offset, 2);
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].seq, Some(3));
+        assert!(pinned.is_none());
+    }
+
     #[test]
     fn tail_returns_last_n() {
-        let q = SessionDetailQuery {
+        let q = session_query! {
             tail: Some(2),
             offset: None,
             limit: None,
+            after_seq: None,
         };
         let (total, offset, msgs) = apply_session_message_window(vec![1, 2, 3, 4, 5], &q);
         assert_eq!(total, 5);
@@ -464,10 +790,11 @@ mod session_window_tests {
 
     #[test]
     fn offset_limit_pages_older() {
-        let q = SessionDetailQuery {
+        let q = session_query! {
             tail: None,
             offset: Some(1),
             limit: Some(2),
+            after_seq: None,
         };
         let (total, offset, msgs) = apply_session_message_window(vec![10, 20, 30, 40], &q);
         assert_eq!(total, 4);
@@ -486,10 +813,11 @@ mod session_window_tests {
     fn tail_stays_capped_when_the_cut_falls_mid_turn() {
         // 8 rows, tail 3 starts on an assistant. The page stays 3; it must not
         // grow back to the question that opened the turn.
-        let q = SessionDetailQuery {
+        let q = session_query! {
             tail: Some(3),
             offset: None,
             limit: None,
+            after_seq: None,
         };
         let (total, offset, window) =
             apply_session_message_window(vec!["u", "a", "t", "u2", "a2", "t2", "a3", "a4"], &q);
@@ -499,7 +827,9 @@ mod session_window_tests {
     }
 
     fn page_msg(role: &str, content: &str) -> MessageInfo {
-        MessageInfo {
+        message_info! {
+            turn_id: None,
+            seq: None,
             role: role.into(),
             content: content.into(),
             reasoning: None,
@@ -517,10 +847,11 @@ mod session_window_tests {
 
     #[test]
     fn tail_expands_to_the_opening_user_when_the_turn_fits() {
-        let q = SessionDetailQuery {
+        let q = session_query! {
             tail: Some(2),
             offset: None,
             limit: None,
+            after_seq: None,
         };
         let messages = vec![
             page_msg("user", "上一问"),
@@ -546,10 +877,11 @@ mod session_window_tests {
     #[test]
     fn tail_loads_the_whole_oversized_turn_without_a_hole() {
         const OVERSIZED: usize = 300;
-        let q = SessionDetailQuery {
+        let q = session_query! {
             tail: Some(2),
             offset: None,
             limit: None,
+            after_seq: None,
         };
         let mut messages = vec![page_msg("user", "超长提问")];
         for index in 0..OVERSIZED + 4 {
@@ -566,10 +898,11 @@ mod session_window_tests {
 
     #[test]
     fn offset_page_snaps_to_complete_turns() {
-        let q = SessionDetailQuery {
+        let q = session_query! {
             tail: None,
             offset: Some(1),
             limit: Some(2),
+            after_seq: None,
         };
         let messages = vec![
             page_msg("user", "问一"),
@@ -597,10 +930,11 @@ mod session_window_tests {
     #[test]
     fn offset_page_loads_the_whole_oversized_turn_without_a_hole() {
         const OVERSIZED: usize = 300;
-        let q = SessionDetailQuery {
+        let q = session_query! {
             tail: None,
             offset: Some(2),
             limit: Some(2),
+            after_seq: None,
         };
         let mut messages = vec![page_msg("user", "超长提问")];
         for index in 0..OVERSIZED + 4 {
@@ -621,10 +955,11 @@ mod session_window_tests {
 
     #[test]
     fn tail_does_not_pin_when_the_page_already_starts_on_a_user() {
-        let q = SessionDetailQuery {
+        let q = session_query! {
             tail: Some(2),
             offset: None,
             limit: None,
+            after_seq: None,
         };
         let (total, offset, window, pinned) = take_session_page(
             vec![page_msg("user", "问"), page_msg("assistant", "答")],
@@ -635,9 +970,127 @@ mod session_window_tests {
     }
 
     #[test]
+    fn snapshot_tail_projects_unflushed_rows_with_absolute_indices() {
+        use jeikcode_kernel::message::Message;
+        let mut q1 = Message::user("旧问题");
+        q1.id = Some("u-1".into());
+        let mut q2 = Message::user("继续");
+        q2.id = Some("u-2".into());
+        let mut a2 = Message::assistant("回答", Vec::new());
+        a2.id = Some("a-2".into());
+        let snapshot = vec![q1.clone(), q2, a2];
+
+        let mut messages = vec![MessageInfo::from_kernel_in(&q1, None)];
+        let mut turns = session_user_outline(&messages);
+        let appended = append_snapshot_tail(
+            &mut messages,
+            &mut turns,
+            &snapshot,
+            std::path::Path::new("/p"),
+        );
+        assert_eq!(
+            appended, 2,
+            "user + assistant tail rows must both be projected"
+        );
+        assert_eq!(messages.len(), 3);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].id.as_deref(), Some("u-2"));
+        assert_eq!(
+            turns[1].index, 1,
+            "outline index must be the absolute canvas position, not a window length"
+        );
+
+        // Idempotent: a second projection sees both rows already present.
+        let appended_again = append_snapshot_tail(
+            &mut messages,
+            &mut turns,
+            &snapshot,
+            std::path::Path::new("/p"),
+        );
+        assert_eq!(appended_again, 0);
+        assert_eq!(turns.len(), 2);
+    }
+
+    #[test]
+    fn display_with_a_middle_user_hole_is_not_authoritative() {
+        use jeikcode_kernel::message::Message;
+
+        fn outline_record(
+            turn_id: u64,
+            id: &str,
+            text: &str,
+        ) -> jeikcode_capabilities::session::DisplayRecord {
+            jeikcode_capabilities::session::DisplayRecord {
+                v: jeikcode_capabilities::session::DISPLAY_VERSION,
+                session_id: "s".into(),
+                turn_id,
+                index: 0,
+                seq: 0,
+                role: "user".into(),
+                id: Some(id.into()),
+                content: text.into(),
+                reasoning: None,
+                synthetic: false,
+                internal_origin: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                is_error: false,
+                images: Vec::new(),
+                created_at: None,
+                elapsed_ms: None,
+            }
+        }
+        fn turn_stat(
+            after_message: usize,
+            turn_id: u64,
+        ) -> jeikcode_capabilities::session::TurnStat {
+            jeikcode_capabilities::session::TurnStat {
+                after_message,
+                position_valid: true,
+                turn_id,
+                round_count: 1,
+                tool_call_count: 0,
+                duration_ms: 1,
+                total_tokens: 0,
+                errored: false,
+                used_tokens: 0,
+                ctx_window: 0,
+                model_usage: Vec::new(),
+            }
+        }
+
+        let mut q1 = Message::user("Q1");
+        q1.id = Some("u1".into());
+        let mut q2 = Message::user("Q2");
+        q2.id = Some("u2".into());
+        let mut q3 = Message::user("Q3");
+        q3.id = Some("u3".into());
+        let snapshot = vec![q1, q2, q3];
+        let stats = vec![turn_stat(1, 1), turn_stat(2, 2), turn_stat(3, 3)];
+
+        // The real 825c5172 shape: turn 2 is missing but turn 3 is visible.
+        let holed = vec![outline_record(1, "u1", "Q1"), outline_record(3, "u3", "Q3")];
+        assert!(
+            !display_covers_completed_user_rows(&holed, &snapshot, &stats, 3),
+            "a middle user hole must force the snapshot projection"
+        );
+
+        let complete = vec![
+            outline_record(1, "u1", "Q1"),
+            outline_record(2, "u2", "Q2"),
+            outline_record(3, "u3", "Q3"),
+        ];
+        assert!(display_covers_completed_user_rows(
+            &complete, &snapshot, &stats, 3
+        ));
+    }
+
+    #[test]
     fn outline_ordinals_ignore_failed_turn_diagnostic_rows() {
         let msgs = vec![
-            MessageInfo {
+            message_info! {
+                turn_id: None,
+                seq: None,
                 role: "user".into(),
                 content: "第一问".into(),
                 reasoning: None,
@@ -651,7 +1104,9 @@ mod session_window_tests {
                 elapsed_ms: None,
                 id: None,
             },
-            MessageInfo {
+            message_info! {
+                turn_id: None,
+                seq: None,
                 role: "assistant".into(),
                 content: "upstream unavailable".into(),
                 reasoning: None,
@@ -665,7 +1120,9 @@ mod session_window_tests {
                 elapsed_ms: None,
                 id: None,
             },
-            MessageInfo {
+            message_info! {
+                turn_id: None,
+                seq: None,
                 role: "user".into(),
                 content: "第二问".into(),
                 reasoning: None,
@@ -679,7 +1136,9 @@ mod session_window_tests {
                 elapsed_ms: None,
                 id: None,
             },
-            MessageInfo {
+            message_info! {
+                turn_id: None,
+                seq: None,
                 role: "assistant".into(),
                 content: "upstream unavailable again".into(),
                 reasoning: None,
@@ -693,7 +1152,9 @@ mod session_window_tests {
                 elapsed_ms: None,
                 id: None,
             },
-            MessageInfo {
+            message_info! {
+                turn_id: None,
+                seq: None,
                 role: "user".into(),
                 content: "服务恢复后继续".into(),
                 reasoning: None,
@@ -730,9 +1191,16 @@ mod session_window_tests {
             created_at: 0,
             updated_at: 0,
             message_count: 0,
+            revision: 0,
+            caps: session_capabilities(),
+            cursor: SessionCursor {
+                oldest_seq: None,
+                total: 0,
+            },
             offset: 0,
             pinned_user_index: None,
             turns: Vec::new(),
+            input_cursor: 0,
             messages: Vec::new(),
             preferred_model: None,
             approval_mode: None,
@@ -798,7 +1266,9 @@ mod session_window_tests {
     fn outline_label_is_short_but_canvas_content_is_full() {
         let long = "长".repeat(1000);
 
-        let msgs = vec![MessageInfo {
+        let msgs = vec![message_info! {
+            turn_id: None,
+            seq: None,
             role: "user".into(),
             content: long.clone(),
             reasoning: None,
@@ -821,6 +1291,7 @@ mod session_window_tests {
             session_id: "s1".into(),
             turn_id: 1,
             index: 0,
+            seq: 0,
             role: "user".into(),
             id: None,
             content: long.clone(),
@@ -849,21 +1320,131 @@ mod chat_replay_tests {
     use super::*;
 
     #[test]
+    fn part_rev_is_monotonic_within_a_part_and_resets_on_a_new_part() {
+        let mut projector = ChatRuntimeProjector::default();
+        projector.current_message_id = Some("m-rev".into());
+
+        let first = projector.next_part_stamp("text");
+        assert_eq!(first.2, Some(1));
+        assert_eq!(first.3, Some(1));
+        let second = projector.next_part_stamp("text");
+        assert_eq!(second.2, Some(1), "same part keeps part_seq");
+        assert_eq!(second.3, Some(2), "same part bumps part_rev");
+
+        let reasoning = projector.next_part_stamp("reasoning");
+        assert_eq!(reasoning.2, Some(2), "kind change opens a new part");
+        assert_eq!(reasoning.3, Some(1), "new part starts at revision 1");
+
+        let text_after_reasoning = projector.next_part_stamp("text");
+        assert_eq!(text_after_reasoning.2, Some(3));
+        assert_eq!(text_after_reasoning.3, Some(1));
+
+        projector.end_streaming_part();
+        let after_tool = projector.next_part_stamp("text");
+        assert_eq!(after_tool.2, Some(4));
+        assert_eq!(after_tool.3, Some(1));
+    }
+
+    #[test]
+    fn artifact_split_text_events_get_distinct_part_revisions() {
+        use jeikcode_kernel::event::AgentEvent;
+
+        let mut projector = ChatRuntimeProjector::default();
+        let _ = projector.project_agent(
+            AgentEvent::AssistantMessage {
+                message_id: "m-artifact-rev".into(),
+            },
+            "sess-artifact-rev",
+        );
+        let events = projector.project_agent(
+            AgentEvent::TextDelta("before\n\n```rust\ncode\n```\nafter".into()),
+            "sess-artifact-rev",
+        );
+        let revisions: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                ChatEvent::TextDelta { part_rev, .. } => *part_rev,
+                _ => None,
+            })
+            .collect();
+        assert!(
+            revisions.len() > 1,
+            "artifact detector must split the delta"
+        );
+        assert!(
+            revisions.windows(2).all(|pair| pair[0] < pair[1]),
+            "each emitted TextDelta needs a distinct increasing part_rev: {revisions:?}"
+        );
+    }
+
+    #[test]
+    fn replay_log_seq_advances_for_every_event_and_keeps_the_last_on_coalesce() {
+        let delta = |content: &str| ChatEvent::TextDelta {
+            content: content.into(),
+            message_id: Some("m-seq".into()),
+            part_id: Some("m-seq:1:text".into()),
+            part_seq: Some(1),
+            part_rev: Some(1),
+        };
+        let mut log = ReplayLog::new(10);
+        assert_eq!(push_chat_replay(&mut log, delta("a")), 11);
+        assert_eq!(push_chat_replay(&mut log, delta("b")), 12);
+        assert_eq!(log.events[0].0, 12, "coalesced entry exposes the last seq");
+        assert_eq!(push_chat_replay(&mut log, ChatEvent::Stopped), 13);
+        assert_eq!(log.events.len(), 2);
+        assert_eq!(log.high_water(), 13);
+    }
+
+    #[test]
+    fn replay_coalescing_keeps_the_last_part_rev() {
+        let delta = |content: &str, rev: u64| ChatEvent::TextDelta {
+            content: content.into(),
+            message_id: Some("m-rev".into()),
+            part_id: Some("m-rev:1:text".into()),
+            part_seq: Some(1),
+            part_rev: Some(rev),
+        };
+        let mut log = ReplayLog::new(0);
+        assert_eq!(push_chat_replay(&mut log, delta("a", 1)), 1);
+        assert_eq!(push_chat_replay(&mut log, delta("b", 2)), 2);
+        assert_eq!(log.events.len(), 1);
+        assert_eq!(log.events[0].0, 2, "coalesced entry keeps the LAST seq");
+        match &log.events[0].1 {
+            ChatEvent::TextDelta {
+                content, part_rev, ..
+            } => {
+                assert_eq!(content, "ab");
+                assert_eq!(
+                    *part_rev,
+                    Some(2),
+                    "replay snapshot carries the last revision"
+                );
+            }
+            other => panic!("expected text delta, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn chat_replay_coalesces_only_within_the_same_identity() {
         let delta = |content: &str, message_id: &str, part_id: &str| ChatEvent::TextDelta {
             content: content.into(),
             message_id: Some(message_id.into()),
             part_id: Some(part_id.into()),
             part_seq: Some(1),
+            part_rev: None,
         };
-        let mut buf = Vec::new();
-        push_chat_replay(&mut buf, delta("a", "m-1", "m-1:1:text"));
-        push_chat_replay(&mut buf, delta("b", "m-1", "m-1:1:text"));
-        assert_eq!(buf.len(), 1, "same identity coalesces");
+        let mut log = ReplayLog::new(0);
+        push_chat_replay(&mut log, delta("a", "m-1", "m-1:1:text"));
+        push_chat_replay(&mut log, delta("b", "m-1", "m-1:1:text"));
+        assert_eq!(log.events.len(), 1, "same identity coalesces");
         // 身份不同绝不合并：合并后回放会把后一回合的正文画到前一回合名下。
-        push_chat_replay(&mut buf, delta("c", "m-2", "m-2:1:text"));
-        assert_eq!(buf.len(), 2, "a different round keeps its own replay entry");
-        match (&buf[0], &buf[1]) {
+        push_chat_replay(&mut log, delta("c", "m-2", "m-2:1:text"));
+        assert_eq!(
+            log.events.len(),
+            2,
+            "a different round keeps its own replay entry"
+        );
+        match (&log.events[0].1, &log.events[1].1) {
             (
                 ChatEvent::TextDelta {
                     content: first,
@@ -898,7 +1479,6 @@ mod transcript_display_tests {
             iso: String::new(),
             session_id: "s1".into(),
             turn_id: id,
-            undone: false,
             user: user.into(),
             assistant: assistant.into(),
             reasoning: String::new(),
@@ -908,7 +1488,9 @@ mod transcript_display_tests {
     }
 
     fn info(role: &str, text: &str, synthetic: bool) -> MessageInfo {
-        MessageInfo {
+        message_info! {
+            turn_id: None,
+            seq: None,
             role: role.into(),
             id: None,
             content: text.into(),
@@ -1013,6 +1595,7 @@ mod transcript_display_tests {
             session_id: "s1".into(),
             turn_id: 1,
             index: 0,
+            seq: 0,
             role: role.into(),
             id: Some("m-1".into()),
             content: content.into(),
@@ -1243,6 +1826,25 @@ mod global_events_tests {
     use super::*;
 
     #[test]
+    fn runtime_activity_serializes_revision_phase_and_owner() {
+        let json = serde_json::to_value(GlobalWireEvent::RuntimeActivity {
+            session_id: "s1".into(),
+            revision: 7,
+            running: true,
+            phase: Some("compacting".into()),
+            phase_started_at: Some(1_700_000_000_000),
+            owner: Some("manual:op-1".into()),
+        })
+        .unwrap();
+        assert_eq!(json["type"], "runtime_activity");
+        assert_eq!(json["session_id"], "s1");
+        assert_eq!(json["revision"], 7);
+        assert_eq!(json["phase"], "compacting");
+        assert_eq!(json["phase_started_at"], 1_700_000_000_000u64);
+        assert_eq!(json["owner"], "manual:op-1");
+    }
+
+    #[test]
     fn global_bus_fans_out_to_every_subscriber() {
         // 跨实例语义：每个实例一条订阅，投递必须广播到所有订阅者（而不是竞争消费）。
         let mut first = global_events().subscribe();
@@ -1264,6 +1866,43 @@ mod global_events_tests {
             assert!(matches!(a, GlobalWireEvent::Activity { .. }));
             assert!(matches!(b, GlobalWireEvent::ReviewAsked { .. }));
         }
+    }
+
+    /// `/loop` / `/goal` 控制器也是「会话正在干活」的一部分：wakeup 等待期间
+    /// 没有执行中的回合，但控制器还挂着，不能被 `/chat/active` 当成空闲。
+    #[test]
+    fn controller_state_counts_as_running_until_it_is_released() {
+        let session_id = "controller-test-loop";
+        crate::note_loop_state(session_id, true, 2, "watch CI");
+        let state = crate::controller_state_for(session_id).expect("loop state must be recorded");
+        assert!(state.loop_active);
+        assert_eq!(state.loop_round, 2);
+        assert_eq!(state.loop_label, "watch CI");
+        assert!(crate::controller_running_session_ids()
+            .iter()
+            .any(|id| id == session_id));
+
+        // 控制器结束：记录仍在（保留最后一轮信息），但不再计入运行态。
+        crate::note_loop_state(session_id, false, 2, "watch CI");
+        assert!(crate::controller_state_for(session_id).is_some());
+        assert!(!crate::controller_running_session_ids()
+            .iter()
+            .any(|id| id == session_id));
+    }
+
+    #[test]
+    fn goal_state_alone_keeps_the_session_running() {
+        let session_id = "controller-test-goal";
+        crate::note_goal_state(session_id, true);
+        assert!(crate::controller_state_for(session_id).is_some_and(|state| state.goal_active));
+        assert!(crate::controller_running_session_ids()
+            .iter()
+            .any(|id| id == session_id));
+
+        crate::note_goal_state(session_id, false);
+        assert!(!crate::controller_running_session_ids()
+            .iter()
+            .any(|id| id == session_id));
     }
 
     /// 路由级 smoke：`/events` 必须先发 `sync` 对齐帧，随后把总线上的增量事件
@@ -1352,6 +1991,24 @@ mod global_events_tests {
         assert_eq!(deleted["type"], "session_deleted");
         assert_eq!(deleted["session_id"], "s1");
 
+        // 查看信号：其它实例据此熄灭「刚完成」徽标。
+        let seen = serde_json::to_value(GlobalWireEvent::SessionSeen {
+            session_id: "s1".into(),
+        })
+        .unwrap();
+        assert_eq!(seen["type"], "session_seen");
+        assert_eq!(seen["session_id"], "s1");
+
+        // 编辑/删除/回溯的跨实例失效信号：只带 revision，客户端据此作废缓存。
+        let mutated = serde_json::to_value(GlobalWireEvent::SessionMutated {
+            session_id: "s1".into(),
+            revision: 7,
+        })
+        .unwrap();
+        assert_eq!(mutated["type"], "session_mutated");
+        assert_eq!(mutated["session_id"], "s1");
+        assert_eq!(mutated["revision"], 7);
+
         // 终态带 kind（客户端据此出右下角通知）；运行中事件不带 terminal。
         let terminal = serde_json::to_value(GlobalWireEvent::Activity {
             session_id: "s1".into(),
@@ -1400,7 +2057,7 @@ mod global_events_tests {
     async fn fanout_chat_events_backfills_session_id_from_done_and_emits_terminal_activity() {
         let mut global_rx = global_events().subscribe();
         let (primary_tx, mut primary_rx) = mpsc::unbounded_channel();
-        let (bus_tx, _bus_rx) = tokio::sync::broadcast::channel(16);
+        let (bus_tx, _bus_rx) = tokio::sync::broadcast::channel::<(u64, ChatEvent)>(16);
         let tx = fanout_chat_events_for_session(primary_tx, bus_tx, None, None, None);
 
         tx.send(ChatEvent::Done {
@@ -1448,7 +2105,7 @@ mod global_events_tests {
 
 /// Compact user-question row for the session outline (right-rail). Not the
 /// model context — just labels.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct SessionTurnOutline {
     /// Stable ordinal among real user questions. Unlike `index`, this is not
     /// affected by assistant/tool/diagnostic rows inserted by failed turns.
@@ -1461,12 +2118,35 @@ pub struct SessionTurnOutline {
     /// Short rail label. The full question lives in `messages`; keeping the
     /// outline compact avoids duplicating the whole transcript in every page.
     pub label: String,
+    /// Input admitted but not yet folded/persisted. Rendered with a pending
+    /// badge; its index is a display-space anchor like any other row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
+    /// Admission order from the durable input log (absent for persisted rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 const OUTLINE_LABEL_CAP: usize = 120;
 
 fn outline_label(text: &str) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let un_steered = if let Some(start) = text.find("<user-query>") {
+        if let Some(end) = text.find("</user-query>") {
+            &text[start + "<user-query>".len()..end]
+        } else {
+            text
+        }
+    } else if let Some(idx) = text.find("[jeikcode-steer]") {
+        let before = text[..idx].trim();
+        if !before.is_empty() {
+            before
+        } else {
+            text
+        }
+    } else {
+        text
+    };
+    let compact = un_steered.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.chars().count() <= OUTLINE_LABEL_CAP {
         return compact;
     }
@@ -1491,16 +2171,597 @@ fn session_user_outline(messages: &[MessageInfo]) -> Vec<SessionTurnOutline> {
             if label.is_empty() {
                 return None;
             }
-            Some((index, msg.id.clone(), label))
+            // 旧快照行可能没有 id：用确定性 id 兑底，大纲条目始终可按 id 命中。
+            Some((
+                index,
+                msg.id.clone().or_else(|| Some(format!("m-legacy-{index}"))),
+                label,
+                msg.seq,
+            ))
         })
         .enumerate()
-        .map(|(ordinal, (index, id, label))| SessionTurnOutline {
+        .map(|(ordinal, (index, id, label, seq))| SessionTurnOutline {
             ordinal,
             id,
             index,
             label,
+            pending: false,
+            seq,
         })
         .collect()
+}
+
+/// Collect the session-unique message identities present in a display log.
+fn display_record_ids(
+    records: &[jeikcode_capabilities::session::DisplayRecord],
+) -> std::collections::HashSet<String> {
+    records
+        .iter()
+        .filter_map(|record| record.id.clone())
+        .collect()
+}
+
+/// v4 completeness: every completed turn's boundary messages must be present in
+/// the durable display log.
+///
+/// Turn ids alone are NOT a sufficient identity: a rewind can restore the
+/// kernel turn counter, so a later turn may REUSE an id whose archived
+/// `turn_stats` entry is still present. `completed_turns.contains(id)` then
+/// reports coverage for a turn that never reached the log — exactly how the
+/// final turn of a session can vanish from the canvas after a refresh. Message
+/// ids are session-unique, so they survive id reuse.
+///
+/// Both boundaries are checked:
+/// - the prompting user row, and
+/// - the turn's last assistant row (the tool-call finalization or the
+///   error diagnostic).
+///
+/// The second check matters because a mid-turn refresh/backfill can legitimately
+/// write the prompt row early; prompt presence alone would then trust a log
+/// whose `turn_complete` slice was dropped.
+///
+/// A `backfilled` log is no longer exempt: its rows carry the canonical message
+/// ids, so the same check applies and a later dropped append is still caught.
+fn v4_display_covers_completed_user_turns(
+    meta: &jeikcode_capabilities::session::DisplayMeta,
+    display_ids: &std::collections::HashSet<String>,
+    snapshot: &[jeikcode_kernel::message::Message],
+    turn_stats: &[jeikcode_capabilities::session::TurnStat],
+    snapshot_last_turn: u64,
+) -> bool {
+    use jeikcode_kernel::message::Role;
+
+    if meta.last_turn_id < snapshot_last_turn {
+        return false;
+    }
+    let completed: std::collections::HashSet<u64> = meta.completed_turns.iter().copied().collect();
+    let mut previous = 0usize;
+    for stat in turn_stats
+        .iter()
+        .filter(|stat| stat.position_valid && stat.turn_id != 0)
+    {
+        let end = stat.after_message.min(snapshot.len());
+        let start = previous.min(end);
+        let turn = &snapshot[start..end];
+        if let Some(prompt) = turn
+            .iter()
+            .find(|message| message.role == Role::User && !message.synthetic)
+        {
+            let covered = match prompt.id.as_deref() {
+                Some(id) => display_ids.contains(id),
+                // A pre-id snapshot cannot be reconciled by identity. A
+                // backfilled log is the only trustworthy projection for those
+                // raw rows; otherwise keep the legacy turn-id contract.
+                None => meta.backfilled || completed.contains(&stat.turn_id),
+            };
+            if !covered {
+                return false;
+            }
+        }
+        // The terminal assistant row proves the whole turn slice landed, not
+        // just a prompt row written by a mid-turn backfill.
+        if let Some(last_assistant) = turn.iter().rev().find(|m| m.role == Role::Assistant) {
+            if let Some(id) = last_assistant.id.as_deref() {
+                if !display_ids.contains(id) {
+                    return false;
+                }
+            }
+        }
+        previous = end;
+    }
+    true
+}
+
+/// v3 migration guard only. v4 sessions use the exact turn-id check in
+/// [`v4_display_covers_completed_user_turns`]; a normal v4 read never calls this.
+///
+/// 展示日志只覆盖「已落盘的完整回合」。当某个已完成回合的用户行缺失，
+/// 且它后面还有可见提问时，这是日志中间的洞（晚到/中断的 flush），
+/// 不是运行中的尾巴——此时必须回退到快照投影，而不是继续信任 display。
+fn display_covers_completed_user_rows(
+    records: &[jeikcode_capabilities::session::DisplayRecord],
+    snapshot: &[jeikcode_kernel::message::Message],
+    turn_stats: &[jeikcode_capabilities::session::TurnStat],
+    snapshot_last_turn: u64,
+) -> bool {
+    use jeikcode_kernel::message::Role;
+
+    let display_ids: std::collections::HashSet<String> = records
+        .iter()
+        .filter(|record| record.role.eq_ignore_ascii_case("user") && !record.synthetic)
+        .map(display_record_identity)
+        .collect();
+    // 旧日志没有 id 时无法核对；下一次空闲读取会用确定性 id 回填。
+    if display_ids.is_empty() {
+        return true;
+    }
+    for (index, message) in snapshot.iter().enumerate() {
+        if message.role != Role::User || message.synthetic {
+            continue;
+        }
+        let Some(id) = message.id.as_deref() else {
+            continue;
+        };
+        if display_ids.contains(id) {
+            continue;
+        }
+        // `after_message` 是快照消息数边界：第一个覆盖该下标的回合就是它所属的 turn。
+        let turn_id = turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid && stat.after_message > index)
+            .min_by_key(|stat| stat.after_message)
+            .map(|stat| stat.turn_id)
+            .unwrap_or(u64::MAX);
+        if turn_id > snapshot_last_turn {
+            // 运行中的尾巴还没有 turn_stat：这是未落盘尾巴，不是洞。
+            continue;
+        }
+        let later_visible = snapshot[index + 1..].iter().any(|later| {
+            later.role == Role::User
+                && !later.synthetic
+                && later
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| display_ids.contains(id))
+        });
+        if later_visible {
+            return false;
+        }
+    }
+    true
+}
+
+/// 把快照里「display 最后一条共享行之后」的未落盘内容投影到画布与大纲。
+///
+/// 这是运行中/刚停止但尚未 flush 的唯一尾巴来源：display 日志要等
+/// `turn_complete`，而 inflight 快照已经有序、带 id。只追加共享锚点之后的
+/// 行，绝不猜测锚点之前的位置；没有共享锚点的旧日志交给 snapshot 回退路径。
+fn append_snapshot_tail(
+    messages: &mut Vec<MessageInfo>,
+    turns: &mut Vec<SessionTurnOutline>,
+    snapshot: &[jeikcode_kernel::message::Message],
+    working_dir: &std::path::Path,
+) -> usize {
+    use jeikcode_kernel::message::Role;
+
+    if snapshot.is_empty() || messages.is_empty() {
+        return 0;
+    }
+    let display_ids: std::collections::HashSet<String> = messages
+        .iter()
+        .filter_map(|message| message.id.clone())
+        .collect();
+    let Some(anchor) = snapshot.iter().rposition(|message| {
+        message
+            .id
+            .as_deref()
+            .is_some_and(|id| display_ids.contains(id))
+    }) else {
+        // 没有共享身份：旧日志/旧 daemon。不能靠文本猜位置。
+        return 0;
+    };
+    let known_turn_ids: std::collections::HashSet<String> =
+        turns.iter().filter_map(|turn| turn.id.clone()).collect();
+    let mut next_seq = messages
+        .iter()
+        .filter_map(|message| message.seq)
+        .max()
+        .unwrap_or(0);
+    let mut appended = 0usize;
+    for message in snapshot.iter().skip(anchor + 1) {
+        let Some(id) = message.id.as_deref() else {
+            continue;
+        };
+        if display_ids.contains(id) {
+            continue;
+        }
+        let index = messages.len();
+        let mut msg_info = MessageInfo::from_kernel_in(message, Some(working_dir));
+        next_seq = next_seq.saturating_add(1);
+        msg_info.seq = Some(next_seq);
+        messages.push(msg_info);
+        appended += 1;
+        if message.role == Role::User && !message.synthetic && !known_turn_ids.contains(id) {
+            let label = outline_label(&jeikcode_capabilities::session::user_text_for_display(
+                working_dir,
+                &message.text,
+            ));
+            if !label.is_empty() {
+                turns.push(SessionTurnOutline {
+                    ordinal: turns.len(),
+                    id: Some(id.to_string()),
+                    index,
+                    label,
+                    pending: false,
+                    seq: Some(next_seq),
+                });
+            }
+        }
+    }
+    appended
+}
+
+/// Show an interrupted per-token checkpoint on a cold read. The next `/chat`
+/// overlays the same content into the model context and clears the sidecar; this
+/// projection only makes the recovered text visible before the retry.
+fn append_interrupted_partial(messages: &mut Vec<MessageInfo>, session_id: &str, running: bool) {
+    if running {
+        return;
+    }
+    let Some(partial) = jeikcode_capabilities::session::partial::load_global(session_id) else {
+        return;
+    };
+    if partial.text.trim().is_empty() && partial.reasoning.trim().is_empty() {
+        return;
+    }
+    if partial.message_id.as_deref().is_some_and(|id| {
+        messages
+            .iter()
+            .any(|message| message.id.as_deref() == Some(id))
+    }) || (!partial.text.trim().is_empty()
+        && messages.iter().any(|message| {
+            message.role == "assistant" && message.content.contains(partial.text.trim())
+        }))
+    {
+        return;
+    }
+    let next_seq = messages
+        .iter()
+        .filter_map(|message| message.seq)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    messages.push(message_info! {
+        turn_id: None,
+        seq: Some(next_seq),
+        role: "assistant".into(),
+        id: partial.message_id,
+        content: partial.text,
+        reasoning: (!partial.reasoning.trim().is_empty()).then_some(partial.reasoning),
+        synthetic: false,
+        internal_origin: Some("interrupted_partial".into()),
+        tool_calls: None,
+        tool_result: None,
+        artifacts: None,
+        images: None,
+        created_at: Some(partial.updated_at),
+        elapsed_ms: None,
+    });
+}
+
+/// Overlay a per-token crash checkpoint onto the canonical conversation.
+/// Idempotent: a persisted assistant message with the same id (or already
+/// containing the checkpoint text) wins. Returns true when a row was appended.
+pub(crate) fn overlay_partial_stream(
+    conversation: &mut Vec<jeikcode_kernel::message::Message>,
+    partial: &jeikcode_capabilities::session::PartialStream,
+) -> bool {
+    if partial.text.trim().is_empty()
+        && partial.reasoning.trim().is_empty()
+        && partial.tool_calls.is_empty()
+    {
+        return false;
+    }
+    let already = conversation.iter().any(|message| {
+        message.role == jeikcode_kernel::message::Role::Assistant
+            && (partial
+                .message_id
+                .as_deref()
+                .is_some_and(|id| message.id.as_deref() == Some(id))
+                || (!partial.text.trim().is_empty() && message.text.contains(partial.text.trim())))
+    });
+    if already {
+        return false;
+    }
+    let calls: Vec<jeikcode_kernel::tool::ToolCall> = partial
+        .tool_calls
+        .iter()
+        .filter_map(|tool| {
+            Some(jeikcode_kernel::tool::ToolCall {
+                id: tool.id.clone()?,
+                name: tool.name.clone()?,
+                arguments: tool.arguments.clone(),
+            })
+        })
+        .collect();
+    let mut recovered =
+        jeikcode_kernel::message::Message::assistant(partial.text.clone(), calls.clone());
+    recovered.id = partial.message_id.clone();
+    recovered.reasoning =
+        (!partial.reasoning.trim().is_empty()).then_some(partial.reasoning.clone());
+    recovered.internal_origin = Some("interrupted_partial".into());
+    conversation.push(recovered);
+    // A tool call without a result makes the provider context invalid. Pair every
+    // interrupted call with an explicit failed result; the next turn can retry.
+    for call in calls {
+        if conversation
+            .iter()
+            .any(|message| message.tool_call_id.as_deref() == Some(call.id.as_str()))
+        {
+            continue;
+        }
+        let mut result = jeikcode_kernel::message::Message::tool_result(
+            call.id,
+            "interrupted: tool call did not complete before the process stopped",
+            true,
+        );
+        result.internal_origin = Some("interrupted_partial_tool".into());
+        conversation.push(result);
+    }
+    true
+}
+
+/// Project admitted-but-not-yet-folded inputs (prompt/steer) onto the canvas
+/// and rail. This is the durable gap between POST acceptance and the kernel's
+/// persisted message; it is scoped to the current operation so stale rows from
+/// an older turn can never reappear.
+fn append_pending_inputs(
+    messages: &mut Vec<MessageInfo>,
+    turns: &mut Vec<SessionTurnOutline>,
+    session_id: &str,
+    operation_id: Option<&str>,
+    working_dir: &std::path::Path,
+    absolute_index_base: usize,
+) {
+    let existing: std::collections::HashSet<String> = messages
+        .iter()
+        .filter_map(|message| message.id.clone())
+        .collect();
+    let mut next_seq = messages
+        .iter()
+        .filter_map(|message| message.seq)
+        .max()
+        .unwrap_or(0);
+    let all_inputs = jeikcode_capabilities::session::inputs::list_global(session_id);
+    if let Some(operation_id) = operation_id {
+        for input in all_inputs.iter().filter(|input| {
+            input.status == "admitted"
+                && input.operation_id.as_deref() == Some(operation_id)
+                && (!input.text.trim().is_empty() || !input.images.is_empty())
+        }) {
+            // Queued steers live in `/chat/queue` as cancellable cards until the
+            // kernel actually folds them at a round boundary (`Steered`). Projecting
+            // an un-folded steer into `messages` prematurely paints a user bubble
+            // below the in-flight assistant round while that round continues
+            // streaming above it.
+            if input.delivery == "steer" {
+                continue;
+            }
+            if existing.contains(&input.id) {
+                continue;
+            }
+            let content =
+                jeikcode_capabilities::session::user_text_for_display(working_dir, &input.text);
+            let images: Vec<ImageData> = input
+                .images
+                .iter()
+                .map(|image| ImageData {
+                    media_type: image.media_type.clone(),
+                    data: image.data.clone(),
+                    missing: false,
+                })
+                .collect();
+            if content.trim().is_empty() && images.is_empty() {
+                continue;
+            }
+            let label_text = if content.trim().is_empty() {
+                "[图片]".to_string()
+            } else {
+                content.clone()
+            };
+            let label = outline_label(&label_text);
+            if label.is_empty() {
+                continue;
+            }
+            let index = absolute_index_base + messages.len();
+            next_seq = next_seq.saturating_add(1);
+            let user_info = message_info! {
+                turn_id: None,
+                seq: Some(next_seq),
+                role: "user".into(),
+                id: Some(input.id.clone()),
+                content,
+                reasoning: None,
+                synthetic: false,
+                internal_origin: Some("pending_input".into()),
+                tool_calls: None,
+                tool_result: None,
+                artifacts: None,
+                images: (!images.is_empty()).then_some(images),
+                created_at: Some(input.created_at),
+                elapsed_ms: None,
+            };
+            messages.push(user_info);
+            turns.push(SessionTurnOutline {
+                ordinal: turns.len(),
+                id: Some(input.id.clone()),
+                index,
+                label,
+                pending: true,
+                seq: Some(next_seq),
+            });
+        }
+    }
+    append_folded_steer_outline(
+        messages,
+        turns,
+        &all_inputs,
+        operation_id,
+        working_dir,
+        absolute_index_base,
+    );
+}
+
+/// Keep queued/folded steers in the right-rail outline before display flush.
+///
+/// `display.jsonl` only gets the steer at `turn_complete` (in the correct
+/// assistant/user order). The durable input log already records the admitted
+/// steer (and marks it promoted when folded); projecting it here prevents a
+/// refresh from rebuilding the outline without it. The pending row is replaced
+/// by the persisted display row once the turn settles (merge is by `id`).
+fn append_folded_steer_outline(
+    messages: &[MessageInfo],
+    turns: &mut Vec<SessionTurnOutline>,
+    inputs: &[jeikcode_capabilities::session::SessionInput],
+    operation_id: Option<&str>,
+    working_dir: &std::path::Path,
+    absolute_index_base: usize,
+) {
+    let existing: std::collections::HashSet<String> =
+        turns.iter().filter_map(|turn| turn.id.clone()).collect();
+    let mut added = 0usize;
+    for input in inputs {
+        if input.delivery != "steer" || (input.status != "admitted" && input.status != "promoted") {
+            continue;
+        }
+        // `/chat` steers carry the owning operation's client id. A live-runtime
+        // steer has no ActiveChatRegistry operation; it is still included as
+        // long as it is promoted and not already in the persisted outline.
+        if let (Some(current), Some(input_op)) = (operation_id, input.operation_id.as_deref()) {
+            if current != input_op {
+                continue;
+            }
+        }
+        if existing.contains(&input.id) {
+            continue;
+        }
+        let content =
+            jeikcode_capabilities::session::user_text_for_display(working_dir, &input.text);
+        let label_text = if content.trim().is_empty() {
+            if input.images.is_empty() {
+                continue;
+            }
+            "[图片]".to_string()
+        } else {
+            content
+        };
+        let label = outline_label(&label_text);
+        if label.is_empty() {
+            continue;
+        }
+        turns.push(SessionTurnOutline {
+            ordinal: turns.len(),
+            id: Some(input.id.clone()),
+            // Provisional canvas coordinate: the pending row is jumped by id and
+            // replaced by the display row once the turn settles.
+            index: absolute_index_base + messages.len() + added,
+            label,
+            pending: true,
+            seq: Some(input.seq),
+        });
+        added = added.saturating_add(1);
+    }
+}
+
+/// Explicit edit/rewind: prune the in-memory turn stats that describe the
+/// removed tail. Derived files are pruned separately AFTER the canonical
+/// snapshot commit, so a failed snapshot write can never leave them ahead.
+fn prune_rewound_turn_stats(
+    meta: &mut jeikcode_capabilities::session::SessionMeta,
+    keep_count: usize,
+) -> Option<std::collections::BTreeSet<u64>> {
+    let had_native = meta
+        .turn_stats
+        .iter()
+        .any(|stat| stat.position_valid && stat.turn_id != 0);
+    meta.turn_stats
+        .retain(|stat| stat.after_message <= keep_count);
+    meta.turn_count = u32::try_from(meta.turn_stats.len()).unwrap_or(0);
+    if !had_native {
+        return None;
+    }
+    Some(
+        meta.turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid && stat.turn_id != 0)
+            .map(|stat| stat.turn_id)
+            .collect(),
+    )
+}
+
+fn resync_todo_board_after_rewind(id: &str, messages: &[jeikcode_kernel::message::Message]) {
+    // 删除/回溯只回退被删掉的那些 todo 动作，保留更早轮次建立/修改过的项。
+    // 按**剩余转录**重新推导；板身份（id + 单调 seq）原地重绑，撤销不会被
+    // 看成“另起一板/版本回退”。
+    let derived = jeikcode_capabilities::tools::derive_current_todos(messages);
+    if jeikcode_capabilities::tools::rebind_todo_board(id, &derived).is_none() {
+        if derived.is_empty() {
+            jeikcode_capabilities::tools::clear_todo_board(id);
+        } else {
+            jeikcode_capabilities::tools::commit_todo_board(id, &derived);
+        }
+    }
+}
+
+fn prune_deleted_turn_stats(
+    meta: &mut jeikcode_capabilities::session::SessionMeta,
+    deleted_range_start: usize,
+    removed_count: usize,
+) -> Option<std::collections::BTreeSet<u64>> {
+    // A single-turn delete keeps every LATER turn. Remove only the stat that
+    // covered the deleted range and shift later positions by the removed rows.
+    let had_native = meta
+        .turn_stats
+        .iter()
+        .any(|stat| stat.position_valid && stat.turn_id != 0);
+    let affected_after = meta
+        .turn_stats
+        .iter()
+        .filter(|stat| {
+            stat.position_valid && stat.turn_id != 0 && stat.after_message > deleted_range_start
+        })
+        .min_by_key(|stat| stat.after_message)
+        .map(|stat| stat.after_message);
+    if let Some(affected_after) = affected_after {
+        meta.turn_stats
+            .retain(|stat| stat.after_message != affected_after);
+        for stat in &mut meta.turn_stats {
+            if stat.after_message > affected_after {
+                stat.after_message = stat.after_message.saturating_sub(removed_count);
+            }
+        }
+    }
+    meta.turn_count = u32::try_from(meta.turn_stats.len()).unwrap_or(0);
+    if !had_native {
+        return None;
+    }
+    Some(
+        meta.turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid && stat.turn_id != 0)
+            .map(|stat| stat.turn_id)
+            .collect(),
+    )
+}
+
+/// Apply derived-file pruning only AFTER the canonical snapshot + meta commit.
+fn prune_derived_turns(
+    manager: &NativeSessionManager,
+    id: &str,
+    surviving: &std::collections::BTreeSet<u64>,
+) {
+    let _ = manager.prune_presentation(id, surviving);
+    let _ = manager.retain_transcript_turns(id, surviving);
 }
 
 fn session_records_user_outline(
@@ -1518,21 +2779,59 @@ fn session_records_user_outline(
             if label.is_empty() {
                 return None;
             }
-            Some((index_offset + idx, record.id.clone(), label))
+            Some((
+                index_offset + idx,
+                Some(display_record_identity(record)),
+                label,
+                (record.seq > 0).then_some(record.seq),
+            ))
         })
         .enumerate()
-        .map(|(ordinal, (index, id, label))| SessionTurnOutline {
+        .map(|(ordinal, (index, id, label, seq))| SessionTurnOutline {
             ordinal,
             id,
             index,
             label,
+            pending: false,
+            seq,
         })
         .collect()
+}
+
+/// 该 daemon 支持的跨端身份 / 版本能力。客户端据此决定是否启用 legacy 文本兜底：
+/// 声明了 `id` 就意味着 wire / 磁盘 / 大纲三处共享同一个消息 id，无需再猜文本。
+/// 新增能力只能追加，不能改名（旧客户端靠字符串匹配）。
+pub(crate) fn session_capabilities() -> Vec<String> {
+    vec![
+        "id".into(),
+        "revision".into(),
+        "seq".into(),
+        "session_mutated".into(),
+        // Terminal frames carry the client correlation id; interrupted turns
+        // commit their partial context instead of rolling it back.
+        "terminal_operation_id".into(),
+        "preserve_interrupted".into(),
+        // Live frames carry an explicit replay boolean; clients must not infer
+        // replay from seq presence on this daemon.
+        "explicit_replay".into(),
+    ]
+}
+
+/// Session-global display cursor for identity-first pagination.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SessionCursor {
+    /// Oldest display `seq` in the returned window (None for legacy rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_seq: Option<u64>,
+    pub total: usize,
 }
 
 /// Session detail response
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionDetail {
+    /// Session-global display cursor.
+    #[serde(default)]
+    pub cursor: SessionCursor,
     pub id: String,
     pub name: String,
     pub working_dir: PathBuf,
@@ -1542,6 +2841,13 @@ pub struct SessionDetail {
     pub updated_at: u64,
     /// Total messages in the transcript (not the returned window size).
     pub message_count: usize,
+    /// 会话权威版本号（内核 `cache_epoch`）。每次显式变更（编辑 / 删除 / 回溯）
+    /// 自增；客户端用它给缓存写入设闸门，旧快照永远不能覆盖新快照。
+    #[serde(default)]
+    pub revision: u64,
+    /// 本 daemon 的能力集（见 [`session_capabilities`]）。客户端据此关闭旧文本兜底。
+    #[serde(default)]
+    pub caps: Vec<String>,
     /// Index of `messages[0]` in the full transcript.
     /// When `pinned_user_index` is set, `messages[0]` is that question and this
     /// is the index of `messages[1]`.
@@ -1555,6 +2861,10 @@ pub struct SessionDetail {
     /// `messages` window so the WebUI turn rail can list the full session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<SessionTurnOutline>,
+    /// Highest durable input-log sequence. Clients pass it back as `after_seq`
+    /// to fetch only newly admitted prompt/steer rows.
+    #[serde(default)]
+    pub input_cursor: u64,
     pub messages: Vec<MessageInfo>,
     /// Per-session model selection. Absent on older sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1743,6 +3053,17 @@ pub(crate) fn session_token_usage_from_session(
     meta: &jeikcode_capabilities::session::SessionMeta,
     snapshot: &jeikcode_kernel::message::SessionSnapshot,
 ) -> Option<SessionTokenUsage> {
+    // 刚提交的压缩是比「最后一条助手消息的 usage」更新的上下文事实：后者仍是
+    // 压缩前的 prompt 大小。新回合 / undo / 显式变更会清空该字段。
+    if let Some(compacted) = meta.compacted_context_tokens.filter(|tokens| *tokens > 0) {
+        return Some(footer_from_last_request(
+            compacted as usize,
+            0,
+            0,
+            None,
+            false,
+        ));
+    }
     if let Some((prompt, completion, cached, ctx_window)) =
         last_assistant_request_usage(&snapshot.messages)
     {
@@ -1822,6 +3143,10 @@ pub(crate) static DAEMON_PROJECT: std::sync::Mutex<Option<ProjectStateStore>> =
 #[derive(Clone)]
 struct AdmittedUser {
     content: String,
+    /// Server-rendered user-facing text (user-wrap unwrapped, reminders/VL
+    /// markers stripped). Live frames carry this so clients never parse protocol
+    /// strings on the authoritative path.
+    display_text: String,
     created_at: Option<u64>,
     /// 客户端关联键（`/chat` 的 `request_id`）。回传到 `ChatEvent::User`，让发送端
     /// 按身份认领自己的乐观气泡，而不是退化到文本比对。
@@ -1833,6 +3158,7 @@ struct AdmittedUser {
 /// and the browser-generated request id so either client protocol can stop it.
 struct ActiveChatOperation {
     started_at: u64,
+    status: Option<String>,
     session_id: Option<String>,
     /// 客户端为本轮提供的关联键（`/chat` 的 `request_id`；`/chat/steer` 走
     /// `client_input_id` + `steered` 通道）。回传到 user 回声，供前端按 id 认领。
@@ -1853,7 +3179,7 @@ struct ActiveChatOperation {
     /// Fan-out bus so WebUI (or other observers) can `GET /chat/watch` and
     /// reattach to a turn started by OpenAI/API clients without owning the
     /// primary SSE response.
-    event_bus: tokio::sync::broadcast::Sender<ChatEvent>,
+    event_bus: tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
     /// The user message admitted for this turn, recorded right when it is
     /// pushed to the conversation. `tokio::broadcast` does not replay history,
     /// so a `/chat/watch` observer that attaches *after* the turn started would
@@ -1864,7 +3190,7 @@ struct ActiveChatOperation {
     /// has no history; without this buffer a reattached WebUI only paints deltas
     /// *after* subscribe and loses thinking/text/tools already streamed.
     /// Consecutive text/reasoning deltas are coalesced to bound memory.
-    replay: Arc<std::sync::Mutex<Vec<ChatEvent>>>,
+    replay: Arc<std::sync::Mutex<ReplayLog>>,
     /// 本回合帧的起始游标：第 i 条缓冲帧的 seq = `seq_base + i + 1`。
     /// 回合结束时把 `seq_base + 缓冲长度` 回写到会话计数器，下一回合接着往上走。
     seq_base: u64,
@@ -1886,7 +3212,7 @@ struct ActiveChatIndex {
     aliases: HashMap<String, String>,
     /// `/chat/watch` observers that arrived while the session had NO active
     /// turn. Keyed by session id -> client id -> sender.
-    standby_watchers: HashMap<String, HashMap<String, mpsc::UnboundedSender<ChatEvent>>>,
+    standby_watchers: HashMap<String, HashMap<String, mpsc::UnboundedSender<(u64, ChatEvent)>>>,
     /// Session-scoped event state. Survives the operation: the turn's frames live
     /// in the operation, but "how far did this session get" and "what was its
     /// terminal frame" must outlive the turn.
@@ -1926,7 +3252,7 @@ struct ActiveChatAdmission {
 /// Outcome of `subscribe_or_standby`: either attach to a running turn now
 /// (`Live`) or park until a turn is admitted for this session (`Standby`).
 enum WatchOutcome {
-    Live(tokio::sync::broadcast::Receiver<ChatEvent>),
+    Live(tokio::sync::broadcast::Receiver<(u64, ChatEvent)>),
     Standby,
 }
 
@@ -2011,6 +3337,7 @@ impl ActiveChatRegistry {
             operation_id.clone(),
             ActiveChatOperation {
                 started_at,
+                status: None,
                 session_id: session_id.clone(),
                 request_id,
                 aliases,
@@ -2021,7 +3348,7 @@ impl ActiveChatRegistry {
                 terminal_reached: false,
                 event_bus,
                 admitted_user: None,
-                replay: Arc::new(std::sync::Mutex::new(Vec::new())),
+                replay: Arc::new(std::sync::Mutex::new(ReplayLog::new(seq_base))),
                 seq_base,
                 steer_tx: None,
                 steer_client_ids: std::collections::VecDeque::new(),
@@ -2062,7 +3389,7 @@ impl ActiveChatRegistry {
     async fn event_bus(
         &self,
         operation_id: &str,
-    ) -> Option<tokio::sync::broadcast::Sender<ChatEvent>> {
+    ) -> Option<tokio::sync::broadcast::Sender<(u64, ChatEvent)>> {
         self.inner
             .read()
             .await
@@ -2071,13 +3398,21 @@ impl ActiveChatRegistry {
             .map(|op| op.event_bus.clone())
     }
 
+    /// Set the human/client-visible operation status (e.g. "compacting").
+    pub async fn set_operation_status(&self, operation_id: &str, status: Option<String>) {
+        let mut index = self.inner.write().await;
+        if let Some(op) = index.operations.get_mut(operation_id) {
+            op.status = status;
+        }
+    }
+
     /// Event bus + shared replay log for a turn (fan-out records into `replay`).
     async fn event_bus_with_replay(
         &self,
         operation_id: &str,
     ) -> Option<(
-        tokio::sync::broadcast::Sender<ChatEvent>,
-        Arc<std::sync::Mutex<Vec<ChatEvent>>>,
+        tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
+        Arc<std::sync::Mutex<ReplayLog>>,
     )> {
         self.inner
             .read()
@@ -2092,23 +3427,25 @@ impl ActiveChatRegistry {
     /// open tabs stay synchronized without polling or full-transcript reloads.
     pub async fn broadcast_to_session(&self, session_id: &str, event: ChatEvent) {
         let index = self.inner.read().await;
+        let mut seq = 0u64;
         if let Some(operation_id) = index.aliases.get(session_id) {
             if let Some(operation) = index.operations.get(operation_id) {
                 // 会话变更（删/改/截断）改写了权威转录：本回合的旧帧立即作废，
                 // 否则带旧游标或全量重连会把变更前发出的帧补回来（已删内容复活）。
+                let mut log = operation
+                    .replay
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if matches!(event, ChatEvent::SessionMutation { .. }) {
-                    operation
-                        .replay
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clear();
+                    log.events.clear();
                 }
-                let _ = operation.event_bus.send(event.clone());
+                seq = log.push(event.clone());
+                let _ = operation.event_bus.send((seq, event.clone()));
             }
         }
         if let Some(watchers) = index.standby_watchers.get(session_id) {
             for tx in watchers.values() {
-                let _ = tx.send(event.clone());
+                let _ = tx.send((seq, event.clone()));
             }
         }
     }
@@ -2121,7 +3458,7 @@ impl ActiveChatRegistry {
         session_id: &str,
     ) -> Option<(
         Vec<(u64, ChatEvent)>,
-        tokio::sync::broadcast::Receiver<ChatEvent>,
+        tokio::sync::broadcast::Receiver<(u64, ChatEvent)>,
     )> {
         let index = self.inner.read().await;
         let operation_id = index.aliases.get(session_id)?.clone();
@@ -2137,11 +3474,7 @@ impl ActiveChatRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // 游标就是缓冲序号（从 1 开始）：缓冲是追加式的（连续同身份合并只改最后一条的内容，
         // 不改它的位置），所以同一个事件的 seq 永远稳定 —— 断点续传靠的就是这一点。
-        let mut snapshot: Vec<(u64, ChatEvent)> = guard
-            .iter()
-            .enumerate()
-            .map(|(index, event)| (operation.seq_base + index as u64 + 1, event.clone()))
-            .collect();
+        let mut snapshot: Vec<(u64, ChatEvent)> = guard.events.clone();
         let rx = operation.event_bus.subscribe();
         drop(guard);
         if let Some(ref admitted) = operation.admitted_user {
@@ -2156,11 +3489,14 @@ impl ActiveChatRegistry {
                         operation.seq_base,
                         ChatEvent::User {
                             content: admitted.content.clone(),
+                            display_text: Some(admitted.display_text.clone()),
+                            internal: Some(false),
+                            editable: Some(true),
                             session_id: Some(session_id.to_string()),
                             created_at: admitted
                                 .created_at
                                 .or((operation.started_at > 0).then_some(operation.started_at)),
-                            message_id: None,
+                            message_id: admitted.client_input_id.clone(),
                             order: None,
                             turn_ordinal: None,
                             client_input_id: admitted.client_input_id.clone(),
@@ -2194,7 +3530,7 @@ impl ActiveChatRegistry {
             .replay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        pending_interactive_from_replay(&guard)
+        pending_interactive_from_replay(&guard.events)
     }
 
     /// True when the turn replay already closed `call_id` (result/output/terminal).
@@ -2211,7 +3547,7 @@ impl ActiveChatRegistry {
             .replay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        replay_resolves_call(&guard, call_id)
+        replay_resolves_call(&guard.events, call_id)
     }
 
     /// Subscribe to a session's turn **if one is already running**, otherwise
@@ -2224,7 +3560,7 @@ impl ActiveChatRegistry {
         &self,
         session_id: &str,
         client_id: Option<&str>,
-        standby_tx: &mpsc::UnboundedSender<ChatEvent>,
+        standby_tx: &mpsc::UnboundedSender<(u64, ChatEvent)>,
         replay_terminal: bool,
     ) -> WatchOutcome {
         let mut index = self.inner.write().await;
@@ -2248,8 +3584,8 @@ impl ActiveChatRegistry {
         // silent, or it would re-deliver the same terminal on every re-arm and
         // spin.
         if replay_terminal {
-            if let Some((_, terminal)) = index.session_terminal.get(session_id) {
-                let _ = standby_tx.send(terminal.clone());
+            if let Some((seq, terminal)) = index.session_terminal.get(session_id) {
+                let _ = standby_tx.send((*seq, terminal.clone()));
             }
         }
         // Multi-client standby pool: prune dead senders, and update or register this client_id.
@@ -2283,6 +3619,7 @@ impl ActiveChatRegistry {
         &self,
         operation_id: &str,
         content: String,
+        display_text: String,
         created_at: Option<u64>,
         images: Vec<ImageData>,
     ) {
@@ -2291,6 +3628,7 @@ impl ActiveChatRegistry {
             let client_input_id = op.request_id.clone();
             op.admitted_user = Some(AdmittedUser {
                 content,
+                display_text,
                 created_at: created,
                 client_input_id,
                 images,
@@ -2320,7 +3658,11 @@ impl ActiveChatRegistry {
         self.admitted_user_message(&op_id).await
     }
 
-    async fn replay_admitted_user(&self, session_id: &str, tx: &mpsc::UnboundedSender<ChatEvent>) {
+    async fn replay_admitted_user(
+        &self,
+        session_id: &str,
+        tx: &mpsc::UnboundedSender<(u64, ChatEvent)>,
+    ) {
         let Some(operation_id) = self.operation_for_session(session_id).await else {
             return;
         };
@@ -2338,16 +3680,22 @@ impl ActiveChatRegistry {
         let created_at = admitted
             .created_at
             .or((started_at > 0).then_some(started_at));
-        let _ = tx.send(ChatEvent::User {
-            content: admitted.content,
-            session_id: Some(session_id.to_string()),
-            created_at,
-            message_id: None,
-            order: None,
-            turn_ordinal: None,
-            client_input_id: admitted.client_input_id,
-            images: (!admitted.images.is_empty()).then(|| admitted.images),
-        });
+        let _ = tx.send((
+            0,
+            ChatEvent::User {
+                content: admitted.content,
+                display_text: Some(admitted.display_text),
+                internal: Some(false),
+                editable: Some(true),
+                session_id: Some(session_id.to_string()),
+                created_at,
+                message_id: admitted.client_input_id.clone(),
+                order: None,
+                turn_ordinal: None,
+                client_input_id: admitted.client_input_id,
+                images: (!admitted.images.is_empty()).then(|| admitted.images),
+            },
+        ));
     }
 
     /// Drain (wake) all standby watchers parked for `session_id`, converting
@@ -2357,7 +3705,7 @@ impl ActiveChatRegistry {
     fn drain_standby_locked(
         index: &mut ActiveChatIndex,
         session_id: &str,
-        bus: &tokio::sync::broadcast::Sender<ChatEvent>,
+        bus: &tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
     ) -> usize {
         if let Some(mut watchers) = index.standby_watchers.remove(session_id) {
             watchers.retain(|_, tx| !tx.is_closed());
@@ -2367,14 +3715,14 @@ impl ActiveChatRegistry {
                 tokio::spawn(async move {
                     loop {
                         match rx.recv().await {
-                            Ok(event) => {
+                            Ok((seq, event)) => {
                                 let terminal = matches!(
                                     event,
                                     ChatEvent::Done { .. }
                                         | ChatEvent::Error { .. }
                                         | ChatEvent::Stopped
                                 );
-                                if tx.send(event).is_err() {
+                                if tx.send((seq, event)).is_err() {
                                     break;
                                 }
                                 if terminal {
@@ -2655,22 +4003,80 @@ impl ActiveChatRegistry {
         }
     }
 
-    /// Drain up to `count` recorded steer client ids and timestamps for the operation (FIFO).
-    async fn take_steer_metadata(
+    /// Remove a cancelled steer's correlation id and timestamp so a later steer
+    /// fold never pops the cancelled steer's stale metadata.
+    async fn cancel_steer_metadata(&self, alias: &str, client_input_id: Option<&str>) {
+        let mut index = self.inner.write().await;
+        let Some(operation_id) = index.aliases.get(alias).cloned() else {
+            return;
+        };
+        let Some(operation) = index.operations.get_mut(&operation_id) else {
+            return;
+        };
+        if let Some(cid) = client_input_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(pos) = operation
+                .steer_client_ids
+                .iter()
+                .position(|entry| entry.as_deref() == Some(cid))
+            {
+                operation.steer_client_ids.remove(pos);
+                operation.steer_timestamps.remove(pos);
+            }
+        } else {
+            operation.steer_client_ids.clear();
+            operation.steer_timestamps.clear();
+        }
+    }
+
+    /// Drain up to `count` recorded steer client ids and timestamps for the operation,
+    /// matching by the kernel's preserved `SteeredInput.message_id` when present so an
+    /// out-of-band or cancelled steer cannot shift the FIFO alignment.
+    async fn take_steer_metadata_for_inputs(
         &self,
         operation_id: &str,
         count: usize,
+        inputs: &[jeikcode_kernel::event::SteeredInput],
     ) -> (Vec<Option<String>>, Vec<Option<u64>>) {
         let mut index = self.inner.write().await;
         let Some(operation) = index.operations.get_mut(operation_id) else {
             return (Vec::new(), Vec::new());
         };
-        let ids = (0..count)
-            .map(|_| operation.steer_client_ids.pop_front().unwrap_or(None))
-            .collect();
-        let timestamps = (0..count)
-            .map(|_| operation.steer_timestamps.pop_front().unwrap_or(None))
-            .collect();
+        let mut ids = Vec::with_capacity(count);
+        let mut timestamps = Vec::with_capacity(count);
+        for i in 0..count {
+            let kernel_id = inputs
+                .get(i)
+                .and_then(|inp| inp.message_id.as_deref())
+                .filter(|s| !s.is_empty());
+            if let Some(kid) = kernel_id {
+                if let Some(pos) = operation
+                    .steer_client_ids
+                    .iter()
+                    .position(|entry| entry.as_deref() == Some(kid))
+                {
+                    let id = operation.steer_client_ids.remove(pos).unwrap_or(None);
+                    let ts = operation.steer_timestamps.remove(pos).unwrap_or(None);
+                    ids.push(id.or_else(|| Some(kid.to_string())));
+                    timestamps.push(ts);
+                    continue;
+                }
+                ids.push(Some(kid.to_string()));
+                let ts = if operation
+                    .steer_client_ids
+                    .front()
+                    .is_some_and(|entry| entry.is_none())
+                {
+                    let _ = operation.steer_client_ids.pop_front();
+                    operation.steer_timestamps.pop_front().unwrap_or(None)
+                } else {
+                    None
+                };
+                timestamps.push(ts);
+            } else {
+                ids.push(operation.steer_client_ids.pop_front().unwrap_or(None));
+                timestamps.push(operation.steer_timestamps.pop_front().unwrap_or(None));
+            }
+        }
         (ids, timestamps)
     }
 
@@ -2683,12 +4089,11 @@ impl ActiveChatRegistry {
         };
         // 会话级游标推进：把本回合已发出的帧数累加进去，下一回合从更高的序号开始。
         // 严格单调递增，且与上下文/压缩无关。
-        let turn_frames = operation
+        let next_base = operation
             .replay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len() as u64;
-        let next_base = operation.seq_base + turn_frames;
+            .high_water();
         for alias in &operation.aliases {
             index.session_seq.insert(alias.clone(), next_base);
         }
@@ -2704,6 +4109,12 @@ impl ActiveChatRegistry {
         operation.finished.notify_waiters();
         // 跨实例增量：操作结束 → 活动状态回落（不触发任何整表重拉）。
         if let Some(sid) = operation.session_id.clone() {
+            // 只结束属于本次 operation 的阶段：手动压缩归 `manual:<op>`，
+            // `/chat` 自动压缩归 `turn` 前缀。绝不能无条件清掉 live 或别的 owner
+            // 正在执行的压缩（旧实现正是这样让刷新误杀另一条链路）。
+            let manual_owner = manual_compaction_owner(operation_id);
+            finish_compaction_phase(&sid, &manual_owner, false);
+            finish_compaction_phase_prefix(&sid, COMPACTION_OWNER_TURN, false);
             publish_global(GlobalWireEvent::Activity {
                 session_id: sid,
                 running: false,
@@ -2734,12 +4145,12 @@ impl ActiveChatRegistry {
         };
         // The terminal frame takes the next slot in the turn's replay log, so its
         // cursor is the same number the replay snapshot hands out.
-        let seq = op.seq_base
-            + op.replay
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len() as u64
-            + 1;
+        let seq = op
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .high_water()
+            .saturating_add(1);
         op.terminal_reached = true;
         let aliases = op.aliases.clone();
         for alias in aliases {
@@ -2823,7 +4234,9 @@ fn log_truncate(value: &str, max: usize) -> String {
 /// terminal) has closed that `call_id`. A `UserInputRequest` is pending until
 /// a later `request_user_input` tool result or the turn ends — TUI/live can
 /// answer or decline without a dedicated chat-bus resolve event.
-fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, Option<ChatEvent>) {
+fn pending_interactive_from_replay(
+    events: &[(u64, ChatEvent)],
+) -> (Option<ChatEvent>, Option<ChatEvent>) {
     // A PermissionRequest is only "answered" by a resolution event that occurs
     // AFTER it (by index). A tool that started / produced output / returned a
     // result BEFORE the request cannot be what answered it, so a genuinely
@@ -2836,10 +4249,15 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
     let mut last_resolution: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     let mut turn_terminal = false;
-    for (index, event) in events.iter().enumerate() {
+    for (index, (_, event)) in events.iter().enumerate() {
         match event {
             ChatEvent::ToolCallStarted { id, .. } => {
                 // Tool already started running — approval was granted / not needed.
+                last_resolution.insert(id.clone(), index);
+            }
+            // Execution returned ⇒ the call necessarily got past its gate, even when
+            // the authoritative result frame has not been applied yet (batch order).
+            ChatEvent::ToolFinished { id, .. } => {
                 last_resolution.insert(id.clone(), index);
             }
             ChatEvent::ToolCallResult { id, name, .. } => {
@@ -2880,10 +4298,11 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
     (permission, user_input)
 }
 
-fn replay_resolves_call(events: &[ChatEvent], call_id: &str) -> bool {
-    events.iter().any(|event| match event {
+fn replay_resolves_call(events: &[(u64, ChatEvent)], call_id: &str) -> bool {
+    events.iter().any(|(_, event)| match event {
         ChatEvent::ToolCallStarted { id, .. }
         | ChatEvent::ToolCallResult { id, .. }
+        | ChatEvent::ToolFinished { id, .. }
         | ChatEvent::ToolOutputChunk { id, .. } => id == call_id,
         ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => true,
         _ => false,
@@ -2913,7 +4332,33 @@ pub(crate) enum GlobalWireEvent {
         session_id: String,
         project_hash: String,
     },
+    /// 某会话已被用户打开/查看：其它实例据此熄灭该会话的「刚完成」徽标。
+    ///
+    /// 徽标由全局 `activity` 广播点亮，熄灭也必须走同一条全局总线，
+    /// 否则只清当前实例会在其它标签页/浏览器上留下幽灵勾。
+    #[serde(rename = "session_seen")]
+    SessionSeen { session_id: String },
+    /// 会话转录被显式变更（编辑 / 删除 / 回溯 / 压缩）。
+    ///
+    /// 与 `session_mutation` 的区别：那条走**会话总线**，只送达“正在看这个会话”
+    /// 的订阅者；本事件走**全局总线**，让没打开该会话的标签页/浏览器也能立刻作废
+    /// 本地缓存。只带 revision，不背 payload —— 客户端按版本决定是否重取。
+    #[serde(rename = "session_mutated")]
+    SessionMutated {
+        session_id: String,
+        /// 变更后的权威版本；客户端只接受 `incoming >= stored`。
+        revision: u64,
+    },
+    /// 一条已落盘的展示记录（压缩边界、警告等）刚刚追加。
+    ///
+    /// display 追加不一定改变 snapshot 的 `cache_epoch`；单靠
+    /// `session_mutated` 的 revision 闸门会让“恰好已知同版本”的客户端跳过重取。
+    /// 本事件只带 session id，客户端做一次定向磁盘尾部对账即可。
+    #[serde(rename = "display_appended")]
+    DisplayAppended { session_id: String },
     /// 活动/转圈变化；`terminal` 非空时同时携带终态供右下角通知去重；`status` 可携带 "compacting" 等阶段状态。
+    ///
+    /// 兼容旧客户端保留；新客户端应优先消费 `runtime_activity`（带 revision/owner）。
     #[serde(rename = "activity")]
     Activity {
         session_id: String,
@@ -2922,6 +4367,22 @@ pub(crate) enum GlobalWireEvent {
         terminal: Option<&'static str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
+    },
+    /// 会话执行态的权威快照（阶段 + revision + owner）。
+    ///
+    /// 这是压缩/运行态的唯一阶段信号：客户端只接受 `revision` 更高的快照，
+    /// 不再根据单个 `status` 字段或事件到达顺序猜测阶段。
+    #[serde(rename = "runtime_activity")]
+    RuntimeActivity {
+        session_id: String,
+        revision: u64,
+        running: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase_started_at: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     /// 某会话弹出待交互卡片（审批/提问）。只带会话 id，客户端对该会话做一次
     /// 定向 pending 拉取（单会话、小请求），避免重拉整表。
@@ -3158,6 +4619,427 @@ pub(crate) fn publish_global(event: GlobalWireEvent) {
     let _ = global_events().send(event);
 }
 
+/// 压缩 owner 命名空间。
+///
+/// 压缩阶段必须按 owner 隔离：`/chat` 的自动压缩归当前 turn，native live 归
+/// live runtime，手动 `/compact` 归该次 operation。任何一个 owner 的收尾都
+/// 不得清除另一个 owner 正在执行的压缩。
+pub(crate) const COMPACTION_OWNER_TURN: &str = "turn";
+pub(crate) const COMPACTION_OWNER_LIVE: &str = "live";
+
+pub(crate) fn manual_compaction_owner(operation_id: &str) -> String {
+    format!("manual:{operation_id}")
+}
+
+#[derive(Clone, Debug)]
+struct CompactionPhase {
+    started_at: u64,
+    owner: String,
+}
+
+/// 会话级执行阶段。`revision` 在每次阶段变化时单调递增；即使阶段结束也保留
+/// 最后一次 revision，客户端据此拒绝迟到的旧事件。
+#[derive(Clone, Debug, Default)]
+struct ExecutionPhaseState {
+    revision: u64,
+    phase: Option<CompactionPhase>,
+}
+
+fn execution_phases() -> &'static std::sync::Mutex<HashMap<String, ExecutionPhaseState>> {
+    static PHASES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, ExecutionPhaseState>>> =
+        std::sync::OnceLock::new();
+    PHASES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// 登记一次压缩开始；同一 owner 的重复开始保留最早的起点。
+///
+/// 返回该 pass 的权威起点。不同 owner 同时到达时拒绝抢占，保留先到者——
+/// 正常情况下 `ActiveChatRegistry` 的准入已经保证同一会话只有一个执行 owner。
+pub(crate) fn note_compaction_started(session_id: &str, owner: &str) -> u64 {
+    let started_at = u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0);
+    let result = {
+        let mut phases = execution_phases()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = phases.entry(session_id.to_string()).or_default();
+        state.revision = state.revision.saturating_add(1);
+        match state.phase.as_ref() {
+            Some(existing) => {
+                if existing.owner != owner {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        running_owner = %existing.owner,
+                        incoming_owner = %owner,
+                        "compaction start ignored: another owner already holds the phase"
+                    );
+                }
+                existing.started_at
+            }
+            None => {
+                state.phase = Some(CompactionPhase {
+                    started_at,
+                    owner: owner.to_string(),
+                });
+                started_at
+            }
+        }
+    };
+    publish_runtime_activity(session_id, true);
+    result
+}
+
+/// 只结束指定 owner 的压缩阶段；owner 不匹配时保持现状。
+pub(crate) fn note_compaction_finished(session_id: &str, owner: &str) -> bool {
+    let mut phases = execution_phases()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(state) = phases.get_mut(session_id) else {
+        return false;
+    };
+    if state
+        .phase
+        .as_ref()
+        .map_or(true, |phase| phase.owner != owner)
+    {
+        return false;
+    }
+    state.phase = None;
+    state.revision = state.revision.saturating_add(1);
+    true
+}
+
+/// 结束某个 owner 前缀的压缩阶段（用于 turn/live 这类没有精确 run id 的投影器）。
+pub(crate) fn note_compaction_finished_for_prefix(session_id: &str, prefix: &str) -> bool {
+    let mut phases = execution_phases()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(state) = phases.get_mut(session_id) else {
+        return false;
+    };
+    if !state
+        .phase
+        .as_ref()
+        .is_some_and(|phase| phase.owner.starts_with(prefix))
+    {
+        return false;
+    }
+    state.phase = None;
+    state.revision = state.revision.saturating_add(1);
+    true
+}
+
+/// 结束阶段并广播权威运行态。`running_after` 描述该 owner 结束后会话是否仍在执行。
+pub(crate) fn finish_compaction_phase(session_id: &str, owner: &str, running_after: bool) -> bool {
+    if note_compaction_finished(session_id, owner) {
+        publish_runtime_activity(session_id, running_after);
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn finish_compaction_phase_prefix(
+    session_id: &str,
+    prefix: &str,
+    running_after: bool,
+) -> bool {
+    if note_compaction_finished_for_prefix(session_id, prefix) {
+        publish_runtime_activity(session_id, running_after);
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn compaction_started_at(session_id: &str) -> Option<u64> {
+    execution_phases()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(session_id)
+        .and_then(|state| state.phase.as_ref().map(|phase| phase.started_at))
+}
+
+pub(crate) fn compaction_owner(session_id: &str) -> Option<String> {
+    execution_phases()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(session_id)
+        .and_then(|state| state.phase.as_ref().map(|phase| phase.owner.clone()))
+}
+
+pub(crate) fn execution_phase_revision(session_id: &str) -> u64 {
+    execution_phases()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(session_id)
+        .map(|state| state.revision)
+        .unwrap_or(0)
+}
+
+pub(crate) fn compaction_running_session_ids() -> Vec<String> {
+    execution_phases()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|(_, state)| state.phase.is_some())
+        .map(|(session_id, _)| session_id.clone())
+        .collect()
+}
+
+/// 广播一条带 revision/owner 的权威运行态。
+///
+/// `RuntimeActivity` 是新客户端的唯一阶段信号；`Activity` 继续保留给旧客户端
+/// 与侧栏的活动列表，两者由同一个状态快照派生，不能再由各处自行拼装。
+pub(crate) fn publish_runtime_activity(session_id: &str, running: bool) {
+    let (started_at, owner, revision) = {
+        let phases = execution_phases()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match phases.get(session_id) {
+            Some(state) => (
+                state.phase.as_ref().map(|phase| phase.started_at),
+                state.phase.as_ref().map(|phase| phase.owner.clone()),
+                state.revision,
+            ),
+            None => (None, None, 0),
+        }
+    };
+    let compacting = started_at.is_some();
+    publish_global(GlobalWireEvent::RuntimeActivity {
+        session_id: session_id.to_string(),
+        revision,
+        running,
+        phase: compacting.then(|| "compacting".to_string()),
+        phase_started_at: started_at,
+        owner: owner.clone(),
+    });
+    // 旧客户端只理解 Activity；状态字段必须与新快照保持一致。
+    publish_global(GlobalWireEvent::Activity {
+        session_id: session_id.to_string(),
+        running,
+        terminal: None,
+        status: Some(if compacting { "compacting" } else { "running" }.to_string()),
+    });
+}
+
+#[cfg(test)]
+mod folded_steer_outline_tests {
+    use super::*;
+
+    #[test]
+    fn folded_steer_is_projected_into_the_outline_without_a_display_row() {
+        let inputs = vec![jeikcode_capabilities::session::SessionInput {
+            id: "steer-1".into(),
+            seq: 7,
+            session_id: "session-1".into(),
+            delivery: "steer".into(),
+            status: "promoted".into(),
+            text: "<user-query>\n看这个\n</user-query>".into(),
+            images: Vec::new(),
+            created_at: 1_700_000_000_000,
+            message_id: Some("m-steer-1".into()),
+            operation_id: Some("op-1".into()),
+        }];
+        let mut turns = Vec::new();
+        append_folded_steer_outline(
+            &[],
+            &mut turns,
+            &inputs,
+            Some("op-1"),
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id.as_deref(), Some("steer-1"));
+        assert_eq!(turns[0].label, "看这个");
+        assert!(turns[0].pending);
+
+        // The same durable steer must not be added twice on every read.
+        append_folded_steer_outline(
+            &[],
+            &mut turns,
+            &inputs,
+            Some("op-1"),
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert_eq!(turns.len(), 1);
+    }
+
+    #[test]
+    fn queued_and_live_steers_are_projected_without_an_operation_alias() {
+        let inputs = vec![
+            jeikcode_capabilities::session::SessionInput {
+                id: "steer-queued".into(),
+                seq: 8,
+                session_id: "session-1".into(),
+                delivery: "steer".into(),
+                status: "admitted".into(),
+                text: "<user-query>\n排队中\n</user-query>".into(),
+                images: Vec::new(),
+                created_at: 1_700_000_000_100,
+                message_id: None,
+                operation_id: Some("op-1".into()),
+            },
+            jeikcode_capabilities::session::SessionInput {
+                id: "steer-live".into(),
+                seq: 9,
+                session_id: "session-1".into(),
+                delivery: "steer".into(),
+                status: "admitted".into(),
+                text: "<user-query>\nlive 转向\n</user-query>".into(),
+                images: Vec::new(),
+                created_at: 1_700_000_000_200,
+                message_id: None,
+                operation_id: None,
+            },
+        ];
+        let mut turns = Vec::new();
+        append_folded_steer_outline(
+            &[],
+            &mut turns,
+            &inputs,
+            None,
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert_eq!(turns.len(), 2);
+        assert!(turns.iter().all(|turn| turn.pending));
+        assert_eq!(turns[0].label, "排队中");
+        assert_eq!(turns[1].label, "live 转向");
+    }
+}
+
+#[cfg(test)]
+mod compaction_phase_tests {
+    use super::*;
+
+    #[test]
+    fn compaction_phase_keeps_earliest_start_and_only_owner_can_finish() {
+        let session_id = "compaction-phase-test-session";
+        note_compaction_finished(session_id, "turn");
+        let first = note_compaction_started(session_id, "turn");
+        // 同一个 pass 的重复 CompactionStarted 不得把计时起点往后拽。
+        assert_eq!(note_compaction_started(session_id, "turn"), first);
+        assert_eq!(compaction_started_at(session_id), Some(first));
+
+        // 另一个 owner 不得清除当前阶段。
+        assert!(!note_compaction_finished(session_id, "live"));
+        assert_eq!(compaction_started_at(session_id), Some(first));
+        assert_eq!(compaction_owner(session_id).as_deref(), Some("turn"));
+
+        let revision_while_compacting = execution_phase_revision(session_id);
+        assert!(revision_while_compacting > 0);
+
+        assert!(note_compaction_finished(session_id, "turn"));
+        assert_eq!(compaction_started_at(session_id), None);
+        // revision 在阶段结束后继续单调保留，客户端可拒绝迟到的旧事件。
+        assert!(execution_phase_revision(session_id) > revision_while_compacting);
+    }
+}
+
+/// 运行时控制器（`/loop` / `/goal`）的服务端权威状态。
+///
+/// `/loop` 在两次唤醒之间会进入 wakeup 等待：那一刻没有回合在执行，
+/// `ActiveChatRegistry` 与会话运行态注册表都如实报告「空闲」，但控制器还挂着，
+/// 下一轮随时开始。客户端若只据此熄灭 busy，就会出现「循环仍在输出、按钮/呼吸点
+/// 却是停止态，刷新才恢复」。这里把 `LoopChanged` / `GoalChanged` 收成一份进程级
+/// 状态，让 `/chat/active` 与 `/chat/runtime` 能如实回答「这个会话还有没有人在干活」。
+///
+/// 每轮至少刷新一次 `updated_at`；超过 [`CONTROLLER_STALE_AFTER`] 未刷新即视为
+/// 控制器已消失，避免 runtime 崩溃/重启后永久占住运行态。
+#[derive(Clone, Debug, Default)]
+struct ControllerState {
+    loop_active: bool,
+    goal_active: bool,
+    loop_round: u32,
+    loop_label: String,
+    updated_at: Option<std::time::Instant>,
+}
+
+/// 控制器状态的保鲜窗口。`schedule_wakeup` 允许最长 3600s 的唤醒延迟，期间不会
+/// 再发 `LoopChanged`，所以窗口必须覆盖一整轮睡眠再留余量；超过即视为控制器
+/// 已消失（runtime 崩溃/重启不会永久占住运行态）。
+const CONTROLLER_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(7200);
+
+fn controller_states(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, ControllerState>> {
+    static STATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ControllerState>>,
+    > = std::sync::OnceLock::new();
+    STATES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn fresh_controller_state(state: &ControllerState) -> bool {
+    state
+        .updated_at
+        .is_some_and(|at| at.elapsed() < CONTROLLER_STALE_AFTER)
+}
+
+/// Record the `/loop` controller state for a session (called from the runtime
+/// event projector; the daemon used to drop these events on the floor).
+fn note_loop_state(session_id: &str, active: bool, round: u32, label: &str) {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return;
+    }
+    let mut guard = controller_states()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 写路径顺便清掉过期条目：长期运行的 daemon 不会因为历史会话无限增长。
+    guard.retain(|_, state| fresh_controller_state(state));
+    let state = guard.entry(session_id.to_string()).or_default();
+    state.loop_active = active;
+    state.loop_round = round;
+    state.loop_label = label.to_string();
+    state.updated_at = Some(std::time::Instant::now());
+}
+
+/// Record the `/goal` controller state for a session.
+fn note_goal_state(session_id: &str, active: bool) {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return;
+    }
+    let mut guard = controller_states()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.retain(|_, state| fresh_controller_state(state));
+    let state = guard.entry(session_id.to_string()).or_default();
+    state.goal_active = active;
+    state.updated_at = Some(std::time::Instant::now());
+}
+
+fn controller_state_for(session_id: &str) -> Option<ControllerState> {
+    let guard = controller_states()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .get(session_id)
+        .filter(|state| fresh_controller_state(state))
+        .cloned()
+}
+
+/// 这个会话是否仍有已武装的运行时控制器（`/loop` 或 `/goal`）。
+fn session_controller_running(session_id: &str) -> bool {
+    controller_state_for(session_id).is_some_and(|state| state.loop_active || state.goal_active)
+}
+
+/// Sessions whose runtime still owns an armed controller. These must count as
+/// "running" for `/chat/active` even while no turn is executing.
+fn controller_running_session_ids() -> Vec<String> {
+    let guard = controller_states()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .iter()
+        .filter(|(_, state)| {
+            fresh_controller_state(state) && (state.loop_active || state.goal_active)
+        })
+        .map(|(session_id, _)| session_id.clone())
+        .collect()
+}
+
 /// 「git 变更命令自动同步」开关：默认开启；读配置失败时按开启兜底。
 /// 仅在确实命中 git 写命令的关键节点调用，开销可忽略（不做任何轮询）。
 fn auto_git_sync_enabled() -> bool {
@@ -3224,39 +5106,153 @@ async fn global_events_stream() -> axum::response::Response {
 /// same `message_id`/`part_id`. Merging across identities used to fuse a later
 /// round's tail into an earlier round's entry, so a watch/live replay repainted
 /// that text under the WRONG stored message (ghost rounds + misplaced text).
-fn push_chat_replay(buf: &mut Vec<ChatEvent>, event: ChatEvent) {
+/// The turn's replay buffer AND the single monotonic event cursor. Every
+/// emitted event (live or replayed) consumes one seq; coalesced text/reasoning
+/// deltas keep the LAST seq, so a replay snapshot is always a prefix of the
+/// same ordered log.
+struct ReplayLog {
+    next_seq: u64,
+    events: Vec<(u64, ChatEvent)>,
+}
+
+impl ReplayLog {
+    fn new(seq_base: u64) -> Self {
+        Self {
+            next_seq: seq_base,
+            events: Vec::new(),
+        }
+    }
+
+    fn high_water(&self) -> u64 {
+        self.next_seq
+    }
+
+    fn push(&mut self, event: ChatEvent) -> u64 {
+        self.next_seq = self.next_seq.saturating_add(1);
+        let seq = self.next_seq;
+        let coalesced = match (&event, self.events.last_mut()) {
+            (
+                ChatEvent::TextDelta {
+                    content,
+                    message_id,
+                    part_id,
+                    part_rev,
+                    ..
+                },
+                Some((
+                    prev_seq,
+                    ChatEvent::TextDelta {
+                        content: prev,
+                        message_id: prev_message_id,
+                        part_id: prev_part_id,
+                        part_rev: prev_part_rev,
+                        ..
+                    },
+                )),
+            ) if message_id == prev_message_id && part_id == prev_part_id => {
+                prev.push_str(content);
+                if part_rev.is_some() {
+                    *prev_part_rev = *part_rev;
+                }
+                *prev_seq = seq;
+                true
+            }
+            (
+                ChatEvent::ReasoningDelta {
+                    content,
+                    message_id,
+                    part_id,
+                    part_rev,
+                    ..
+                },
+                Some((
+                    prev_seq,
+                    ChatEvent::ReasoningDelta {
+                        content: prev,
+                        message_id: prev_message_id,
+                        part_id: prev_part_id,
+                        part_rev: prev_part_rev,
+                        ..
+                    },
+                )),
+            ) if message_id == prev_message_id && part_id == prev_part_id => {
+                prev.push_str(content);
+                if part_rev.is_some() {
+                    *prev_part_rev = *part_rev;
+                }
+                *prev_seq = seq;
+                true
+            }
+            (
+                ChatEvent::ToolOutputChunk { id, chunk },
+                Some((
+                    prev_seq,
+                    ChatEvent::ToolOutputChunk {
+                        id: prev_id,
+                        chunk: prev,
+                    },
+                )),
+            ) if id == prev_id => {
+                prev.push_str(chunk);
+                *prev_seq = seq;
+                true
+            }
+            _ => false,
+        };
+        if !coalesced {
+            self.events.push((seq, event));
+        }
+        seq
+    }
+}
+
+fn push_chat_replay(log: &mut ReplayLog, event: ChatEvent) -> u64 {
+    log.push(event)
+}
+
+fn push_chat_replay_legacy(buf: &mut Vec<ChatEvent>, event: ChatEvent) {
     match (&event, buf.last_mut()) {
         (
             ChatEvent::TextDelta {
                 content,
                 message_id,
                 part_id,
+                part_rev,
                 ..
             },
             Some(ChatEvent::TextDelta {
                 content: prev,
                 message_id: prev_message_id,
                 part_id: prev_part_id,
+                part_rev: prev_part_rev,
                 ..
             }),
         ) if message_id == prev_message_id && part_id == prev_part_id => {
             prev.push_str(content);
+            if part_rev.is_some() {
+                *prev_part_rev = *part_rev;
+            }
         }
         (
             ChatEvent::ReasoningDelta {
                 content,
                 message_id,
                 part_id,
+                part_rev,
                 ..
             },
             Some(ChatEvent::ReasoningDelta {
                 content: prev,
                 message_id: prev_message_id,
                 part_id: prev_part_id,
+                part_rev: prev_part_rev,
                 ..
             }),
         ) if message_id == prev_message_id && part_id == prev_part_id => {
             prev.push_str(content);
+            if part_rev.is_some() {
+                *prev_part_rev = *part_rev;
+            }
         }
         (
             ChatEvent::ToolOutputChunk { id, chunk },
@@ -3278,8 +5274,8 @@ fn push_chat_replay(buf: &mut Vec<ChatEvent>, event: ChatEvent) {
 /// can rehydrate the full turn after a browser refresh.
 pub(crate) fn fanout_chat_events(
     primary: mpsc::UnboundedSender<ChatEvent>,
-    bus: tokio::sync::broadcast::Sender<ChatEvent>,
-    replay: Option<Arc<std::sync::Mutex<Vec<ChatEvent>>>>,
+    bus: tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
+    replay: Option<Arc<std::sync::Mutex<ReplayLog>>>,
 ) -> mpsc::UnboundedSender<ChatEvent> {
     fanout_chat_events_for_session(primary, bus, replay, None, None)
 }
@@ -3289,14 +5285,15 @@ pub(crate) fn fanout_chat_events(
 /// compat turns on the same session.
 pub(crate) fn fanout_chat_events_for_session(
     primary: mpsc::UnboundedSender<ChatEvent>,
-    bus: tokio::sync::broadcast::Sender<ChatEvent>,
-    replay: Option<Arc<std::sync::Mutex<Vec<ChatEvent>>>>,
+    bus: tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
+    replay: Option<Arc<std::sync::Mutex<ReplayLog>>>,
     session_id: Option<String>,
     working_dir: Option<std::path::PathBuf>,
 ) -> mpsc::UnboundedSender<ChatEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
     tokio::spawn(async move {
         let mut current_sid = session_id;
+        let mut no_replay_seq: u64 = 0;
         let current_wd = working_dir;
         // Git 变更命令登记表：call_id → 意图（见 git_intent）。仅在 shell 工具里命中
         // 「改动分支/引用/远端」的 git 命令时登记，待其 ToolResult 落地才触发一次广播。
@@ -3351,9 +5348,20 @@ pub(crate) fn fanout_chat_events_for_session(
                         session_id: session_id.clone(),
                     });
                 }
-                ChatEvent::User { session_id, .. } => {
+                ChatEvent::User {
+                    session_id,
+                    client_input_id,
+                    message_id,
+                    ..
+                } => {
                     let sid = session_id.clone().or_else(|| current_sid.clone());
                     if let Some(sid) = sid {
+                        // The admitted prompt is now a real message: retire its
+                        // pending input row by the same id.
+                        let _ = jeikcode_capabilities::session::inputs::mark_promoted_global(
+                            &sid,
+                            &[(client_input_id.clone(), message_id.clone())],
+                        );
                         publish_global(GlobalWireEvent::Activity {
                             session_id: sid,
                             running: true,
@@ -3370,6 +5378,17 @@ pub(crate) fn fanout_chat_events_for_session(
                     // 中途转向已并入本轮：异地客户端即使没在看这个会话，也要把这条
                     // 提问写进它自己的本地画布缓存（切过去 / 冷启动时气泡已在）。
                     if let Some(sid) = current_sid.clone() {
+                        // The kernel folded these steers into persisted user
+                        // messages: retire their pending input rows by client id
+                        // and bind the kernel message id for later reconciliation.
+                        let pairs: Vec<(Option<String>, Option<String>)> = client_input_ids
+                            .iter()
+                            .cloned()
+                            .zip(inputs.iter().map(|input| input.message_id.clone()))
+                            .collect();
+                        let _ = jeikcode_capabilities::session::inputs::mark_promoted_global(
+                            &sid, &pairs,
+                        );
                         publish_global(GlobalWireEvent::SteerFolded {
                             session_id: sid,
                             inputs: inputs
@@ -3450,15 +5469,16 @@ pub(crate) fn fanout_chat_events_for_session(
             if let Some(sid) = effective_sid {
                 mirror_chat_event_to_registry(sid, &event);
             }
-            if let Some(ref replay) = replay {
+            let seq = if let Some(ref replay) = replay {
                 let mut guard = replay
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                push_chat_replay(&mut guard, event.clone());
-                let _ = bus.send(event.clone());
+                push_chat_replay(&mut guard, event.clone())
             } else {
-                let _ = bus.send(event.clone());
-            }
+                no_replay_seq = no_replay_seq.saturating_add(1);
+                no_replay_seq
+            };
+            let _ = bus.send((seq, event.clone()));
             let _ = primary.send(event);
             // 终态必须先写入 replay 并投递到 /chat/watch 总线，随后才能在全局 /events 上广播
             // running: false 与执行磁盘扫描，避免前端收到 Activity 信号时 /chat/watch 尚未收到 Done。
@@ -3644,8 +5664,10 @@ impl AppState {
         let map = get_session_queues_map().await;
         let mut writer = map.write().await;
         let list = writer.entry(sid.clone()).or_default();
+        let client_input_id = uuid::Uuid::new_v4().to_string();
         list.push(QueuedMessageItem {
-            id: serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
+            id: serde_json::Value::String(client_input_id.clone()),
+            client_input_id: Some(client_input_id),
             text: text.to_string(),
             images: None,
             kind: "queue".to_string(),
@@ -3802,7 +5824,7 @@ pub struct ToolResultInfo {
 }
 
 /// Message info for API response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct MessageInfo {
     pub role: String,
     /// Stable per-message identity from the kernel `Message.id` (SIDECAR). Lets
@@ -3810,6 +5832,22 @@ pub struct MessageInfo {
     /// persisted before the field existed. ADDITIVE: `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Durable client-input correlation id (`SessionInput.id`) for user rows.
+    /// The kernel message id alone is not enough after a reconnect: a queued
+    /// steer card carries the client id, so both halves must be on the row to
+    /// dedupe without text heuristics. ADDITIVE: absent on old daemons/rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_input_id: Option<String>,
+    /// Session-global v4 display order. Additive: absent for snapshot-only rows
+    /// and old daemons. `after_seq` deltas use this cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// Kernel turn id of the round that produced this row. Persisted so the WebUI
+    /// can distinguish a steer folded into a RUNNING turn from a steer-delivered
+    /// NEW turn after a terminal, even after a refresh. `None` for backfilled
+    /// rows / legacy snapshots where the turn id is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<u64>,
     pub content: String,
     /// The model's reasoning/thinking for an ASSISTANT message — persisted
     /// losslessly in the kernel `Message.reasoning` but until now dropped at
@@ -3826,6 +5864,19 @@ pub struct MessageInfo {
     pub synthetic: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_origin: Option<String>,
+    /// User-facing text. For user rows the display pipeline already unwraps the
+    /// user envelope and strips injected reminders; clients must render THIS
+    /// instead of re-parsing protocol strings out of `content`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_text: Option<String>,
+    /// Server-authored visibility flag. A row is hidden from the transcript when
+    /// this is true (synthetic reminders, verify-cadence narration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal: Option<bool>,
+    /// Whether the UI may edit / delete / rewind this row. Display-only archive
+    /// and presentation rows are never editable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallInfo>>,
     /// Tool result summary (for tool role messages)
@@ -3993,13 +6044,31 @@ impl MessageInfo {
                 }
             }
         }
+        let display_text = (msg.role == Role::User).then(|| content.clone());
+        let internal = msg.synthetic || msg.internal_origin.as_deref() == Some("verify_cadence");
+        let editable = (msg.role == Role::User).then(|| {
+            !msg.synthetic
+                && !matches!(
+                    msg.internal_origin.as_deref(),
+                    Some("transcript_archive") | Some("presentation") | Some("pending_input")
+                )
+        });
         Self {
+            seq: None,
+            turn_id: msg
+                .meta
+                .as_ref()
+                .and_then(|meta| (meta.turn_id > 0).then_some(meta.turn_id)),
             role: role.into(),
             id: msg.id.clone(),
+            client_input_id: None,
             content,
             reasoning: msg.reasoning.clone(),
             synthetic: msg.synthetic,
             internal_origin: msg.internal_origin.clone(),
+            display_text,
+            internal: Some(internal),
+            editable,
             tool_calls,
             tool_result,
             artifacts,
@@ -4449,6 +6518,36 @@ fn cors_layer() -> CorsLayer {
         ])
         .expose_headers([header::ETAG])
         .allow_credentials(true)
+}
+
+fn is_legacy_live_transport(path: &str) -> bool {
+    matches!(
+        path,
+        "/live" | "/live/message" | "/live/stop" | "/live/compact" | "/live/switch_session"
+    )
+}
+
+/// Mark the retired `/live` transport without breaking older clients. The
+/// current WebUI uses `/chat` + `/chat/watch`; these endpoints remain for an
+/// external compatibility window.
+async fn legacy_live_deprecation_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    let mut response = next.run(req).await;
+    if is_legacy_live_transport(&path) {
+        response.headers_mut().insert(
+            axum::http::header::HeaderName::from_static("deprecation"),
+            axum::http::HeaderValue::from_static("true"),
+        );
+        response.headers_mut().insert(
+            axum::http::header::HeaderName::from_static("link"),
+            axum::http::HeaderValue::from_static("</chat>; rel=\"successor-version\""),
+        );
+        tracing::warn!(path = %path, "deprecated /live transport used");
+    }
+    response
 }
 
 /// Middleware that updates `last_activity` timestamp on every request except
@@ -5458,6 +7557,26 @@ async fn resolve_session(Path(id): Path<String>) -> impl IntoResponse {
     }
 }
 
+/// POST /sessions/:id/seen — 广播「该会话已被用户查看」。
+///
+/// 侧栏的绿色「刚完成」徽标由全局 `activity` 广播点亮；熄灭也必须走同一条
+/// 全局总线，否则只清当前标签页会在其它标签页 / 浏览器上留下幽灵勾。
+/// 本接口不读写会话数据，只发一条跨实例失效信号。
+async fn mark_session_seen(Path(id): Path<String>) -> impl IntoResponse {
+    let session_id = id.trim();
+    if session_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "success": false, "error": "session_id is required" })),
+        )
+            .into_response();
+    }
+    publish_global(GlobalWireEvent::SessionSeen {
+        session_id: session_id.to_string(),
+    });
+    Json(serde_json::json!({ "success": true })).into_response()
+}
+
 /// GET /sessions/by-working-dir?working_dir=/path - List sessions for an explicit working directory
 async fn get_sessions_by_working_dir(
     Query(query): Query<SessionsByWorkingDirQuery>,
@@ -5644,235 +7763,267 @@ async fn get_session_detail(
                 .map(|stat| stat.turn_id)
                 .max()
                 .unwrap_or(0);
+            let current_operation = if turn_running {
+                state
+                    .active_chats
+                    .admitted_user_for_session(&id)
+                    .await
+                    .and_then(|user| user.client_input_id)
+            } else {
+                None
+            };
+            // First-paint `tail=N`: use the v4 offset index to seek directly into
+            // the tail. Only for an idle, settled v4 session; running sessions need
+            // the snapshot-tail overlay and keep the full read path.
+            let tail_view = if query.offset.is_none() && query.after_seq.is_none() {
+                query.tail.and_then(|tail| {
+                    read_display_tail_view(
+                        &display_manager,
+                        &session,
+                        tail,
+                        current_operation.as_deref(),
+                        turn_running,
+                        snapshot_last_turn,
+                    )
+                })
+            } else {
+                None
+            };
             // Prefer the append-only display transcript: it is never compacted,
             // so it keeps every turn, image, reasoning block and tool card. A log
             // that is behind the snapshot (failed write / old session) falls back
             // to the snapshot projection and is backfilled below.
-            let display = read_display_cached(&display_manager, &session.meta.id)
-                .filter(|(meta, _)| meta.last_turn_id >= snapshot_last_turn);
-            let (turns, message_count, offset, messages, pinned_user_index) =
-                if let Some((meta, records)) = display {
-                    let elapsed =
-                        display_turn_elapsed_overrides(&records, &session.meta.turn_stats);
-                    // A hook-created log begins at the first user turn; a backfill
-                    // already contains the session-start prefix. Prepend the prefix
-                    // only in the former case so indices stay stable across upgrades.
-                    let already_prefixed = meta.backfilled
-                        || records.first().is_some_and(|record| {
-                            record.role.eq_ignore_ascii_case("system")
-                                || (record.role.eq_ignore_ascii_case("user") && record.synthetic)
-                        });
-                    let prefix = if already_prefixed {
-                        Vec::new()
-                    } else {
-                        display_prefix_messages(&session)
-                    };
-                    let prefix_len = prefix.len();
-
-                    // 1. 全会话大纲零开销提取：直接从 DisplayRecord 提炼，确保右栏大纲与 "(13 questions left)" 100% 精确，
-                    // 并且无需将整仓几千行无用工具行堆分配转化为 MessageInfo。
-                    let mut turns = session_user_outline(&prefix);
-                    let record_turns = session_records_user_outline(&records, prefix_len);
-                    let turns_offset = turns.len();
-                    turns.extend(record_turns.into_iter().map(|mut t| {
-                        t.ordinal += turns_offset;
-                        t
-                    }));
-
-                    if prefix_len == 0 {
-                        let (total, offset, start, end, pinned) = resolve_page_indices(
-                            &records,
-                            |r| {
-                                is_visible_user_turn_start_content(&r.role, r.synthetic, &r.content)
-                            },
-                            &query,
-                        );
-                        let snapshot_ids: std::collections::HashSet<&str> = session
-                            .snapshot
-                            .messages
-                            .iter()
-                            .filter_map(|message| message.id.as_deref())
-                            .collect();
-                        let mark_latest = !turn_running && meta.last_turn_id <= snapshot_last_turn;
-
-                        let mut window_messages = Vec::with_capacity(end.saturating_sub(start) + 1);
-                        if let Some(p_idx) = pinned {
-                            let mut p_msg = display_record_to_message_info(&records[p_idx]);
-                            if let Some(duration) = elapsed.get(&p_idx) {
-                                p_msg.elapsed_ms = Some(*duration);
-                            }
-                            if records[p_idx].turn_id < snapshot_last_turn
-                                || (records[p_idx].turn_id == snapshot_last_turn && mark_latest)
-                            {
-                                if p_msg.internal_origin.is_none() {
-                                    if let Some(id) = p_msg.id.as_deref() {
-                                        if !snapshot_ids.contains(id) {
-                                            p_msg.internal_origin =
-                                                Some("transcript_archive".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            window_messages.push(p_msg);
-                        }
-                        for (index, record) in records[start..end].iter().enumerate() {
-                            let actual_idx = start + index;
-                            let mut msg = display_record_to_message_info(record);
-                            if let Some(duration) = elapsed.get(&actual_idx) {
-                                msg.elapsed_ms = Some(*duration);
-                            }
-                            if record.turn_id < snapshot_last_turn
-                                || (record.turn_id == snapshot_last_turn && mark_latest)
-                            {
-                                if msg.internal_origin.is_none() {
-                                    if let Some(id) = msg.id.as_deref() {
-                                        if !snapshot_ids.contains(id) {
-                                            msg.internal_origin =
-                                                Some("transcript_archive".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            window_messages.push(msg);
-                        }
-                        attach_display_images(
-                            &mut window_messages,
-                            std::path::Path::new(&session.meta.working_dir),
-                            &session.meta.id,
-                        );
-                        // 旧日志里缺时间的行曾被写成会话 `updated_at`：读取时按行序拉回，
-                        // 避免顶层回复的时间比上一条还早。
-                        repair_display_clock(&mut window_messages);
-                        (turns, total, offset, window_messages, pinned)
-                    } else {
-                        let mut full_messages = prefix;
-                        full_messages.extend(records.iter().enumerate().map(|(index, record)| {
-                            let mut message = display_record_to_message_info(record);
-                            if let Some(duration) = elapsed.get(&index) {
-                                message.elapsed_ms = Some(*duration);
-                            }
-                            message
-                        }));
-                        let snapshot_ids: std::collections::HashSet<&str> = session
-                            .snapshot
-                            .messages
-                            .iter()
-                            .filter_map(|message| message.id.as_deref())
-                            .collect();
-                        mark_display_only_archive_rows(
-                            records.as_slice(),
-                            &mut full_messages[prefix_len..],
-                            &snapshot_ids,
-                            snapshot_last_turn,
-                            !turn_running && meta.last_turn_id <= snapshot_last_turn,
-                        );
-                        attach_display_images(
-                            &mut full_messages,
-                            std::path::Path::new(&session.meta.working_dir),
-                            &session.meta.id,
-                        );
-                        repair_display_clock(&mut full_messages);
-                        let (message_count, offset, window, pinned) =
-                            take_session_page(full_messages, &query);
-                        (turns, message_count, offset, window, pinned)
-                    }
-                } else {
-                    let mut messages = match merge_catalog_session_messages_for_display(&session) {
-                        Ok(messages) => messages,
-                        Err(error) => {
-                            let msg = format!("Failed to load session: {error}");
-                            return (StatusCode::NOT_FOUND, Json(msg)).into_response();
-                        }
-                    };
-                    // Compaction drains model context from the snapshot, but the raw
-                    // transcript is append-only. Rebuild the pre-compaction display
-                    // prefix from it so the question rail and canvas never lose turns
-                    // after a refresh. Presentation entries already merged into the
-                    // list are display-only rows: the splice keeps any that are not
-                    // covered by the rebuilt transcript.
-                    if let Some(anchor) = messages.iter().position(|message| {
-                        message.role.eq_ignore_ascii_case("user")
-                            && message.synthetic
-                            && jeikcode_capabilities::compaction::is_compaction_anchor_text(
-                                &message.content,
+            let display = if tail_view.is_some() {
+                None
+            } else {
+                read_display_cached(&display_manager, &session.meta.id).filter(|(meta, records)| {
+                    if meta.v == jeikcode_capabilities::session::DISPLAY_VERSION {
+                        // v4 normal path: exact prompt-identity coverage; no text
+                        // reconciliation. A gap (including a dropped tail whose
+                        // turn id was reused after a rewind) falls through to the
+                        // one-time canonical rebuild below.
+                        meta.complete
+                            && v4_display_covers_completed_user_turns(
+                                meta,
+                                &display_record_ids(records),
+                                &session.snapshot.messages,
+                                &session.meta.turn_stats,
+                                snapshot_last_turn,
                             )
-                    }) {
-                        if let Some(turns) = load_display_transcript(&hash, &session.meta.id) {
-                            let boundary = messages[anchor + 1..].iter().find(|message| {
-                                message.role.eq_ignore_ascii_case("user") && !message.synthetic
-                            });
-                            let prefix = display_prefix_from_transcript(
-                                &turns,
-                                boundary.and_then(|message| message.created_at),
-                                boundary.map(|message| message.content.as_str()),
-                            );
-                            messages = splice_compacted_display(messages, prefix);
-                        }
+                    } else {
+                        // v3 is migration input only.
+                        meta.last_turn_id >= snapshot_last_turn
+                            && display_covers_completed_user_rows(
+                                records,
+                                &session.snapshot.messages,
+                                &session.meta.turn_stats,
+                                snapshot_last_turn,
+                            )
                     }
-                    // One-time upgrade path for sessions created before the display
-                    // log existed. Only settled sessions are materialized so a live
-                    // turn is never frozen into the log half-way. If an existing log
-                    // is already beyond the readable ceiling, do not rewrite it on
-                    // every read (the next read would fail the same way).
-                    let display_too_large = display_manager
-                        .display_path(&session.meta.id)
-                        .ok()
-                        .and_then(|path| std::fs::metadata(path).ok())
-                        .is_some_and(|metadata| {
-                            metadata.len()
-                                > jeikcode_capabilities::session::display::MAX_DISPLAY_READ_BYTES
-                                    as u64
-                        });
-                    if !turn_running && !messages.is_empty() && !display_too_large {
-                        let records: Vec<_> = messages
-                            .iter()
-                            .enumerate()
-                            .map(|(index, message)| {
-                                display_record_from_message_info(&session.meta.id, index, message)
-                            })
-                            .collect();
-                        let _ = display_manager.write_display_backfill(
-                            &session.meta.id,
-                            &records,
-                            snapshot_last_turn,
-                        );
-                    }
-                    let turns = session_user_outline(&messages);
-                    repair_display_clock(&mut messages);
-                    let (message_count, offset, messages, pinned_user_index) =
-                        take_session_page(messages, &query);
-                    (turns, message_count, offset, messages, pinned_user_index)
+                })
+            };
+            let display_is_v4 = display
+                .as_ref()
+                .is_some_and(|(meta, _)| meta.v == jeikcode_capabilities::session::DISPLAY_VERSION);
+            let (turns, message_count, offset, messages, pinned_user_index) = if let Some(view) =
+                tail_view
+            {
+                (
+                    view.turns,
+                    view.message_count,
+                    view.offset,
+                    view.messages,
+                    view.pinned_user_index,
+                )
+            } else if let Some((meta, records)) = display {
+                let elapsed = display_turn_elapsed_overrides(&records, &session.meta.turn_stats);
+                // A hook-created log begins at the first user turn; a backfill
+                // already contains the session-start prefix. Prepend the prefix
+                // only in the former case so indices stay stable across upgrades.
+                let already_prefixed = meta.backfilled
+                    || records.first().is_some_and(|record| {
+                        record.role.eq_ignore_ascii_case("system")
+                            || (record.role.eq_ignore_ascii_case("user") && record.synthetic)
+                    });
+                let prefix = if already_prefixed {
+                    Vec::new()
+                } else {
+                    display_prefix_messages(&session)
                 };
-            // 核心修复：如果当前会话有正在运行中的回合（turn_running），
-            // 内存中已接收入场但尚未落盘的最新用户提问，必须安全补进 turns 大纲！
-            // 否则用户在 turn 进行中刷新页面或向上翻页拉取历史时，最新一条提问从大纲消失！
-            let mut turns = turns;
-            if turn_running {
-                if let Some(admitted) = state.active_chats.admitted_user_for_session(&id).await {
-                    let compact = outline_label(&admitted.content);
-                    if !compact.is_empty() {
-                        let already_has = turns.iter().any(|t| {
-                            t.label == compact
-                                || t.id.as_deref() == admitted.client_input_id.as_deref()
+                let prefix_len = prefix.len();
+
+                // 1. 全会话大纲零开销提取：直接从 DisplayRecord 提炼，确保右栏大纲与 "(13 questions left)" 100% 精确，
+                // 并且无需将整仓几千行无用工具行堆分配转化为 MessageInfo。
+                let mut turns = session_user_outline(&prefix);
+                let record_turns = session_records_user_outline(&records, prefix_len);
+                let turns_offset = turns.len();
+                turns.extend(record_turns.into_iter().map(|mut t| {
+                    t.ordinal += turns_offset;
+                    t
+                }));
+
+                let mut full_messages = prefix;
+                full_messages.extend(records.iter().enumerate().map(|(index, record)| {
+                    let mut message = display_record_to_message_info(record);
+                    if let Some(duration) = elapsed.get(&index) {
+                        message.elapsed_ms = Some(*duration);
+                    }
+                    message
+                }));
+                let snapshot_ids: std::collections::HashSet<&str> = session
+                    .snapshot
+                    .messages
+                    .iter()
+                    .filter_map(|message| message.id.as_deref())
+                    .collect();
+                mark_display_only_archive_rows(
+                    records.as_slice(),
+                    &mut full_messages[prefix_len..],
+                    &snapshot_ids,
+                    snapshot_last_turn,
+                    !turn_running && meta.last_turn_id <= snapshot_last_turn,
+                );
+                // 展示日志在 turn_complete 才落盘。运行中/刚停止/硬杀死的尾巴只存在于
+                // inflight 快照：按最后一条共享 id 之后整段投影，画布与大纲共用
+                // 同一套绝对下标，刷新后与直播看到的完全一致。
+                // The append is idempotent (only rows after the last shared id), so
+                // a fully settled v4 log is untouched; an idle crashed turn (no
+                // completed `turn_stat`, so `v4_display_covers...` cannot see it)
+                // still gets its checkpointed tail back.
+                append_snapshot_tail(
+                    &mut full_messages,
+                    &mut turns,
+                    &session.snapshot.messages,
+                    std::path::Path::new(&session.meta.working_dir),
+                );
+                if !display_is_v4 && !turn_running && !full_messages.is_empty() {
+                    // Lazy v3 -> v4 migration: the current merged projection is
+                    // complete enough to become the v4 source of truth. The next
+                    // read never re-enters this branch.
+                    let records: Vec<_> = full_messages
+                        .iter()
+                        .enumerate()
+                        .map(|(index, message)| {
+                            display_record_from_message_info(&session.meta.id, index, message)
+                        })
+                        .collect();
+                    let _ = display_manager.write_display_backfill(
+                        &session.meta.id,
+                        &records,
+                        snapshot_last_turn,
+                    );
+                }
+                // Durable admitted inputs (prompt/steer) that the kernel has
+                // not folded/persisted yet: show them now, scoped to this turn.
+                append_pending_inputs(
+                    &mut full_messages,
+                    &mut turns,
+                    &session.meta.id,
+                    current_operation.as_deref(),
+                    std::path::Path::new(&session.meta.working_dir),
+                    0,
+                );
+                annotate_client_input_ids(&mut full_messages, &session.meta.id);
+                append_interrupted_partial(&mut full_messages, &session.meta.id, turn_running);
+                attach_display_images(
+                    &mut full_messages,
+                    std::path::Path::new(&session.meta.working_dir),
+                    &session.meta.id,
+                );
+                repair_display_clock(&mut full_messages);
+                let (message_count, offset, window, pinned) =
+                    if let Some(after_seq) = query.after_seq {
+                        take_session_after(full_messages, after_seq)
+                    } else {
+                        take_session_page(full_messages, &query)
+                    };
+                (turns, message_count, offset, window, pinned)
+            } else {
+                // v4 missing/incomplete: one-time migration or explicit-mutation
+                // rebuild. This branch writes v4 before returning; a normal
+                // settled session never re-enters it.
+                let mut messages = match merge_catalog_session_messages_for_display(&session) {
+                    Ok(messages) => messages,
+                    Err(error) => {
+                        let msg = format!("Failed to load session: {error}");
+                        return (StatusCode::NOT_FOUND, Json(msg)).into_response();
+                    }
+                };
+                // 旧快照可能没有 message id（功能引入前写入）：补确定性 id，
+                // 保证新契约下的右栏锚点 / 编辑 / 删除不退化。
+                mint_legacy_message_ids(&mut messages);
+                // Compaction drains model context from the snapshot, but the raw
+                // transcript is append-only. Rebuild the pre-compaction display
+                // prefix from it so the question rail and canvas never lose turns
+                // after a refresh. Presentation entries already merged into the
+                // list are display-only rows: the splice keeps any that are not
+                // covered by the rebuilt transcript.
+                if let Some(anchor) = messages.iter().position(|message| {
+                    message.role.eq_ignore_ascii_case("user")
+                        && message.synthetic
+                        && jeikcode_capabilities::compaction::is_compaction_anchor_text(
+                            &message.content,
+                        )
+                }) {
+                    if let Some(turns) = load_display_transcript(&hash, &session.meta.id) {
+                        let boundary = messages[anchor + 1..].iter().find(|message| {
+                            message.role.eq_ignore_ascii_case("user") && !message.synthetic
                         });
-                        if !already_has {
-                            let next_index = turns
-                                .iter()
-                                .map(|t| t.index)
-                                .max()
-                                .map(|i| i + 1)
-                                .unwrap_or(0);
-                            let ordinal = turns.len();
-                            turns.push(SessionTurnOutline {
-                                ordinal,
-                                id: admitted.client_input_id.clone(),
-                                index: next_index,
-                                label: compact,
-                            });
-                        }
+                        let prefix = display_prefix_from_transcript(
+                            &turns,
+                            boundary.and_then(|message| message.created_at),
+                            boundary.map(|message| message.content.as_str()),
+                        );
+                        messages = splice_compacted_display(messages, prefix);
                     }
                 }
-            }
+                // One-time upgrade path for sessions created before the display
+                // log existed. Only settled sessions are materialized so a live
+                // turn is never frozen into the log half-way. If an existing log
+                // is already beyond the readable ceiling, do not rewrite it on
+                // every read (the next read would fail the same way).
+                let display_too_large = display_manager
+                    .display_path(&session.meta.id)
+                    .ok()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .is_some_and(|metadata| {
+                        metadata.len()
+                            > jeikcode_capabilities::session::display::MAX_DISPLAY_READ_BYTES as u64
+                    });
+                if !turn_running && !messages.is_empty() && !display_too_large {
+                    let records: Vec<_> = messages
+                        .iter()
+                        .enumerate()
+                        .map(|(index, message)| {
+                            display_record_from_message_info(&session.meta.id, index, message)
+                        })
+                        .collect();
+                    let _ = display_manager.write_display_backfill(
+                        &session.meta.id,
+                        &records,
+                        snapshot_last_turn,
+                    );
+                }
+                let mut turns = session_user_outline(&messages);
+                append_pending_inputs(
+                    &mut messages,
+                    &mut turns,
+                    &id,
+                    current_operation.as_deref(),
+                    std::path::Path::new(&session.meta.working_dir),
+                    0,
+                );
+                annotate_client_input_ids(&mut messages, &id);
+                append_interrupted_partial(&mut messages, &id, turn_running);
+                repair_display_clock(&mut messages);
+                let (message_count, offset, messages, pinned_user_index) =
+                    if let Some(after_seq) = query.after_seq {
+                        take_session_after(messages, after_seq)
+                    } else {
+                        take_session_page(messages, &query)
+                    };
+                (turns, message_count, offset, messages, pinned_user_index)
+            };
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
             let todos = if let Some(board) = jeikcode_capabilities::tools::read_todo_board(&id) {
                 if jeikcode_capabilities::tools::list_fully_completed(&board.items) && !turn_running
@@ -5885,6 +8036,19 @@ async fn get_session_detail(
             } else {
                 Vec::new()
             };
+            let cursor = SessionCursor {
+                oldest_seq: messages.iter().find_map(|message| message.seq),
+                total: message_count,
+            };
+            // 大纲单取：右栏唤醒时只需要 turns（每轮提问的标签/序号/seq），
+            // 正文、工具输出、图片一律不传。弱网下把一次大纲刷新从几十 KB
+            // 降到几百字节；`message_count` / `cursor` 仍然保留，客户端可以
+            // 用它做“是否需要拉正文”的对账。
+            let messages = if query.turns_only.unwrap_or(false) {
+                Vec::new()
+            } else {
+                messages
+            };
             let detail = SessionDetail {
                 id: session.meta.id,
                 name: session.meta.name,
@@ -5892,9 +8056,13 @@ async fn get_session_detail(
                 created_at: u64::try_from(session.meta.created_at.max(0)).unwrap_or(0),
                 updated_at: u64::try_from(session.meta.updated_at.max(0)).unwrap_or(0),
                 message_count,
+                revision: session.snapshot.cache_epoch,
+                caps: session_capabilities(),
+                cursor,
                 offset,
                 pinned_user_index,
                 turns,
+                input_cursor: jeikcode_capabilities::session::inputs::cursor_global(&id),
                 messages,
                 preferred_model: session.meta.preferred_model.clone().or_else(|| {
                     session
@@ -5921,15 +8089,22 @@ async fn get_session_detail(
             let working_dir = crate::native_live::session_draft_working_dir(&id)
                 .unwrap_or_else(|| PathBuf::from("."));
             let detail = SessionDetail {
+                cursor: SessionCursor {
+                    oldest_seq: None,
+                    total: 0,
+                },
                 id: id.clone(),
                 name: format!("session-{id}"),
                 working_dir,
                 created_at: 0,
                 updated_at: 0,
                 message_count: 0,
+                revision: 0,
+                caps: session_capabilities(),
                 offset: 0,
                 pinned_user_index: None,
                 turns: Vec::new(),
+                input_cursor: jeikcode_capabilities::session::inputs::cursor_global(&id),
                 messages: Vec::new(),
                 preferred_model: None,
                 approval_mode: Some(
@@ -6396,7 +8571,9 @@ fn display_prefix_from_transcript(
     let mut rows = Vec::new();
     for turn in &turns[..split] {
         if !turn.user.trim().is_empty() {
-            rows.push(MessageInfo {
+            rows.push(message_info! {
+                seq: None,
+                turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
                 role: "user".into(),
                 id: Some(format!("{ID_PREFIX}-{}-user", turn.turn_id)),
                 content: turn.user.clone(),
@@ -6430,7 +8607,9 @@ fn display_prefix_from_transcript(
         }
         if has_tools {
             // Phase 1: Tool execution message (thinking + tool calls)
-            rows.push(MessageInfo {
+            rows.push(message_info! {
+                seq: None,
+                turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
                 role: "assistant".into(),
                 id: Some(format!("{ID_PREFIX}-{}-assistant-tools", turn.turn_id)),
                 content: String::new(),
@@ -6445,7 +8624,9 @@ fn display_prefix_from_transcript(
                 elapsed_ms: None,
             });
             for (index, tool) in turn.tools.iter().enumerate() {
-                rows.push(MessageInfo {
+                rows.push(message_info! {
+                    seq: None,
+                    turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
                     role: "tool".into(),
                     id: Some(format!("{ID_PREFIX}-{}-tool-{index}", turn.turn_id)),
                     content: tool.result.clone(),
@@ -6467,7 +8648,9 @@ fn display_prefix_from_transcript(
             }
             // Phase 2: Final reply message (concluding answer text)
             if has_text {
-                rows.push(MessageInfo {
+                rows.push(message_info! {
+                    seq: None,
+                    turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
                     role: "assistant".into(),
                     id: Some(format!("{ID_PREFIX}-{}-assistant", turn.turn_id)),
                     content: turn.assistant.clone(),
@@ -6483,7 +8666,9 @@ fn display_prefix_from_transcript(
                 });
             }
         } else {
-            rows.push(MessageInfo {
+            rows.push(message_info! {
+                seq: None,
+                turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
                 role: "assistant".into(),
                 id: Some(format!("{ID_PREFIX}-{}-assistant", turn.turn_id)),
                 content: turn.assistant.clone(),
@@ -6610,7 +8795,27 @@ fn display_prefix_messages(
         }
         out.push(MessageInfo::from_kernel_in(message, Some(working_dir)));
     }
+    mint_legacy_message_ids(&mut out);
     out
+}
+
+/// 跨版本兼容：旧日志（id 字段引入前写入）可能没有 `id`。读取时铸造一个
+/// **确定性** id：`m-<turn_id>-<index>`。它稳定、可重复，且永远不会与内核
+/// `m-<uuid>` 撞车；于是历史会话无需重写日志就能被新架构按 id 寻址。
+fn display_record_identity(record: &jeikcode_capabilities::session::DisplayRecord) -> String {
+    record
+        .id
+        .clone()
+        .unwrap_or_else(|| format!("m-{}-{}", record.turn_id, record.index))
+}
+
+/// 给没有 id 的旧快照行补确定性 id，保证右栏/编辑/删除在新契约下仍可用。
+fn mint_legacy_message_ids(messages: &mut [MessageInfo]) {
+    for (index, message) in messages.iter_mut().enumerate() {
+        if message.id.is_none() {
+            message.id = Some(format!("m-legacy-{index}"));
+        }
+    }
 }
 
 /// Convert one display-log record to the API shape the WebUI/TUI already render.
@@ -6665,13 +8870,30 @@ fn display_record_to_message_info(
             .iter()
             .map(|call| (call.name.as_str(), call.arguments.as_str())),
     );
-    MessageInfo {
+    let display_text = record
+        .role
+        .eq_ignore_ascii_case("user")
+        .then(|| content.clone());
+    let internal = record.synthetic || record.internal_origin.as_deref() == Some("verify_cadence");
+    let editable = record.role.eq_ignore_ascii_case("user").then(|| {
+        !record.synthetic
+            && !matches!(
+                record.internal_origin.as_deref(),
+                Some("transcript_archive") | Some("presentation") | Some("pending_input")
+            )
+    });
+    message_info! {
+        turn_id: (record.turn_id > 0).then_some(record.turn_id),
+        seq: (record.seq > 0).then_some(record.seq),
         role: record.role.clone(),
-        id: record.id.clone(),
+        id: Some(display_record_identity(record)),
         content,
         reasoning: record.reasoning.clone(),
         synthetic: record.synthetic,
         internal_origin: record.internal_origin.clone(),
+        display_text,
+        internal: Some(internal),
+        editable,
         tool_calls,
         tool_result,
         artifacts,
@@ -6679,6 +8901,54 @@ fn display_record_to_message_info(
         created_at: record.created_at,
         elapsed_ms: record.elapsed_ms,
     }
+}
+
+/// Attach the durable client-input id to user rows. A steer has two identities:
+/// the client-minted `SessionInput.id` and the kernel `message_id`; the display
+/// log only persists the latter, so after a reload a queue card carrying the
+/// former could not be recognized as already folded. The durable input ledger
+/// is the single source for this mapping; no text matching is needed.
+fn client_input_identity_map(
+    inputs: impl IntoIterator<Item = jeikcode_capabilities::session::SessionInput>,
+) -> std::collections::HashMap<String, String> {
+    let mut by_message: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for input in inputs {
+        let input_id = input.id;
+        // A promoted input has both ids; an admitted one may already be keyed
+        // by its client id when it is rendered as a pending row.
+        by_message.insert(input_id.clone(), input_id.clone());
+        if let Some(message_id) = input.message_id.filter(|id| !id.trim().is_empty()) {
+            by_message.insert(message_id, input_id);
+        }
+    }
+    by_message
+}
+
+fn annotate_client_input_ids_with(
+    messages: &mut [MessageInfo],
+    by_message: &std::collections::HashMap<String, String>,
+) {
+    if by_message.is_empty() {
+        return;
+    }
+    for message in messages {
+        if !message.role.eq_ignore_ascii_case("user") {
+            continue;
+        }
+        let Some(id) = message.id.as_deref() else {
+            continue;
+        };
+        if let Some(client_input_id) = by_message.get(id) {
+            message.client_input_id = Some(client_input_id.clone());
+        }
+    }
+}
+
+fn annotate_client_input_ids(messages: &mut [MessageInfo], session_id: &str) {
+    let inputs = jeikcode_capabilities::session::inputs::list_global(session_id);
+    let by_message = client_input_identity_map(inputs);
+    annotate_client_input_ids_with(messages, &by_message);
 }
 
 /// Mark display-log rows that no longer exist in the kernel snapshot as
@@ -6724,12 +8994,22 @@ fn display_record_from_message_info(
     jeikcode_capabilities::session::DisplayRecord {
         v: jeikcode_capabilities::session::DISPLAY_VERSION,
         session_id: session_id.to_string(),
-        // Backfill rows have no kernel turn identity; the meta's `last_turn_id`
-        // carries the real coverage boundary for subsequent appends.
-        turn_id: 0,
+        // Carry the kernel turn identity when the source row knows it (snapshot
+        // meta / live display rows). Legacy rows without it stay 0; the WebUI
+        // then falls back to steer-root penetration for the timer boundary.
+        turn_id: message.turn_id.unwrap_or(0),
         index: u32::try_from(index).unwrap_or(u32::MAX),
+        seq: message.seq.unwrap_or(0),
         role: message.role.clone(),
-        id: message.id.clone(),
+        id: message.id.clone().or_else(|| {
+            if message.internal_origin.as_deref() == Some("turn_diagnostic") {
+                Some(format!("diag-{}", uuid::Uuid::new_v4()))
+            } else if message.role == "system" {
+                Some(format!("sys-{}", uuid::Uuid::new_v4()))
+            } else {
+                Some(format!("msg-{}", uuid::Uuid::new_v4()))
+            }
+        }),
         content: message.content.clone(),
         reasoning: message.reasoning.clone(),
         synthetic: message.synthetic,
@@ -6773,6 +9053,147 @@ fn display_record_from_message_info(
         created_at: message.created_at,
         elapsed_ms: message.elapsed_ms,
     }
+}
+
+pub(crate) enum DisplayMutation<'a> {
+    Patch {
+        target_id: Option<&'a str>,
+        text: &'a str,
+        images: &'a [ImageData],
+        truncate_after: bool,
+    },
+    Truncate {
+        target_id: Option<&'a str>,
+        inclusive: bool,
+    },
+    Delete {
+        target_id: Option<&'a str>,
+        delete_turn: bool,
+    },
+}
+
+/// Rewrite the v4 log in place for an explicit mutation, preserving every row
+/// before the target (including display-only/presentation rows that are absent
+/// from the model snapshot). Falls back to invalidation + canonical rebuild only
+/// when the v4 log or the target identity is unavailable.
+pub(crate) fn rewrite_display_for_mutation(
+    manager: &NativeSessionManager,
+    id: &str,
+    mutation: DisplayMutation<'_>,
+    last_turn_id: u64,
+    completed_turns: &[u64],
+) -> bool {
+    let Some((_meta, mut records)) = manager.read_display(id).ok().flatten() else {
+        return false;
+    };
+    let target_id = match &mutation {
+        DisplayMutation::Patch { target_id, .. }
+        | DisplayMutation::Truncate { target_id, .. }
+        | DisplayMutation::Delete { target_id, .. } => *target_id,
+    };
+    let Some(target_id) = target_id else {
+        return false;
+    };
+    let Some(idx) = records
+        .iter()
+        .position(|record| record.id.as_deref() == Some(target_id))
+    else {
+        return false;
+    };
+    match mutation {
+        DisplayMutation::Patch {
+            text,
+            images,
+            truncate_after,
+            ..
+        } => {
+            if truncate_after {
+                let target_turn = records[idx].turn_id;
+                let presentation_tail: Vec<_> = records[idx + 1..]
+                    .iter()
+                    .filter(|record| {
+                        record.turn_id == target_turn
+                            && record.internal_origin.as_deref() == Some("presentation")
+                    })
+                    .cloned()
+                    .collect();
+                records.truncate(idx + 1);
+                records.extend(presentation_tail);
+            }
+            if let Some(record) = records.get_mut(idx) {
+                record.content = text.to_string();
+                record.images = images
+                    .iter()
+                    .map(|image| jeikcode_capabilities::session::DisplayImage {
+                        media_type: image.media_type.clone(),
+                        data: image.data.clone(),
+                        missing: image.missing,
+                    })
+                    .collect();
+            }
+        }
+        DisplayMutation::Truncate { inclusive, .. } => {
+            // `inclusive=false` means “remove the target and everything after it”;
+            // keep ends at the target. `inclusive=true` keeps the target itself.
+            let keep = if inclusive { idx + 1 } else { idx };
+            let target_turn = records[idx].turn_id;
+            // Presentation-only rows belong to the turn; keep them only when the
+            // target row itself survives (inclusive truncate). An exclusive
+            // rewind removes the whole target turn, including its display rows.
+            let presentation_tail: Vec<_> = if inclusive {
+                records[keep..]
+                    .iter()
+                    .filter(|record| {
+                        record.turn_id == target_turn
+                            && record.internal_origin.as_deref() == Some("presentation")
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            records.truncate(keep);
+            records.extend(presentation_tail);
+        }
+        DisplayMutation::Delete { delete_turn, .. } => {
+            let is_user = records[idx].role.eq_ignore_ascii_case("user");
+            if delete_turn {
+                let end = records
+                    .iter()
+                    .enumerate()
+                    .skip(idx + 1)
+                    .find(|(_, record)| {
+                        record.role.eq_ignore_ascii_case("user") && !record.synthetic
+                    })
+                    .map(|(index, _)| index)
+                    .unwrap_or(records.len());
+                records.drain(idx..end);
+            } else if !is_user {
+                // Assistant/tool delete keeps the preceding user row and removes
+                // the whole agent run up to the next user turn.
+                let start = records[..idx]
+                    .iter()
+                    .rposition(|record| record.role.eq_ignore_ascii_case("user"))
+                    .map(|position| position + 1)
+                    .unwrap_or(0);
+                let end = records
+                    .iter()
+                    .enumerate()
+                    .skip(idx + 1)
+                    .find(|(_, record)| {
+                        record.role.eq_ignore_ascii_case("user") && !record.synthetic
+                    })
+                    .map(|(index, _)| index)
+                    .unwrap_or(records.len());
+                records.drain(start..end);
+            } else {
+                records.remove(idx);
+            }
+        }
+    }
+    manager
+        .rewrite_display_rows(id, &records, last_turn_id, completed_turns, false)
+        .is_ok()
 }
 
 fn merge_catalog_session_messages_for_display(
@@ -6821,7 +9242,9 @@ fn merge_catalog_session_messages_for_display(
             if jeikcode_capabilities::reminder::is_system_reminder(&entry.text) {
                 continue;
             }
-            messages.push(MessageInfo {
+            messages.push(message_info! {
+                turn_id: None,
+                seq: None,
                 role: match entry.role {
                     PresentationRole::User => "user",
                     PresentationRole::Assistant => "assistant",
@@ -6831,7 +9254,7 @@ fn merge_catalog_session_messages_for_display(
                 content: unwrap_presentation_text(entry.role, &entry.text),
                 reasoning: None,
                 synthetic: false,
-                internal_origin: None,
+                internal_origin: Some("presentation".into()),
                 tool_calls: None,
                 tool_result: None,
                 artifacts: None,
@@ -6852,7 +9275,9 @@ fn merge_catalog_session_messages_for_display(
             if jeikcode_capabilities::reminder::is_system_reminder(&entry.text) {
                 continue;
             }
-            messages.push(MessageInfo {
+            messages.push(message_info! {
+                turn_id: None,
+                seq: None,
                 role: match entry.role {
                     PresentationRole::User => "user",
                     PresentationRole::Assistant => "assistant",
@@ -6862,7 +9287,7 @@ fn merge_catalog_session_messages_for_display(
                 content: unwrap_presentation_text(entry.role, &entry.text),
                 reasoning: None,
                 synthetic: false,
-                internal_origin: None,
+                internal_origin: Some("presentation".into()),
                 tool_calls: None,
                 tool_result: None,
                 artifacts: None,
@@ -7026,10 +9451,22 @@ async fn append_session_messages(
     }
 
     let project_hash = response_project_hash(&working_dir);
+    let client_request_id = req
+        .client_request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| {
+            !key.is_empty()
+                && key.len() <= 128
+                && key
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        });
     let message_count = match crate::legacy_convert::append_catalog_presentation_in_project(
         &project_hash,
         &session_id,
         &messages,
+        client_request_id,
     ) {
         Ok(count) => count,
         Err(error) => {
@@ -7038,12 +9475,8 @@ async fn append_session_messages(
         }
     };
 
-    // UI-only presentation entries live outside the conversation; the display
-    // log no longer matches. Drop it so the next read rebuilds from the merged
-    // snapshot + presentation projection.
-    let manager =
-        NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(&project_hash));
-    let _ = manager.invalidate_display(&session_id);
+    // The manager writes UI-only presentation rows into the v4 display log at
+    // the anchor turn (or invalidates it itself when the anchor is legacy).
 
     let response = AppendSessionMessagesResponse {
         success: true,
@@ -7459,6 +9892,10 @@ async fn delete_session(
                 .await;
         match deleted {
             Ok(Ok(())) => {
+                // Global sidecars are session-id keyed and are not under the
+                // project bucket; delete them with the session.
+                jeikcode_capabilities::session::inputs::clear_global(&id);
+                jeikcode_capabilities::session::partial::clear_global(&id);
                 let working_dir = state_clone.project.read().await.working_dir.clone();
                 let id_for_cleanup = id.clone();
                 let active_chats_cleanup = state_clone.active_chats.clone();
@@ -7585,6 +10022,11 @@ pub struct PatchMessageRequest {
     pub expected_message_id: Option<String>,
     #[serde(default)]
     pub expected_role: Option<String>,
+    /// Edit = rewrite the turn: after applying the new text, remove every
+    /// message after the edited row from the model context and every
+    /// downstream projection. Defaults to false for legacy clients.
+    #[serde(default)]
+    pub truncate_after: Option<bool>,
 }
 
 /// Query parameters for deleting a session message
@@ -7808,6 +10250,33 @@ fn resolve_target_message_index(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionInputsQuery {
+    #[serde(default)]
+    after_seq: u64,
+}
+
+/// GET /projects/:hash/sessions/:id/inputs?after_seq=N
+///
+/// Durable prompt/steer admission rows. The session detail already projects
+/// pending rows onto the canvas/rail; this endpoint is the `after_seq` delta
+/// for reconnecting clients (no full transcript reload).
+async fn get_session_inputs(
+    Path((_hash, id)): Path<(String, String)>,
+    Query(query): Query<SessionInputsQuery>,
+) -> impl IntoResponse {
+    let cursor = jeikcode_capabilities::session::inputs::cursor_global(&id);
+    let inputs: Vec<_> = jeikcode_capabilities::session::inputs::list_global(&id)
+        .into_iter()
+        .filter(|input| input.seq > query.after_seq)
+        .collect();
+    Json(serde_json::json!({
+        "success": true,
+        "cursor": cursor,
+        "inputs": inputs,
+    }))
+}
+
 /// PATCH /projects/:hash/sessions/:id/messages/:index - Mutate message in place
 async fn patch_session_message(
     State(state): State<AppState>,
@@ -7864,13 +10333,27 @@ async fn patch_session_message(
             req.expected_role.as_deref(),
             req.expected_message_id.as_deref(),
         );
-        let Some(real_index) = target_idx else {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "success": false, "error": "message not found" })),
-            )
-                .into_response();
+        let real_index = match target_idx {
+            Some(idx) => idx,
+            None => {
+                if req.expected_role.as_deref() == Some("user") || req.expected_message_id.is_some() {
+                    let mut user_msg = jeikcode_kernel::message::Message::user(req.expected_text.as_deref().unwrap_or(""));
+                    user_msg.id = req.expected_message_id.clone();
+                    snapshot.messages.push(user_msg);
+                    snapshot.messages.len() - 1
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({ "success": false, "error": "message not found" })),
+                    )
+                    .into_response();
+                }
+            }
         };
+        let display_target_id = snapshot.messages[real_index]
+            .id
+            .clone()
+            .or_else(|| req.expected_message_id.clone());
 
         snapshot.messages[real_index].text = req.text.clone();
         if let Some(imgs) = req.images.as_ref() {
@@ -7882,11 +10365,28 @@ async fn patch_session_message(
                 })
                 .collect();
         }
+        let truncate_after = req.truncate_after.unwrap_or(false);
+        let mut derived_turns: Option<std::collections::BTreeSet<u64>> = None;
+        if truncate_after {
+            // Edit = rewrite: the edited prompt is now the tail of the model
+            // context. Every later message, stat, display-only row, transcript
+            // turn and presentation anchor must disappear with it.
+            let keep_count = real_index + 1;
+            snapshot.messages.truncate(keep_count);
+            let (turn_c, req_c) =
+                jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
+            snapshot.turn_counter = turn_c;
+            snapshot.request_counter = req_c;
+            derived_turns = prune_rewound_turn_stats(&mut meta, keep_count);
+        }
         snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
-        // Explicit mutation: the append-only display log no longer matches the
-        // edited snapshot. Drop it; the next read backfills from the new state.
-        let _ = manager.invalidate_display(&id);
+        // 显式变更改写了上下文：压缩估算的占用不再成立。
+        meta.compacted_context_tokens = None;
         meta.updated_at = jeikcode_capabilities::session::now_ms();
+        meta.message_count = u32::try_from(snapshot.messages.len()).unwrap_or(0);
+        if truncate_after {
+            resync_todo_board_after_rewind(&id, &snapshot.messages);
+        }
         if let Err(e) = manager.save_snapshot(&id, &snapshot) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -7896,6 +10396,55 @@ async fn patch_session_message(
         }
         manager.clear_inflight_snapshot(&id);
         let _ = manager.write_meta(&meta);
+        if let Some(surviving) = derived_turns.as_ref() {
+            prune_derived_turns(&manager, &id, surviving);
+        }
+        // In-place v4 mutation: preserve every row before the edit (including
+        // display-only/presentation rows), drop the downstream tail, refresh the
+        // edited row. Only fall back to invalidation when the log/target id is
+        // unavailable (legacy/missing v4).
+        let display_images: Vec<ImageData> = req
+            .images
+            .as_ref()
+            .map(|images| {
+                images
+                    .iter()
+                    .map(|image| ImageData {
+                        media_type: image.media_type.clone(),
+                        data: image.data.clone(),
+                        missing: false,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let surviving_last_turn = meta
+            .turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid)
+            .map(|stat| stat.turn_id)
+            .max()
+            .unwrap_or(0);
+        let completed_turns: Vec<u64> = meta
+            .turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid && stat.turn_id != 0)
+            .map(|stat| stat.turn_id)
+            .collect();
+        let rewritten = rewrite_display_for_mutation(
+            &manager,
+            &id,
+            DisplayMutation::Patch {
+                target_id: display_target_id.as_deref(),
+                text: &req.text,
+                images: &display_images,
+                truncate_after,
+            },
+            surviving_last_turn,
+            &completed_turns,
+        );
+        if !rewritten {
+            let _ = manager.invalidate_display(&id);
+        }
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -7913,13 +10462,26 @@ async fn patch_session_message(
             delete_turn: None,
             target_index: None,
             target_message_id: None,
+            truncate_after: Some(truncate_after),
             ts: Some(now),
         };
         state_clone.active_chats.broadcast_to_session(&id, event).await;
+        // 跨实例：没有活跃订阅者的标签页也必须作废本地缓存，因此除会话总线外
+        // 再走一条全局失效总线（只带 revision，不背 payload）。
+        publish_global(GlobalWireEvent::SessionMutated {
+            session_id: id.clone(),
+            revision: snapshot.cache_epoch,
+        });
 
         (
             StatusCode::OK,
-            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "source_index": real_index })),
+            Json(serde_json::json!({
+                "success": true,
+                "revision": snapshot.cache_epoch,
+                "source_index": real_index,
+                "message_count": snapshot.messages.len(),
+                "truncated": truncate_after,
+            })),
         )
             .into_response()
     })
@@ -7989,8 +10551,13 @@ async fn delete_session_message(
             )
                 .into_response();
         };
+        let display_target_id = snapshot.messages[real_index]
+            .id
+            .clone()
+            .or_else(|| query.expected_message_id.clone());
 
         let delete_turn = query.delete_turn.unwrap_or(false);
+        let before_len = snapshot.messages.len();
         let mutation_start_idx;
         if delete_turn {
             // 用户消息删除（整回合删除：删除该用户消息以及随后的整轮 Agent 中间输出和回答）
@@ -8027,32 +10594,19 @@ async fn delete_session_message(
             }
         }
 
+        let removed_count = before_len.saturating_sub(snapshot.messages.len());
+        let derived_turns =
+            prune_deleted_turn_stats(&mut meta, mutation_start_idx, removed_count);
         let (turn_c, req_c) =
             jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
         snapshot.turn_counter = turn_c;
         snapshot.request_counter = req_c;
         snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
-        // Explicit mutation: the append-only display log no longer matches the
-        // edited snapshot. Drop it; the next read backfills from the new state.
-        let _ = manager.invalidate_display(&id);
+        // 显式变更改写了上下文：压缩估算的占用不再成立。
+        meta.compacted_context_tokens = None;
         meta.updated_at = jeikcode_capabilities::session::now_ms();
         meta.message_count = u32::try_from(snapshot.messages.len()).unwrap_or(0);
-        meta.turn_count = u32::try_from(turn_c).unwrap_or(0);
-        // 删除/回溯只应回退「被删掉的那些 todo 动作」，不能一刀切清空：
-        // A 轮建立的计划如果只在后轮 steer 之后被改过几项，删掉后轮消息绝不该连带清空 A 轮。
-        // 按**剩余转录**重新推导（单轮内建立又删除 → 推导为空，与旧行为等价），
-        // 并原地重绑：板身份（id + 单调 seq）保留，撤销不会被看成“另起一板/版本回退”。
-        // 槽不存在（新进程尚未装载该会话）才退回 clear/commit；
-        // 磁盘 `.todo` 由下面 save_snapshot 内部的 persist_todo_board 按新板重写。
-        let derived_todos =
-            jeikcode_capabilities::tools::derive_current_todos(&snapshot.messages);
-        if jeikcode_capabilities::tools::rebind_todo_board(&id, &derived_todos).is_none() {
-            if derived_todos.is_empty() {
-                jeikcode_capabilities::tools::clear_todo_board(&id);
-            } else {
-                jeikcode_capabilities::tools::commit_todo_board(&id, &derived_todos);
-            }
-        }
+        resync_todo_board_after_rewind(&id, &snapshot.messages);
         if let Err(e) = manager.save_snapshot(&id, &snapshot) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -8062,6 +10616,35 @@ async fn delete_session_message(
         }
         manager.clear_inflight_snapshot(&id);
         let _ = manager.write_meta(&meta);
+        if let Some(surviving) = derived_turns.as_ref() {
+            prune_derived_turns(&manager, &id, surviving);
+        }
+        let surviving_last_turn = meta
+            .turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid)
+            .map(|stat| stat.turn_id)
+            .max()
+            .unwrap_or(0);
+        let completed_turns: Vec<u64> = meta
+            .turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid && stat.turn_id != 0)
+            .map(|stat| stat.turn_id)
+            .collect();
+        let rewritten = rewrite_display_for_mutation(
+            &manager,
+            &id,
+            DisplayMutation::Delete {
+                target_id: display_target_id.as_deref(),
+                delete_turn,
+            },
+            surviving_last_turn,
+            &completed_turns,
+        );
+        if !rewritten {
+            let _ = manager.invalidate_display(&id);
+        }
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -8077,11 +10660,16 @@ async fn delete_session_message(
             text: None,
             images: None,
             delete_turn: Some(delete_turn),
+            truncate_after: None,
             target_index: None,
             target_message_id: None,
             ts: Some(now),
         };
         state_clone.active_chats.broadcast_to_session(&id, event).await;
+        publish_global(GlobalWireEvent::SessionMutated {
+            session_id: id.clone(),
+            revision: snapshot.cache_epoch,
+        });
 
         (
             StatusCode::OK,
@@ -8148,14 +10736,28 @@ async fn truncate_session(
             req.expected_role.as_deref(),
             req.target_message_id.as_deref(),
         );
-        let Some(real_index) = target_idx else {
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({ "success": true, "notFound": true })),
-            )
-                .into_response();
+        let real_index = match target_idx {
+            Some(idx) => idx,
+            None => {
+                if req.expected_role.as_deref() == Some("user") || req.target_message_id.is_some() {
+                    let mut user_msg = jeikcode_kernel::message::Message::user(req.expected_text.as_deref().unwrap_or(""));
+                    user_msg.id = req.target_message_id.clone();
+                    snapshot.messages.push(user_msg);
+                    snapshot.messages.len() - 1
+                } else {
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "success": true, "notFound": true })),
+                    )
+                    .into_response();
+                }
+            }
         };
 
+        let display_target_id = snapshot.messages[real_index]
+            .id
+            .clone()
+            .or_else(|| req.target_message_id.clone());
         let keep_count = if req.inclusive.unwrap_or(false) {
             (real_index + 1).min(snapshot.messages.len())
         } else {
@@ -8163,32 +10765,17 @@ async fn truncate_session(
         };
 
         snapshot.messages.truncate(keep_count);
+        let derived_turns = prune_rewound_turn_stats(&mut meta, keep_count);
         let (turn_c, req_c) =
             jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
         snapshot.turn_counter = turn_c;
         snapshot.request_counter = req_c;
         snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
-        // Explicit mutation: the append-only display log no longer matches the
-        // edited snapshot. Drop it; the next read backfills from the new state.
-        let _ = manager.invalidate_display(&id);
+        // 显式变更改写了上下文：压缩估算的占用不再成立。
+        meta.compacted_context_tokens = None;
         meta.updated_at = jeikcode_capabilities::session::now_ms();
         meta.message_count = u32::try_from(snapshot.messages.len()).unwrap_or(0);
-        meta.turn_count = u32::try_from(turn_c).unwrap_or(0);
-        // 删除/回溯只应回退「被删掉的那些 todo 动作」，不能一刀切清空：
-        // A 轮建立的计划如果只在后轮 steer 之后被改过几项，删掉后轮消息绝不该连带清空 A 轮。
-        // 按**剩余转录**重新推导（单轮内建立又删除 → 推导为空，与旧行为等价），
-        // 并原地重绑：板身份（id + 单调 seq）保留，撤销不会被看成“另起一板/版本回退”。
-        // 槽不存在（新进程尚未装载该会话）才退回 clear/commit；
-        // 磁盘 `.todo` 由下面 save_snapshot 内部的 persist_todo_board 按新板重写。
-        let derived_todos =
-            jeikcode_capabilities::tools::derive_current_todos(&snapshot.messages);
-        if jeikcode_capabilities::tools::rebind_todo_board(&id, &derived_todos).is_none() {
-            if derived_todos.is_empty() {
-                jeikcode_capabilities::tools::clear_todo_board(&id);
-            } else {
-                jeikcode_capabilities::tools::commit_todo_board(&id, &derived_todos);
-            }
-        }
+        resync_todo_board_after_rewind(&id, &snapshot.messages);
         if let Err(e) = manager.save_snapshot(&id, &snapshot) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -8198,6 +10785,35 @@ async fn truncate_session(
         }
         manager.clear_inflight_snapshot(&id);
         let _ = manager.write_meta(&meta);
+        if let Some(surviving) = derived_turns.as_ref() {
+            prune_derived_turns(&manager, &id, surviving);
+        }
+        let surviving_last_turn = meta
+            .turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid)
+            .map(|stat| stat.turn_id)
+            .max()
+            .unwrap_or(0);
+        let completed_turns: Vec<u64> = meta
+            .turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid && stat.turn_id != 0)
+            .map(|stat| stat.turn_id)
+            .collect();
+        let rewritten = rewrite_display_for_mutation(
+            &manager,
+            &id,
+            DisplayMutation::Truncate {
+                target_id: display_target_id.as_deref(),
+                inclusive: req.inclusive.unwrap_or(false),
+            },
+            surviving_last_turn,
+            &completed_turns,
+        );
+        if !rewritten {
+            let _ = manager.invalidate_display(&id);
+        }
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -8213,11 +10829,16 @@ async fn truncate_session(
             text: None,
             images: None,
             delete_turn: None,
+            truncate_after: None,
             target_index: Some(keep_count),
             target_message_id: req.target_message_id,
             ts: Some(now),
         };
         state_clone.active_chats.broadcast_to_session(&id, event).await;
+        publish_global(GlobalWireEvent::SessionMutated {
+            session_id: id.clone(),
+            revision: snapshot.cache_epoch,
+        });
 
         (
             StatusCode::OK,
@@ -8619,6 +11240,16 @@ pub enum ChatEvent {
     #[serde(rename = "user")]
     User {
         content: String,
+        /// Server-rendered user-facing text. Clients render THIS; the raw
+        /// `content` remains the exact model/runtime text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_text: Option<String>,
+        /// Server-authored visibility flag (synthetic reminders).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        internal: Option<bool>,
+        /// Whether the UI may edit/rewind this row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        editable: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         /// Epoch ms the user message was authored. Lets a mid-turn refresh keep
@@ -8647,10 +11278,6 @@ pub enum ChatEvent {
     UserIdentified {
         message_id: String,
         turn_ordinal: u32,
-        /// 绝对转录下标（客户端的 `sourceIndex`）：回放中“被折叠线切掉的提问”靠它
-        /// 回到真实位置，不必再用文本去大纲里猜。压缩可能重编号，故按 hint 使用。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        absolute_index: Option<usize>,
     },
     /// Tool batch started (all tools in this assistant turn)
     #[serde(rename = "tool_batch")]
@@ -8670,6 +11297,10 @@ pub enum ChatEvent {
         /// Monotonic part counter within the message (bumped on kind change).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         part_seq: Option<u32>,
+        /// Monotonic revision inside THIS part; live deltas and the coalesced
+        /// replay frame carry it so the client applies each part event once.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_rev: Option<u64>,
     },
     /// LLM reasoning/thinking content
     #[serde(rename = "reasoning")]
@@ -8681,6 +11312,8 @@ pub enum ChatEvent {
         part_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         part_seq: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_rev: Option<u64>,
     },
     /// Tool call started
     #[serde(rename = "tool_start")]
@@ -8725,6 +11358,13 @@ pub enum ChatEvent {
         success: bool,
         duration_ms: u64,
     },
+    /// Tool EXECUTION returned for this call, emitted BEFORE the authoritative
+    /// `tool_result` (which still lands once the whole parallel batch is applied,
+    /// in emission order). Clients settle the row here so a fast tool stops
+    /// spinning while a slow sibling keeps running; `output`/`duration_ms` stay
+    /// on the later `tool_result` frame. Purely observational.
+    #[serde(rename = "tool_finished")]
+    ToolFinished { id: String, success: bool },
     /// Token usage update
     #[serde(rename = "tokens")]
     TokenUsage {
@@ -8829,6 +11469,22 @@ pub enum ChatEvent {
         /// Post-compaction estimated context tokens (summary + kept recent turns).
         tokens: u32,
     },
+    /// A display-only notice that is ALREADY persisted in the session display log
+    /// (e.g. the manual compaction boundary). Carries the record's authoritative
+    /// identity so every observer places it as a standalone transcript row in the
+    /// same order a cold load would, and dedupes it by `id`.
+    ///
+    /// `display_seq` is the display-log `seq`; it is deliberately not named `seq`
+    /// because `/chat/watch` frames overwrite `seq` with the replay cursor.
+    #[serde(rename = "display_notice")]
+    DisplayNotice {
+        session_id: String,
+        id: String,
+        display_seq: u64,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<u64>,
+    },
     /// Auxiliary session persistence failed. Clients must display this outside
     /// the assistant message timeline.
     #[serde(rename = "persistence_warning")]
@@ -8880,6 +11536,9 @@ pub enum ChatEvent {
         images: Option<Vec<ImageInput>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         delete_turn: Option<bool>,
+        /// Patch action: the edit also removed every message after the row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        truncate_after: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         target_index: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -9175,6 +11834,13 @@ mod session_token_usage_tests {
             usage.total < 300_000,
             "must not restore the 1.7M billing sum"
         );
+
+        // 压缩提交后的占用是比快照最后一条 assistant 的旧 usage 更新的事实。
+        meta.compacted_context_tokens = Some(1_234);
+        let compacted = session_token_usage_from_session(&meta, &snapshot).unwrap();
+        assert_eq!(compacted.prompt, 1_234);
+        assert_eq!(compacted.completion, 0);
+        assert_eq!(compacted.total, 1_234);
     }
 }
 
@@ -9183,6 +11849,9 @@ struct ChatSteerCancelRequest {
     pub session_id: String,
     #[serde(default)]
     pub message: Option<String>,
+    /// Stable steer identity; takes precedence over the text fallback.
+    #[serde(default)]
+    pub client_input_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -9199,12 +11868,38 @@ async fn chat_steer_cancel(
 ) -> impl IntoResponse {
     let mut _cancelled = false;
 
+    // Retire the cancelled steer from the operation's in-memory metadata FIFO
+    // and the durable input log so a subsequent steer fold or session detail
+    // pull never resurrects or misattributes the cancelled steer.
+    state
+        .active_chats
+        .cancel_steer_metadata(&req.session_id, req.client_input_id.as_deref())
+        .await;
+    let resolved_sid = state
+        .active_chats
+        .session_id(&req.session_id)
+        .await
+        .unwrap_or_else(|| req.session_id.clone());
+    let _ = jeikcode_capabilities::session::inputs::mark_cancelled_global(
+        &resolved_sid,
+        req.client_input_id.as_deref(),
+        req.message.as_deref(),
+    );
+    if resolved_sid != req.session_id {
+        let _ = jeikcode_capabilities::session::inputs::mark_cancelled_global(
+            &req.session_id,
+            req.client_input_id.as_deref(),
+            req.message.as_deref(),
+        );
+    }
+
     // 1. 若存在活跃的 /chat 通道，通过 steer 信号通道发送撤回
     if let Some(tx) = state.active_chats.steer_sender(&req.session_id).await {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         if tx
             .send(live_api::ChatSteerSignal::Cancel {
                 text: req.message.clone(),
+                message_id: req.client_input_id.clone(),
                 done: done_tx,
             })
             .is_ok()
@@ -9219,7 +11914,11 @@ async fn chat_steer_cancel(
 
     // 2. 若存在全局活跃 runner handle（Live / 共享会话模式），通过 handle 撤回
     if let Some(handle) = crate::native_live::existing_runner_handle(&req.session_id) {
-        if handle.cancel_steer(req.message).await.is_ok() {
+        if handle
+            .cancel_steer(req.message, req.client_input_id)
+            .await
+            .is_ok()
+        {
             _cancelled = true;
         }
     }
@@ -9235,7 +11934,7 @@ async fn chat_steer_cancel(
 
 #[cfg(test)]
 mod chat_event_type_tests {
-    use super::{ChatEvent, ChatRuntimeProjector};
+    use super::{compaction_started_at, finish_compaction_phase, ChatEvent, ChatRuntimeProjector};
 
     #[test]
     fn runtime_info_serializes_the_exact_resolved_selection() {
@@ -9275,6 +11974,48 @@ mod chat_event_type_tests {
         let event = ChatEvent::ToolBatchStarted { calls };
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["calls"][0]["id"], "call-1");
+    }
+
+    #[test]
+    fn runtime_compaction_start_registers_phase_and_finish_clears_it() {
+        use jeikcode_coding::runtime::{CompactionCompletion, CompactionOutcome};
+        use jeikcode_coding::CodingRuntimeEvent;
+        use jeikcode_kernel::message::CompactTrigger;
+
+        let sid = "runtime-compaction-phase-test";
+        let _ = finish_compaction_phase(sid, crate::COMPACTION_OWNER_TURN, false);
+        let mut projector = ChatRuntimeProjector::default();
+        let started = projector.project_runtime(
+            CodingRuntimeEvent::CompactionStarted {
+                trigger: CompactTrigger::Auto { utilization: 0.95 },
+            },
+            sid,
+        );
+        assert!(matches!(
+            started.as_slice(),
+            [ChatEvent::SessionStatus { status, .. }] if status == "compacting"
+        ));
+        assert!(compaction_started_at(sid).is_some());
+
+        // 自动触发器的空操作也必须清掉阶段，否则刷新后 `Compacting…` 会复活。
+        let finished = projector.project_runtime(
+            CodingRuntimeEvent::CompactionFinished {
+                completion: CompactionCompletion::Completed(CompactionOutcome {
+                    trigger: CompactTrigger::Auto { utilization: 0.95 },
+                    epoch: 1,
+                    removed_messages: 0,
+                    bytes_before: 100,
+                    bytes_after: 100,
+                    committed: false,
+                    estimated_tokens_before: 30,
+                    estimated_tokens_after: 30,
+                    committed_snapshot: None,
+                }),
+            },
+            sid,
+        );
+        assert!(finished.is_empty());
+        assert_eq!(compaction_started_at(sid), None);
     }
 
     #[test]
@@ -9587,6 +12328,9 @@ enum ArtifactDetectorState {
         artifact_type: String,
         fence_len: usize,
         depth: usize,
+        /// Whether a top-level outline heading may heal a missing close fence.
+        /// Markdown / plain-text containers legitimately hold headings.
+        heal_on_heading: bool,
     },
     /// Inside HTML block (detected by <html>, <!DOCTYPE, or substantial HTML tags)
     InHtml { id: String, content: String },
@@ -9661,10 +12405,13 @@ impl ArtifactDetector {
                                 message_id: None,
                                 part_id: None,
                                 part_seq: None,
+                                part_rev: None,
                             });
                         }
 
                         let (artifact_type, title) = Self::artifact_type_for_language(&language);
+                        let heal_on_heading = artifact_type != "markdown"
+                            && !Self::is_text_container_language(&language);
                         let id = self.next_id();
                         events.push(ChatEvent::ArtifactStart {
                             id: id.clone(),
@@ -9683,6 +12430,7 @@ impl ArtifactDetector {
                             artifact_type,
                             fence_len,
                             depth: 1,
+                            heal_on_heading,
                         };
                         remaining = &remaining[content_start..];
                     }
@@ -9734,6 +12482,7 @@ impl ArtifactDetector {
                             message_id: None,
                             part_id: None,
                             part_seq: None,
+                            part_rev: None,
                         });
                         remaining = "";
                     }
@@ -9743,6 +12492,7 @@ impl ArtifactDetector {
                     artifact_type,
                     fence_len,
                     mut depth,
+                    heal_on_heading,
                 } => match Self::find_next_fence_in_block(
                     remaining,
                     fence_len,
@@ -9774,6 +12524,7 @@ impl ArtifactDetector {
                             artifact_type,
                             fence_len,
                             depth,
+                            heal_on_heading,
                         };
                         remaining = &remaining[after_fence_line..];
                     }
@@ -9788,12 +12539,13 @@ impl ArtifactDetector {
                             artifact_type,
                             fence_len,
                             depth,
+                            heal_on_heading,
                         };
                         remaining = &remaining[after_fence_line..];
                     }
                     None => {
-                        // 结构性终结自愈：如果当前非 markdown 代码块内部遇到了明确的顶层大纲结构（如 `\n### 第二步`）
-                        if artifact_type != "markdown" {
+                        // 结构性终结自愈：如果当前代码块（非 markdown / 纯文本容器）内部遇到了明确的顶层大纲结构（如 `\n### 第二步`）
+                        if heal_on_heading {
                             if let Some(term_pos) = Self::find_structural_terminator(remaining) {
                                 if term_pos > 0 {
                                     events.push(ChatEvent::ArtifactContent {
@@ -9817,6 +12569,7 @@ impl ArtifactDetector {
                             artifact_type,
                             fence_len,
                             depth,
+                            heal_on_heading,
                         };
                         remaining = "";
                     }
@@ -9981,7 +12734,7 @@ impl ArtifactDetector {
             let line_end = text[line_start..]
                 .find('\n')
                 .map_or(text.len(), |idx| line_start + idx);
-            let line = text[line_start..line_end].trim();
+            let line = &text[line_start..line_end];
             if Self::is_structural_heading(line) {
                 return Some(line_start);
             }
@@ -9990,14 +12743,60 @@ impl ArtifactDetector {
         None
     }
 
+    /// Fence languages whose body is prose and may legitimately contain
+    /// headings. Mirrors `TEXT_CONTAINER_LANGS` in `webui/src/lib/markdownPrep.ts`:
+    /// the WebUI renderer never heals those blocks, so the stream split must not
+    /// either, or the live canvas diverges from the persisted transcript.
+    fn is_text_container_language(language: &str) -> bool {
+        const TEXT_CONTAINER_LANGS: &[&str] = &[
+            "",
+            "text",
+            "plain",
+            "plaintext",
+            "txt",
+            "prompt",
+            "prompts",
+            "rules",
+            "guide",
+            "instructions",
+            "chat",
+            "chatml",
+            "system",
+            "user",
+            "assistant",
+            "doc",
+            "docs",
+            "documentation",
+            "output",
+            "console",
+            "log",
+            "logs",
+            "terminal",
+            "shell-session",
+            "error",
+            "err",
+            "markdown",
+            "md",
+            "mdx",
+            "mkd",
+        ];
+        let lower = language.trim().to_lowercase();
+        TEXT_CONTAINER_LANGS.contains(&lower.as_str())
+    }
+
+    /// A heading that ends an unclosed code block. Must stay a subset of the
+    /// WebUI rule (`isStructuralTerminator`): a single `#` is a comment in
+    /// python / bash / yaml / toml / C (`# 1. 解析与格式化`, `#include`), and an
+    /// indented `##` is code body. Only an unindented `##`..`######` outline
+    /// heading counts; healing anything else here splits the block mid-stream
+    /// and the rest of the code streams out as prose.
     fn is_structural_heading(line: &str) -> bool {
-        let trimmed = line.trim();
-        let heading = trimmed.trim_start_matches(|c: char| c == '>' || c.is_whitespace());
+        let heading = line.trim_end();
         if !heading.starts_with('#') {
             return false;
         }
         let hashes = heading.chars().take_while(|&c| c == '#').count();
-        if hashes < 1 || hashes > 6 {
+        if !(2..=6).contains(&hashes) {
             return false;
         }
         let after_hashes = &heading[hashes..];
@@ -10315,7 +13114,21 @@ struct ChatRuntimeProjector {
     /// Monotonic per-message part counter; bumped when the streaming part KIND
     /// changes (reasoning → text → …) so each part gets a unique `part_id`.
     part_seq: u32,
+    /// Monotonic revision within the current part. Reset when a new part id is
+    /// allocated; incremented for every live delta. The replay log coalesces
+    /// deltas but keeps the LAST revision, so the client can apply a part once.
+    part_rev: u64,
     last_part_kind: Option<String>,
+    /// Current streaming assistant content for crash recovery. Rewritten at a
+    /// small throttle; cleared when the canonical snapshot commits.
+    partial_text: String,
+    partial_reasoning: String,
+    partial_session_id: Option<String>,
+    partial_message_id: Option<String>,
+    partial_part_id: Option<String>,
+    partial_last_save: Option<std::time::Instant>,
+    partial_bytes_since_save: usize,
+    partial_tools: Vec<jeikcode_capabilities::session::PartialToolCall>,
 }
 
 impl Default for ChatRuntimeProjector {
@@ -10332,12 +13145,176 @@ impl Default for ChatRuntimeProjector {
             current_message_id: None,
             current_user_message_id: None,
             part_seq: 0,
+            part_rev: 0,
             last_part_kind: None,
+            partial_text: String::new(),
+            partial_reasoning: String::new(),
+            partial_session_id: None,
+            partial_message_id: None,
+            partial_part_id: None,
+            partial_last_save: None,
+            partial_bytes_since_save: 0,
+            partial_tools: Vec::new(),
         }
     }
 }
 
+/// 保证在压缩改写 `snapshot.json` 或追加独立显示通知之前，会话的 v4 `display.jsonl`
+/// 已经完整落地。若该会话此前因 `/undo`、编辑、删除或旧格式导入而缺少完整 v4 日志，
+/// 直接调 `append_display_notice` 会返回 `Ok(None)`，导致压缩标记既写不进磁盘、
+/// 也不会广播给其它实例。
+pub(crate) fn ensure_v4_display_for_session(
+    manager: &NativeSessionManager,
+    loaded: &jeikcode_capabilities::session::LoadedSession,
+) {
+    let snapshot_last_turn = loaded
+        .meta
+        .turn_stats
+        .iter()
+        .filter(|stat| stat.position_valid)
+        .map(|stat| stat.turn_id)
+        .max()
+        .unwrap_or(0);
+    let already_valid = manager
+        .read_display(&loaded.meta.id)
+        .ok()
+        .flatten()
+        .is_some_and(|(meta, records)| {
+            meta.v == jeikcode_capabilities::session::DISPLAY_VERSION
+                && meta.complete
+                && v4_display_covers_completed_user_turns(
+                    &meta,
+                    &display_record_ids(&records),
+                    &loaded.snapshot.messages,
+                    &loaded.meta.turn_stats,
+                    snapshot_last_turn,
+                )
+        });
+    if already_valid {
+        return;
+    }
+    let view = crate::legacy_convert::CatalogSessionView {
+        snapshot: loaded.snapshot.clone(),
+        meta: loaded.meta.clone(),
+        presentation: loaded.presentation.clone(),
+    };
+    let Ok(mut messages) = merge_catalog_session_messages_for_display(&view) else {
+        return;
+    };
+    if messages.is_empty() {
+        return;
+    }
+    mint_legacy_message_ids(&mut messages);
+    let records: Vec<_> = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| display_record_from_message_info(&loaded.meta.id, index, message))
+        .collect();
+    let _ = manager.write_display_backfill(&loaded.meta.id, &records, snapshot_last_turn);
+}
+
+pub(crate) fn persist_session_display_notice(
+    session_id: &str,
+    message: &str,
+    notice_id: Option<String>,
+) -> Option<jeikcode_capabilities::session::DisplayRecord> {
+    if session_id.trim().is_empty() || message.trim().is_empty() {
+        return None;
+    }
+    let resolved = resolve_session_by_id(session_id).ok().flatten()?;
+    let mgr = NativeSessionManager::with_root(
+        NativeSessionManager::sessions_root().join(&resolved.project_hash),
+    );
+    if let Ok(loaded) = mgr.load_native_session(&resolved.meta.id) {
+        ensure_v4_display_for_session(&mgr, &loaded);
+    }
+    let record = mgr
+        .append_display_notice(&resolved.meta.id, message, notice_id)
+        .ok()
+        .flatten();
+    if record.is_some() {
+        publish_global(GlobalWireEvent::DisplayAppended {
+            session_id: resolved.meta.id,
+        });
+    }
+    record
+}
+
 impl ChatRuntimeProjector {
+    fn reset_partial_stream(&mut self) {
+        self.partial_text.clear();
+        self.partial_reasoning.clear();
+        self.partial_message_id = None;
+        self.partial_part_id = None;
+        self.partial_last_save = None;
+        self.partial_bytes_since_save = 0;
+        self.partial_tools.clear();
+    }
+
+    fn note_partial_delta(
+        &mut self,
+        kind: &str,
+        message_id: &Option<String>,
+        part_id: &Option<String>,
+        content: &str,
+    ) {
+        if self.terminal_seen {
+            return;
+        }
+        if let Some(message_id) = message_id {
+            if self.partial_message_id.as_deref() != Some(message_id.as_str()) {
+                // A new assistant round supersedes the previous partial: the
+                // previous round is checkpointed by SnapshotHook at the boundary.
+                self.partial_text.clear();
+                self.partial_reasoning.clear();
+                self.partial_message_id = Some(message_id.clone());
+            }
+        }
+        if let Some(part_id) = part_id {
+            self.partial_part_id = Some(part_id.clone());
+        }
+        if kind == "reasoning" {
+            self.partial_reasoning.push_str(content);
+        } else {
+            self.partial_text.push_str(content);
+        }
+        self.partial_bytes_since_save = self.partial_bytes_since_save.saturating_add(content.len());
+        self.maybe_save_partial();
+    }
+
+    fn maybe_save_partial(&mut self) {
+        if self.terminal_seen {
+            return;
+        }
+        let Some(session_id) = self.partial_session_id.clone() else {
+            return;
+        };
+        // Canonical daemon sessions are UUIDs. Non-UUID ids come from legacy
+        // imports/tests; do not create recovery files outside a real session.
+        if uuid::Uuid::parse_str(&session_id).is_err() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let due = self.partial_last_save.map_or(true, |last| {
+            now.duration_since(last) >= std::time::Duration::from_millis(250)
+        });
+        if !due && self.partial_bytes_since_save < 8192 {
+            return;
+        }
+        self.partial_last_save = Some(now);
+        self.partial_bytes_since_save = 0;
+        let partial = jeikcode_capabilities::session::PartialStream {
+            session_id,
+            message_id: self.partial_message_id.clone(),
+            part_id: self.partial_part_id.clone(),
+            text: self.partial_text.clone(),
+            reasoning: self.partial_reasoning.clone(),
+            tool_calls: self.partial_tools.clone(),
+            updated_at: u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0),
+        };
+        let _ = jeikcode_capabilities::session::partial::save_global(&partial);
+    }
+
     fn project_runtime(
         &mut self,
         event: CodingRuntimeEvent,
@@ -10390,21 +13367,32 @@ impl ChatRuntimeProjector {
             } if outcome.committed => {
                 // Clear the driver's "compacting" status (the kernel announced it for
                 // every pass) and refresh the footer meter with the post-compaction size.
-                crate::publish_global(crate::GlobalWireEvent::Activity {
-                    session_id: permission_session_id.to_string(),
-                    running: true,
-                    terminal: None,
-                    status: None,
-                });
+                crate::finish_compaction_phase(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                    true,
+                );
+                let mark = jeikcode_config::i18n::format_compaction_mark(
+                    outcome.removed_messages,
+                    outcome.estimated_tokens_before,
+                    outcome.estimated_tokens_after,
+                );
+                let notice_event =
+                    match persist_session_display_notice(permission_session_id, &mark, None) {
+                        Some(record) => ChatEvent::DisplayNotice {
+                            session_id: permission_session_id.to_string(),
+                            id: record.id.unwrap_or_default(),
+                            display_seq: record.seq,
+                            text: record.content,
+                            created_at: record.created_at,
+                        },
+                        None => ChatEvent::Warning {
+                            message: mark,
+                            message_id: self.notice_anchor(),
+                        },
+                    };
                 vec![
-                    ChatEvent::Warning {
-                        message: jeikcode_config::i18n::format_compaction_mark(
-                            outcome.removed_messages,
-                            outcome.estimated_tokens_before,
-                            outcome.estimated_tokens_after,
-                        ),
-                        message_id: self.notice_anchor(),
-                    },
+                    notice_event,
                     ChatEvent::ContextCompacted {
                         session_id: permission_session_id.to_string(),
                         tokens: outcome.estimated_tokens_after as u32,
@@ -10418,12 +13406,11 @@ impl ChatRuntimeProjector {
             CodingRuntimeEvent::CompactionFinished {
                 completion: CompactionCompletion::Completed(outcome),
             } if outcome.is_manual() => {
-                crate::publish_global(crate::GlobalWireEvent::Activity {
-                    session_id: permission_session_id.to_string(),
-                    running: true,
-                    terminal: None,
-                    status: None,
-                });
+                crate::finish_compaction_phase(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                    true,
+                );
                 let text = jeikcode_config::i18n::format_compaction_noop(
                     outcome.estimated_tokens_before,
                     outcome.estimated_tokens_after,
@@ -10435,6 +13422,7 @@ impl ChatRuntimeProjector {
                         message_id: None,
                         part_id: None,
                         part_seq: None,
+                        part_rev: None,
                     }]
                 } else {
                     self.artifacts.process(&text)
@@ -10452,12 +13440,11 @@ impl ChatRuntimeProjector {
                         ..
                     },
             } => {
-                crate::publish_global(crate::GlobalWireEvent::Activity {
-                    session_id: permission_session_id.to_string(),
-                    running: true,
-                    terminal: None,
-                    status: None,
-                });
+                crate::finish_compaction_phase(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                    true,
+                );
                 vec![
                     ChatEvent::Warning {
                         message: jeikcode_config::i18n::format_compaction_interrupted(),
@@ -10476,12 +13463,11 @@ impl ChatRuntimeProjector {
                         error,
                     },
             } => {
-                crate::publish_global(crate::GlobalWireEvent::Activity {
-                    session_id: permission_session_id.to_string(),
-                    running: true,
-                    terminal: None,
-                    status: None,
-                });
+                crate::finish_compaction_phase(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                    true,
+                );
                 vec![
                     ChatEvent::Error {
                         message: format!("compact failed: {error}"),
@@ -10492,6 +13478,16 @@ impl ChatRuntimeProjector {
                         status: "running".to_string(),
                     },
                 ]
+            }
+            CodingRuntimeEvent::CompactionFinished { .. } => {
+                // 自动触发器上的空操作 / 失败 / 中断也必须结束阶段：否则上一个
+                // CompactionStarted 留下的 `Compacting…` 会一直挂到回合终态。
+                crate::finish_compaction_phase(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                    true,
+                );
+                Vec::new()
             }
             CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed {
                 reason, stats, ..
@@ -10562,18 +13558,64 @@ impl ChatRuntimeProjector {
                     name,
                 }]
             }
-            CodingRuntimeEvent::CompactionStarted { .. }
-            | CodingRuntimeEvent::CompactionFinished { .. }
-            | CodingRuntimeEvent::RuntimeStopped(_)
-            | CodingRuntimeEvent::ModeChanged { .. }
+            CodingRuntimeEvent::LoopChanged(progress) => {
+                // `/loop` 的控制器状态是服务端权威运行态的一部分：wakeup 等待期间
+                // 没有回合在跑，但下一轮随时开始，客户端不能据此熄灭 busy。
+                crate::note_loop_state(
+                    permission_session_id,
+                    progress.active,
+                    progress.round,
+                    &progress.label,
+                );
+                // 控制器变化双向广播：armed → 点亮（wakeup 等待期也算在跑），
+                // released → 熄灭。若释放时当前回合还在收尾，下一帧直播内容会
+                // 立即把它点亮回来（`noteRunningProofFrame`），不会留下假停止态。
+                crate::publish_global(crate::GlobalWireEvent::Activity {
+                    session_id: permission_session_id.to_string(),
+                    running: progress.active,
+                    terminal: None,
+                    status: None,
+                });
+                Vec::new()
+            }
+            CodingRuntimeEvent::GoalChanged(progress) => {
+                crate::note_goal_state(permission_session_id, progress.active);
+                crate::publish_global(crate::GlobalWireEvent::Activity {
+                    session_id: permission_session_id.to_string(),
+                    running: progress.active,
+                    terminal: None,
+                    status: None,
+                });
+                Vec::new()
+            }
+            CodingRuntimeEvent::CompactionStarted { .. } => {
+                // 内核事件在 runtime 层已经转换成 CodingRuntimeEvent::CompactionStarted
+                // （AgentEvent 不再下传），自动压缩的“Compacting…”必须在这里登记。
+                crate::note_compaction_started(permission_session_id, crate::COMPACTION_OWNER_TURN);
+                vec![ChatEvent::SessionStatus {
+                    session_id: permission_session_id.to_string(),
+                    status: "compacting".to_string(),
+                }]
+            }
+            CodingRuntimeEvent::RuntimeStopped(_) => {
+                // runtime 已经死了：控制器不可能再续轮，立即从权威运行态移除，
+                // 否则 `/chat/active` 会把一个不存在的循环永久报成运行中。
+                crate::finish_compaction_phase(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                    false,
+                );
+                crate::note_loop_state(permission_session_id, false, 0, "");
+                crate::note_goal_state(permission_session_id, false);
+                Vec::new()
+            }
+            CodingRuntimeEvent::ModeChanged { .. }
             | CodingRuntimeEvent::Reconfiguring { .. }
             | CodingRuntimeEvent::Reconfigured { .. }
             | CodingRuntimeEvent::ProviderChanged { .. }
             | CodingRuntimeEvent::ProviderUnavailable { .. }
             | CodingRuntimeEvent::SessionChanged(_)
             | CodingRuntimeEvent::WorkingDirectoryChanged(_)
-            | CodingRuntimeEvent::GoalChanged(_)
-            | CodingRuntimeEvent::LoopChanged(_)
             | CodingRuntimeEvent::UndoFinished(_)
             | CodingRuntimeEvent::ContextStatsRefreshed(_)
             | CodingRuntimeEvent::SnapshotRestoreFinished { .. }
@@ -10587,17 +13629,28 @@ impl ChatRuntimeProjector {
     /// `part_seq` when the kind changes). `None` ids when no assistant-message
     /// boundary has been seen (older driver / non-boundary text such as a
     /// compaction advisory).
-    fn next_part_stamp(&mut self, kind: &str) -> (Option<String>, Option<String>, Option<u32>) {
+    fn next_part_stamp(
+        &mut self,
+        kind: &str,
+    ) -> (Option<String>, Option<String>, Option<u32>, Option<u64>) {
         let message_id = self.current_message_id.clone();
         if self.last_part_kind.as_deref() != Some(kind) {
             self.part_seq += 1;
+            self.part_rev = 1;
             self.last_part_kind = Some(kind.to_string());
+        } else {
+            self.part_rev = self.part_rev.saturating_add(1);
         }
         let has_id = message_id.is_some();
         let part_id = message_id
             .as_ref()
             .map(|m| format!("{m}:{}:{kind}", self.part_seq));
-        (message_id, part_id, has_id.then_some(self.part_seq))
+        (
+            message_id,
+            part_id,
+            has_id.then_some(self.part_seq),
+            has_id.then_some(self.part_rev),
+        )
     }
 
     /// Close the current streaming part so the next delta opens a fresh one.
@@ -10625,18 +13678,22 @@ impl ChatRuntimeProjector {
     ) -> Vec<ChatEvent> {
         use jeikcode_kernel::event::AgentEvent as Agent;
 
+        self.partial_session_id = Some(session_id.to_string());
         match event {
             Agent::AssistantMessage { message_id } => {
                 // Boundary marker: tag subsequent deltas with this identity.
-                self.current_message_id = Some(message_id);
+                self.current_message_id = Some(message_id.clone());
                 self.part_seq = 0;
+                self.part_rev = 0;
                 self.last_part_kind = None;
+                self.reset_partial_stream();
+                self.partial_message_id = Some(message_id);
                 Vec::new()
             }
             Agent::UserMessage {
                 message_id,
                 turn_ordinal,
-                message_index,
+                ..
             } => {
                 // Identity-only boundary: the `user` echo already painted the
                 // bubble; this binds it to the stored message id.
@@ -10646,30 +13703,40 @@ impl ChatRuntimeProjector {
                 // 否则会挂到上一轮回答底部 / 下一条 loop 下面。
                 self.current_user_message_id = Some(message_id.clone());
                 self.current_message_id = None;
+                // A new turn starts: the previous turn's partial must have been
+                // committed/cleared; drop any stale checkpoint.
+                self.reset_partial_stream();
+                jeikcode_capabilities::session::partial::clear_global(session_id);
                 vec![ChatEvent::UserIdentified {
                     message_id,
                     turn_ordinal,
-                    absolute_index: Some(message_index),
                 }]
             }
             Agent::TextDelta(text) => {
-                let (message_id, part_id, part_seq) = self.next_part_stamp("text");
+                let (message_id, part_id, part_seq, part_rev) = self.next_part_stamp("text");
+                self.note_partial_delta("text", &message_id, &part_id, &text);
                 let mut events = if self.keep_raw_markdown {
                     vec![ChatEvent::TextDelta {
                         content: text,
                         message_id: message_id.clone(),
                         part_id: part_id.clone(),
                         part_seq,
+                        part_rev,
                     }]
                 } else {
                     self.artifacts.process(&text)
                 };
-                // ArtifactDetector emits TextDelta without ids — stamp them here.
+                // ArtifactDetector may split ONE model delta into several
+                // TextDelta events (prose before/after a code fence). Every
+                // emitted event must get its OWN part_rev; reusing the model
+                // delta's revision would make the client drop all but the first.
+                let mut next_rev = part_rev;
                 for ev in events.iter_mut() {
                     if let ChatEvent::TextDelta {
                         message_id: m,
                         part_id: p,
                         part_seq: s,
+                        part_rev: r,
                         ..
                     } = ev
                     {
@@ -10682,17 +13749,28 @@ impl ChatRuntimeProjector {
                         if s.is_none() {
                             *s = part_seq;
                         }
+                        if let Some(rev) = next_rev {
+                            *r = Some(rev);
+                            next_rev = Some(rev.saturating_add(1));
+                        }
+                    }
+                }
+                if let Some(last) = next_rev {
+                    if part_rev.is_some() {
+                        self.part_rev = last.saturating_sub(1);
                     }
                 }
                 events
             }
             Agent::Reasoning(content) => {
-                let (message_id, part_id, part_seq) = self.next_part_stamp("reasoning");
+                let (message_id, part_id, part_seq, part_rev) = self.next_part_stamp("reasoning");
+                self.note_partial_delta("reasoning", &message_id, &part_id, &content);
                 vec![ChatEvent::ReasoningDelta {
                     content,
                     message_id,
                     part_id,
                     part_seq,
+                    part_rev,
                 }]
             }
             Agent::ToolBatchStarted { calls, .. } => {
@@ -10701,11 +13779,74 @@ impl ChatRuntimeProjector {
                 // post-tool prose indistinguishable on replay, so the browser cannot
                 // converge the part in place and re-appends it instead.
                 self.end_streaming_part();
+                self.partial_tools = calls
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(index, call)| jeikcode_capabilities::session::PartialToolCall {
+                            index: u32::try_from(index).unwrap_or(u32::MAX),
+                            id: Some(call.id.clone()),
+                            name: Some(call.name.clone()),
+                            arguments: call.arguments.clone(),
+                        },
+                    )
+                    .collect();
+                self.maybe_save_partial();
                 vec![ChatEvent::ToolBatchStarted { calls }]
             }
             Agent::ToolStarted { call } => {
+                if let Some(existing) = self
+                    .partial_tools
+                    .iter_mut()
+                    .find(|tool| tool.id.as_deref() == Some(call.id.as_str()))
+                {
+                    existing.name = Some(call.name.clone());
+                    existing.arguments = call.arguments.clone();
+                } else {
+                    self.partial_tools
+                        .push(jeikcode_capabilities::session::PartialToolCall {
+                            index: u32::try_from(self.partial_tools.len()).unwrap_or(u32::MAX),
+                            id: Some(call.id.clone()),
+                            name: Some(call.name.clone()),
+                            arguments: call.arguments.clone(),
+                        });
+                }
+                self.maybe_save_partial();
                 self.end_streaming_part();
                 self.project_tool_started(call)
+            }
+            Agent::ToolCallStreaming {
+                index,
+                id,
+                name,
+                arguments,
+            } => {
+                let argument_len = arguments.len();
+                if let Some(existing) = self
+                    .partial_tools
+                    .iter_mut()
+                    .find(|tool| tool.index == index)
+                {
+                    if id.is_some() {
+                        existing.id = id;
+                    }
+                    if name.is_some() {
+                        existing.name = name;
+                    }
+                    existing.arguments.push_str(&arguments);
+                } else {
+                    self.partial_tools
+                        .push(jeikcode_capabilities::session::PartialToolCall {
+                            index,
+                            id,
+                            name,
+                            arguments,
+                        });
+                }
+                self.partial_bytes_since_save =
+                    self.partial_bytes_since_save.saturating_add(argument_len);
+                self.maybe_save_partial();
+                Vec::new()
             }
             Agent::ToolProgress { call_id, message } => {
                 if let Some(progress) = message.strip_prefix('\u{1e}') {
@@ -10720,6 +13861,10 @@ impl ChatRuntimeProjector {
                     }]
                 }
             }
+            Agent::ToolFinished { call_id, is_error } => vec![ChatEvent::ToolFinished {
+                id: call_id,
+                success: !is_error,
+            }],
             Agent::ToolResult { result } => {
                 let (name, started) = self
                     .live_tools
@@ -10755,10 +13900,19 @@ impl ChatRuntimeProjector {
                     message_id: self.notice_anchor(),
                 }]
             }
-            Agent::Warning(message) => vec![ChatEvent::Warning {
-                message: localize_agent_warning(&message),
-                message_id: self.notice_anchor(),
-            }],
+            Agent::Warning(message) => {
+                // Liveness / retry advisories are TRANSIENT: they belong to the
+                // live turn, not the durable transcript. Persisting them here put
+                // them at the end of display.jsonl (assistant rounds are flushed
+                // only at turn_complete), where every later refresh rendered
+                // them below the final answer. Keep only the live wire event;
+                // durable boundary notices use `Compacted`/`DisplayNotice`.
+                let localized = localize_agent_warning(&message);
+                vec![ChatEvent::Warning {
+                    message: localized,
+                    message_id: self.notice_anchor(),
+                }]
+            }
             Agent::RateLimited {
                 reset_at_display,
                 reset_label,
@@ -10778,6 +13932,14 @@ impl ChatRuntimeProjector {
                 if let Some(event) = self.finish() {
                     events.push(event);
                 }
+                if let Some(last_id) = inputs.last().and_then(|input| input.message_id.clone()) {
+                    self.current_user_message_id = Some(last_id);
+                }
+                self.current_message_id = None;
+                self.part_seq = 0;
+                self.part_rev = 0;
+                self.last_part_kind = None;
+                self.reset_partial_stream();
                 events.push(ChatEvent::Steered {
                     count,
                     inputs,
@@ -10787,12 +13949,7 @@ impl ChatRuntimeProjector {
                 events
             }
             Agent::CompactionStarted { .. } => {
-                crate::publish_global(crate::GlobalWireEvent::Activity {
-                    session_id: session_id.to_string(),
-                    running: true,
-                    terminal: None,
-                    status: Some("compacting".to_string()),
-                });
+                crate::note_compaction_started(session_id, crate::COMPACTION_OWNER_TURN);
                 vec![ChatEvent::SessionStatus {
                     session_id: session_id.to_string(),
                     status: "compacting".to_string(),
@@ -10805,25 +13962,30 @@ impl ChatRuntimeProjector {
                 committed: true,
                 ..
             } => {
-                crate::publish_global(crate::GlobalWireEvent::Activity {
-                    session_id: session_id.to_string(),
-                    running: true,
-                    terminal: None,
-                    status: None,
-                });
+                crate::finish_compaction_phase(session_id, crate::COMPACTION_OWNER_TURN, true);
                 let est_before = (bytes_before as f32 / 3.5).ceil() as usize;
                 let est_after = (bytes_after as f32 / 3.5).ceil() as usize;
+                let mark =
+                    jeikcode_config::i18n::format_compaction_mark(removed, est_before, est_after);
+                let notice_event = match persist_session_display_notice(session_id, &mark, None) {
+                    Some(record) => ChatEvent::DisplayNotice {
+                        session_id: session_id.to_string(),
+                        id: record.id.unwrap_or_default(),
+                        display_seq: record.seq,
+                        text: record.content,
+                        created_at: record.created_at,
+                    },
+                    None => ChatEvent::Warning {
+                        message: mark,
+                        message_id: self.notice_anchor(),
+                    },
+                };
                 vec![
                     ChatEvent::SessionStatus {
                         session_id: session_id.to_string(),
                         status: "running".to_string(),
                     },
-                    ChatEvent::Warning {
-                        message: jeikcode_config::i18n::format_compaction_mark(
-                            removed, est_before, est_after,
-                        ),
-                        message_id: self.notice_anchor(),
-                    },
+                    notice_event,
                     ChatEvent::ContextCompacted {
                         session_id: session_id.to_string(),
                         tokens: est_after as u32,
@@ -10831,12 +13993,7 @@ impl ChatRuntimeProjector {
                 ]
             }
             Agent::CompactionFailed { error, .. } => {
-                crate::publish_global(crate::GlobalWireEvent::Activity {
-                    session_id: session_id.to_string(),
-                    running: true,
-                    terminal: None,
-                    status: None,
-                });
+                crate::finish_compaction_phase(session_id, crate::COMPACTION_OWNER_TURN, true);
                 vec![
                     ChatEvent::SessionStatus {
                         session_id: session_id.to_string(),
@@ -10853,19 +14010,13 @@ impl ChatRuntimeProjector {
             Agent::Compacted {
                 committed: false, ..
             } => {
-                crate::publish_global(crate::GlobalWireEvent::Activity {
-                    session_id: session_id.to_string(),
-                    running: true,
-                    terminal: None,
-                    status: None,
-                });
+                crate::finish_compaction_phase(session_id, crate::COMPACTION_OWNER_TURN, true);
                 vec![ChatEvent::SessionStatus {
                     session_id: session_id.to_string(),
                     status: "running".to_string(),
                 }]
             }
             Agent::TurnStarted
-            | Agent::ToolCallStreaming { .. }
             | Agent::ToolBatchCompleted { .. }
             | Agent::Request { .. }
             | Agent::Snapshot { .. }
@@ -10969,9 +14120,16 @@ async fn chat_stream(
         req.working_dir = Some(project.working_dir.clone());
     }
 
+    // 客户端关联键 = 落盘消息 id（新契约下两者同值），先捕获再借用。
+    // API / 旧客户端可能没有 request_id：仍必须为这一轮铸造唯一身份，
+    // 否则 user 回声、展示行、大纲三处无 id，WebUI 观看时会重复或丢提问。
+    let client_input_id = req
+        .request_id
+        .clone()
+        .or_else(|| Some(jeikcode_kernel::message::new_message_id()));
     let admission = match state
         .active_chats
-        .admit(req.session_id.as_deref(), req.request_id.as_deref())
+        .admit(req.session_id.as_deref(), client_input_id.as_deref())
         .await
     {
         Ok(admission) => admission,
@@ -10998,6 +14156,87 @@ async fn chat_stream(
                 .into_response();
         }
     };
+
+    // Durable input admission: a refresh between POST acceptance and the first
+    // kernel frame must not lose the user's question. The input log is the
+    // projection source for the pending user row/rail entry; the kernel echo
+    // promotes it by the same id.
+    if let (Some(sid), Some(input_id)) = (req.session_id.as_deref(), client_input_id.as_deref()) {
+        let mut input = jeikcode_capabilities::session::SessionInput {
+            id: input_id.to_string(),
+            seq: 0,
+            session_id: sid.to_string(),
+            delivery: "prompt".into(),
+            status: "admitted".into(),
+            text: req.message.clone(),
+            images: req
+                .images
+                .iter()
+                .map(|image| jeikcode_kernel::message::ImageContent {
+                    media_type: image.media_type.clone(),
+                    data: image.data.clone(),
+                })
+                .collect(),
+            created_at: u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0),
+            message_id: Some(input_id.to_string()),
+            operation_id: Some(input_id.to_string()),
+        };
+        let _ = jeikcode_capabilities::session::inputs::append_global(&mut input);
+
+        // 关键落盘铁律：用户发出的提问直接在受理的第 1 毫秒原子追加写入该会话的 snapshot！
+        // 绝不等待回合终态，确保只要用户发出了消息，物理磁盘 100% 存在，永远可编辑/回溯/删除！
+        let bucket = if let Some(dir) = req.working_dir.as_deref() {
+            NativeSessionManager::project_hash(std::path::Path::new(dir))
+        } else if let Ok(Some(resolved)) = resolve_session_by_id(sid) {
+            resolved.project_hash
+        } else {
+            String::new()
+        };
+        if !bucket.is_empty() {
+            let manager = NativeSessionManager::with_root(
+                NativeSessionManager::sessions_root().join(&bucket),
+            );
+            if let Ok(mut snap) = manager.load_snapshot(sid) {
+                if !snap
+                    .messages
+                    .iter()
+                    .any(|m| m.id.as_deref() == Some(input_id))
+                {
+                    let mut user_msg = jeikcode_kernel::message::Message::user(&req.message);
+                    user_msg.id = Some(input_id.to_string());
+                    user_msg.images = req
+                        .images
+                        .iter()
+                        .map(|img| jeikcode_kernel::message::ImageContent {
+                            media_type: img.media_type.clone(),
+                            data: img.data.clone(),
+                        })
+                        .collect();
+                    user_msg.created_at_ms = input.created_at;
+                    snap.messages.push(user_msg);
+                    let _ = manager.save_snapshot(sid, &snap);
+                }
+            }
+            // 关键物理落盘铁律（单一真源）：在发起任何模型网络请求之前，
+            // 提问直接原子写入 display.jsonl！从物理源头确立提问排在所有模型输出之前的绝对时序！
+            let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = req
+                .images
+                .iter()
+                .map(|img| jeikcode_capabilities::session::DisplayImage {
+                    media_type: img.media_type.clone(),
+                    data: img.data.clone(),
+                    missing: false,
+                })
+                .collect();
+            let _ = manager.append_display_user(
+                sid,
+                input_id,
+                &req.message,
+                &display_images,
+                Some(input.created_at),
+            );
+        }
+    }
 
     let (client_tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
     let operation_id = admission.operation_id.clone();
@@ -11070,6 +14309,10 @@ async fn chat_stream(
 
     let chat_session_id = session_uuid.map(|u| u.to_string()).unwrap_or_default();
     let task_session_id = chat_session_id.clone();
+    // Client correlation id (= persisted user message id). Stamped on terminal
+    // frames so a late `done`/`stopped` from a displaced turn can be ignored by
+    // the browser instead of clearing the replacement turn's busy state.
+    let stream_operation_id = req.request_id.clone();
     let cleanup_op = operation_id.clone();
     let rpc_op_id = operation_id.clone();
     let rpc_sid = chat_session_id.clone();
@@ -11140,7 +14383,12 @@ async fn chat_stream(
     active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let stream_session_id = chat_session_id.clone();
+    let stream_operation_id = stream_operation_id.clone();
     let stream = UnboundedReceiverStream::new(rx).map(move |event| {
+        let terminal = matches!(
+            &event,
+            ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. }
+        );
         let mut val = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
         if let serde_json::Value::Object(ref mut map) = val {
             if !map.contains_key("session_id") {
@@ -11148,6 +14396,14 @@ async fn chat_stream(
                     "session_id".to_string(),
                     serde_json::Value::String(stream_session_id.clone()),
                 );
+            }
+            if terminal {
+                if let Some(operation_id) = stream_operation_id.as_deref() {
+                    map.insert(
+                        "operation_id".to_string(),
+                        serde_json::Value::String(operation_id.to_string()),
+                    );
+                }
             }
         }
         let json = serde_json::to_string(&val).unwrap_or_default();
@@ -11416,13 +14672,33 @@ pub(crate) async fn process_chat_request(
             })
             .collect();
         let mut conv = conversation.lock().await;
+        // Per-token crash recovery: if the previous process died mid-stream, the
+        // canonical snapshot stops at the last round boundary. Overlay the
+        // partial assistant content now, BEFORE the new user prompt, so the next
+        // turn continues with the interrupted context instead of starting over.
+        if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&session_id) {
+            let _ = overlay_partial_stream(&mut conv, &partial);
+            jeikcode_capabilities::session::partial::clear_global(&session_id);
+        }
         let mut user_msg = if images.is_empty() {
             Message::user(runtime_text.clone())
         } else {
             Message::user_with_images(runtime_text.clone(), images)
         };
         user_msg.created_at_ms = created_at;
-        conv.push(user_msg);
+        user_msg.id = req.request_id.clone();
+        if !conv.iter().any(|m| {
+            m.id.as_deref() == req.request_id.as_deref()
+                && m.role == jeikcode_kernel::message::Role::User
+        }) {
+            conv.push(user_msg);
+        }
+        let snap = jeikcode_kernel::message::SessionSnapshot::new(conv.clone());
+        let project_bucket = NativeSessionManager::project_hash(&working_dir);
+        let manager = NativeSessionManager::with_root(
+            NativeSessionManager::sessions_root().join(&project_bucket),
+        );
+        let _ = manager.save_snapshot(&session_id, &snap);
         drop(conv);
         // Emit the admitted user message to the fan-out bus so `/chat/watch`
         // observers (WebUI detached) render it in real time, instead of only
@@ -11434,10 +14710,19 @@ pub(crate) async fn process_chat_request(
         // and the send may receive both — the WebUI dedups it by the echoed
         // client correlation id (text matching only as a legacy fallback).
         let created_at = (created_at > 0).then_some(created_at);
+        // Server-owned display text: the live echo must not make every client
+        // re-parse the steer envelope / reminders / VL annotation.
+        let display_text = {
+            let (display, _) = strip_vision_marker(
+                &jeikcode_capabilities::session::user_text_for_display(&working_dir, &runtime_text),
+            );
+            display
+        };
         active_chats
             .record_user_message(
                 &operation_id,
                 runtime_text.clone(),
+                display_text.clone(),
                 created_at,
                 display_images.clone(),
             )
@@ -11448,16 +14733,20 @@ pub(crate) async fn process_chat_request(
             .admitted_user_message(&operation_id)
             .await
             .and_then(|admitted| admitted.client_input_id);
-        let _ = event_tx.send(ChatEvent::User {
+        let user_event = ChatEvent::User {
             content: runtime_text,
+            display_text: Some(display_text),
+            internal: Some(false),
+            editable: Some(true),
             session_id: Some(session_id.clone()),
             created_at,
-            message_id: None,
+            message_id: client_input_id.clone(),
             order: None,
             turn_ordinal: None,
             client_input_id,
             images: (!display_images.is_empty()).then_some(display_images),
-        });
+        };
+        let _ = event_tx.send(user_event);
     }
     // Interactive approval bridged over HTTP: interactive local clients (WebUI,
     // channel, VSCode, JetBrains) in Build and Accept Edits modes route
@@ -11537,6 +14826,11 @@ pub(crate) async fn process_chat_request(
         let runtime_user_inputs = pending_user_inputs.clone();
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         active_chats.install_steer(&operation_id, steer_tx).await;
+        // 本回合的客户端关联键 = 落盘消息 id：在 spawn 之前取出，供内核沿用。
+        let turn_client_input_id = active_chats
+            .admitted_user_message(&operation_id)
+            .await
+            .and_then(|admitted| admitted.client_input_id);
         tokio::spawn(async move {
             CurrentContext::scope(tel_ctx, || async move {
                 live_api::run_chat_turn_v2(
@@ -11554,6 +14848,7 @@ pub(crate) async fn process_chat_request(
                     },
                     approval_mode,
                     steer_rx,
+                    turn_client_input_id,
                 )
                 .await;
             })
@@ -11567,6 +14862,10 @@ pub(crate) async fn process_chat_request(
     };
     let mut first_ttft_promoted = false;
     let effective_provider_for_default = provider_name.clone();
+    let opening_client_input_id = active_chats
+        .admitted_user_message(&operation_id)
+        .await
+        .and_then(|admitted| admitted.client_input_id);
 
     while let Some(event) = runtime_event_rx.recv().await {
         for mut chat_event in projector.project_runtime(event, &perm_session_key) {
@@ -11594,17 +14893,56 @@ pub(crate) async fn process_chat_request(
             // WebUI can reconcile an in-flight steer (id → persisted message).
             if let ChatEvent::Steered {
                 count,
+                inputs,
                 client_input_ids,
                 timestamps,
-                ..
             } = &mut chat_event
             {
                 if client_input_ids.is_empty() {
                     let (ids, ts) = active_chats
-                        .take_steer_metadata(&operation_id, *count)
+                        .take_steer_metadata_for_inputs(&operation_id, *count, inputs)
                         .await;
                     *client_input_ids = ids;
                     *timestamps = ts;
+                }
+            }
+            // Natural turn-end steer drain (`drain_pending`): the kernel emits
+            // `UserMessage` (`UserIdentified`) without `Steered`. Synthesize
+            // `Steered` from the durable input record so remote observers that
+            // do not hold the local queue card still paint the steered bubble.
+            if let ChatEvent::UserIdentified { ref message_id, .. } = chat_event {
+                if opening_client_input_id.as_deref() != Some(message_id.as_str()) {
+                    if let Some(steered_input) =
+                        jeikcode_capabilities::session::inputs::list_global(&perm_session_key)
+                            .into_iter()
+                            .rev()
+                            .find(|item| item.id == *message_id && item.delivery == "steer")
+                    {
+                        let k_input = jeikcode_kernel::event::SteeredInput {
+                            text: steered_input.text,
+                            images: steered_input.images,
+                            message_id: Some(message_id.clone()),
+                        };
+                        let inputs_slice = std::slice::from_ref(&k_input);
+                        let (ids, ts) = active_chats
+                            .take_steer_metadata_for_inputs(&operation_id, 1, inputs_slice)
+                            .await;
+                        let effective_ts = if ts.first().copied().flatten().is_some() {
+                            ts
+                        } else {
+                            vec![(steered_input.created_at > 0).then_some(steered_input.created_at)]
+                        };
+                        let _ = event_tx.send(ChatEvent::Steered {
+                            count: 1,
+                            inputs: vec![k_input],
+                            client_input_ids: if ids.is_empty() {
+                                vec![Some(message_id.clone())]
+                            } else {
+                                ids
+                            },
+                            timestamps: effective_ts,
+                        });
+                    }
                 }
             }
             if matches!(
@@ -11760,20 +15098,27 @@ struct StopChatResponse {
 
 /// One `/chat/watch` replay frame.
 ///
-/// `seq` is the frame's position in the turn replay buffer (the resume cursor).
-/// Only REPLAYED frames carry it: a frame without `seq` is a live delta and is
-/// always new to the client. The browser stores the highest `seq` it applied and
-/// sends it back as `after_seq` on reconnect, so a reconnect never re-paints what
-/// is already on screen (and never has to guess by content).
-fn chat_watch_frame_json(event: &ChatEvent, session_id: &str, seq: Option<u64>) -> String {
-    chat_watch_frame_json_with_tail(event, session_id, seq, false)
+/// `seq` is the turn log's monotonic cursor. EVERY frame (replayed or live)
+/// carries it; `replay` only says which delivery path produced the frame. The
+/// browser applies each seq once and sends the highest back as `after_seq` on
+/// reconnect, so it never guesses by content.
+fn chat_watch_frame_json(
+    event: &ChatEvent,
+    session_id: &str,
+    seq: Option<u64>,
+    replay: bool,
+    operation_id: Option<&str>,
+) -> String {
+    chat_watch_frame_json_with_tail(event, session_id, seq, replay, false, operation_id)
 }
 
 fn chat_watch_frame_json_with_tail(
     event: &ChatEvent,
     session_id: &str,
     seq: Option<u64>,
+    replay: bool,
     replay_last: bool,
+    operation_id: Option<&str>,
 ) -> String {
     let mut val = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
     if let serde_json::Value::Object(ref mut map) = val {
@@ -11783,9 +15128,24 @@ fn chat_watch_frame_json_with_tail(
                 serde_json::Value::String(session_id.to_string()),
             );
         }
+        // Terminal frames carry the client correlation id (= persisted user
+        // message id). A late terminal from a displaced turn must not clear the
+        // replacement turn; clients compare this against their active turn id.
+        if matches!(
+            event,
+            ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. }
+        ) {
+            if let Some(operation_id) = operation_id {
+                map.insert(
+                    "operation_id".to_string(),
+                    serde_json::Value::String(operation_id.to_string()),
+                );
+            }
+        }
         if let Some(seq) = seq {
             map.insert("seq".to_string(), serde_json::Value::Number(seq.into()));
         }
+        map.insert("replay".to_string(), serde_json::Value::Bool(replay));
         if replay_last {
             map.insert("replay_last".to_string(), serde_json::Value::Bool(true));
         }
@@ -11802,6 +15162,7 @@ fn chat_watch_session_start_json(session_id: &str, cursor: u64) -> String {
         "type": "session_start",
         "session_id": session_id,
         "cursor": cursor,
+        "caps": session_capabilities(),
     })
     .to_string()
 }
@@ -11816,23 +15177,81 @@ mod chat_watch_frame_tests {
             message_id: Some("m-round-2".into()),
             part_id: Some("m-round-2:2:text".into()),
             part_seq: Some(2),
+            part_rev: None,
         }
     }
 
     #[test]
-    fn replayed_frames_carry_the_cursor_and_live_frames_do_not() {
-        let replayed: serde_json::Value =
-            serde_json::from_str(&chat_watch_frame_json(&text_delta(), "s-1", Some(7))).unwrap();
+    fn replayed_and_live_frames_carry_the_cursor_and_replay_flag() {
+        let replayed: serde_json::Value = serde_json::from_str(&chat_watch_frame_json(
+            &text_delta(),
+            "s-1",
+            Some(7),
+            true,
+            None,
+        ))
+        .unwrap();
         assert_eq!(replayed["seq"], serde_json::Value::Number(7.into()));
+        assert_eq!(replayed["replay"], serde_json::Value::Bool(true));
         assert_eq!(replayed["type"], "text");
         assert_eq!(replayed["session_id"], "s-1");
         assert_eq!(replayed["part_id"], "m-round-2:2:text");
 
-        // A live delta carries no cursor: it is always new, never re-painted.
-        let live: serde_json::Value =
-            serde_json::from_str(&chat_watch_frame_json(&text_delta(), "s-1", None)).unwrap();
-        assert!(live.get("seq").is_none());
+        // Live frames use the SAME cursor; `replay` only describes delivery.
+        let live: serde_json::Value = serde_json::from_str(&chat_watch_frame_json(
+            &text_delta(),
+            "s-1",
+            Some(8),
+            false,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(live["seq"], serde_json::Value::Number(8.into()));
+        assert_eq!(live["replay"], serde_json::Value::Bool(false));
         assert_eq!(live["content"], "正文 2");
+    }
+
+    #[test]
+    fn terminal_frames_carry_the_operation_id() {
+        let stopped: serde_json::Value = serde_json::from_str(&chat_watch_frame_json(
+            &ChatEvent::Stopped,
+            "s-1",
+            None,
+            false,
+            Some("req-1"),
+        ))
+        .unwrap();
+        assert_eq!(stopped["operation_id"], "req-1");
+        assert_eq!(stopped["type"], "stopped");
+
+        let done: serde_json::Value = serde_json::from_str(&chat_watch_frame_json(
+            &ChatEvent::Done {
+                tokens: 0,
+                tool_calls: 0,
+                session_id: "s-1".into(),
+                stop_reason: Some("cancelled".into()),
+                message: None,
+                message_id: None,
+            },
+            "s-1",
+            None,
+            false,
+            Some("req-1"),
+        ))
+        .unwrap();
+        assert_eq!(done["operation_id"], "req-1");
+
+        // Streaming frames stay lean: the terminal identity is only needed at
+        // turn boundaries.
+        let live: serde_json::Value = serde_json::from_str(&chat_watch_frame_json(
+            &text_delta(),
+            "s-1",
+            Some(9),
+            false,
+            Some("req-1"),
+        ))
+        .unwrap();
+        assert!(live.get("operation_id").is_none());
     }
 
     #[test]
@@ -11873,11 +15292,10 @@ mod chat_part_identity_tests {
             "sess-1",
         );
         match identified.as_slice() {
-            [ChatEvent::UserIdentified { absolute_index, .. }] => {
+            [ChatEvent::UserIdentified { message_id, .. }] => {
                 assert_eq!(
-                    *absolute_index,
-                    Some(7),
-                    "identity frame must carry the absolute transcript index"
+                    message_id, "m-user",
+                    "identity frame carries the stored message id only"
                 );
             }
             other => panic!("expected one user_identified, got {other:?}"),
@@ -11983,8 +15401,8 @@ async fn chat_watch(
             .into_response();
     }
 
-    let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
-    // 断点续传：回放帧带 seq（回合缓冲序号 = 游标），实时帧不带。
+    let (tx, rx) = mpsc::unbounded_channel::<(u64, ChatEvent)>();
+    // 断点续传：回放帧和实时帧都带同一个全局 seq；replay 布尔只说明送达路径。
     // 帧语义由「这次连接请求了什么」决定 —— 前端自己就知道，不需要逐帧猜：
     //   after_seq = -1 → 新会话/空画布：不补发，只回 session_start 后转实时
     //   after_seq = N  → 只补 seq >= N 的回放帧，然后转实时
@@ -12014,9 +15432,8 @@ async fn chat_watch(
                 .cloned();
 
             match q.after_seq {
-                Some(-1) => {
-                    // 新会话：画布本来就是空的，补发毫无意义；只给一个起始游标。
-                    // 但是如果本轮存在活跃用户提问，必须在头部送达，防止刷新后用户提问丢失！
+                Some(-1) if snapshot.is_empty() => {
+                    // 新会话且当前无在途输出：只给一个起始游标。
                     handshake = Some(chat_watch_session_start_json(&session_id, buffer_len));
                     if let Some(user) = opening_user {
                         replay_head = vec![user];
@@ -12026,14 +15443,65 @@ async fn chat_watch(
                 // 开场提问的 seq 可能已经小于游标（页把提问切掉了）。把它补回头部，
                 // 游标之后的提问（中途 steer）原样保留，不再把所有 User 事件剥掉。
                 Some(after) if after >= 0 && (after as u64) <= buffer_len => {
+                    let snapshot_for_tools = snapshot.clone();
                     let mut filtered: Vec<(u64, ChatEvent)> = snapshot
                         .into_iter()
-                        .filter(|(seq, _)| *seq >= after as u64)
+                        .filter(|(seq, _)| *seq > after as u64)
                         .collect();
                     if let Some((user_seq, user)) = opening_user {
                         if !filtered.iter().any(|(seq, _)| *seq == user_seq) {
                             filtered.insert(0, (user_seq, user));
                         }
+                    }
+                    // 工具调用原子性守卫：如果续传切片中包含某个工具的输出、结果或完成帧，
+                    // 但该工具的 ToolCallStarted 帧落在游标之前被过滤，必须将 ToolCallStarted 一并补回！
+                    // 绝不能下发丢失了名称和参数的无头工具帧，导致客户端被迫捏造空参数！
+                    let mut missing_tool_starts: Vec<(usize, (u64, ChatEvent))> = Vec::new();
+                    for (idx, (_, event)) in filtered.iter().enumerate() {
+                        let tool_id = match event {
+                            ChatEvent::ToolOutputChunk { id, .. }
+                            | ChatEvent::ToolCallResult { id, .. }
+                            | ChatEvent::ToolFinished { id, .. } => Some(id.as_str()),
+                            _ => None,
+                        };
+                        if let Some(tid) = tool_id {
+                            let already_has_start = filtered.iter().any(|(_, ev)| matches!(ev, ChatEvent::ToolCallStarted { id, .. } if id == tid));
+                            if !already_has_start && !missing_tool_starts.iter().any(|(_, (_, ev))| matches!(ev, ChatEvent::ToolCallStarted { id, .. } if id == tid)) {
+                                if let Some((s_seq, s_ev)) = snapshot_for_tools.iter().find(|(_, ev)| matches!(ev, ChatEvent::ToolCallStarted { id, .. } if id == tid)) {
+                                    missing_tool_starts.push((idx, (*s_seq, s_ev.clone())));
+                                }
+                            }
+                        }
+                    }
+                    for (insert_idx, item) in missing_tool_starts.into_iter().rev() {
+                        filtered.insert(insert_idx, item);
+                    }
+                    // 在途工具守卫：若某个工具的 `ToolCallStarted` 落在 `seq <= after`，且当前
+                    // `snapshot` 中尚无对应的 `ToolCallResult`（说明该工具仍在后台执行中，
+                    // 磁盘 `snapshot.json` 尚未在批次边界落盘，而它的 `ToolCallResult` 稍后会从
+                    // `bus_rx` 实时推下），必须把 `ToolCallStarted` 补进回放头部！
+                    // 否则客户端切回会话重置画布后，稍后收到实时 `ToolCallResult` 时会退化为无参空工具。
+                    let inflight_insert_pos = usize::from(
+                        filtered
+                            .first()
+                            .is_some_and(|(_, ev)| matches!(ev, ChatEvent::User { .. })),
+                    );
+                    let mut inflight_starts: Vec<(u64, ChatEvent)> = Vec::new();
+                    for (s_seq, s_ev) in &snapshot_for_tools {
+                        if let ChatEvent::ToolCallStarted { id: tid, .. } = s_ev {
+                            let has_result = snapshot_for_tools.iter().any(|(_, ev)| {
+                                matches!(ev, ChatEvent::ToolCallResult { id, .. } if id == tid)
+                            });
+                            let already_in_filtered = filtered.iter().any(|(_, ev)| {
+                                matches!(ev, ChatEvent::ToolCallStarted { id, .. } if id == tid)
+                            });
+                            if !has_result && !already_in_filtered {
+                                inflight_starts.push((*s_seq, s_ev.clone()));
+                            }
+                        }
+                    }
+                    for item in inflight_starts.into_iter().rev() {
+                        filtered.insert(inflight_insert_pos, item);
                     }
                     replay_head = filtered;
                 }
@@ -12054,14 +15522,14 @@ async fn chat_watch(
                 tokio::spawn(async move {
                     loop {
                         match bus_rx.recv().await {
-                            Ok(event) => {
+                            Ok((seq, event)) => {
                                 let terminal = matches!(
                                     event,
                                     ChatEvent::Done { .. }
                                         | ChatEvent::Error { .. }
                                         | ChatEvent::Stopped
                                 );
-                                if tx.send(event).is_err() {
+                                if tx.send((seq, event)).is_err() {
                                     break;
                                 }
                                 if terminal {
@@ -12098,14 +15566,14 @@ async fn chat_watch(
                     tokio::spawn(async move {
                         loop {
                             match bus_rx.recv().await {
-                                Ok(event) => {
+                                Ok((seq, event)) => {
                                     let terminal = matches!(
                                         event,
                                         ChatEvent::Done { .. }
                                             | ChatEvent::Error { .. }
                                             | ChatEvent::Stopped
                                     );
-                                    if tx.send(event).is_err() {
+                                    if tx.send((seq, event)).is_err() {
                                         break;
                                     }
                                     if terminal {
@@ -12150,14 +15618,14 @@ async fn chat_watch(
                 tokio::spawn(async move {
                     loop {
                         match bus_rx.recv().await {
-                            Ok(event) => {
+                            Ok((seq, event)) => {
                                 let terminal = matches!(
                                     event,
                                     ChatEvent::Done { .. }
                                         | ChatEvent::Error { .. }
                                         | ChatEvent::Stopped
                                 );
-                                if tx.send(event).is_err() {
+                                if tx.send((seq, event)).is_err() {
                                     break;
                                 }
                                 if terminal {
@@ -12183,8 +15651,17 @@ async fn chat_watch(
     active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let head_session_id = session_id.clone();
     let live_session_id = session_id.clone();
-    // 只有补发帧带 seq。实时帧不带：直播序号和缓冲下标不是同一套，写进游标后
-    // 刷新会以为自己已经越过缓冲，服务端整段重放，前端又当成新 token 往上接。
+    // Client correlation id of the running turn (= persisted user message id).
+    // Stamped on terminal frames so a late terminal for a displaced turn is
+    // ignorable by the reattached browser.
+    let watch_operation_id = state
+        .active_chats
+        .admitted_user_for_session(&session_id)
+        .await
+        .and_then(|user| user.client_input_id);
+    let live_operation_id = watch_operation_id.clone();
+    // live 与 replay 共用同一个 session 级 seq；replay 布尔只描述送达路径。
+    // 前端按 seq 只应用一次，live 追加、replay 替换。
     let replay_len = replay_head.len();
     let head_json: Vec<String> = handshake
         .into_iter()
@@ -12193,7 +15670,9 @@ async fn chat_watch(
                 event,
                 &head_session_id,
                 Some(*seq),
+                true,
                 idx + 1 == replay_len,
+                watch_operation_id.as_deref(),
             )
         }))
         .collect();
@@ -12201,14 +15680,16 @@ async fn chat_watch(
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json))
     });
 
-    let live_stream = UnboundedReceiverStream::new(rx).map(move |event| {
-        Ok::<_, std::convert::Infallible>(
-            axum::response::sse::Event::default().data(chat_watch_frame_json(
+    let live_stream = UnboundedReceiverStream::new(rx).map(move |(seq, event)| {
+        Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
+            chat_watch_frame_json(
                 &event,
                 &live_session_id,
-                None,
-            )),
-        )
+                Some(seq),
+                false,
+                live_operation_id.as_deref(),
+            ),
+        ))
     });
     let stream = head_stream.chain(live_stream);
     let conn_guard = SseConnectionGuard(active_conns);
@@ -12327,6 +15808,10 @@ struct ChatSteerRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueuedMessageItem {
     pub id: serde_json::Value,
+    /// Stable client correlation id. Minted by the WebUI when the card is
+    /// created; the atomic `/chat/queue/claim` key (and the eventual prompt id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_input_id: Option<String>,
     pub text: String,
     #[serde(default)]
     pub images: Option<serde_json::Value>,
@@ -12358,6 +15843,17 @@ static SESSION_QUEUES: tokio::sync::OnceCell<
     tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>>,
 > = tokio::sync::OnceCell::const_new();
 
+/// Permanent (bounded) tombstones for delivered queue cards. A stale tab that
+/// still has the card locally must never resurrect or deliver it again.
+static SESSION_QUEUE_CLAIMS: tokio::sync::OnceCell<
+    tokio::sync::RwLock<HashMap<String, Vec<String>>>,
+> = tokio::sync::OnceCell::const_new();
+
+/// Serializes claim/release/update so two tabs cannot both "win" the same card.
+static QUEUE_CLAIM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+const MAX_QUEUE_CLAIMS: usize = 512;
+
 async fn get_session_queues_map(
 ) -> &'static tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>> {
     SESSION_QUEUES
@@ -12376,30 +15872,160 @@ fn session_queue_file_path(session_id: &str) -> Option<PathBuf> {
     Some(dir.join(format!("{clean}.json")))
 }
 
+fn session_queue_claims_path(session_id: &str) -> Option<PathBuf> {
+    let clean = session_id.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let home = jeikcode_config::util::real_home_dir()?;
+    let dir = home.join(".jeikcode").join("state").join("queues");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join(format!("{clean}.claimed.json")))
+}
+
+async fn get_session_queue_claims_map() -> &'static tokio::sync::RwLock<HashMap<String, Vec<String>>>
+{
+    SESSION_QUEUE_CLAIMS
+        .get_or_init(|| async { tokio::sync::RwLock::new(HashMap::new()) })
+        .await
+}
+
+async fn load_queue_claims(session_id: &str) -> Vec<String> {
+    let map = get_session_queue_claims_map().await;
+    {
+        let reader = map.read().await;
+        if let Some(claims) = reader.get(session_id) {
+            return claims.clone();
+        }
+    }
+    let mut claims = Vec::new();
+    if let Some(path) = session_queue_claims_path(session_id) {
+        if let Ok(text) = tokio::fs::read_to_string(&path).await {
+            claims = serde_json::from_str::<Vec<String>>(&text).unwrap_or_default();
+        }
+    }
+    let mut writer = map.write().await;
+    writer.insert(session_id.to_string(), claims.clone());
+    claims
+}
+
+async fn save_queue_claims(session_id: &str, claims: &[String]) {
+    let map = get_session_queue_claims_map().await;
+    {
+        let mut writer = map.write().await;
+        if claims.is_empty() {
+            writer.remove(session_id);
+        } else {
+            writer.insert(session_id.to_string(), claims.to_vec());
+        }
+    }
+    if let Some(path) = session_queue_claims_path(session_id) {
+        if claims.is_empty() {
+            let _ = tokio::fs::remove_file(path).await;
+        } else if let Ok(text) = serde_json::to_string(claims) {
+            let _ = tokio::fs::write(path, text).await;
+        }
+    }
+}
+
+/// The stable claim key of a queue item: client correlation id, else its wire id.
+fn queue_claim_id(item: &QueuedMessageItem) -> Option<String> {
+    item.client_input_id.clone().or_else(|| match &item.id {
+        serde_json::Value::String(value) => Some(value.clone()),
+        value => Some(value.to_string()),
+    })
+}
+
+/// Drop already-claimed cards from any queue snapshot. A stale tab's whole-list
+/// write or an old queue_updated pull must never resurrect a delivered card.
+fn drop_claimed_queue_items(
+    items: Vec<QueuedMessageItem>,
+    claims: &[String],
+) -> Vec<QueuedMessageItem> {
+    items
+        .into_iter()
+        .filter(|item| {
+            queue_claim_id(item)
+                .map(|id| !claims.iter().any(|claimed| claimed == &id))
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
+/// Try to take ownership of one card. `has_payload` covers a card the server
+/// has not mirrored yet (the browser may still be racing its first queue write).
+fn claim_queue_item(
+    items: &mut Vec<QueuedMessageItem>,
+    claims: &mut Vec<String>,
+    client_input_id: &str,
+    has_payload: bool,
+) -> bool {
+    if claims.iter().any(|claimed| claimed == client_input_id) {
+        return false;
+    }
+    match items
+        .iter()
+        .position(|item| queue_claim_id(item).as_deref() == Some(client_input_id))
+    {
+        Some(index) => {
+            items.remove(index);
+        }
+        None if has_payload => {
+            // Local-only card: the caller owns this id; accept it once.
+        }
+        None => return false,
+    }
+    claims.push(client_input_id.to_string());
+    if claims.len() > MAX_QUEUE_CLAIMS {
+        let drop = claims.len() - MAX_QUEUE_CLAIMS;
+        claims.drain(..drop);
+    }
+    true
+}
+
 async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
     let sid = q.session_id.trim();
     if sid.is_empty() {
         return Json(serde_json::json!([]));
     }
+    let claims = load_queue_claims(sid).await;
     let map = get_session_queues_map().await;
-    {
+    let mut items = {
         let reader = map.read().await;
-        if let Some(items) = reader.get(sid) {
-            return Json(serde_json::to_value(items).unwrap_or_default());
-        }
-    }
-    if let Some(path) = session_queue_file_path(sid) {
-        if path.exists() {
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                if let Ok(items) = serde_json::from_str::<Vec<QueuedMessageItem>>(&content) {
-                    let mut writer = map.write().await;
-                    writer.insert(sid.to_string(), items.clone());
-                    return Json(serde_json::to_value(items).unwrap_or_default());
+        reader.get(sid).cloned()
+    };
+    if items.is_none() {
+        if let Some(path) = session_queue_file_path(sid) {
+            if path.exists() {
+                if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                    if let Ok(loaded) = serde_json::from_str::<Vec<QueuedMessageItem>>(&content) {
+                        let mut writer = map.write().await;
+                        writer.insert(sid.to_string(), loaded.clone());
+                        items = Some(loaded);
+                    }
                 }
             }
         }
     }
-    Json(serde_json::json!([]))
+    let items = drop_claimed_queue_items(items.unwrap_or_default(), &claims);
+    Json(serde_json::to_value(items).unwrap_or_default())
+}
+
+async fn persist_session_queue(session_id: &str) {
+    let map = get_session_queues_map().await;
+    let items = map
+        .read()
+        .await
+        .get(session_id)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(path) = session_queue_file_path(session_id) {
+        if items.is_empty() {
+            let _ = tokio::fs::remove_file(path).await;
+        } else if let Ok(json_str) = serde_json::to_string_pretty(&items) {
+            let _ = tokio::fs::write(path, json_str).await;
+        }
+    }
 }
 
 /// 队列内容是否实质变化。跨端“广播 → 对端拉取 → 原样回写”会造成回声，
@@ -12414,37 +16040,136 @@ fn queue_content_changed(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ChatQueueClaimRequest {
+    session_id: String,
+    client_input_id: String,
+    /// Present when the card may not have reached the server yet (save race).
+    #[serde(default)]
+    item: Option<QueuedMessageItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatQueueReleaseRequest {
+    session_id: String,
+    client_input_id: String,
+    /// Restore the card if the claimed delivery failed (busy/transport).
+    #[serde(default)]
+    item: Option<QueuedMessageItem>,
+}
+
 async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl IntoResponse {
     let sid = req.session_id.trim().to_string();
     if !sid.is_empty() {
+        // Serialize with claim/release: a stale whole-list write must not
+        // resurrect a card another tab already claimed.
+        let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+        let claims = load_queue_claims(&sid).await;
+        let items = drop_claimed_queue_items(req.items, &claims);
         let map = get_session_queues_map().await;
         let changed = {
             let mut writer = map.write().await;
-            let changed = queue_content_changed(writer.get(&sid), &req.items);
-            if req.items.is_empty() {
+            let changed = queue_content_changed(writer.get(&sid), &items);
+            if items.is_empty() {
                 writer.remove(&sid);
             } else {
-                writer.insert(sid.clone(), req.items.clone());
+                writer.insert(sid.clone(), items.clone());
             }
             changed
         };
         if changed {
-            let path = session_queue_file_path(&sid);
-            if req.items.is_empty() {
-                if let Some(path) = path {
-                    let _ = tokio::fs::remove_file(path).await;
-                }
-            } else if let Some(path) = path {
-                if let Ok(json_str) = serde_json::to_string_pretty(&req.items) {
-                    let _ = tokio::fs::write(path, json_str).await;
-                }
-            }
+            persist_session_queue(&sid).await;
             // 广播放在锁外：对端收到信号会再拉 `/chat/queue`，绝不能在持锁期间等它。
             // 只带会话 id：卡片里的图片可能是整张 base64，不背进全局通道。
             publish_global(GlobalWireEvent::QueueUpdated { session_id: sid });
         }
     }
     Json(serde_json::json!({ "success": true }))
+}
+
+/// Atomically take ownership of one queued card. Exactly one caller wins; the
+/// tombstone prevents a stale tab (or a resurrected mirror) from delivering it
+/// again. The claim id is also the prompt id the winning tab will submit.
+async fn claim_chat_queue(Json(req): Json<ChatQueueClaimRequest>) -> impl IntoResponse {
+    let sid = req.session_id.trim().to_string();
+    let cid = req.client_input_id.trim().to_string();
+    if sid.is_empty() || cid.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "claimed": false, "error": "session_id/client_input_id required" })),
+        )
+            .into_response();
+    }
+    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let mut claims = load_queue_claims(&sid).await;
+    let map = get_session_queues_map().await;
+    let mut queue_changed = false;
+    let claimed;
+    {
+        let mut writer = map.write().await;
+        let mut items = writer.remove(&sid).unwrap_or_default();
+        let before = items.len();
+        claimed = claim_queue_item(&mut items, &mut claims, &cid, req.item.is_some());
+        queue_changed = items.len() != before;
+        if !items.is_empty() {
+            writer.insert(sid.clone(), items);
+        }
+    }
+    if !claimed {
+        return Json(serde_json::json!({ "claimed": false })).into_response();
+    }
+    save_queue_claims(&sid, &claims).await;
+    if queue_changed {
+        persist_session_queue(&sid).await;
+    }
+    // Broadcast even for a local-only claim: other tabs must drop their stale
+    // copy even though the server queue never contained it.
+    publish_global(GlobalWireEvent::QueueUpdated { session_id: sid });
+    Json(serde_json::json!({ "claimed": true })).into_response()
+}
+
+/// Undo a claim when the winning tab could not deliver (busy/transport). The
+/// card is restored so a later drain can try again; the tombstone is removed.
+async fn release_chat_queue(Json(req): Json<ChatQueueReleaseRequest>) -> impl IntoResponse {
+    let sid = req.session_id.trim().to_string();
+    let cid = req.client_input_id.trim().to_string();
+    if sid.is_empty() || cid.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "released": false, "error": "session_id/client_input_id required" })),
+        )
+            .into_response();
+    }
+    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let mut claims = load_queue_claims(&sid).await;
+    claims.retain(|claimed| claimed != &cid);
+    save_queue_claims(&sid, &claims).await;
+    let mut added = false;
+    if let Some(mut item) = req.item {
+        if item.client_input_id.is_none() {
+            item.client_input_id = Some(cid.clone());
+        }
+        let map = get_session_queues_map().await;
+        {
+            let mut writer = map.write().await;
+            let mut items = writer.remove(&sid).unwrap_or_default();
+            if !items
+                .iter()
+                .any(|existing| queue_claim_id(existing).as_deref() == Some(cid.as_str()))
+            {
+                items.push(item);
+                added = true;
+            }
+            if !items.is_empty() {
+                writer.insert(sid.clone(), items);
+            }
+        }
+    }
+    if added {
+        persist_session_queue(&sid).await;
+        publish_global(GlobalWireEvent::QueueUpdated { session_id: sid });
+    }
+    Json(serde_json::json!({ "released": true })).into_response()
 }
 
 #[cfg(test)]
@@ -12454,6 +16179,7 @@ mod chat_queue_tests {
     fn item(text: &str, kind: &str) -> QueuedMessageItem {
         QueuedMessageItem {
             id: serde_json::Value::String(text.to_string()),
+            client_input_id: None,
             text: text.to_string(),
             images: None,
             kind: kind.to_string(),
@@ -12523,6 +16249,39 @@ mod chat_queue_tests {
         assert_eq!(json["inputs"][0]["has_images"], true);
         assert!(json["inputs"][0].get("images").is_none());
         assert!(!json.to_string().contains("BASE64-BODY-SHOULD-STAY-LOCAL"));
+    }
+
+    #[test]
+    fn queue_claim_has_one_winner_and_a_permanent_tombstone() {
+        let mut card = item("queued", "queue");
+        card.client_input_id = Some("cid-1".into());
+        let mut items = vec![card];
+        let mut claims = Vec::new();
+
+        assert!(claim_queue_item(&mut items, &mut claims, "cid-1", true));
+        assert!(items.is_empty(), "the winner consumes the server card");
+        assert_eq!(claims, vec!["cid-1"]);
+
+        // A second tab with the same (stale) card, even with a payload, loses.
+        assert!(!claim_queue_item(&mut items, &mut claims, "cid-1", true));
+
+        // A card the server has not mirrored yet can still be claimed once by
+        // the tab that owns its payload.
+        assert!(!claim_queue_item(&mut items, &mut claims, "cid-2", false));
+        assert!(claim_queue_item(&mut items, &mut claims, "cid-2", true));
+        assert!(!claim_queue_item(&mut items, &mut claims, "cid-2", true));
+    }
+
+    #[test]
+    fn claimed_cards_are_filtered_from_any_queue_snapshot() {
+        let mut a = item("a", "queue");
+        a.client_input_id = Some("a".into());
+        let mut b = item("b", "queue");
+        b.client_input_id = Some("b".into());
+
+        let filtered = drop_claimed_queue_items(vec![a, b], &["a".to_string()]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].client_input_id.as_deref(), Some("b"));
     }
 }
 
@@ -12834,16 +16593,59 @@ struct FsEntryDto {
     is_ignored: bool,
 }
 
+fn load_fs_tree_gitignore(
+    root: &std::path::Path,
+    current_dir: &std::path::Path,
+) -> ignore::gitignore::Gitignore {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    // 兼容多种标准与项目级忽略文件：.gitignore, .ignore, .jeikcodeignore, .git/info/exclude
+    for name in [
+        ".gitignore",
+        ".ignore",
+        ".jeikcodeignore",
+        ".git/info/exclude",
+    ] {
+        let p = root.join(name);
+        if p.is_file() {
+            let _ = builder.add(&p);
+        }
+    }
+    // 沿途递归加载从 root 到 current_dir 路径上各级子目录中的局部忽略文件
+    if let Ok(rel) = current_dir.strip_prefix(root) {
+        let mut cur = root.to_path_buf();
+        for component in rel.components() {
+            cur.push(component);
+            for name in [".gitignore", ".ignore", ".jeikcodeignore"] {
+                let p = cur.join(name);
+                if p.is_file() {
+                    let _ = builder.add(&p);
+                }
+            }
+        }
+    }
+    builder.build().unwrap_or_else(|_| {
+        ignore::gitignore::GitignoreBuilder::new(root)
+            .build()
+            .expect("empty gitignore")
+    })
+}
+
 async fn fs_tree(State(state): State<AppState>, Query(q): Query<FsTreeQuery>) -> impl IntoResponse {
+    let root = state
+        .bind_working_dir
+        .canonicalize()
+        .unwrap_or_else(|_| state.bind_working_dir.clone());
+    let root = jeikcode_capabilities::pathnorm::strip_verbatim_path(&root);
+
     let req_path = q.path.as_deref().unwrap_or("").trim();
     let abs_dir = if req_path.is_empty() || req_path == "." {
-        state.bind_working_dir.clone()
+        root.to_path_buf()
     } else {
         let p = std::path::PathBuf::from(req_path);
         if p.is_absolute() {
             p
         } else {
-            state.bind_working_dir.join(p)
+            root.join(p)
         }
     };
     let abs_dir = abs_dir.canonicalize().unwrap_or(abs_dir);
@@ -12862,6 +16664,8 @@ async fn fs_tree(State(state): State<AppState>, Query(q): Query<FsTreeQuery>) ->
         );
     }
 
+    let gitignore = load_fs_tree_gitignore(&root, &abs_dir);
+
     let mut entries_res: Vec<FsEntryDto> = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
@@ -12874,11 +16678,28 @@ async fn fs_tree(State(state): State<AppState>, Query(q): Query<FsTreeQuery>) ->
             }
             let file_type = entry.file_type();
             let is_dir = file_type.map(|t| t.is_dir()).unwrap_or(false);
-            let full_p = abs_dir.join(&name).to_string_lossy().replace('\\', "/");
-            let is_ignored = name == "target"
-                || name == "node_modules"
-                || name == "dist"
-                || name.starts_with('.');
+            let entry_path = abs_dir.join(&name);
+            let full_p = entry_path.to_string_lossy().replace('\\', "/");
+
+            let is_ignored = {
+                let rel_opt = entry_path.strip_prefix(&root).ok();
+                let matched = if let Some(rel) = rel_opt {
+                    gitignore.matched_path_or_any_parents(rel, is_dir)
+                } else {
+                    gitignore.matched_path_or_any_parents(&entry_path, is_dir)
+                };
+                match matched {
+                    ignore::Match::Ignore(_) => true,
+                    ignore::Match::Whitelist(_) => false,
+                    ignore::Match::None => {
+                        name == "target"
+                            || name == "node_modules"
+                            || name == "dist"
+                            || name == ".jeikcode_store"
+                            || name.starts_with('.')
+                    }
+                }
+            };
 
             if is_dir {
                 dirs.push(name.clone());
@@ -12925,40 +16746,53 @@ struct FsReadQuery {
     cwd: Option<String>,
 }
 
-async fn fs_read(State(state): State<AppState>, Query(q): Query<FsReadQuery>) -> impl IntoResponse {
-    let raw = q.path.trim().trim_start_matches("./");
+#[derive(Debug, Deserialize)]
+struct FsStatQuery {
+    path: String,
+    cwd: Option<String>,
+}
+
+/// `/fs/read` 与 `/fs/stat` 共用的路径解析：相对路径依次尝试显式 cwd、绑定工作目录、进程当前目录。
+fn resolve_fs_target(
+    raw_path: &str,
+    cwd: Option<&str>,
+    bind_working_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    let raw = raw_path.trim().trim_start_matches("./");
     let mut p = std::path::PathBuf::from(raw);
     if !p.is_absolute() {
-        if let Some(ref cwd_str) = q.cwd {
-            let candidate_cwd = std::path::PathBuf::from(cwd_str).join(raw);
-            if candidate_cwd.exists() {
-                p = candidate_cwd;
-            } else {
-                let candidate = state.bind_working_dir.join(raw);
-                if candidate.exists() {
-                    p = candidate;
-                } else if let Ok(cur) = std::env::current_dir() {
-                    let candidate2 = cur.join(raw);
-                    if candidate2.exists() {
-                        p = candidate2;
-                    }
-                }
+        let existing = |candidate: std::path::PathBuf| candidate.exists().then_some(candidate);
+        let mut resolved =
+            cwd.and_then(|cwd_str| existing(std::path::PathBuf::from(cwd_str).join(raw)));
+        if resolved.is_none() {
+            resolved = existing(bind_working_dir.join(raw));
+        }
+        if resolved.is_none() {
+            if let Ok(cur) = std::env::current_dir() {
+                resolved = existing(cur.join(raw));
             }
-        } else {
-            let candidate = state.bind_working_dir.join(raw);
-            if candidate.exists() {
-                p = candidate;
-            } else if let Ok(cur) = std::env::current_dir() {
-                let candidate2 = cur.join(raw);
-                if candidate2.exists() {
-                    p = candidate2;
-                }
-            }
+        }
+        if let Some(found) = resolved {
+            p = found;
         }
     }
 
     let p = p.canonicalize().unwrap_or(p);
-    let p = jeikcode_capabilities::pathnorm::strip_verbatim_path(&p);
+    jeikcode_capabilities::pathnorm::strip_verbatim_path(&p)
+}
+
+/// 文件戳（大小 + 修改时间）：编辑器用它判断磁盘内容是否真的变过。
+fn fs_stamp(meta: &std::fs::Metadata) -> (u64, Option<u64>) {
+    let modified_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+    (meta.len(), modified_ms)
+}
+
+async fn fs_read(State(state): State<AppState>, Query(q): Query<FsReadQuery>) -> impl IntoResponse {
+    let p = resolve_fs_target(&q.path, q.cwd.as_deref(), &state.bind_working_dir);
 
     if !p.exists() || !p.is_file() {
         return (
@@ -12967,10 +16801,19 @@ async fn fs_read(State(state): State<AppState>, Query(q): Query<FsReadQuery>) ->
                 "path": q.path,
                 "content": "",
                 "success": false,
-                "error": "File not found"
+                "error": "File not found",
+                "size": 0,
+                "modified_ms": null
             })),
         );
     }
+
+    // 先取戳再读内容：宁可文件在 read 期间又被改一次（下一轮多刷一次），
+    // 也不能让戳比内容更旧，否则轮询会误判“磁盘没变”而留下旧内容。
+    let (size, modified_ms) = tokio::fs::metadata(&p)
+        .await
+        .map(|m| fs_stamp(&m))
+        .unwrap_or((0, None));
 
     match tokio::fs::read_to_string(&p).await {
         Ok(content) => (
@@ -12978,7 +16821,9 @@ async fn fs_read(State(state): State<AppState>, Query(q): Query<FsReadQuery>) ->
             Json(serde_json::json!({
                 "path": p.to_string_lossy().replace('\\', "/"),
                 "content": content,
-                "success": true
+                "success": true,
+                "size": size,
+                "modified_ms": modified_ms
             })),
         ),
         Err(_) => match tokio::fs::read(&p).await {
@@ -12987,7 +16832,9 @@ async fn fs_read(State(state): State<AppState>, Query(q): Query<FsReadQuery>) ->
                 Json(serde_json::json!({
                     "path": p.to_string_lossy().replace('\\', "/"),
                     "content": String::from_utf8_lossy(&bytes).to_string(),
-                    "success": true
+                    "success": true,
+                    "size": size,
+                    "modified_ms": modified_ms
                 })),
             ),
             Err(e) => (
@@ -12996,10 +16843,43 @@ async fn fs_read(State(state): State<AppState>, Query(q): Query<FsReadQuery>) ->
                     "path": q.path,
                     "content": "",
                     "success": false,
-                    "error": format!("{e}")
+                    "error": format!("{e}"),
+                    "size": 0,
+                    "modified_ms": null
                 })),
             ),
         },
+    }
+}
+
+/// 轻量文件戳查询：编辑器前台标签轮询它，只有大小/修改时间变化才重新拉全文。
+async fn fs_stat(State(state): State<AppState>, Query(q): Query<FsStatQuery>) -> impl IntoResponse {
+    let p = resolve_fs_target(&q.path, q.cwd.as_deref(), &state.bind_working_dir);
+    match tokio::fs::metadata(&p).await {
+        Ok(meta) => {
+            let (size, modified_ms) = fs_stamp(&meta);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "path": p.to_string_lossy().replace('\\', "/"),
+                    "exists": true,
+                    "is_file": meta.is_file(),
+                    "size": size,
+                    "modified_ms": modified_ms
+                })),
+            )
+        }
+        // 不返回 404：客户端需要区分“文件被删/改名”和“网络故障”。
+        Err(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "path": q.path,
+                "exists": false,
+                "is_file": false,
+                "size": 0,
+                "modified_ms": null
+            })),
+        ),
     }
 }
 
@@ -13023,13 +16903,22 @@ async fn fs_write(
     }
     let content = body.content.unwrap_or_default();
     match tokio::fs::write(&p, content.as_bytes()).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "success": true,
-                "message": "File saved successfully"
-            })),
-        ),
+        Ok(()) => {
+            // 返回写入后的文件戳：客户端用它推进轮询基线，避免把自己的保存误判成外部更新。
+            let (size, modified_ms) = tokio::fs::metadata(&p)
+                .await
+                .map(|m| fs_stamp(&m))
+                .unwrap_or((content.len() as u64, None));
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "message": "File saved successfully",
+                    "size": size,
+                    "modified_ms": modified_ms
+                })),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -13686,6 +17575,38 @@ async fn chat_steer(
             }),
         );
     };
+    // Durable steer admission: visible in the rail even before the kernel folds
+    // it, and recovered after a refresh. Promotion by the `Steered` fan-out
+    // retires this row by the same client id.
+    if let Some(client_id) = req.client_input_id.clone() {
+        let operation_id = state
+            .active_chats
+            .admitted_user_for_session(&req.session_id)
+            .await
+            .and_then(|user| user.client_input_id);
+        let mut input = jeikcode_capabilities::session::SessionInput {
+            id: client_id,
+            seq: 0,
+            session_id: req.session_id.clone(),
+            delivery: "steer".into(),
+            status: "admitted".into(),
+            text: req.message.clone(),
+            images: req
+                .images
+                .iter()
+                .map(|image| jeikcode_kernel::message::ImageContent {
+                    media_type: image.media_type.clone(),
+                    data: image.data.clone(),
+                })
+                .collect(),
+            created_at: req.created_at.unwrap_or_else(|| {
+                u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0)
+            }),
+            message_id: None,
+            operation_id,
+        };
+        let _ = jeikcode_capabilities::session::inputs::append_global(&mut input);
+    }
     // Record the client correlation id and timestamp BEFORE submitting
     state
         .active_chats
@@ -13702,6 +17623,7 @@ async fn chat_steer(
                 data: image.data,
             })
             .collect(),
+        client_input_id: req.client_input_id.clone(),
         done: done_tx,
     };
     if tx.send(live_api::ChatSteerSignal::Submit(pending)).is_err() {
@@ -13719,13 +17641,23 @@ async fn chat_steer(
         Err(_) => Err("timed out waiting for the running turn to accept the steer".into()),
     };
     match outcome {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(ChatSteerResponse {
-                accepted: true,
-                error: None,
-            }),
-        ),
+        Ok(()) => {
+            // 服务端已将转向接收进运行中的回合：这是「会话仍在干活」的权威证据，
+            // 广播出去让任何一端（包括刚清过 busy 的观察者）立即回到运行态。
+            crate::publish_global(crate::GlobalWireEvent::Activity {
+                session_id: req.session_id.clone(),
+                running: true,
+                terminal: None,
+                status: None,
+            });
+            (
+                StatusCode::OK,
+                Json(ChatSteerResponse {
+                    accepted: true,
+                    error: None,
+                }),
+            )
+        }
         Err(error) => (
             StatusCode::CONFLICT,
             Json(ChatSteerResponse {
@@ -13757,7 +17689,125 @@ async fn active_chat_sessions(State(state): State<AppState>) -> impl IntoRespons
     for id in SessionRuntimeRegistry::global().live_turn_session_ids() {
         ids.insert(id);
     }
+    // `/loop` / `/goal` 在两次唤醒之间没有执行中的回合，但控制器还挂着：
+    // 对客户端而言这也是「正在干活」，否则按钮会在两轮之间闪回发送态。
+    for id in crate::controller_running_session_ids() {
+        ids.insert(id);
+    }
+    for id in crate::compaction_running_session_ids() {
+        ids.insert(id);
+    }
     Json(ids.into_iter().collect::<Vec<_>>())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ChatRuntimeQuery {
+    session_id: String,
+}
+
+/// GET /chat/runtime?session_id=… — the single server-side authority for
+/// 「这个会话现在有没有人在干活」.
+///
+/// `/chat/active` 只是一个 id 列表，且口径只覆盖「有回合在执行」。本接口把
+/// `/chat` 占用、native live 回合、运行时注册表与 `/loop`·`/goal` 控制器并成
+/// 一份每会话快照，客户端据此（而不是本地启发式）决定发送/停止按钮、呼吸点与
+/// 实时计时。`status` 是当前阶段（如 `compacting`），`compaction_started_at`
+/// 是该阶段的墙钟起点；两者都由服务端压缩阶段登记表支撑，刷新后照样可恢复。
+/// 旧客户端不读它，因此这是纯增量接口。
+async fn chat_runtime(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ChatRuntimeQuery>,
+) -> axum::response::Response {
+    use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
+
+    let session_id = q.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "session_id is required",
+            })),
+        )
+            .into_response();
+    }
+    let (chat_active, chat_status, chat_started_at) = {
+        let guard = state.active_chats.inner.read().await;
+        if let Some(op_id) = guard.aliases.get(&session_id) {
+            if let Some(op) = guard.operations.get(op_id) {
+                (true, op.status.clone(), Some(op.started_at))
+            } else {
+                (true, None, None)
+            }
+        } else {
+            (false, None, None)
+        }
+    };
+    let live_running =
+        crate::native_live::live_running_session_id().as_deref() == Some(session_id.as_str());
+    let registry_live = SessionRuntimeRegistry::global()
+        .live_turn_session_ids()
+        .iter()
+        .any(|id| id == &session_id);
+    let controller = crate::controller_state_for(&session_id).unwrap_or_default();
+    let meta = SessionRuntimeRegistry::global()
+        .list_all()
+        .into_iter()
+        .find(|entry| entry.session_id == session_id);
+    let turn_id = state
+        .active_chats
+        .admitted_user_for_session(&session_id)
+        .await
+        .and_then(|user| user.client_input_id);
+    let compaction_phase_started_at = compaction_started_at(&session_id);
+    let compaction_owner = compaction_owner(&session_id);
+    let execution_revision = execution_phase_revision(&session_id);
+    let running = chat_active
+        || live_running
+        || registry_live
+        || controller.loop_active
+        || controller.goal_active
+        // 阶段登记本身就是“有人在跑”的证据：手动 `/live/compact` 在空闲 runtime
+        // 上执行时，上述四个信号都可能为假。
+        || compaction_phase_started_at.is_some();
+    // `/chat` 操作自己的 status 与压缩登记表取并集：自动压缩过去只广播事件、
+    // 不写操作状态，刷新后客户端就丢了 `Compacting…`；native live 更没有操作状态。
+    let status =
+        chat_status.or_else(|| compaction_phase_started_at.map(|_| "compacting".to_string()));
+    let source = if chat_active {
+        "chat"
+    } else if live_running || registry_live {
+        "live"
+    } else if controller.loop_active {
+        "loop"
+    } else if controller.goal_active {
+        "goal"
+    } else if compaction_phase_started_at.is_some() {
+        "compaction"
+    } else {
+        "idle"
+    };
+    Json(serde_json::json!({
+        "running": running,
+        "source": source,
+        "status": status,
+        "phase": compaction_phase_started_at.map(|_| "compacting"),
+        "phase_started_at": compaction_phase_started_at,
+        "owner": compaction_owner,
+        "revision": execution_revision,
+        "started_at": chat_started_at,
+        "compaction_started_at": compaction_phase_started_at,
+        "turn_id": turn_id,
+        "loop": {
+            "active": controller.loop_active,
+            "round": controller.loop_round,
+            "label": controller.loop_label,
+        },
+        "goal": { "active": controller.goal_active },
+        "last_terminal": meta.as_ref().and_then(|entry| entry.last_terminal.clone()),
+        "terminal_seq": meta.as_ref().map(|entry| entry.terminal_seq).unwrap_or(0),
+    }))
+    .into_response()
 }
 
 #[derive(serde::Serialize)]
@@ -16751,6 +20801,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         )
         .route("/projects/:hash/sessions", get(get_project_sessions))
         .route("/sessions/:id/messages", post(append_session_messages))
+        .route("/sessions/:id/seen", post(mark_session_seen))
         .route(
             "/projects/:hash/sessions/:id/freshness",
             get(get_session_freshness),
@@ -16762,6 +20813,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route(
             "/projects/:hash/sessions/:id",
             get(get_session_detail).delete(delete_session),
+        )
+        .route(
+            "/projects/:hash/sessions/:id/inputs",
+            get(get_session_inputs),
         )
         .route("/projects/:hash/sessions/:id/rename", patch(rename_session))
         .route("/projects/:hash/sessions/:id/repair", post(repair_session))
@@ -16789,6 +20844,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/fs/action", post(fs_action_handler))
         .route("/fs/tree", get(fs_tree))
         .route("/fs/read", get(fs_read))
+        .route("/fs/stat", get(fs_stat))
         .route("/fs/write", post(fs_write))
         .route("/fs/search", get(fs_search))
         .route("/fs/locate", get(fs_locate))
@@ -16798,6 +20854,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/terminal/close", post(terminal_close))
         .route("/terminal/ws", get(terminal_ws_handler))
         .route("/chat/queue", get(get_chat_queue).post(update_chat_queue))
+        .route("/chat/queue/claim", post(claim_chat_queue))
+        .route("/chat/queue/release", post(release_chat_queue))
         .route(
             "/chat/steer",
             post(chat_steer)
@@ -16809,6 +20867,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             post(chat_steer_cancel).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
         )
         .route("/chat/active", get(active_chat_sessions))
+        .route("/chat/runtime", get(chat_runtime))
         .route("/runtime/sessions", get(runtime_sessions))
         .route("/system-notify", post(system_notify))
         .route("/notify-focus", get(get_notify_focus))
@@ -16998,6 +21057,9 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     let app = public
         .merge(protected)
         .with_state(state.clone())
+        .layer(axum::middleware::from_fn(
+            legacy_live_deprecation_middleware,
+        ))
         .layer(axum::middleware::from_fn(activity_tracker_middleware))
         .layer(axum::Extension(last_activity.clone()))
         .layer(cors_layer())
@@ -17372,6 +21434,15 @@ mod fs_list_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sequenced(events: &[ChatEvent]) -> Vec<(u64, ChatEvent)> {
+        events
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, event)| (index as u64 + 1, event))
+            .collect()
+    }
 
     #[test]
     fn chat_turn_policy_api_is_low_confirm() {
@@ -18664,7 +22735,7 @@ mod tests {
         assert!(matches!(
             rx.try_recv()
                 .expect("the recorded terminal must be delivered"),
-            ChatEvent::Done { .. }
+            (_, ChatEvent::Done { .. })
         ));
     }
 
@@ -18692,7 +22763,7 @@ mod tests {
                 rx.try_recv().expect(
                     "a watcher attaching after the turn ended must receive the terminal frame"
                 ),
-                ChatEvent::Done { .. }
+                (_, ChatEvent::Done { .. })
             ),
             "the terminal frame must outlive the operation"
         );
@@ -18738,7 +22809,7 @@ mod tests {
         assert!(matches!(
             rx1.try_recv()
                 .expect("recorded terminal present before clear"),
-            ChatEvent::Done { .. }
+            (_, ChatEvent::Done { .. })
         ));
 
         // Evict session on delete
@@ -18808,6 +22879,9 @@ mod tests {
         // 发送第一帧 User 提问
         let user_event = ChatEvent::User {
             content: "帮我写冒泡排序".into(),
+            display_text: Some("帮我写冒泡排序".into()),
+            internal: Some(false),
+            editable: Some(true),
             session_id: Some(session_id.to_string()),
             created_at: Some(12345),
             message_id: None,
@@ -18816,7 +22890,7 @@ mod tests {
             client_input_id: None,
             images: None,
         };
-        let _ = bus.send(user_event);
+        let _ = bus.send((1, user_event));
 
         // 验证异地端和本机端在同一时刻都能无遗漏地收到该 User 事件！
         let remote_received = rx_remote
@@ -18824,7 +22898,7 @@ mod tests {
             .await
             .expect("remote client must receive live user event");
         assert!(
-            matches!(remote_received, ChatEvent::User { ref content, .. } if content == "帮我写冒泡排序")
+            matches!(remote_received, (_, ChatEvent::User { ref content, .. }) if content == "帮我写冒泡排序")
         );
 
         let local_received = rx_local_refresh
@@ -18832,7 +22906,7 @@ mod tests {
             .await
             .expect("local client must receive live user event");
         assert!(
-            matches!(local_received, ChatEvent::User { ref content, .. } if content == "帮我写冒泡排序")
+            matches!(local_received, (_, ChatEvent::User { ref content, .. }) if content == "帮我写冒泡排序")
         );
     }
 
@@ -18948,6 +23022,7 @@ mod tests {
             .record_user_message(
                 &admission.operation_id,
                 "hello".into(),
+                "hello".into(),
                 Some(1_700_000_000_000),
                 Vec::new(),
             )
@@ -18956,13 +23031,16 @@ mod tests {
         registry.replay_admitted_user("session-1", &tx).await;
         let event = rx.try_recv().expect("admitted user should replay");
         match event {
-            ChatEvent::User {
-                content,
-                session_id,
-                created_at,
-                client_input_id,
-                ..
-            } => {
+            (
+                _,
+                ChatEvent::User {
+                    content,
+                    session_id,
+                    created_at,
+                    client_input_id,
+                    ..
+                },
+            ) => {
                 assert_eq!(content, "hello");
                 assert_eq!(session_id.as_deref(), Some("session-1"));
                 assert_eq!(created_at, Some(1_700_000_000_000));
@@ -18978,6 +23056,9 @@ mod tests {
     fn user_event_serializes_created_at() {
         let json = serde_json::to_value(ChatEvent::User {
             content: "hi".into(),
+            display_text: Some("hi".into()),
+            internal: Some(false),
+            editable: Some(true),
             session_id: Some("s1".into()),
             created_at: Some(42),
             message_id: None,
@@ -19002,13 +23083,15 @@ mod tests {
         let identified = serde_json::to_value(ChatEvent::UserIdentified {
             message_id: "m-user-1".into(),
             turn_ordinal: 3,
-            absolute_index: Some(7),
         })
         .unwrap();
         assert_eq!(identified["type"], "user_identified");
         assert_eq!(identified["message_id"], "m-user-1");
         assert_eq!(identified["turn_ordinal"], 3);
-        assert_eq!(identified["absolute_index"], 7);
+        assert!(
+            identified.get("absolute_index").is_none(),
+            "absolute_index 是内核 snapshot 下标，不是 display 下标，不得下发"
+        );
     }
 
     #[tokio::test]
@@ -20135,7 +24218,9 @@ mod tests {
     }
 
     fn history_msg(role: &str, elapsed_ms: Option<u64>) -> MessageInfo {
-        MessageInfo {
+        message_info! {
+            turn_id: None,
+            seq: None,
             role: role.into(),
             content: role.into(),
             reasoning: None,
@@ -20372,6 +24457,7 @@ mod tests {
             session_id: "s1".into(),
             turn_id,
             index: 0,
+            seq: 0,
             role: "user".into(),
             id: Some(id.into()),
             content: id.into(),
@@ -20630,6 +24716,45 @@ mod tests {
     }
 
     #[test]
+    fn artifact_detector_keeps_hash_comments_inside_code_block() {
+        // `# 1. xxx` 是 python 注释，缩进的 `##` 是代码体；都不能提前闭合代码块，
+        // 否则后续代码会以正文 TextDelta 流出，真正的闭合 ``` 反而被当成新代码块开启。
+        let mut detector = ArtifactDetector::new();
+        let mut events = detector.process("```python\nimport sys\n");
+        events.extend(detector.process(
+            "\n# ---------------------------\n# 1. 解析与格式化\n# ---------------------------\n",
+        ));
+        events.extend(detector.process("def f():\n    ## 步骤 1：内部注释\n    pass\n"));
+        events.extend(detector.process("```\n运行效果："));
+
+        let ends = events
+            .iter()
+            .filter(|event| matches!(event, ChatEvent::ArtifactEnd { .. }))
+            .count();
+        assert_eq!(ends, 1, "Events: {events:#?}");
+        let prose: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ChatEvent::TextDelta { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prose, "运行效果：");
+    }
+
+    #[test]
+    fn artifact_detector_never_heals_text_container_blocks() {
+        let mut detector = ArtifactDetector::new();
+        let events = detector.process("```text\n日志\n\n### 第二步：继续\n");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ChatEvent::ArtifactEnd { .. })),
+            "Events: {events:#?}"
+        );
+    }
+
+    #[test]
     fn first_query_value_extracts_token() {
         assert_eq!(first_query_value("token=abc", "token"), Some("abc".into()));
         assert_eq!(
@@ -20765,7 +24890,9 @@ mod tests {
     #[test]
     fn attach_image_sets_replaces_placeholders_in_order_only() {
         fn msg(role: &str, images: Option<Vec<ImageData>>) -> MessageInfo {
-            MessageInfo {
+            message_info! {
+                turn_id: None,
+                seq: None,
                 role: role.into(),
                 content: String::new(),
                 reasoning: None,
@@ -20820,7 +24947,9 @@ mod tests {
             data: data.into(),
             missing: false,
         };
-        let mut messages = vec![MessageInfo {
+        let mut messages = vec![message_info! {
+            turn_id: None,
+            seq: None,
             role: "user".into(),
             id: None,
             content: "new question".into(),
@@ -21174,10 +25303,11 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
                 let response = get_session_detail(
                     State(state),
                     Path((hash, id)),
-                    Query(SessionDetailQuery {
+                    Query(session_query! {
                         tail,
                         offset,
                         limit,
+                        after_seq: None,
                     }),
                     HeaderMap::new(),
                 )
@@ -21372,9 +25502,8 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
             let response = get_session_detail(
                 State(state),
                 Path((project_hash, id.to_string())),
-                Query(SessionDetailQuery {
+                Query(session_query! {
                     tail: Some(48),
-                    ..Default::default()
                 }),
                 HeaderMap::new(),
             )
@@ -21398,6 +25527,8 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
         assert!(texts.iter().any(|text| text == "SNAPSHOT Q"));
         let (display_meta, _) = manager.read_display(id).unwrap().unwrap();
         assert!(display_meta.backfilled);
+        assert_eq!(display_meta.v, DISPLAY_VERSION);
+        assert_eq!(display_meta.last_seq, 2);
 
         // Replace the log with a distinctive projection; the next read must
         // prefer it over the snapshot (proves the display source is wired).
@@ -21407,6 +25538,7 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
                 session_id: id.into(),
                 turn_id: 0,
                 index: 0,
+                seq: 0,
                 role: "user".into(),
                 id: None,
                 content: "DISPLAY ONLY Q".into(),
@@ -21425,6 +25557,7 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
                 session_id: id.into(),
                 turn_id: 0,
                 index: 1,
+                seq: 0,
                 role: "assistant".into(),
                 id: None,
                 content: "DISPLAY ONLY A".into(),
@@ -21440,7 +25573,7 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
             },
         ];
         manager.write_display_backfill(id, &records, 0).unwrap();
-        let value = read(state, project_hash, id).await;
+        let value = read(state.clone(), project_hash.clone(), id).await;
         let texts: Vec<String> = value["messages"]
             .as_array()
             .unwrap()
@@ -21449,12 +25582,83 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
             .collect();
         assert!(texts.iter().any(|text| text == "DISPLAY ONLY Q"));
         assert!(!texts.iter().any(|text| text == "SNAPSHOT Q"));
+
+        // Explicit mutation invalidates the v4 log; the next read must rebuild
+        // it from the canonical snapshot (the same path edit/delete/rewind uses).
+        manager.invalidate_display(id).unwrap();
+        let rebuilt = read(state.clone(), project_hash.clone(), id).await;
+        let rebuilt_texts: Vec<String> = rebuilt["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str().map(str::to_string))
+            .collect();
+        assert!(rebuilt_texts.iter().any(|text| text == "SNAPSHOT Q"));
+        let (rebuilt_meta, _) = manager.read_display(id).unwrap().unwrap();
+        assert_eq!(rebuilt_meta.v, DISPLAY_VERSION);
+        assert!(rebuilt_meta.backfilled);
+
+        // Simulate an old v3 log written before this migration: the next read
+        // must use it as the migration source and write a v4 log.
+        std::fs::write(
+            manager.display_meta_path(id).unwrap(),
+            serde_json::json!({
+                "v": 3,
+                "complete": true,
+                "last_turn_id": 0,
+                "completed_turns": [0],
+                "backfilled": false,
+                "updated_at": 1
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let v3_row = serde_json::json!({
+            "v": 3,
+            "session_id": id,
+            "turn_id": 0,
+            "index": 0,
+            "role": "user",
+            "id": "v3-question",
+            "content": "V3 MIGRATED Q",
+            "reasoning": null,
+            "synthetic": false,
+            "internal_origin": null,
+            "tool_calls": [],
+            "tool_call_id": null,
+            "is_error": false,
+            "images": [],
+            "created_at": 1,
+            "elapsed_ms": null
+        });
+        std::fs::write(manager.display_path(id).unwrap(), format!("{}\n", v3_row)).unwrap();
+        let migrated = read(state, project_hash, id).await;
+        let migrated_texts: Vec<String> = migrated["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str().map(str::to_string))
+            .collect();
+        assert!(migrated_texts.iter().any(|text| text == "V3 MIGRATED Q"));
+        let (migrated_meta, migrated_rows) = manager.read_display(id).unwrap().unwrap();
+        assert_eq!(migrated_meta.v, DISPLAY_VERSION);
+        assert_eq!(migrated_meta.last_seq, migrated_rows.len() as u64);
+        assert_eq!(migrated_rows[0].seq, 1);
     }
 }
 
 #[cfg(test)]
 mod channel_mode_tests {
     use super::*;
+
+    fn sequenced(events: &[ChatEvent]) -> Vec<(u64, ChatEvent)> {
+        events
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, event)| (index as u64 + 1, event))
+            .collect()
+    }
 
     #[test]
     fn resolve_channel_header() {
@@ -21633,7 +25837,7 @@ mod channel_mode_tests {
                 arguments: "{}".into(),
             },
         ];
-        let (perm, user) = pending_interactive_from_replay(&events);
+        let (perm, user) = pending_interactive_from_replay(&sequenced(&events));
         assert!(matches!(
             perm,
             Some(ChatEvent::PermissionRequest { call_id, .. }) if call_id == "c1"
@@ -21660,7 +25864,7 @@ mod channel_mode_tests {
                 duration_ms: 1,
             },
         ];
-        let (perm, _) = pending_interactive_from_replay(&events);
+        let (perm, _) = pending_interactive_from_replay(&sequenced(&events));
         assert!(perm.is_none(), "resolved call must not restore a card");
     }
 
@@ -21680,10 +25884,10 @@ mod channel_mode_tests {
                 chunk: "writing".into(),
             },
         ];
-        let (perm, _) = pending_interactive_from_replay(&events);
+        let (perm, _) = pending_interactive_from_replay(&sequenced(&events));
         assert!(perm.is_none(), "output means approval already granted");
-        assert!(replay_resolves_call(&events, "c1"));
-        assert!(!replay_resolves_call(&events, "other"));
+        assert!(replay_resolves_call(&sequenced(&events), "c1"));
+        assert!(!replay_resolves_call(&sequenced(&events), "other"));
     }
 
     #[test]
@@ -21706,7 +25910,7 @@ mod channel_mode_tests {
                 message_id: None,
             },
         ];
-        let (perm, user) = pending_interactive_from_replay(&events);
+        let (perm, user) = pending_interactive_from_replay(&sequenced(&events));
         assert!(perm.is_none());
         assert!(user.is_none());
     }
@@ -21732,7 +25936,7 @@ mod channel_mode_tests {
                 duration_ms: 1,
             },
         ];
-        let (perm, user) = pending_interactive_from_replay(&events);
+        let (perm, user) = pending_interactive_from_replay(&sequenced(&events));
         assert!(perm.is_none());
         assert!(
             user.is_none(),
@@ -22195,5 +26399,599 @@ mod channel_mode_tests {
             content6["mcpServers"]["camel-tool"]["autoApprove"],
             serde_json::json!(["ping", "pong"])
         );
+    }
+}
+
+#[cfg(test)]
+mod rewind_consistency_tests {
+    use super::*;
+    use jeikcode_capabilities::session::{
+        DisplayAnchor, PresentationEntry, PresentationFile, PresentationRole, SessionMeta,
+        StorageOwner, TurnStat,
+    };
+
+    fn stat(after_message: usize, turn_id: u64) -> TurnStat {
+        TurnStat {
+            after_message,
+            position_valid: true,
+            turn_id,
+            round_count: 1,
+            tool_call_count: 0,
+            duration_ms: 1,
+            total_tokens: 0,
+            errored: false,
+            used_tokens: 0,
+            ctx_window: 0,
+            model_usage: Vec::new(),
+        }
+    }
+
+    fn meta_with(id: &str) -> SessionMeta {
+        let mut meta = SessionMeta::new(id, "/p", 1);
+        meta.owner = StorageOwner::Native;
+        meta.turn_stats = vec![stat(2, 1), stat(4, 2), stat(6, 3)];
+        meta.turn_count = 3;
+        meta
+    }
+
+    fn entry(turn_id: u64) -> PresentationEntry {
+        PresentationEntry {
+            anchor: DisplayAnchor::AfterTurn { turn_id },
+            role: PresentationRole::User,
+            text: format!("display-{turn_id}"),
+        }
+    }
+
+    fn transcript_line(id: &str, turn_id: u64) -> String {
+        serde_json::json!({
+            "v": 1,
+            "ts": 1,
+            "iso": "x",
+            "session_id": id,
+            "turn_id": turn_id,
+            "user": format!("user-{turn_id}"),
+            "assistant": format!("answer-{turn_id}"),
+            "usage": {}
+        })
+        .to_string()
+    }
+
+    fn seed(mgr: &NativeSessionManager, id: &str, meta: &SessionMeta) {
+        mgr.write_meta(meta).unwrap();
+        let mut presentation = PresentationFile::default();
+        presentation.entries = vec![entry(1), entry(2), entry(3)];
+        mgr.write_presentation(id, &presentation).unwrap();
+        std::fs::write(
+            mgr.jsonl_path(id).unwrap(),
+            format!(
+                "{}\n{}\n{}\n",
+                transcript_line(id, 1),
+                transcript_line(id, 2),
+                transcript_line(id, 3)
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rewrite_prunes_every_downstream_representation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = NativeSessionManager::with_root(dir.path());
+        let id = "rewrite-prune";
+        let mut meta = meta_with(id);
+        seed(&mgr, id, &meta);
+
+        // Keep turns 1 and 2 (after_message <= 4); turn 3 is downstream.
+        let surviving = prune_rewound_turn_stats(&mut meta, 4).unwrap();
+        prune_derived_turns(&mgr, id, &surviving);
+        assert_eq!(meta.turn_stats.len(), 2);
+        assert_eq!(meta.turn_count, 2);
+        let presentation = mgr.read_presentation(id).unwrap();
+        assert_eq!(presentation.entries.len(), 2);
+        assert!(presentation.entries.iter().all(|e| e.text != "display-3"));
+        let transcript = std::fs::read_to_string(mgr.jsonl_path(id).unwrap()).unwrap();
+        assert!(transcript.contains("\"turn_id\":2"));
+        assert!(!transcript.contains("\"turn_id\":3"));
+    }
+
+    #[test]
+    fn partial_overlay_is_idempotent_and_resumes_before_the_new_prompt() {
+        let partial = jeikcode_capabilities::session::PartialStream {
+            session_id: "s1".into(),
+            message_id: Some("m-1".into()),
+            part_id: Some("m-1:1:text".into()),
+            text: "half an answer".into(),
+            reasoning: "thinking".into(),
+            tool_calls: vec![jeikcode_capabilities::session::PartialToolCall {
+                index: 0,
+                id: Some("call-1".into()),
+                name: Some("bash".into()),
+                arguments: "{\"cmd\":\"ls\"}".into(),
+            }],
+            updated_at: 1,
+        };
+        let mut conv = Vec::new();
+        assert!(overlay_partial_stream(&mut conv, &partial));
+        assert_eq!(conv.len(), 2, "assistant + interrupted tool result");
+        assert_eq!(conv[1].tool_call_id.as_deref(), Some("call-1"));
+        assert!(conv[1].is_error);
+        assert_eq!(conv[0].text, "half an answer");
+        assert_eq!(conv[0].reasoning.as_deref(), Some("thinking"));
+        assert_eq!(
+            conv[0].internal_origin.as_deref(),
+            Some("interrupted_partial")
+        );
+
+        // The canonical snapshot already contains this assistant message: a
+        // second resume must not append a duplicate.
+        let mut persisted =
+            jeikcode_kernel::message::Message::assistant("half an answer".to_string(), Vec::new());
+        persisted.id = Some("m-1".into());
+        let mut existing = vec![persisted];
+        assert!(!overlay_partial_stream(&mut existing, &partial));
+        assert_eq!(existing.len(), 1);
+    }
+
+    #[test]
+    fn single_turn_delete_keeps_later_turns_and_reindexes_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = NativeSessionManager::with_root(dir.path());
+        let id = "delete-one-turn";
+        let mut meta = meta_with(id);
+        seed(&mgr, id, &meta);
+
+        // Delete the first turn (2 rows) while turns 2 and 3 stay.
+        let surviving = prune_deleted_turn_stats(&mut meta, 0, 2).unwrap();
+        prune_derived_turns(&mgr, id, &surviving);
+        assert_eq!(meta.turn_stats.len(), 2);
+        assert_eq!(meta.turn_stats[0].turn_id, 2);
+        assert_eq!(meta.turn_stats[0].after_message, 2);
+        assert_eq!(meta.turn_stats[1].turn_id, 3);
+        assert_eq!(meta.turn_stats[1].after_message, 4);
+        assert_eq!(meta.turn_count, 2);
+        let presentation = mgr.read_presentation(id).unwrap();
+        assert_eq!(presentation.entries.len(), 2);
+        assert!(presentation.entries.iter().all(|e| e.text != "display-1"));
+        let transcript = std::fs::read_to_string(mgr.jsonl_path(id).unwrap()).unwrap();
+        assert!(!transcript.contains("\"turn_id\":1"));
+        assert!(transcript.contains("\"turn_id\":2"));
+        assert!(transcript.contains("\"turn_id\":3"));
+    }
+}
+
+#[cfg(test)]
+mod live_deprecation_tests {
+    use super::*;
+
+    #[test]
+    fn only_retired_live_transport_paths_are_marked() {
+        for path in [
+            "/live",
+            "/live/message",
+            "/live/stop",
+            "/live/compact",
+            "/live/switch_session",
+        ] {
+            assert!(is_legacy_live_transport(path), "{path}");
+        }
+        for path in [
+            "/live/provider",
+            "/live/mode",
+            "/live/reasoning_effort",
+            "/live/permission",
+            "/live/user-input",
+            "/chat",
+            "/chat/watch",
+        ] {
+            assert!(!is_legacy_live_transport(path), "{path}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod v4_coverage_tests {
+    use super::*;
+    use jeikcode_capabilities::session::{DisplayMeta, TurnStat};
+    use jeikcode_kernel::message::Message;
+
+    fn stat(after_message: usize, turn_id: u64) -> TurnStat {
+        TurnStat {
+            after_message,
+            position_valid: true,
+            turn_id,
+            round_count: 1,
+            tool_call_count: 0,
+            duration_ms: 1,
+            total_tokens: 0,
+            errored: false,
+            used_tokens: 0,
+            ctx_window: 0,
+            model_usage: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn v4_mutation_rewrites_in_place_and_preserves_prefix_rows() {
+        use jeikcode_capabilities::session::DisplayRecord;
+
+        fn row(id: &str, role: &str, content: &str, turn_id: u64, index: u32) -> DisplayRecord {
+            DisplayRecord {
+                v: jeikcode_capabilities::session::DISPLAY_VERSION,
+                session_id: "s1".into(),
+                turn_id,
+                index,
+                seq: 0,
+                role: role.into(),
+                id: Some(id.into()),
+                content: content.into(),
+                reasoning: None,
+                synthetic: false,
+                internal_origin: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                is_error: false,
+                images: Vec::new(),
+                created_at: Some(1),
+                elapsed_ms: None,
+            }
+        }
+
+        let seed = |dir: &std::path::Path| {
+            let manager = NativeSessionManager::with_root(dir);
+            manager
+                .rewrite_display_rows(
+                    "s1",
+                    &[
+                        row("u1", "user", "Q1", 1, 0),
+                        row("a1", "assistant", "A1", 1, 1),
+                        row("p-1", "assistant", "DISPLAY ONLY", 1, 2),
+                        row("u2", "user", "Q2", 2, 0),
+                        {
+                            let mut display_only = row("p-2", "assistant", "DISPLAY TAIL", 2, 2);
+                            display_only.internal_origin = Some("presentation".into());
+                            display_only
+                        },
+                        row("a2", "assistant", "A2", 2, 1),
+                        row("u3", "user", "Q3", 3, 0),
+                        row("a3", "assistant", "A3", 3, 1),
+                    ],
+                    3,
+                    &[1, 2, 3],
+                    false,
+                )
+                .unwrap();
+            manager
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = seed(dir.path());
+        assert!(rewrite_display_for_mutation(
+            &manager,
+            "s1",
+            DisplayMutation::Truncate {
+                target_id: Some("u2"),
+                inclusive: true,
+            },
+            2,
+            &[1, 2],
+        ));
+        let (meta, rows) = manager.read_display("s1").unwrap().unwrap();
+        assert_eq!(meta.last_turn_id, 2);
+        assert_eq!(meta.completed_turns, vec![1, 2]);
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().any(|row| row.id.as_deref() == Some("p-1")));
+        assert!(rows.iter().any(|row| row.id.as_deref() == Some("u2")));
+        assert!(
+            rows.iter().any(|row| row.id.as_deref() == Some("p-2")),
+            "presentation rows anchored to the surviving turn must not be cut"
+        );
+        assert!(!rows.iter().any(|row| row.id.as_deref() == Some("u3")));
+        assert_eq!(rows.last().unwrap().seq, rows.len() as u64);
+
+        // Exclusive truncate is what “回溯并提交” uses: the target user row and
+        // its whole turn must disappear before the replacement prompt is sent.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = seed(dir.path());
+        assert!(rewrite_display_for_mutation(
+            &manager,
+            "s1",
+            DisplayMutation::Truncate {
+                target_id: Some("u2"),
+                inclusive: false,
+            },
+            2,
+            &[1, 2],
+        ));
+        let (_, rows) = manager.read_display("s1").unwrap().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(!rows.iter().any(|row| row.id.as_deref() == Some("u2")));
+        assert!(!rows.iter().any(|row| row.id.as_deref() == Some("p-2")));
+        assert!(!rows.iter().any(|row| row.id.as_deref() == Some("u3")));
+        assert_eq!(rows.last().unwrap().seq, rows.len() as u64);
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = seed(dir.path());
+        let images: Vec<ImageData> = Vec::new();
+        assert!(rewrite_display_for_mutation(
+            &manager,
+            "s1",
+            DisplayMutation::Patch {
+                target_id: Some("u2"),
+                text: "EDITED Q2",
+                images: &images,
+                truncate_after: true,
+            },
+            2,
+            &[1, 2],
+        ));
+        let (_, rows) = manager.read_display("s1").unwrap().unwrap();
+        assert_eq!(rows.len(), 5);
+        assert!(rows
+            .iter()
+            .any(|row| row.id.as_deref() == Some("u2") && row.content == "EDITED Q2"));
+        assert!(rows.iter().any(|row| row.id.as_deref() == Some("p-2")));
+        assert!(!rows.iter().any(|row| row.id.as_deref() == Some("a3")));
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = seed(dir.path());
+        assert!(rewrite_display_for_mutation(
+            &manager,
+            "s1",
+            DisplayMutation::Delete {
+                target_id: Some("u2"),
+                delete_turn: true,
+            },
+            2,
+            &[1, 3],
+        ));
+        let (_, rows) = manager.read_display("s1").unwrap().unwrap();
+        assert!(rows.iter().any(|row| row.id.as_deref() == Some("u3")));
+        assert!(rows.iter().any(|row| row.id.as_deref() == Some("p-1")));
+        assert!(!rows.iter().any(|row| row.id.as_deref() == Some("u2")));
+        assert!(!rows.iter().any(|row| row.id.as_deref() == Some("a2")));
+    }
+
+    #[test]
+    fn v4_large_log_roundtrips_with_monotonic_seq() {
+        use jeikcode_capabilities::session::DisplayRecord;
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = NativeSessionManager::with_root(dir.path());
+        let rows: Vec<DisplayRecord> = (0..2000)
+            .map(|index| DisplayRecord {
+                v: jeikcode_capabilities::session::DISPLAY_VERSION,
+                session_id: "s1".into(),
+                turn_id: index / 2,
+                index: u32::try_from(index % 2).unwrap_or(0),
+                seq: 0,
+                role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+                id: Some(format!("m-{index}")),
+                content: format!("row {index}"),
+                reasoning: None,
+                synthetic: false,
+                internal_origin: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                is_error: false,
+                images: Vec::new(),
+                created_at: Some(index as u64),
+                elapsed_ms: None,
+            })
+            .collect();
+        manager.write_display_backfill("s1", &rows, 1000).unwrap();
+        let (meta, read) = manager.read_display("s1").unwrap().unwrap();
+        assert_eq!(read.len(), 2000);
+        assert_eq!(meta.last_seq, 2000);
+        assert_eq!(read.first().unwrap().seq, 1);
+        assert_eq!(read.last().unwrap().seq, 2000);
+    }
+
+    #[test]
+    fn display_log_cache_is_bounded_and_hits() {
+        let mut cache = DisplayLogCache::default();
+        for index in 0..(MAX_CACHED_DISPLAY_ENTRIES + 4) {
+            cache.insert(DisplayLogCacheEntry {
+                key: format!("k-{index}"),
+                log_mtime: None,
+                log_len: 1,
+                meta_mtime: None,
+                meta_len: 1,
+                meta: Default::default(),
+                records: std::sync::Arc::new(Vec::new()),
+            });
+        }
+        assert_eq!(cache.entries.len(), MAX_CACHED_DISPLAY_ENTRIES);
+        assert!(!cache.entries.contains_key("k-0"));
+        let hit = cache.get("k-9", None, 1, None, 1);
+        assert!(hit.is_some(), "recently inserted entries must hit");
+    }
+
+    #[test]
+    fn v4_tail_view_seeks_to_the_requested_window() {
+        use jeikcode_capabilities::session::{
+            DisplayRecord, PresentationFile, SessionMeta, StorageOwner,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = NativeSessionManager::with_root(dir.path());
+        let id = "tail-view";
+        let rows: Vec<DisplayRecord> = (0..100usize)
+            .map(|index| DisplayRecord {
+                v: jeikcode_capabilities::session::DISPLAY_VERSION,
+                session_id: id.into(),
+                turn_id: (index / 2) as u64,
+                index: (index % 2) as u32,
+                seq: 0,
+                role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+                id: Some(format!("m-{index}")),
+                content: format!("row {index}"),
+                reasoning: None,
+                synthetic: false,
+                internal_origin: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                is_error: false,
+                images: Vec::new(),
+                created_at: Some(index as u64),
+                elapsed_ms: None,
+            })
+            .collect();
+        manager.write_display_backfill(id, &rows, 50).unwrap();
+        let mut meta = SessionMeta::new(id, "/p", 1);
+        meta.owner = StorageOwner::Native;
+        let session = crate::legacy_convert::CatalogSessionView {
+            snapshot: jeikcode_kernel::message::SessionSnapshot::new(Vec::new()),
+            meta,
+            presentation: PresentationFile::default(),
+        };
+        let view = read_display_tail_view(&manager, &session, 10, None, false, 0).unwrap();
+        assert_eq!(view.message_count, 100);
+        assert_eq!(view.offset, 90);
+        assert_eq!(view.messages.len(), 10);
+        assert_eq!(view.turns.len(), 50);
+        assert_eq!(view.messages[0].content, "row 90");
+        assert_eq!(view.turns.last().unwrap().index, 98);
+    }
+
+    fn prompt(text: &str, id: &str) -> Message {
+        let mut message = Message::user(text);
+        message.id = Some(id.into());
+        message
+    }
+
+    fn assistant(text: &str, id: &str) -> Message {
+        let mut message = Message::assistant(text, Vec::new());
+        message.id = Some(id.into());
+        message
+    }
+
+    fn ids(values: &[&str]) -> std::collections::HashSet<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn v4_requires_both_turn_boundaries_in_the_display_log() {
+        let messages = vec![
+            prompt("q1", "u1"),
+            assistant("a1", "a1"),
+            prompt("q2", "u2"),
+            assistant("a2", "a2"),
+        ];
+        let stats = vec![stat(2, 1), stat(4, 2)];
+        let mut meta = DisplayMeta {
+            complete: true,
+            last_turn_id: 2,
+            completed_turns: vec![1],
+            ..DisplayMeta::default()
+        };
+        // Turn 1 is complete; turn 2 is missing entirely.
+        let mut present = ids(&["u1", "a1"]);
+        assert!(!v4_display_covers_completed_user_turns(
+            &meta, &present, &messages, &stats, 2
+        ));
+        present.extend(ids(&["u2", "a2"]));
+        meta.completed_turns.push(2);
+        assert!(v4_display_covers_completed_user_turns(
+            &meta, &present, &messages, &stats, 2
+        ));
+
+        // The prompt landed (e.g. a mid-turn backfill) but the terminal assistant
+        // slice did not: still incomplete.
+        present.remove("a2");
+        assert!(!v4_display_covers_completed_user_turns(
+            &meta, &present, &messages, &stats, 2
+        ));
+
+        // A backfilled log is not exempt: its rows must still carry the ids.
+        meta.backfilled = true;
+        meta.completed_turns.clear();
+        assert!(!v4_display_covers_completed_user_turns(
+            &meta, &present, &messages, &stats, 2
+        ));
+        present.insert("a2".into());
+        assert!(v4_display_covers_completed_user_turns(
+            &meta, &present, &messages, &stats, 2
+        ));
+        meta.last_turn_id = 1;
+        assert!(!v4_display_covers_completed_user_turns(
+            &meta, &present, &messages, &stats, 2
+        ));
+
+        // A pre-id snapshot cannot be reconciled by identity; the legacy
+        // turn-id contract still applies to it.
+        let legacy = vec![Message::user("q1"), Message::assistant("a1", Vec::new())];
+        let legacy_stats = vec![stat(2, 1)];
+        meta.last_turn_id = 1;
+        meta.completed_turns = vec![1];
+        assert!(v4_display_covers_completed_user_turns(
+            &meta,
+            &std::collections::HashSet::new(),
+            &legacy,
+            &legacy_stats,
+            1
+        ));
+    }
+
+    #[test]
+    fn v4_reused_turn_id_does_not_mask_a_missing_final_turn() {
+        // A rewind restored the kernel counter, so the final turn reused id 41
+        // while the archived stat for the earlier 41 is still present. The turn
+        // id is already in `completed_turns`, but the NEW turn never reached the
+        // display log. Coverage must fail so the read path rebuilds.
+        let messages = vec![
+            prompt("q1", "u1"),
+            assistant("a1", "a1"),
+            prompt("q2", "u2"),
+            assistant("a2", "a2"),
+        ];
+        let stats = vec![stat(2, 41), stat(4, 41)];
+        let meta = DisplayMeta {
+            complete: true,
+            last_turn_id: 41,
+            completed_turns: vec![41],
+            ..DisplayMeta::default()
+        };
+        let present = ids(&["u1", "a1"]);
+        assert!(
+            !v4_display_covers_completed_user_turns(&meta, &present, &messages, &stats, 41),
+            "the reused turn id must not hide the missing final turn"
+        );
+    }
+}
+
+#[cfg(test)]
+mod client_identity_tests {
+    use super::*;
+
+    #[test]
+    fn folded_steer_client_id_is_attached_to_its_kernel_message() {
+        let inputs = vec![jeikcode_capabilities::session::SessionInput {
+            id: "client-steer-1".into(),
+            seq: 1,
+            session_id: "sess-1".into(),
+            delivery: "steer".into(),
+            status: "promoted".into(),
+            text: "继续".into(),
+            images: Vec::new(),
+            created_at: 1,
+            message_id: Some("m-kernel-1".into()),
+            operation_id: None,
+        }];
+        let map = client_input_identity_map(inputs);
+        let mut rows = vec![
+            MessageInfo {
+                role: "user".into(),
+                id: Some("m-kernel-1".into()),
+                ..Default::default()
+            },
+            MessageInfo {
+                role: "assistant".into(),
+                id: Some("m-kernel-1".into()),
+                ..Default::default()
+            },
+        ];
+        annotate_client_input_ids_with(&mut rows, &map);
+        assert_eq!(rows[0].client_input_id.as_deref(), Some("client-steer-1"));
+        assert_eq!(rows[1].client_input_id, None);
     }
 }

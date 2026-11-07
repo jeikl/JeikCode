@@ -296,7 +296,7 @@ pub fn render_identity_and_precedence(model: &str) -> (String, Option<String>) {
         render_identity_and_precedence_from(&cfg, model)
     } else {
         (
-            format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project."),
+            "You are the JeikCode AI coding Agent provided by Jeik, running on your underlying model. You help users with software engineering tasks within the current project.".to_string(),
             None,
         )
     }
@@ -313,7 +313,7 @@ pub(crate) fn render_identity_and_precedence_from(
             let desc = id
                 .description
                 .as_deref()
-                .unwrap_or("an AI coding agent by JeikCode running the {model} model");
+                .unwrap_or("an AI coding agent provided by Jeik, running on your underlying model");
             let role = id.role_summary.as_deref().unwrap_or(
                 "You help users with software engineering tasks within the current project.",
             );
@@ -325,10 +325,10 @@ pub(crate) fn render_identity_and_precedence_from(
                 .replace("{role_summary}", role)
                 .replace("{model}", model)
         } else {
-            format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project.")
+            "You are the JeikCode AI coding Agent provided by Jeik, running on your underlying model. You help users with software engineering tasks within the current project.".to_string()
         }
     } else {
-        format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project.")
+        "You are the JeikCode AI coding Agent provided by Jeik, running on your underlying model. You help users with software engineering tasks within the current project.".to_string()
     };
 
     let precedence = cfg.precedence.as_ref().and_then(|p| p.rule.clone());
@@ -920,42 +920,36 @@ doing_tasks:
             init.identity.as_ref().unwrap().agent_name.as_deref(),
             Some("JeikCode")
         );
+        let init_template = init
+            .identity
+            .as_ref()
+            .unwrap()
+            .template
+            .as_deref()
+            .expect("identity template");
+        assert!(init_template.contains("provided by Jeik"));
+        assert!(init_template.contains("<project_instructions>"));
+        let init_precedence = init
+            .precedence
+            .as_ref()
+            .unwrap()
+            .rule
+            .as_deref()
+            .expect("precedence rule");
+        assert!(init_precedence
+            .contains("project_instructions >> memory > user_preferences > system_rules"));
         let rules: CustomRulesConfig =
             serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/rules.yaml")))
                 .expect("rules.yaml");
-        let wf = rules.workflow.as_ref().unwrap();
-        assert!(wf
-            .principle
-            .as_deref()
-            .unwrap()
-            .to_lowercase()
-            .contains("determine the final goal"));
-        let guide = wf.guidelines.as_ref().unwrap();
-        assert!(guide.contains_key("todolist_closure"));
-        assert!(guide.contains_key("concurrency"));
-        assert!(guide.contains_key("exploration_tasks"));
-        assert!(guide.contains_key("targeted_exploration"));
-        assert!(guide.contains_key("modification_tasks"));
-        assert!(
-            rules
-                .prohibitions
-                .as_ref()
-                .unwrap()
-                .iter()
-                .any(|p| p.contains("run_command")),
-            "prohibitions is a live rules.yaml field"
-        );
-        assert!(
-            rules
-                .output
-                .as_ref()
-                .unwrap()
-                .signposts
-                .as_deref()
-                .unwrap()
-                .contains("status"),
-            "signposts is a live rules.yaml field"
-        );
+        let raw = rules.raw.as_deref().expect("rules.yaml raw");
+        assert!(raw.contains("## Execution Guidelines"));
+        assert!(raw.contains("## Tool Discipline"));
+        assert!(raw.contains("## Task Execution Guidelines"));
+        assert!(raw.contains("## Output"));
+        assert!(raw.contains("Answer language"));
+        assert!(raw.contains("convergence of multiple sources of authority"));
+        assert!(rules.workflow.is_none(), "raw replaces structured rules");
+        assert!(rules.prohibitions.is_none());
     }
 
     #[test]
@@ -1029,7 +1023,7 @@ doing_tasks:
         let (identity, precedence) = render_identity_and_precedence_from(&init, "test-model");
 
         let b1 = format!(
-            "{identity}\n\n## PRECEDENCE:\n{}\n\n{env_facts}\n</environment>",
+            "{identity}\n\n## PRECEDENCE:\n{}\n\n{env_facts}",
             precedence.unwrap()
         );
 
@@ -1055,18 +1049,16 @@ doing_tasks:
         );
 
         let clean_rules_text = render_custom_rules_from(&rules);
-        let b2 = format!(
-            "<workflow_and_execution_discipline>\n{}\n\n{clean_rules_text}\n</workflow_and_execution_discipline>",
-            crate::persona::CRITICAL_PRECEDENCE_NOTICE
-        );
+        let b2 = format!("<system_rules>\n\n{clean_rules_text}\n\n</system_rules>");
 
         assert!(
-            b2.starts_with("<workflow_and_execution_discipline>\n"),
-            "b2 must start with <workflow_and_execution_discipline>\\n, got: {b2}"
+            b2.starts_with("<system_rules>\n"),
+            "b2 must start with <system_rules>\\n, got: {b2}"
         );
         assert!(
-            b2.ends_with("</workflow_and_execution_discipline>"),
-            "b2 must end with </workflow_and_execution_discipline>, got: {b2}"
+            b2.ends_with("</system_rules>"),
+            "b2 must end with </system_rules>, got: {b2}"
         );
+        assert!(!b2.contains("Critical Precedence"));
     }
 }

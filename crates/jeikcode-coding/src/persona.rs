@@ -11,9 +11,9 @@
 //!   to start a new conversation / clear history. Without this, GLM/DeepSeek proactively
 //!   suggest "开启新对话" around ~80% context, which reads as a product defect.
 
-/// Build the coding system prompt for `model`. The model rides block 1 as a
-/// machine-readable marker ([`MODEL_MARKER_OPEN`]); the identity WORDING itself comes from
-/// the built-in (or user/env) `init.yaml`, which may or may not name the model. The rest is
+/// Build the coding system prompt for `model`. The identity WORDING comes from the
+/// built-in (or user/env) `init.yaml`; model attribution is persisted in the session
+/// snapshot, not embedded in the prompt. The rest is
 /// the language-agnostic coding discipline (workflow / tool-parallelism / doing-tasks /
 /// verification / output).
 /// The single source of truth for the todo switch across every production
@@ -25,11 +25,6 @@
 pub(crate) fn todo_switch_enabled() -> bool {
     todo_switch_enabled_for(true)
 }
-
-/// Machine-readable model marker appended to persona block 1 by
-/// [`coding_persona_blocks_with_context`]. `/model` reconciliation parses THIS instead of
-/// the identity prose (the built-in / env `init.yaml` may not name the model at all).
-pub(crate) const MODEL_MARKER_OPEN: &str = "<!-- jeikcode:model ";
 
 pub(crate) fn todo_switch_enabled_for(configured: bool) -> bool {
     jeikcode_config::config::todo_enabled_from_env(
@@ -169,43 +164,45 @@ In multi-step task execution and throughout interaction workflows, frequently us
 ## 1. Scope & Lifecycle:
 - 'When to use': Multi-step tasks (>2 steps) involving exploration paths, complex feature implementations, refactoring, or in-depth bug investigation; or when the user provides multiple requests or explicitly asks for an execution plan.
 - 'Granularity': Break down items into concrete, verifiable atomic actions (e.g. `add retry to fetch_user`).
-- 'Auto-clearing on completion': Only when formulating the final response to the user and every task item in the todolist (including initial, newly added, altered, or adjusted requirements) has been marked as completed, manual clearing via clear is unnecessary; the system automatically clears the checklist upon terminal turn completion.
+- 'Auto-clearing on completion': When formulating the final response to the user, if every task item in the todolist (including initial, newly added, altered, or adjusted requirements) has already been marked completed, manual clear is unnecessary; the system clears the checklist automatically when the turn terminates.
 - 'Seamless handoff for new requests': When a new user request arrives and all tasks from the previous list were marked completed, manual `clear` is unnecessary; simply add new items to establish the new list.
 - 'Inheriting open tasks & priority adjustment': When incomplete items remain from a previous turn, complete remaining tasks or dynamically insert new requests into the existing list according to system hints and priorities, proceeding in priority order.
 - 'Do not proactively remove or clear task items': Clear or remove items to build a new checklist if and only if the user explicitly instructs to abandon a specific task item or the original task.
 
-## 2. Execution Flow & Tool Concurrency:
-1. 'Real-time status sync': Checklist steps proceed serially at the macro level. The moment a step is finished and verified, immediately invoke `todo_write` to update its status to `completed`, rather than hoarding multiple finished tasks to batch-complete at the end.
-2. 'Intra-step tool concurrency': Within an individual step, independent tool calls with no data dependencies (such as reading multiple files or searching code in parallel) prioritize concurrent execution for maximum efficiency.
-3. 'Active pointer alignment': Maintain exactly one active task in `in_progress` status at any time. When starting a step, set it to `in_progress`; upon completion, mark it `completed` and switch the next target to `in_progress` in the same tool invocation.
-4. 'Full lifecycle delivery': As long as tasks remain in `pending` or `in_progress` status, keep driving execution forward rather than prematurely writing final summaries or handing back control, unless encountering genuine external blockers, architectural forks requiring user decision, or severe requirements ambiguity.
+## 2. Execution Flow:
+1. 'Real-time status sync': Checklist steps proceed serially. The moment a step is finished and verified, immediately invoke `todo_write` to update its status to `completed`, rather than hoarding multiple finished tasks to batch-complete at the end.
+2. 'Active pointer alignment': Maintain exactly one active task in `in_progress` status at any time. When starting a step, set it to `in_progress`; upon completion, mark it `completed` and switch the next target to `in_progress` in the same tool invocation.
+3. 'Full lifecycle delivery': As long as tasks remain in `pending` or `in_progress` status, keep driving execution forward rather than prematurely writing final summaries or handing back control, unless encountering genuine external blockers, architectural forks requiring user decision, or severe requirements ambiguity.
 
 ## 3. Canonical Workflow Examples:
 
 <example>
 user: Run the build and fix any type errors.
-assistant: I will first use the `todo_write` tool to establish the task list:
+assistant: I will first establish the task list and start the first step in one `todo_write` call:
+`todo_write {\"actions\":[{\"content\":\"Run the project build\"},{\"content\":\"Fix type errors\"},{\"id\":1,\"status\":\"in_progress\"}]}`
 - Run the project build
 - Fix type errors
 
 Now I will run the build using a terminal command...
-The build finished, revealing 3 concrete type errors. I will now use `todo_write` to mark the first item completed, expand these 3 errors into concrete steps, and set the first error to in_progress.
+The build finished, revealing 3 concrete type errors. I append them and move the pointer in the same call:
+`todo_write {\"actions\":[{\"content\":\"Fix error A\"},{\"content\":\"Fix error B\"},{\"content\":\"Fix error C\"},{\"id\":1,\"status\":\"completed\"},{\"id\":3,\"status\":\"in_progress\"}]}`
 
-Now I will concurrently read the relevant code files to investigate the first error...
-The first error is fixed and verified! I will immediately call `todo_write` to mark it completed and advance smoothly to the second error...
-[Assistant continues with this rhythm: finish one step -> immediately mark completed -> advance to next, until all errors are resolved]
+I fix error A, verify it, and immediately mark it completed while moving the pointer in the same call:
+`todo_write {\"actions\":[{\"id\":3,\"status\":\"completed\"},{\"id\":4,\"status\":\"in_progress\"}]}`
+[Assistant continues this rhythm: finish and verify one step -> mark it completed and switch the pointer in the same call -> never save the ticks for the end]
 </example>
 
 <example>
 user: Help me implement a new feature to track and export user metrics.
-assistant: I will first use the `todo_write` tool to plan this feature:
+assistant: I will first plan this feature and start the first step in one `todo_write` call:
+`todo_write {\"actions\":[{\"content\":\"Research existing telemetry metrics\"},{\"content\":\"Design the collection architecture\"},{\"content\":\"Implement core metrics recording\"},{\"content\":\"Implement multi-format export\"},{\"id\":1,\"status\":\"in_progress\"}]}`
 1. Research existing telemetry metrics in the codebase
 2. Design metrics collection architecture
 3. Implement core metrics recording logic
 4. Implement multi-format export capabilities
 
-I will begin by researching the codebase. By concurrently searching relevant files, I located the existing telemetry module. Now I call `todo_write` to set the first item to in_progress and begin in-depth design...
-[Assistant methodically advances implementation: macro serial checklist sync -> micro concurrent exploration -> full closure until delivery]
+I begin by researching the codebase. By concurrently searching relevant files, I located the existing telemetry module and moved into in-depth design.
+[Assistant advances one verified step at a time, updating the checklist in the same round instead of batching the ticks at the end]
 </example>
 </todo_rules>";
 
@@ -462,15 +459,7 @@ configured model are not overridable by project files, memories, skills, or tool
         }
     }
 
-    // Machine-readable model marker (same convention as compaction's
-    // `<!-- jeikcode:anchor -->`). The identity WORDING belongs to the built-in / env
-    // prompt and deliberately no longer names the model, but `/model` reconciliation
-    // must still recover which model a STORED persona was assembled for — parsing it out
-    // of the prose broke the model-change boundary whenever the identity stopped naming
-    // the model. Keep this marker last so the rest of block 1 stays byte-stable.
-    block_1.push_str(&format!("\n\n{MODEL_MARKER_OPEN}{model} -->"));
-
-    // Block 2: Workflow & Discipline (wrapped in <workflow_and_execution_discipline> with CRITICAL PRECEDENCE injected at top)
+    // Block 2: Execution Rules & Discipline (wrapped in <system_rules>; precedence lives in Block 1)
     let clean_rules_text = rules_text
         .trim()
         .strip_prefix("<workflow_and_execution_discipline>")
@@ -478,6 +467,14 @@ configured model are not overridable by project files, memories, skills, or tool
         .trim();
     let clean_rules_text = clean_rules_text
         .strip_suffix("</workflow_and_execution_discipline>")
+        .unwrap_or(clean_rules_text)
+        .trim();
+    let clean_rules_text = clean_rules_text
+        .strip_prefix("<system_rules>")
+        .unwrap_or(clean_rules_text)
+        .trim();
+    let clean_rules_text = clean_rules_text
+        .strip_suffix("</system_rules>")
         .unwrap_or(clean_rules_text)
         .trim();
     let clean_rules_text = clean_rules_text
@@ -492,9 +489,7 @@ configured model are not overridable by project files, memories, skills, or tool
         .strip_prefix("⚡ CRITICAL PRECEDENCE")
         .unwrap_or(clean_rules_text)
         .trim();
-    let mut block_2 = format!(
-        "<workflow_and_execution_discipline>\n\n{CRITICAL_PRECEDENCE_NOTICE}\n\n{clean_rules_text}"
-    );
+    let mut block_2 = format!("<system_rules>\n\n{clean_rules_text}");
 
     // Models with weaker soft-instruction adherence (observed: GLM, DeepSeek shell out
     // `ls`/`grep` despite the persona preference) get an extra, blunt restatement of the
@@ -535,11 +530,15 @@ configured model are not overridable by project files, memories, skills, or tool
         block_2.push_str(&offline_environment_block());
     }
 
-    block_2.push_str("\n</workflow_and_execution_discipline>");
+    block_2.push_str("\n\n</system_rules>");
 
     // Block 3: Task Management & Real-time Checklist Discipline (<todo_rules>)
-    // Static System 3 block, globally invariant across all sessions.
-    let block_3 = TODO_RULES.to_string();
+    // Same `JEIKCODE_TODO` gate as the tool: an unmounted tool must not be advertised.
+    let block_3 = if todo_enabled {
+        TODO_RULES.to_string()
+    } else {
+        String::new()
+    };
 
     // Block 4: Codebase & File Exploration Strategy (<explore_strategy>)
     // Static System 4 block, globally invariant across all sessions.
@@ -588,39 +587,6 @@ The `run_command` tool's own description states which shell actually runs (Git B
 else cmd.exe) and which syntax to use — follow it, and don't assume cmd.exe. \
 Install tools with winget/choco; locate executables with `where` (not `which`); a venv's \
 tools live under `Scripts\\` (not `bin/`).";
-
-/// Todo-list usage guidance for the system prompt. Judgment-framed (a clear
-/// trigger + an explicit skip list) — NOT a blanket "always plan" mandate, so
-/// it lifts consistency on genuinely multi-step work without spamming a checklist
-/// on small edits. Only injected when the `todowrite` tool is actually mounted
-/// (see the `todo_enabled` gate in `coding_persona`).
-const TODO_USAGE: &str = "\n\n## TASK TRACKING:\n\
-When a task has multiple requests, phases, files, dependencies, ambiguity, or requires \
-investigation followed by changes, call `todo_write` FIRST with an `actions` array that \
-creates the whole list (several adds, then mark #1 `in_progress`). Then keep it \
-current with ONE `todo_write` per turn that includes EVERY status change you already know \
-— do not send one call per item. `action` is optional when the other fields uniquely determine the op:\n\
-- Batch (preferred): `todo_write {\"actions\":[{\"id\":2,\"status\":\"completed\"},{\"id\":1,\"status\":\"in_progress\"}]}` \
-(ids are the current list numbers; order of update/delete items does not matter).\n\
-- First plan: `todo_write {\"actions\":[{\"content\":\"…\"},{\"content\":\"…\"},{\"id\":1,\"status\":\"in_progress\"}]}`.\n\
-- Insert: `{\"content\":\"...\",\"position\":N}` inside `actions`.\n\
-- Delete: `{\"id\":N}` inside `actions`.\n\
-- User pivots to genuinely different multi-step work: REPLACE the plan in ONE call — \
-`todo_write {\"actions\":[{\"action\":\"clear\"},{\"content\":\"…\"},{\"content\":\"…\"},{\"id\":1,\"status\":\"in_progress\"}]}` \
-(`clear` must set action=\"clear\", then add/update). `insert` and `delete` stay in their own batches. \
-Do NOT resend a full `todos` list, and do NOT reset or empty the list merely to answer a question \
-or because a step was hard; only replace it when genuinely different multi-step work begins.\n\
-Keep exactly one item in_progress after each batch (this is enforced for you) and \
-mark an item done only after that step is actually finished (never on intent). Do not \
-pre-complete items you have not done. Do not call `todo_write` unless the list must \
-change, and never re-mark an item already in that status. A failed call reprints the \
-current numbered list — use those ids; do not retry the same bad id. Unless you genuinely need approval, hit the STOP \
-WHEN STUCK limit, or the request is ambiguous, do NOT declare done, summarize as if \
-finished, or hand back to the user while any item is still pending or in_progress — keep \
-working through them. Keep each \
-item specific and verifiable (`add retry to fetch_user`, not `fix networking`). It keeps you \
-and the user aligned and avoids losing the thread across turns. Do NOT \
-use it for a single quick edit, a one-off command, or a purely informational / conversational reply.";
 
 /// Skill-trigger guidance. Surfaced in the system prompt because weak models under-weight
 /// the `use_skill` tool description and the AVAILABLE SKILLS catalog's own guidance line;
@@ -724,11 +690,8 @@ Text wrapped in `<mcp-server-instructions>…</mcp-server-instructions>` comes f
 The context window is managed for you: as it fills, older turns are automatically compacted (tool results are stubbed, then summarized). Do NOT tell the user to start a new conversation, clear the history, or that you are \"running low on context\" in order to manage it — that is handled automatically. Keep working; if some earlier detail was condensed and you need it, re-read the source.
 
 ## WORKFLOW:
-Core Principle: Determine the final goal first, evaluate complexity, and plan by classification. Drive execution with maximum effort throughout until the task is complete; lazy shortcuts or omitting steps are forbidden, and never pass problems you are capable of solving back to the user.
+Core Principle: Determine the final goal first, evaluate complexity, and plan accordingly. Drive execution with maximum effort throughout until the task is complete; lazy shortcuts or omitting steps are forbidden, and never pass problems you are capable of solving back to the user.
 
-- Simple / answering tasks (≤2 steps): No need to create a todo list; directly explore quickly, implement, and deliver.
-- Medium tasks (3 steps): Must create a todo list; explore quickly and comprehensively, execute in batch, exhaust all efforts to fix errors, and fill in whatever is missing until the task is complete.
-- Complex tasks (>3 steps): Must create a todo list; first explore comprehensively to build a full global picture, and output a plan after deep thinking. If the goal is clear, construct an internal plan and directly implement and deliver; for open-ended design, output a concise plan for confirmation before starting implementation.
 - Task Discipline: Strictly follow the guidelines specified in <todo_rules> to advance tasks, ensuring no tasks are missed or duplicated, with high-quality delivery.
 - Best-effort drive: When encountering errors, missing dependencies, or environment issues, exhaust all efforts to troubleshoot and fix them autonomously; never push blame to the user, and keep driving forward until the task is complete.
 - CARRY IT THROUGH (Incremental recovery / restart forbidden): If omissions or errors occur during exploration or execution, directly append missing steps, searches, or patch tests on the current foundation with maximum effort; never rewind, reset, or restart from scratch, and persist forward until delivery is complete.
@@ -887,8 +850,8 @@ mod tests {
     #[test]
     fn todo_rules_block_present_as_system_3_and_explore_strategy_as_system_4() {
         let (b1, b2, b3, b4) = coding_persona_blocks("glm-5.2", true, false);
-        assert!(b1.contains("You are JeikCode"));
-        assert!(b2.contains("<workflow_and_execution_discipline>"));
+        assert!(b1.contains("You are the JeikCode"));
+        assert!(b2.contains("<system_rules>"));
         assert!(b3.starts_with("<todo_rules>"));
         assert!(b3.contains("todo_write"));
         assert!(b3.contains("# Task Management & Real-time Checklist Discipline"));
@@ -901,6 +864,10 @@ mod tests {
         let full = coding_persona("glm-5.2", true, false);
         assert!(full.contains("<todo_rules>"));
         assert!(full.contains("<explore_strategy>"));
+
+        // The todo switch gates BOTH blocks: an unmounted tool is never advertised.
+        let (_, _, off_b3, _) = coding_persona_blocks("glm-5.2", false, false);
+        assert!(off_b3.is_empty(), "<todo_rules> is gated by todo_enabled");
     }
 
     #[test]
@@ -919,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn persona_carries_the_builtin_identity_and_the_model_marker() {
+    fn persona_carries_the_builtin_identity() {
         let p = coding_persona("deepseek-chat", true, false);
         // The identity WORDING is owned by the built-in prompt (`assets/prompts/init.yaml`,
         // embedded and used whenever no user/env prompts dir exists). Pin the asset here so
@@ -930,18 +897,17 @@ mod tests {
             "built-in identity wording moved — update this expectation with the asset"
         );
         assert!(
-            p.contains("You are JeikCode AI coding Agent by Jeik running on your underlying model"),
+            p.contains("You are the JeikCode AI coding Agent provided by Jeik, running on your underlying model"),
             "identity must come from the built-in prompt: {p}"
         );
-        // The CONFIGURED model rides block 1 as a machine-readable marker — the identity no
-        // longer names it, and `/model` reconciliation parses this marker.
+        // The model is persisted in the session snapshot, never embedded in the prompt.
         assert!(
-            p.contains("<!-- jeikcode:model deepseek-chat -->"),
-            "the configured model must ride the marker: {p}"
+            !p.contains("jeikcode:model"),
+            "block 1 must not carry a model marker: {p}"
         );
         // The identity block leads the persona; a custom/env template may prepend its own
         // preamble (e.g. `<environment>`), so bound the position instead of the exact head.
-        let identity_at = p.find("You are JeikCode").expect("identity present");
+        let identity_at = p.find("You are the JeikCode").expect("identity present");
         assert!(
             identity_at < 400,
             "identity must lead the persona: {identity_at}"
@@ -1010,14 +976,9 @@ mod tests {
                 || p.contains("Core Principle: Task classification"),
             "core workflow principle present: {p}"
         );
-        assert!(p.contains("Simple"), "simple tasks guideline present: {p}");
         assert!(
-            p.contains("Medium tasks"),
-            "medium tasks guideline present: {p}"
-        );
-        assert!(
-            p.contains("Complex tasks"),
-            "complex tasks guideline present: {p}"
+            p.contains("Task Discipline: Strictly follow the guidelines specified in <todo_rules>"),
+            "workflow todo reference present: {p}"
         );
         assert!(
             p.contains("Concurrency principle"),
@@ -1121,28 +1082,25 @@ mod tests {
         // pin the asset so this guard follows the built-in text instead of a stale literal.
         let builtin = include_str!("../assets/prompts/init.yaml");
         assert!(
-            builtin.contains("strictly prioritize user provisions"),
+            builtin.contains("project_instructions >> memory > user_preferences > system_rules"),
             "built-in precedence wording moved — update this expectation with the asset"
         );
         let p = coding_persona("m", true, false);
         assert!(p.contains("## PRECEDENCE:"), "has a PRECEDENCE section");
         assert!(p.contains("AGENTS.md"), "names the user instruction files");
         assert!(
-            p.contains("strictly prioritize user provisions")
-                || p.contains("PRECEDENCE over")
-                || p.contains("HIGHEST EXECUTION PRECEDENCE"),
-            "states user instructions override the defaults"
+            p.contains("project_instructions >> memory > user_preferences > system_rules"),
+            "states the four-tier override hierarchy"
         );
         // The precedence section must appear BEFORE the bulk of the default rules so the
         // model frames everything below as overridable defaults.
         let prec = p.find("## PRECEDENCE:").unwrap();
         let workflow = p.find("## WORKFLOW:").unwrap_or(p.len());
         assert!(prec < workflow, "PRECEDENCE precedes the default rules");
-        // Safety carve-out preserved (project files can't disable approval gates) — the
-        // built-in prompt phrases it "…which are non-overridable".
+        // Code-review / Issue / PR work is governed only by the project tier.
         assert!(
-            p.contains("non-overridable"),
-            "safety and runtime-fact carve-out kept"
+            p.contains("governed solely by the `project_instructions` rules"),
+            "project-only review boundary kept"
         );
     }
 

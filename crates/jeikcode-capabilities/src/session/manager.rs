@@ -439,6 +439,13 @@ pub struct SessionMeta {
     /// attributed to a provider/model written by older metadata.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub detached_unattributed_tokens: u64,
+    /// 最近一次成功压缩后的上下文占用（估算 prompt tokens）。
+    ///
+    /// 压缩保留最近窗口 + 摘要，但快照里最后一条助手消息的 usage 仍然是压缩前
+    /// 的数值；冷启动、刷新、异地端必须先看到压缩后的值，直到下一次真实 usage
+    /// 写入。新回合的 turn stat 或 undo 会清空它。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_context_tokens: Option<u64>,
     /// How this session was created. Defaults to [`SessionOrigin::Manual`] so
     /// that sessions written before this field existed deserialize correctly.
     #[serde(default)]
@@ -483,6 +490,7 @@ impl SessionMeta {
             turn_stats: Vec::new(),
             detached_model_usage: Vec::new(),
             detached_unattributed_tokens: 0,
+            compacted_context_tokens: None,
             origin: SessionOrigin::Manual,
             preferred_model: None,
             reasoning_effort: None,
@@ -1771,6 +1779,27 @@ impl SessionManager {
         })
     }
 
+    fn display_lock_path(&self, id: &str) -> SessionResult<PathBuf> {
+        self.path_for(id, "display.lock")
+    }
+
+    /// Serialize v4 display-log mutations. The display log has its own lock so a
+    /// turn-complete append and a display-only insert cannot read-modify-write
+    /// the same file concurrently. Lock order is always meta -> display.
+    pub(crate) fn with_display_lock<T>(
+        &self,
+        id: &str,
+        operation: impl FnOnce() -> SessionResult<T>,
+    ) -> SessionResult<T> {
+        validate_session_id(id)?;
+        fs::create_dir_all(&self.root).map_err(|e| io_at(&self.root, e))?;
+        let lock_path = self.display_lock_path(id)?;
+        reject_existing_non_regular(&lock_path)?;
+        let lock = open_lock_file(&lock_path)?;
+        fs2::FileExt::lock_exclusive(&lock).map_err(|e| io_at(&lock_path, e))?;
+        operation()
+    }
+
     fn with_meta_lock<T>(
         &self,
         id: &str,
@@ -2981,8 +3010,36 @@ impl SessionManager {
                 }
                 Err(error) => return Err(error),
             };
-            presentation.entries.push(entry);
-            self.write_presentation_unlocked(id, &presentation)
+            presentation.entries.push(entry.clone());
+            self.write_presentation_unlocked(id, &presentation)?;
+            // Keep v4 in lockstep when it exists. If this is a v3/no-v4
+            // session, the next read migrates/rebuilds from ui.json instead of
+            // deleting the v3 migration source here.
+            let anchor_turn_id = match entry.anchor {
+                DisplayAnchor::AtStart => 0,
+                DisplayAnchor::AfterTurn { turn_id } => turn_id,
+            };
+            let role = match entry.role {
+                PresentationRole::User => "user",
+                PresentationRole::Assistant => "assistant",
+            };
+            let content = match entry.role {
+                PresentationRole::User => {
+                    let meta = self.read_meta(id)?;
+                    super::user_text_for_display(
+                        std::path::Path::new(&meta.working_dir),
+                        &entry.text,
+                    )
+                }
+                PresentationRole::Assistant => entry.text.clone(),
+            };
+            let _ = self.insert_presentation_rows(
+                id,
+                anchor_turn_id,
+                &[(role.to_string(), content)],
+                None,
+            );
+            Ok(())
         })
     }
 
@@ -2994,6 +3051,7 @@ impl SessionManager {
         &self,
         id: &str,
         messages: &[(PresentationRole, String)],
+        client_request_id: Option<&str>,
     ) -> SessionResult<usize> {
         self.with_meta_lock(id, || {
             let meta = self.read_meta(id)?;
@@ -3013,15 +3071,55 @@ impl SessionManager {
                     turn_id: stat.turn_id,
                 })
                 .unwrap_or(DisplayAnchor::AtStart);
+            let anchor_turn_id = match anchor {
+                DisplayAnchor::AtStart => 0,
+                DisplayAnchor::AfterTurn { turn_id } => turn_id,
+            };
             let mut presentation = self.read_presentation(id)?;
-            presentation
-                .entries
-                .extend(messages.iter().map(|(role, text)| PresentationEntry {
+            // A retried HTTP append must not duplicate UI-only rows. v4 is the
+            // durable request ledger for the idempotency key.
+            if let Some(request_id) = client_request_id {
+                if self.display_has_presentation_request(id, anchor_turn_id, request_id) {
+                    return Ok((meta.message_count as usize)
+                        .checked_add(presentation.entries.len())
+                        .ok_or(SessionStoreError::TooLarge {
+                            kind: "catalog message count",
+                            limit: usize::MAX,
+                            actual: usize::MAX,
+                        })?);
+                }
+            }
+            let new_entries: Vec<PresentationEntry> = messages
+                .iter()
+                .map(|(role, text)| PresentationEntry {
                     anchor,
                     role: *role,
                     text: text.clone(),
-                }));
+                })
+                .collect();
+            presentation.entries.extend(new_entries.iter().cloned());
             self.write_presentation_unlocked(id, &presentation)?;
+
+            let rows: Vec<(String, String)> = new_entries
+                .iter()
+                .map(|entry| {
+                    let role = match entry.role {
+                        PresentationRole::User => "user",
+                        PresentationRole::Assistant => "assistant",
+                    };
+                    let content = match entry.role {
+                        PresentationRole::User => super::user_text_for_display(
+                            std::path::Path::new(&meta.working_dir),
+                            &entry.text,
+                        ),
+                        PresentationRole::Assistant => entry.text.clone(),
+                    };
+                    (role.to_string(), content)
+                })
+                .collect();
+            let _ = self
+                .insert_presentation_rows(id, anchor_turn_id, &rows, client_request_id)
+                .unwrap_or(false);
             (meta.message_count as usize)
                 .checked_add(presentation.entries.len())
                 .ok_or(SessionStoreError::TooLarge {
@@ -3046,6 +3144,53 @@ impl SessionManager {
             }
             Ok(removed)
         })
+    }
+
+    /// Remove raw-transcript turns that an explicit edit/delete/rewind removed
+    /// from the canonical snapshot. The transcript is the pre-compaction
+    /// display/recall source: leaving deleted turns there lets a later display
+    /// backfill resurrect them.
+    ///
+    /// `turn_id == 0` (legacy backfill records) is preserved: it predates the
+    /// stable turn identity and is always older than the mutation boundary.
+    pub fn retain_transcript_turns(
+        &self,
+        id: &str,
+        surviving_turn_ids: &BTreeSet<u64>,
+    ) -> SessionResult<usize> {
+        let path = self.jsonl_path(id)?;
+        let bytes = match self.read_bytes_bounded(&path, "transcript", MAX_JSONL_BYTES) {
+            Ok(bytes) => bytes,
+            Err(SessionStoreError::NotFound { .. }) => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut removed = 0usize;
+        for line in bytes.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let keep = match serde_json::from_slice::<serde_json::Value>(line) {
+                Ok(value) => match value.get("turn_id").and_then(|value| value.as_u64()) {
+                    Some(turn_id) => turn_id == 0 || surviving_turn_ids.contains(&turn_id),
+                    // A record without turn identity cannot be attributed; keep it
+                    // rather than destroying recall on a schema mismatch.
+                    None => true,
+                },
+                // A partial final line is preserved; the next append repairs it.
+                Err(_) => true,
+            };
+            if keep {
+                out.extend_from_slice(line);
+                out.push(b'\n');
+            } else {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.write_bytes_atomic(&path, &out, "transcript", MAX_JSONL_BYTES)?;
+        }
+        Ok(removed)
     }
 
     /// Drop native turn stats whose stable turn no longer survives. Legacy stats
@@ -3520,6 +3665,29 @@ fn scan_catalog_cached(sessions_root: &Path) -> CatalogScan {
     scan
 }
 
+/// Session-owned auxiliary artifacts live in the same project bucket, but their
+/// filename stem is `<session-id>.<role>`, not a session id. The generic
+/// `.json` / `.jsonl` fallbacks in [`scan_catalog_root`] would otherwise mint
+/// fake catalog sources such as `<id>.display` and report them as damaged
+/// legacy sessions or orphan sidecars.
+///
+/// `display.jsonl` is written at prompt admission, BEFORE a brand-new `/chat`
+/// session has a `.meta`. Those false diagnostics then prefix-matched the real
+/// id in the daemon lookup and blocked the first turn with
+/// "matches multiple damaged catalog entries".
+fn session_auxiliary_artifact(name: &str) -> bool {
+    const AUXILIARY_SUFFIXES: &[&str] = &[
+        ".display.idx.jsonl",
+        ".display.jsonl",
+        ".display.meta.json",
+        ".bashkw.json",
+        ".pending_permission.json",
+    ];
+    AUXILIARY_SUFFIXES
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
 fn scan_catalog_root(sessions_root: &Path) -> CatalogScan {
     let mut scan = CatalogScan::default();
     let mut sessions: BTreeMap<(String, String), CatalogAggregate> = BTreeMap::new();
@@ -3624,6 +3792,13 @@ fn scan_catalog_root(sessions_root: &Path) -> CatalogScan {
                     continue;
                 }
             };
+            // Display logs, their index/meta and other session-owned auxiliary
+            // files are not catalog sources. Skip them BEFORE the generic
+            // suffix parsing so a healthy session never produces fake
+            // `<id>.display` sidecars or `<id>.display.meta` legacy entries.
+            if session_auxiliary_artifact(&name) {
+                continue;
+            }
             let direct_sidecar_id = name
                 .strip_suffix(".snapshot")
                 .or_else(|| name.strip_suffix(".jsonl"))
@@ -4779,6 +4954,115 @@ mod tests {
             "presentation writes must not mutate provider/runtime context"
         );
         assert!(mgr.presentation_path("s1").unwrap().ends_with("s1.ui.json"));
+    }
+
+    #[test]
+    fn presentation_bulk_append_updates_v4_display() {
+        use crate::session::display::DisplayRecord;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        let mut meta = SessionMeta::new("s1", "/p", 1);
+        meta.owner = StorageOwner::Native;
+        meta.message_count = 2;
+        meta.turn_stats = vec![TurnStat {
+            after_message: 2,
+            position_valid: true,
+            turn_id: 1,
+            round_count: 1,
+            tool_call_count: 0,
+            duration_ms: 1,
+            total_tokens: 1,
+            errored: false,
+            used_tokens: 1,
+            ctx_window: 10,
+            model_usage: Vec::new(),
+        }];
+        mgr.write_meta(&meta).unwrap();
+        mgr.write_presentation("s1", &PresentationFile::default())
+            .unwrap();
+        let row = |id: &str, role: &str, content: &str, index: u32| DisplayRecord {
+            v: crate::session::display::DISPLAY_VERSION,
+            session_id: "s1".into(),
+            turn_id: 1,
+            index,
+            seq: 0,
+            role: role.into(),
+            id: Some(id.into()),
+            content: content.into(),
+            reasoning: None,
+            synthetic: false,
+            internal_origin: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            is_error: false,
+            images: Vec::new(),
+            created_at: Some(1),
+            elapsed_ms: None,
+        };
+        mgr.write_display_backfill(
+            "s1",
+            &[row("u1", "user", "Q", 0), row("a1", "assistant", "A", 1)],
+            1,
+        )
+        .unwrap();
+        mgr.append_presentation_at_latest_valid_turn(
+            "s1",
+            &[(PresentationRole::Assistant, "display only".into())],
+            None,
+        )
+        .unwrap();
+        let (display_meta, rows) = mgr.read_display("s1").unwrap().unwrap();
+        assert!(rows.iter().any(|row| {
+            row.internal_origin.as_deref() == Some("presentation") && row.content == "display only"
+        }));
+        assert_eq!(rows.last().unwrap().content, "display only");
+        assert_eq!(display_meta.last_seq, 3);
+        assert_eq!(
+            mgr.read_presentation("s1").unwrap().entries.len(),
+            1,
+            "ui.json remains the migration/rebuild source"
+        );
+
+        mgr.append_presentation_at_latest_valid_turn(
+            "s1",
+            &[(PresentationRole::Assistant, "second display-only".into())],
+            None,
+        )
+        .unwrap();
+        let (_, rows) = mgr.read_display("s1").unwrap().unwrap();
+        let presentation_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.internal_origin.as_deref() == Some("presentation"))
+            .collect();
+        assert_eq!(presentation_rows.len(), 2);
+        assert_ne!(presentation_rows[0].id, presentation_rows[1].id);
+        assert_eq!(presentation_rows[0].index, 2);
+        assert_eq!(presentation_rows[1].index, 3);
+
+        let first = mgr
+            .append_presentation_at_latest_valid_turn(
+                "s1",
+                &[(PresentationRole::Assistant, "idempotent note".into())],
+                Some("req-1"),
+            )
+            .unwrap();
+        let retried = mgr
+            .append_presentation_at_latest_valid_turn(
+                "s1",
+                &[(PresentationRole::Assistant, "idempotent note".into())],
+                Some("req-1"),
+            )
+            .unwrap();
+        assert_eq!(first, retried);
+        let (_, rows) = mgr.read_display("s1").unwrap().unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.internal_origin.as_deref() == Some("presentation"))
+                .count(),
+            3,
+            "a retried request must append exactly once"
+        );
     }
 
     #[test]
@@ -6334,6 +6618,64 @@ mod tests {
     }
 
     #[test]
+    fn catalog_ignores_session_auxiliary_artifacts_as_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let bucket = root.path().join("0123456789abcdef");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let id = "bae75c33-b339-49cd-9e0a-f8dd3ea881a6";
+        for name in [
+            format!("{id}.display.jsonl"),
+            format!("{id}.display.idx.jsonl"),
+            format!("{id}.display.meta.json"),
+            format!("{id}.bashkw.json"),
+            format!("{id}.pending_permission.json"),
+        ] {
+            std::fs::write(bucket.join(name), b"{}").unwrap();
+        }
+
+        let scan = SessionManager::scan_catalog(root.path());
+
+        assert!(scan.entries.is_empty());
+        assert!(
+            scan.diagnostics.is_empty(),
+            "session-owned auxiliaries must never become catalog sources: {:?}",
+            scan.diagnostics
+        );
+    }
+
+    #[test]
+    fn catalog_keeps_native_session_with_display_artifacts_single_and_clean() {
+        let root = tempfile::tempdir().unwrap();
+        let bucket = root.path().join("0123456789abcdef");
+        let mgr = SessionManager::with_root(&bucket);
+        let id = "display-native";
+        let lease = mgr.acquire_lease(id).unwrap();
+        let mut meta = SessionMeta::new(id, "/project", 1);
+        meta.owner = StorageOwner::Native;
+        meta.message_count = 1;
+        mgr.commit_native_import(
+            &lease,
+            Some(&snap(&["hello"])),
+            Some(&PresentationFile::default()),
+            &meta,
+        )
+        .unwrap();
+        mgr.append_display_user(id, "prompt-1", "hello", &[], None)
+            .unwrap();
+        let _ = mgr.read_display(id).unwrap();
+
+        let scan = SessionManager::scan_catalog(root.path());
+
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].id, id);
+        assert!(
+            scan.diagnostics.is_empty(),
+            "display sidecars of a healthy session are not damage: {:?}",
+            scan.diagnostics
+        );
+    }
+
+    #[test]
     fn logical_delete_requires_the_same_bucket_lease_and_keeps_lock_files() {
         let root = tempfile::tempdir().unwrap();
         let bucket_a = root.path().join("aaaaaaaaaaaaaaaa");
@@ -7098,6 +7440,7 @@ mod tests {
         mgr.append_presentation_at_latest_valid_turn(
             "s1",
             &[(PresentationRole::User, "concurrent append".into())],
+            None,
         )
         .unwrap();
 
@@ -7370,6 +7713,7 @@ mod tests {
             .append_presentation_at_latest_valid_turn(
                 "s1",
                 &[(PresentationRole::Assistant, "note".into())],
+                None,
             )
             .unwrap();
 
@@ -7392,6 +7736,7 @@ mod tests {
             .append_presentation_at_latest_valid_turn(
                 "s1",
                 &[(PresentationRole::Assistant, "note".into())],
+                None,
             )
             .unwrap_err();
 
@@ -7893,6 +8238,45 @@ mod tests {
         mgr.delete(&lease).unwrap();
 
         assert!(!mgr.has_inflight_snapshot(id));
+    }
+
+    #[test]
+    fn retain_transcript_turns_drops_removed_turns_and_keeps_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        let id = "retain-transcript";
+        let path = mgr.jsonl_path(id).unwrap();
+        let line = |turn_id: u64, user: &str| {
+            serde_json::json!({
+                "v": 1,
+                "ts": 1,
+                "iso": "x",
+                "session_id": id,
+                "turn_id": turn_id,
+                "user": user,
+                "assistant": "a",
+                "usage": {}
+            })
+            .to_string()
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                line(0, "legacy"),
+                line(1, "one"),
+                line(2, "two"),
+                line(3, "three")
+            ),
+        )
+        .unwrap();
+        let surviving = BTreeSet::from([1, 3]);
+        assert_eq!(mgr.retain_transcript_turns(id, &surviving).unwrap(), 1);
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains("\"turn_id\":0"), "legacy record stays");
+        assert!(out.contains("\"turn_id\":1"));
+        assert!(!out.contains("\"turn_id\":2"), "removed turn is gone");
+        assert!(out.contains("\"turn_id\":3"));
     }
 
     #[test]

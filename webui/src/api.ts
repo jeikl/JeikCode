@@ -3,6 +3,7 @@
 import type { Lang } from './i18n';
 import { stripExtendedPathPrefix } from './lib/displayPath.ts';
 import type { PermissionDecisionResult } from './lib/pendingPermission.ts';
+import type { ServerChatRuntime } from './lib/serverRuntime.ts';
 
 // Serve / webui bootstrap: `/?token=<uuid>` is handed off via HttpOnly cookie
 // AND left visible on first paint so we can stash it for Authorization.
@@ -479,39 +480,50 @@ export async function getHealth(): Promise<HealthInfo> {
 }
 
 /**
- * 断点续传游标：只有「回放帧」带 `seq`（回合缓冲序号）；实时帧不带。
+ * 断点续传游标：live 与 replay 帧都带同一个 session 级 `seq`；`replay`
+ * 只说明送达路径（live append / replay replace）。
  *
  * 前端把收到的最大 seq 存起来，重连时当作 `after_seq` 带回去，服务器只补之后的
  * 帧 —— 收到的每一帧都是新的，不再需要靠内容猜「这条画过没有」。
  */
 export interface SeqTaggedFrame {
   seq?: number;
+  /** True only for frames read from the turn replay snapshot; live frames use
+   *  the same seq but append instead of replacing. Absent on old daemons, where
+   *  seq presence is the fallback replay marker. */
+  replay?: boolean;
 }
 
 export type SSEEvent =
   | { type: 'runtime_info'; provider: string; model: string }
   | { type: 'session_assigned'; session_id: string }
   /** `after_seq = -1`（新会话）的握手帧：不补发，只告知起始游标。 */
-  | { type: 'session_start'; session_id?: string; cursor: number }
-  | { type: 'user'; content: string; session_id?: string; created_at?: number; message_id?: string; order?: number; turn_ordinal?: number; client_input_id?: string; images?: ImageData[] }
-  | { type: 'user_identified'; message_id: string; turn_ordinal?: number; absolute_index?: number }
-  | { type: 'text'; content: string; message_id?: string; part_id?: string; part_seq?: number }
-  | { type: 'reasoning'; content: string; message_id?: string; part_id?: string; part_seq?: number }
+  | { type: 'session_start'; session_id?: string; cursor: number; caps?: string[] }
+  | { type: 'user'; content: string; display_text?: string; internal?: boolean; editable?: boolean; session_id?: string; created_at?: number; message_id?: string; order?: number; turn_ordinal?: number; client_input_id?: string; images?: ImageData[] }
+  | { type: 'user_identified'; message_id: string; turn_ordinal?: number }
+  | { type: 'text'; content: string; message_id?: string; part_id?: string; part_seq?: number; part_rev?: number }
+  | { type: 'reasoning'; content: string; message_id?: string; part_id?: string; part_seq?: number; part_rev?: number }
   | { type: 'tool_start'; id: string; name: string; arguments: unknown; message_id?: string }
   | { type: 'tool_output'; id?: string; chunk: string }
   | { type: 'tool_progress'; id: string; progress: string }
+  /** 工具执行已返回（权威结果帧仍按发射顺序排队）。客户端用它先把行状态落定，
+   *  避免同一并发批次里耗时长工具未完成时，短工具陪着一起“运行中”。 */
+  | { type: 'tool_finished'; id: string; success: boolean }
   | { type: 'tool_result'; id: string; name: string; output: string; success: boolean; duration_ms: number }
   | { type: 'tokens'; prompt: number; completion: number; total: number; cached?: number; cached_estimated?: boolean; reasoning?: number }
   | { type: 'permission_request'; session_id: string; approval_id: string; tool_name: string; reason: string; call_id: string; arguments: unknown }
   | UserInputRequestEvent
   | { type: 'user_input_resolved'; request_id: number }
   | { type: 'steered'; count: number; inputs: { text: string; images?: ImageData[]; message_id?: string }[]; client_input_ids?: Array<string | null>; timestamps?: Array<number | null> }
-  | { type: 'done'; tokens: unknown; tool_calls: unknown; session_id: string; stop_reason?: string; message?: string; message_id?: string }
-  | { type: 'stopped' }
-  | { type: 'error'; message: string; message_id?: string }
+  | { type: 'done'; tokens: unknown; tool_calls: unknown; session_id: string; stop_reason?: string; message?: string; message_id?: string; operation_id?: string }
+  | { type: 'stopped'; session_id?: string; operation_id?: string }
+  | { type: 'error'; message: string; message_id?: string; operation_id?: string }
   | { type: 'warning'; message: string; message_id?: string; /** Live path: committed compaction's post-context tokens. */ tokens_after?: number }
   /** Committed compaction: update the context meter immediately (no usage follows). */
   | { type: 'context_compacted'; session_id?: string; tokens: number }
+  /** 已落盘的显示通知（如手动压缩边界）：带显示日志的权威 `id`/`display_seq`，
+   *  各端按同一序号摆成独立 system 行。 */
+  | { type: 'display_notice'; session_id?: string; id: string; display_seq: number; text: string; created_at?: number }
   | { type: 'persistence_warning'; message: string }
   | { type: 'rate_limited'; reset_at_display: string; reset_label: string; secs_until_reset: number | null; auto_resuming: boolean; server_message?: string | null; message_id?: string }
   // Artifact events: the daemon's ArtifactDetector strips fenced code blocks from
@@ -574,6 +586,7 @@ export interface SessionMutationEvent {
   text?: string;
   images?: ImageData[];
   delete_turn?: boolean;
+  truncate_after?: boolean;
   target_index?: number;
   target_message_id?: string;
   ts?: number;
@@ -711,6 +724,7 @@ export async function postChatSteer(
 export async function cancelChatSteer(
   sessionId: string,
   message?: string,
+  clientInputId?: string,
 ): Promise<void> {
   const resp = await apiFetch('/chat/steer/cancel', {
     method: 'POST',
@@ -718,6 +732,7 @@ export async function cancelChatSteer(
     body: JSON.stringify({
       session_id: sessionId,
       ...(message ? { message } : {}),
+      ...(clientInputId ? { client_input_id: clientInputId } : {}),
     }),
   }).catch(() => null);
   if (!resp || !resp.ok) {
@@ -765,6 +780,9 @@ export function getFsRawUrl(filePath: string): string {
 
 export interface QueuedMessageApiItem {
   id: number | string;
+  /** Stable client correlation id: the atomic queue-claim key and the eventual
+   *  prompt id. Minted when the card is created; absent on legacy cards. */
+  client_input_id?: string;
   text: string;
   images?: ImageData[];
   kind: 'queue' | 'steering' | 'steer';
@@ -793,6 +811,43 @@ export async function saveChatQueue(sessionId: string, items: QueuedMessageApiIt
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ session_id: sessionId, items }),
+  }).catch(() => {});
+}
+
+/** Atomically take ownership of one queued card. Exactly one tab can win. */
+export async function claimChatQueue(
+  sessionId: string,
+  clientInputId: string,
+  item?: QueuedMessageApiItem,
+): Promise<boolean> {
+  const resp = await apiFetch('/chat/queue/claim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      session_id: sessionId,
+      client_input_id: clientInputId,
+      ...(item ? { item } : {}),
+    }),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = (await resp.json().catch(() => ({}))) as { claimed?: boolean };
+  return data.claimed === true;
+}
+
+/** Return a claim when delivery failed; the card is restored for a later drain. */
+export async function releaseChatQueue(
+  sessionId: string,
+  clientInputId: string,
+  item?: QueuedMessageApiItem,
+): Promise<void> {
+  await apiFetch('/chat/queue/release', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      session_id: sessionId,
+      client_input_id: clientInputId,
+      ...(item ? { item } : {}),
+    }),
   }).catch(() => {});
 }
 
@@ -857,6 +912,22 @@ export async function getActiveChatSessions(): Promise<string[]> {
     throw new Error('active chats returned an invalid payload');
   }
   return body;
+}
+
+/**
+ * 会话级服务端权威运行态（`chat` / `live` / `loop` / `goal` 并集）。
+ *
+ * `/chat/active` 只是一个 id 列表，且口径只覆盖「有回合在执行」；`/loop` 在两次
+ * 唤醒之间没有执行中的回合，却仍有控制器在续轮。WebUI 的 busy 只认这份快照，
+ * 不再用本地启发式猜「是不是已经停下来了」。
+ */
+export async function getChatRuntime(sessionId: string): Promise<ServerChatRuntime> {
+  const resp = await apiFetch(
+    `/chat/runtime?session_id=${encodeURIComponent(sessionId)}`,
+    { headers: authHeaders() },
+  );
+  if (!resp.ok) throw new Error(`chat runtime failed: ${resp.status}`);
+  return (await resp.json()) as ServerChatRuntime;
 }
 
 /** Unanswered interactive prompts for an active turn (Build / AcceptEdits / Plan).
@@ -1235,6 +1306,20 @@ export interface SessionMessage {
   /** Stable per-message identity from the pipeline (`Message.id`). Absent on
    *  older daemons; UI then falls back to positional identity. */
   id?: string;
+  /** Durable client-input correlation id (`SessionInput.id`) for user rows.
+   *  Lets a reloaded bubble match its queued steer card by identity. */
+  client_input_id?: string;
+  /** v4 display order cursor (`seq`). Additive; absent for snapshot-only rows. */
+  seq?: number;
+  /** Server-rendered user-facing text (already unwrapped / stripped). */
+  display_text?: string;
+  /** Server-authored visibility flag: hide this row from the transcript. */
+  internal?: boolean;
+  /** Server-authored mutation permission; false = archive/presentation row. */
+  editable?: boolean;
+  /** Persisted kernel turn id (display/session detail). Absent on older daemons
+   *  and backfilled rows; the timer falls back to steer-root penetration then. */
+  turn_id?: number;
   /** Model reasoning/thinking for assistant messages (persisted losslessly;
    *  previously dropped at the API boundary so a reload lost all earlier
    *  thinking). Rendered as a collapsible thinking block before the text. */
@@ -1264,6 +1349,10 @@ export interface SessionTurnOutline {
   id?: string;
   /** Short rail label. Full question text comes from the loaded messages. */
   label: string;
+  /** Admitted but not yet folded/persisted (durable input log). */
+  pending?: boolean;
+  /** Admission sequence from the input log. */
+  seq?: number;
 }
 
 export interface SessionDetail {
@@ -1274,6 +1363,14 @@ export interface SessionDetail {
   updated_at: number;
   /** Total messages on disk (not the returned window size). */
   message_count: number;
+  /** 会话权威版本（内核 `cache_epoch`）。每次显式变更（编辑/删除/回溯）自增。
+   *  客户端用它给缓存写入设闸门：旧快照永远不能覆盖新快照。旧 daemon 缺省为 0。 */
+  revision?: number;
+  /** Identity-first paging cursor (oldest display seq in this window). */
+  cursor?: { oldest_seq?: number; total: number };
+  /** 本 daemon 的能力集（`id` / `revision` / `seq` / `session_mutated`）。
+   *  声明了 `id` 就关闭客户端所有文本兜底。旧 daemon 缺省为空。 */
+  /** 旧 daemon 的兼容声明字段已废弃；新契约始终身份优先。 */
   /** Index of `messages[0]` in the full transcript. Absent on older daemons.
    *  When `pinned_user_index` is set, `messages[0]` is that pinned question and
    *  `offset` is the index of `messages[1]`. */
@@ -1283,6 +1380,11 @@ export interface SessionDetail {
   pinned_user_index?: number;
   /** All user questions for the right-rail outline. Independent of the message window. */
   turns?: SessionTurnOutline[];
+  /** Daemon capability negotiation (`id`, `revision`, `terminal_operation_id`, ...). */
+  caps?: string[];
+  /** Highest durable input-log sequence. Pass back as `after_seq` to fetch only
+   *  newly admitted prompt/steer rows. */
+  input_cursor?: number;
   messages: SessionMessage[];
   /** Per-session model selection. Absent on older sessions. */
   preferred_model?: string | null;
@@ -1331,6 +1433,19 @@ export async function listProjectSessions(projectHash: string): Promise<SessionM
   if (!resp.ok) throw new Error(`list project sessions failed: ${resp.status}`);
   const list: SessionMeta[] = await resp.json();
   return list.map((m) => ({ ...m, project_hash: projectHash }));
+}
+
+/**
+ * 广播「该会话已被用户打开」：其它标签页 / 浏览器收到 `session_seen` 后
+ * 熄灭该会话的绿色「刚完成」徽标。徽标由全局 `activity` 点亮，
+ * 熄灭必须走同一条全局总线，否则只清当前实例会留下幽灵勾。
+ */
+export async function postSessionSeen(sessionId: string): Promise<void> {
+  const resp = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/seen`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error(`mark session seen failed: ${resp.status}`);
 }
 
 // Cross-project session search by name, UNCAPPED. Backs the search modal so it
@@ -1444,8 +1559,10 @@ export async function patchSessionMessage(
     expected_text?: string;
     expected_message_id?: string;
     expected_role?: 'user' | 'assistant';
+    /** Edit = rewrite: remove every message after this row from context/disk. */
+    truncate_after?: boolean;
   },
-): Promise<{ success: boolean; revision: number; source_index: number }> {
+): Promise<{ success: boolean; revision: number; source_index: number; message_count?: number; truncated?: boolean }> {
   const resp = await apiFetch(
     `/projects/${encodeURIComponent(projectHash)}/sessions/${encodeURIComponent(sessionId)}/messages/${index}`,
     {
@@ -2342,16 +2459,38 @@ const sessionDetailEtagCache = new Map<
 export async function getSession(
   projectHash: string,
   sessionId: string,
-  opts?: { tail?: number; offset?: number; limit?: number; signal?: AbortSignal },
+  opts?: {
+    tail?: number;
+    offset?: number;
+    limit?: number;
+    afterSeq?: number;
+    /** Older-history cursor (exclusive): rows with `seq < beforeSeq`. */
+    beforeSeq?: number;
+    /** Jump to the page containing this record id. */
+    around?: string;
+    /** Outline-only: skip the transcript (server returns turns + metadata). */
+    turnsOnly?: boolean;
+    signal?: AbortSignal;
+  },
 ): Promise<SessionDetail> {
   const q = new URLSearchParams();
   if (opts?.tail != null) q.set('tail', String(opts.tail));
   if (opts?.offset != null) q.set('offset', String(opts.offset));
   if (opts?.limit != null) q.set('limit', String(opts.limit));
+  if (opts?.afterSeq != null) q.set('after_seq', String(opts.afterSeq));
+  if (opts?.beforeSeq != null) q.set('before_seq', String(opts.beforeSeq));
+  if (opts?.around != null) q.set('around', opts.around);
+  if (opts?.turnsOnly) q.set('turns_only', 'true');
   const qs = q.toString();
   const path = `/projects/${projectHash}/sessions/${sessionId}`;
   const requestPath = qs ? `${path}?${qs}` : path;
-  const cached = sessionDetailEtagCache.get(requestPath);
+  // First paint (`tail`), live deltas (`after_seq`) and the outline-only read must
+  // be FRESH. Reusing a cached detail body via 304 can pin an older outline/window
+  // when the display log changed without bumping the client-visible ETag — the
+  // "only 2-3 turns until I switch sessions" bug. Paged history
+  // (`offset`/`limit`) may still use the conditional cache.
+  const cacheable = opts?.tail == null && opts?.afterSeq == null && opts?.turnsOnly !== true;
+  const cached = cacheable ? sessionDetailEtagCache.get(requestPath) : undefined;
   const headers = authHeaders();
   if (cached?.etag) headers['If-None-Match'] = cached.etag;
   const resp = await apiFetch(requestPath, {
@@ -2370,7 +2509,7 @@ export async function getSession(
   }
   const detail = (await resp.json()) as SessionDetail;
   const etag = resp.headers.get('ETag');
-  if (etag) {
+  if (cacheable && etag) {
     sessionDetailEtagCache.delete(requestPath);
     sessionDetailEtagCache.set(requestPath, { etag, detail });
     while (sessionDetailEtagCache.size > SESSION_DETAIL_CACHE_MAX) {
@@ -2408,7 +2547,30 @@ export type GlobalWireEvent =
   | { type: 'sync' }
   | { type: 'session_upsert'; session: SessionMetaWithProject }
   | { type: 'session_deleted'; session_id: string; project_hash: string }
+  /** 某会话已被某个实例打开/查看：其它实例熄灭该会话的「刚完成」徽标。 */
+  | { type: 'session_seen'; session_id: string }
+  /**
+   * 会话转录被显式变更（编辑 / 删除单条 / 回溯 / 压缩）：
+   * 全局失效信号，只带 revision。客户端据此作废本地缓存（低版本）并对
+   * 正在显示的会话做一次定向重取；**绝不**用增量帧套用 mutation。
+   */
+  | { type: 'session_mutated'; session_id: string; revision: number }
+  /** 一条展示记录已落盘（压缩边界/警告）；客户端做一次定向磁盘对账。 */
+  | { type: 'display_appended'; session_id: string }
   | { type: 'activity'; session_id: string; running: boolean; terminal?: 'completed' | 'stopped' | 'failed'; status?: string }
+  /**
+   * 执行态的权威快照（带 revision/owner/phase）。新客户端只按它更新
+   * Compacting/Busy；`activity` 仅作旧客户端兼容与侧栏活动列表。
+   */
+  | {
+      type: 'runtime_activity';
+      session_id: string;
+      revision: number;
+      running: boolean;
+      phase?: string | null;
+      phase_started_at?: number | null;
+      owner?: string | null;
+    }
   /** 该会话弹出了审批/提问卡：对该会话做一次定向 pending 拉取（单会话小请求）。 */
   | { type: 'review_asked'; session_id: string }
   /** 待交互已解决：按 id 就地从所有实例的通知卡片中移除。 */
@@ -2557,124 +2719,6 @@ export async function streamGlobalEvents(
       window.removeEventListener('online', checkWakeup);
     }
   }
-}
-
-export type LiveWireEvent =
-  | { type: 'snapshot'; messages: SessionMessage[]; message_count?: number; offset?: number; session_id: string; session_name?: string; project_hash: string; provider: string; mode: ApprovalMode; working_dir?: string }
-  | { type: 'provider'; provider: string }
-  | { type: 'mode'; mode: ApprovalMode }
-  | { type: 'user'; text: string; images?: ImageData[]; client_input_id?: string; message_id?: string }
-  | { type: 'user_identified'; message_id: string; turn_ordinal?: number; absolute_index?: number }
-  | { type: 'text'; content: string; message_id?: string; part_id?: string; part_seq?: number }
-  | { type: 'reasoning'; content: string; message_id?: string; part_id?: string; part_seq?: number }
-  | { type: 'tool_start'; id: string; name: string; arguments: string; message_id?: string }
-  | { type: 'tool_output'; id: string; chunk: string }
-  | { type: 'tool_progress'; id: string; progress: string }
-  | { type: 'tool_result'; id: string; name: string; output: string; success: boolean; duration_ms: number }
-  | { type: 'tokens'; prompt: number; completion: number; total: number; cached?: number }
-  | { type: 'state'; running: boolean; stop_reason?: string; message?: string }
-  | { type: 'error'; message: string }
-  | { type: 'warning'; message: string; message_id?: string; /** Live path: committed compaction's post-context tokens. */ tokens_after?: number }
-  | { type: 'context_compacted'; session_id?: string; tokens: number }
-  | { type: 'persistence_warning'; message: string }
-  | { type: 'rate_limited'; reset_at_display: string; reset_label: string; secs_until_reset: number | null; auto_resuming: boolean; server_message?: string | null; message_id?: string }
-  | { type: 'permission_request'; session_id?: string; runtime_instance_id: string; generation: number; request_id: number; tool_name: string; reason: string; call_id: string; arguments: string }
-  | { type: 'user_input_request'; session_id?: string; request_id: number; header: string; question: string; mode: 'single' | 'multiple' | 'text'; options: { label: string; description?: string }[] }
-  | { type: 'user_input_resolved'; request_id: number }
-  | { type: 'steered'; count: number; inputs: { text: string; images: ImageData[]; message_id?: string }[]; client_input_ids: Array<string | null> }
-  | { type: 'session_switched'; session_id: string }
-  | { type: 'session_renamed'; session_id: string; name: string }
-  | { type: 'session_status'; session_id?: string; status: string }
-  | { type: 'working_dir'; working_dir: string }
-  | { type: 'command_output'; text: string };
-
-
-export async function postLiveMessage(
-  message: string,
-  images?: ImageData[],
-  provider?: string,
-  sessionId?: string | null,
-  clientInputId?: string,
-): Promise<{ disposition: 'started' | 'steered'; generation: number; turn_id: number }> {
-  const resp = await apiFetch('/live/message', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({
-      message,
-      ...(images && images.length ? { images } : {}),
-      ...(provider ? { provider } : {}),
-      ...(sessionId ? { session_id: sessionId } : {}),
-      ...(clientInputId ? { client_input_id: clientInputId } : {}),
-    }),
-  });
-  if (!resp.ok) throw new Error(`send live message failed: ${resp.status}`);
-  const body = await resp.json() as {
-    accepted?: boolean;
-    disposition?: 'started' | 'steered';
-    generation?: number;
-    turn_id?: number;
-    error?: string;
-  };
-  if (!body.accepted) throw new Error(body.error ?? 'live runtime rejected the message');
-  // Compatibility with a daemon from before typed submit receipts. The old
-  // response only said `accepted:true`; treating it as started avoids rolling
-  // back an input the server has already accepted and duplicating it on retry.
-  if (body.disposition === undefined) {
-    return { disposition: 'started', generation: 0, turn_id: 0 };
-  }
-  if (
-    (body.disposition !== 'started' && body.disposition !== 'steered') ||
-    typeof body.generation !== 'number' ||
-    typeof body.turn_id !== 'number'
-  ) {
-    throw new Error('live runtime returned an invalid submit receipt');
-  }
-  return {
-    disposition: body.disposition,
-    generation: body.generation,
-    turn_id: body.turn_id,
-  };
-}
-
-export async function postLiveStop(sessionId?: string | null): Promise<void> {
-  const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
-  const resp = await apiFetch(`/live/stop${params}`, {
-    method: 'POST',
-    headers: authHeaders(),
-  });
-  if (!resp.ok) throw new Error(`stop live chat failed: ${resp.status}`);
-  const body = await resp.json() as { accepted?: boolean };
-  if (!body.accepted) throw new Error('live runtime rejected the stop request');
-}
-
-/** Sync-mode manual compaction: dispatch a compaction against the shared live
- *  runtime. `accepted:false` means no live runtime is bound (nothing to compact). */
-export async function postLiveCompact(): Promise<{ accepted: boolean }> {
-  const resp = await apiFetch('/live/compact', {
-    method: 'POST',
-    headers: authHeaders(),
-  });
-  if (!resp.ok) throw new Error(`live compact failed: ${resp.status}`);
-  const body = await resp.json() as { accepted?: boolean };
-  return { accepted: body.accepted === true };
-}
-
-/** Ask the bound native runtime to resume an existing session. */
-export async function postLiveSwitchSession(
-  sessionId: string,
-): Promise<{ ok: boolean; activeTurn: boolean; error?: string }> {
-  const resp = await apiFetch('/live/switch_session', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ session_id: sessionId }),
-  });
-  if (!resp.ok) throw new Error(`switch live session failed: ${resp.status}`);
-  const body = await resp.json() as { ok?: boolean; active_turn?: boolean; error?: string };
-  return {
-    ok: body.ok === true,
-    activeTurn: body.active_turn === true,
-    error: body.error,
-  };
 }
 
 /** Sync-mode model switch: notify the daemon immediately when the dropdown
@@ -2830,35 +2874,6 @@ export async function postLiveReasoningEffort(
   if (!resp.ok) throw new Error(`set live reasoning effort failed: ${resp.status}`);
   const body = await resp.json() as { ok?: boolean; error?: string };
   if (!body.ok) throw new Error(body.error ?? 'live runtime rejected reasoning effort');
-}
-
-export async function postLivePermission(
-  decision: 'allow' | 'deny' | 'always_allow' | 'allow_persist',
-  toolName?: string,
-  sessionId?: string | null,
-  runtimeInstanceId?: string | null,
-  generation?: number,
-  requestId?: number,
-): Promise<{ accepted: boolean }> {
-  if (!sessionId || !runtimeInstanceId || generation === undefined || requestId === undefined) {
-    throw new Error('missing live approval identity');
-  }
-  const resp = await apiFetch('/live/permission', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({
-      decision,
-      tool_name: toolName,
-      session_id: sessionId,
-      runtime_instance_id: runtimeInstanceId,
-      generation,
-      request_id: requestId,
-    }),
-  });
-  if (!resp.ok) throw new Error(`answer live permission failed: ${resp.status}`);
-  const body = await resp.json() as { accepted?: boolean };
-  if (!body.accepted) throw new Error('live runtime did not accept permission');
-  return { accepted: true };
 }
 
 export interface UserInputQuestion {
@@ -3420,7 +3435,15 @@ export async function fetchFsTree(path?: string): Promise<FsTreeResponse> {
   return resp.json();
 }
 
-export async function fetchFsRead(path: string, cwd?: string): Promise<{ path: string; content: string; success: boolean }> {
+export interface FsReadResult {
+  path: string;
+  content: string;
+  success: boolean;
+  size?: number;
+  modified_ms?: number | null;
+}
+
+export async function fetchFsRead(path: string, cwd?: string): Promise<FsReadResult> {
   const params = new URLSearchParams({ path });
   if (cwd) params.set('cwd', cwd);
   const resp = await apiFetch(`/fs/read?${params.toString()}`, {
@@ -3433,7 +3456,34 @@ export async function fetchFsRead(path: string, cwd?: string): Promise<{ path: s
   return resp.json();
 }
 
-export async function fetchFsWrite(path: string, content: string): Promise<{ success: boolean; message?: string }> {
+export interface FsStatResult {
+  path: string;
+  exists: boolean;
+  is_file: boolean;
+  size: number;
+  modified_ms: number | null;
+}
+
+/** 轻量文件戳：编辑器轮询它判断磁盘是否变化，变化时才拉全文。 */
+export async function fetchFsStat(
+  path: string,
+  cwd?: string,
+  signal?: AbortSignal,
+): Promise<FsStatResult> {
+  const params = new URLSearchParams({ path });
+  if (cwd) params.set('cwd', cwd);
+  const resp = await apiFetch(`/fs/stat?${params.toString()}`, {
+    headers: authHeaders(),
+    signal,
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function fetchFsWrite(
+  path: string,
+  content: string,
+): Promise<{ success: boolean; message?: string; size?: number; modified_ms?: number | null }> {
   const resp = await apiFetch('/fs/write', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },

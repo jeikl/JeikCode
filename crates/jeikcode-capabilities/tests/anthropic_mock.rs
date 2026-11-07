@@ -248,10 +248,12 @@ async fn multi_round_signed_thinking_is_echoed_back_verbatim() {
         round2.contains("I should check the time."),
         "and the thinking text: {round2}"
     );
-    // The request also enables thinking at the top level.
+    // The request also enables thinking at the top level: modern Claude uses
+    // adaptive thinking, older models use enabled + budget_tokens.
     assert!(
-        round2.contains("\"thinking\":{\"budget_tokens\":")
-            && round2.contains("\"type\":\"enabled\""),
+        round2.contains("\"thinking\":{\"type\":\"adaptive\"}")
+            || (round2.contains("\"thinking\":{\"budget_tokens\":")
+                && round2.contains("\"type\":\"enabled\"")),
         "thinking enabled: {round2}"
     );
 }

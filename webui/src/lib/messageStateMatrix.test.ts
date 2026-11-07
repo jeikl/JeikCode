@@ -4,9 +4,9 @@ import {
   mergeOlderMessages,
   resolveHistoryOffset,
   cachedHeadIsContiguous,
-  sanitizeCanvasMessages,
   spliceAuthoritativeDiskTail,
 } from './sessionProjection.ts';
+import { normalizeCanvas } from './canvas/canvasStore.ts';
 import {
   mergeDiskWithUnpersistedTail,
   transcriptHasInFlightAssistant,
@@ -322,7 +322,7 @@ test('event-order matrix: steer/tool/reconcile in several interleavings', () => 
       }
     }
 
-    const sanitized = sanitizeCanvasMessages(canvas);
+    const sanitized = normalizeCanvas(canvas);
     const ids = sanitized.map((row) => row.id).filter((id): id is string => !!id);
     assert.equal(new Set(ids).size, ids.length, `duplicate in order ${order.join('>')}`);
     assert.equal(
@@ -366,7 +366,8 @@ test('after a compacted disk snapshot, a new steer keeps the full display histor
   assert.ok(toolIndex > steerIndex);
 });
 
-test('cache schema version is 6, so pre-fix canvases are not trusted', async () => {
-  const { CACHE_DISPLAY_VERSION } = await import('./sessionCache.ts');
-  assert.equal(CACHE_DISPLAY_VERSION, 6);
+test('cache schema version is 14, so pre-transient canvases are not trusted', async () => {
+  const { CACHE_DISPLAY_VERSION, CACHE_SCHEMA } = await import('./sessionCache.ts');
+  assert.equal(CACHE_SCHEMA, 14);
+  assert.equal(CACHE_DISPLAY_VERSION, CACHE_SCHEMA);
 });

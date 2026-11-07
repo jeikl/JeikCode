@@ -774,3 +774,79 @@ async fn different_keys_are_not_merged() {
         "distinct files stay independent"
     );
 }
+
+// GUARD 5: A fast call in a concurrent batch must ANNOUNCE its completion before
+// the slow sibling's authoritative result lands.
+//
+// Phase ③ applies results in emission (plan) order — provider pairing and
+// prefix-cache determinism require it — so without `ToolFinished` a 10 ms call
+// sharing a batch with a 500 ms call would look "running" until the slow one
+// returns. The DRIVER must be able to settle the short row (√) early while the
+// authoritative `ToolResult` frames keep their emission order.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn fast_call_finishes_before_the_slow_sibling_result() {
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(ConcurrencyProbeTool {
+        name: "slow",
+        inflight: inflight.clone(),
+        peak: peak.clone(),
+        delay_ms: 500,
+    }));
+    reg.register(Arc::new(ConcurrencyProbeTool {
+        name: "fast",
+        inflight,
+        peak,
+        delay_ms: 10,
+    }));
+    let provider = Arc::new(MockProvider::new(vec![
+        vec![
+            StreamEvent::ToolCall(tc("1", "slow")),
+            StreamEvent::ToolCall(tc("2", "fast")),
+            StreamEvent::Done { truncated: false },
+        ],
+        vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::Done { truncated: false },
+        ],
+    ]));
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["slow", "fast"]))
+        .build()
+        .spawn();
+    handle.commands.send(send("go")).unwrap();
+
+    // (“finished” | “result”, call_id) in arrival order.
+    let mut seq: Vec<(&'static str, String)> = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(ev) = handle.events.recv().await {
+            match ev {
+                AgentEvent::ToolFinished { call_id, .. } => seq.push(("finished", call_id)),
+                AgentEvent::ToolResult { result } => seq.push(("result", result.call_id)),
+                AgentEvent::TurnComplete { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
+
+    let pos = |kind: &str, id: &str| seq.iter().position(|(k, i)| *k == kind && i == id);
+    let fast_settled = pos("finished", "2").expect("the fast call must emit ToolFinished");
+    let slow_result = pos("result", "1").expect("the slow call must emit its ToolResult");
+    assert!(
+        fast_settled < slow_result,
+        "the fast call must settle before the slow sibling's result arrives: {seq:?}"
+    );
+    let results: Vec<&str> = seq
+        .iter()
+        .filter(|(kind, _)| *kind == "result")
+        .map(|(_, id)| id.as_str())
+        .collect();
+    assert_eq!(
+        results,
+        vec!["1", "2"],
+        "authoritative results must keep emission order: {seq:?}"
+    );
+}

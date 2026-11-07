@@ -13,8 +13,10 @@
 
 /* === Base layout === */
 html {
-  min-height: calc(100vh * var(--app-zoom-inv, 1));
-  height: calc(100vh * var(--app-zoom-inv, 1));
+  /* 视口高度统一由 visualViewport 驱动：软键盘收起后不会残留一条等于浏览器
+     工具栏高度的底部黑边，也不会因键盘期间的可视区平移而裁掉顶部。 */
+  min-height: calc(var(--app-vvh, 100vh) * var(--app-zoom-inv, 1));
+  height: calc(var(--app-vvh, 100vh) * var(--app-zoom-inv, 1));
   min-width: calc(100vw * var(--app-zoom-inv, 1));
   width: calc(100vw * var(--app-zoom-inv, 1));
 }
@@ -35,8 +37,8 @@ body {
 
 #app {
   display: flex;
-  height: calc(100dvh * var(--app-zoom-inv, 1));
-  min-height: calc(100dvh * var(--app-zoom-inv, 1));
+  height: calc(var(--app-vvh, 100dvh) * var(--app-zoom-inv, 1));
+  min-height: calc(var(--app-vvh, 100dvh) * var(--app-zoom-inv, 1));
   width: 100%;
   max-width: 100%;
   overflow: hidden;
@@ -2390,6 +2392,22 @@ body {
   color: var(--app-primary-foreground);
   box-shadow: inset 2px 0 0 var(--app-command-menu-active-accent);
 }
+/* Durable input admitted but not yet folded/persisted: show it, but mark it
+   visibly as in-flight instead of pretending it is a settled question. */
+.turn-nav-item.pending {
+  opacity: 0.72;
+  font-style: italic;
+}
+.turn-nav-item.pending::after {
+  content: '•';
+  margin-left: 6px;
+  color: var(--app-brand);
+  animation: turn-nav-pending-pulse 1.2s ease-in-out infinite;
+}
+@keyframes turn-nav-pending-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
 
 /* ============================================================================
    Right Inspector Multi-Tab Panel & Git Panel
@@ -3108,6 +3126,7 @@ body {
   cursor: col-resize;
   z-index: 10;
   user-select: none;
+  touch-action: none;
   transition: background-color 0.15s ease;
 }
 .right-panel-resizer:hover,
@@ -3130,6 +3149,7 @@ body {
 .right-panel-tabs {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 4px;
 }
 
@@ -3160,18 +3180,19 @@ body {
 
 .tab-badge {
   position: absolute;
-  top: 2px;
-  right: 2px;
-  min-width: 12px;
-  height: 12px;
-  padding: 0 2px;
-  border-radius: 6px;
+  top: -3px;
+  right: -3px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
   background: var(--app-brand, #3b82f6);
   color: #fff;
   font-size: 9px;
   font-weight: 700;
-  line-height: 12px;
+  line-height: 14px;
   text-align: center;
+  white-space: nowrap;
 }
 
 .right-panel-title {
@@ -3854,6 +3875,34 @@ body {
   flex-direction: column;
   align-items: flex-start;
   color: var(--app-primary-foreground);
+  /*
+   * 这里曾经加过 `content-visibility: auto` 做长会话离屏优化，已回退。
+   * 实测它会在内容高度剧烈变化时（代码梅闭合、表格出现）把节点当成离屏内容
+   * 跳过绘制，表现为「代码框闭合那一瞬消失，stop 后才又出现」；`is-live`
+   * 只能盖住“末条”，盖不住同一轮里被替换的前一条。
+   * 长列表性能交给 `contain` 与虚拟滚动以外的手段，正确性优先。
+   */
+}
+
+/*
+ * 流式行绝不能离屏优化。
+ * `content-visibility: auto` 会按“上次记住的尺寸”跳过绘制；而正在输出的那一行
+ * 每次增量都会改变高度，Chromium 会间歇性把它当作离屏内容跳过，表现就是
+ * **Markdown 先整个消失、等 stop 布局稳定后代码块才跳出来**。
+ * 末条（is-last）就是正在流式的行，固定为正常渲染。
+ */
+/*
+ * 本轮正在输出的助手行不做任何跳过绘制的优化。
+ *
+ * 保留这条规则是因为将来若重新引入离屏优化，流式行必须豁免：
+ * 代码梅闭合会让高度突变，一旦被跳过绘制，用户看到的就是“代码框消失”。
+ */
+.timeline-message.is-live,
+.timeline-message.is-live .markdown-root,
+.timeline-message.is-last,
+.timeline-message.is-last .markdown-root {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
 }
 
 .timeline-message:first-child { padding-top: 0; }
@@ -3889,6 +3938,12 @@ body {
 }
 /* Skill/markdown content can be wide — let it use the full column width. */
 .user-message-bubble.is-markdown { max-width: 100%; width: 100%; }
+/* Durable input admitted but not yet folded/persisted: visible, but marked
+   as in-flight (the rail shows the same state with a pulsing dot). */
+.user-message-wrapper.pending-input .user-message-bubble {
+  opacity: 0.78;
+  border-style: dashed;
+}
 
 /* 技能/文档型消息展开后按 markdown 渲染：取消气泡的 pre-wrap，避免块级元素
    之间出现多余空白；首/尾块去掉外边距使其贴合气泡内边距。 */
@@ -4279,30 +4334,184 @@ body {
   white-space: pre-wrap;
 }
 
-/* Non-fatal advisory (e.g. "conversation compacted") — muted amber notice line,
+/* Non-fatal advisory (e.g. "conversation compacted") — muted notice line,
    visually distinct from a red error and never merged into the reply text. */
 .msg-notice {
-  color: var(--app-warning-accent);
-  background: color-mix(in srgb, var(--app-warning-accent), transparent 88%);
-  border-radius: 6px;
-  padding: 4px 10px;
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: fit-content;
+  max-width: min(880px, 100%);
+  color: var(--app-primary-foreground);
+  background: color-mix(in srgb, var(--app-card-background) 75%, transparent);
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.08));
+  border-radius: var(--corner-radius-medium, 10px);
+  padding: 7px 12px;
   margin: 6px 0;
-  font-size: 13.5px;
+  font-family: var(--app-sans-font-family);
+  font-size: 13px;
   line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 3px 8px -2px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   white-space: pre-wrap;
+  word-break: break-word;
+}
+
+:root[data-theme='light'] .msg-notice {
+  background: color-mix(in srgb, var(--app-card-background) 85%, #ffffff);
+  border-color: rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 6px -1px rgba(0, 0, 0, 0.03);
 }
 
 .msg-notice.command-output {
-  color: var(--app-primary-foreground);
-  background: color-mix(in srgb, var(--app-tool-background), var(--app-primary-background) 30%);
-  border: 1px solid var(--app-input-border);
-  font-family: var(--app-monospace-font-family);
-  font-size: 13px;
-  line-height: 1.5;
-  border-radius: 6px;
-  padding: 8px 12px;
   margin: 8px 0;
+}
+
+/* === Modern Premium Notice Card === */
+.msg-notice-card {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: fit-content;
+  max-width: min(880px, 100%);
+  margin: 7px 0;
+  padding: 8px 14px;
+  border-radius: var(--corner-radius-medium, 10px);
+  font-family: var(--app-sans-font-family);
+  font-size: 13px;
+  line-height: 1.55;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--app-primary-foreground);
+  background: color-mix(in srgb, var(--app-card-background) 80%, transparent);
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.08));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 3px 10px -2px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+  user-select: text;
+}
+
+:root[data-theme='light'] .msg-notice-card {
+  background: color-mix(in srgb, var(--app-card-background) 85%, #ffffff);
+  border-color: rgba(0, 0, 0, 0.09);
+  color: var(--app-primary-foreground);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 3px 8px -1px rgba(0, 0, 0, 0.04);
+}
+
+.msg-notice-card:hover {
+  border-color: color-mix(in srgb, var(--app-brand) 30%, var(--app-border, rgba(255, 255, 255, 0.15)));
+}
+
+:root[data-theme='light'] .msg-notice-card:hover {
+  border-color: color-mix(in srgb, var(--app-brand) 40%, rgba(0, 0, 0, 0.15));
+}
+
+.msg-notice-icon-wrapper {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  background: color-mix(in srgb, var(--app-brand) 14%, transparent);
+  color: var(--app-brand);
+}
+
+.msg-notice-svg {
+  display: block;
+}
+
+/* Compact done variant (special violet/indigo accent for memory & compression) */
+.msg-notice-card.is-compact {
+  border-color: color-mix(in srgb, #8b5cf6 25%, var(--app-border, rgba(255, 255, 255, 0.08)));
+}
+
+:root[data-theme='light'] .msg-notice-card.is-compact {
+  border-color: color-mix(in srgb, #7c3aed 20%, rgba(0, 0, 0, 0.08));
+}
+
+.msg-notice-card.is-compact .msg-notice-icon-wrapper {
+  background: color-mix(in srgb, #8b5cf6 16%, transparent);
+  color: #a78bfa;
+}
+
+:root[data-theme='light'] .msg-notice-card.is-compact .msg-notice-icon-wrapper {
+  background: color-mix(in srgb, #7c3aed 12%, transparent);
+  color: #7c3aed;
+}
+
+/* 压缩完成是转录的「轮次边界标记」，不是一条消息：
+   用细分割线 + 小字让它与上方的 assistant 回答明确分离，
+   避免看起来像回答正文的续行。 */
+.compaction-marker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 10px 0 6px;
+  color: var(--app-msg-time-color, #c8cbcf);
+  font-size: 11.5px;
+  line-height: 1.4;
+  user-select: text;
+}
+
+.compaction-marker-line {
+  flex: 1 1 auto;
+  min-width: 24px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, #8b5cf6 32%, var(--app-border, rgba(255, 255, 255, 0.14))),
+    transparent
+  );
+}
+
+.compaction-marker-text {
+  flex: 0 0 auto;
+  max-width: 80%;
+  text-align: center;
   white-space: pre-wrap;
+  opacity: 0.92;
+  color: color-mix(in srgb, #a78bfa 55%, var(--app-msg-time-color, #c8cbcf));
+}
+
+::root[data-theme='light'] .compaction-marker-text {
+  color: color-mix(in srgb, #7c3aed 60%, var(--app-msg-time-color, #475569));
+}
+
+.compaction-marker-row.is-active-search-match .compaction-marker-text {
+  outline: 1.5px solid rgba(59, 130, 246, 0.4);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* Warning variant */
+.msg-notice-card.is-warning {
+  border-color: color-mix(in srgb, var(--app-warning-accent) 25%, var(--app-border, rgba(255, 255, 255, 0.08)));
+}
+
+.msg-notice-card.is-warning .msg-notice-icon-wrapper {
+  background: color-mix(in srgb, var(--app-warning-accent) 15%, transparent);
+  color: var(--app-warning-accent);
+}
+
+/* Success variant */
+.msg-notice-card.is-success .msg-notice-icon-wrapper {
+  background: color-mix(in srgb, var(--app-success-foreground) 15%, transparent);
+  color: var(--app-success-foreground);
+}
+
+.msg-notice-content {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* === Todo task list === */
@@ -5248,6 +5457,60 @@ body {
 }
 .markdown-root tbody tr:hover td {
   background: var(--app-list-hover-background, rgba(255, 255, 255, 0.05));
+}
+
+/* Excel-like column resizing: the scroll wrapper owns horizontal panning, and
+   the table switches to fixed layout once the user pins column widths. */
+.markdown-root .md-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin: 14px 0;
+  scrollbar-width: thin;
+}
+.markdown-root .md-table-scroll > table {
+  display: table;
+  width: max-content;
+  max-width: none;
+  margin: 0;
+  overflow: visible;
+}
+.markdown-root .md-th-resizable {
+  position: relative;
+}
+.md-col-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 9px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+  touch-action: none;
+  user-select: none;
+}
+.markdown-root .md-th-last .md-col-resizer {
+  right: 0;
+}
+.md-col-resizer::after {
+  content: '';
+  position: absolute;
+  top: 22%;
+  bottom: 22%;
+  left: 4px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--app-brand, #3b82f6);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.markdown-root .md-th-resizable:hover .md-col-resizer::after,
+.md-col-resizer.is-active::after {
+  opacity: 0.8;
+}
+.md-table-scroll table.is-resizing,
+.md-table-scroll table.is-resizing * {
+  user-select: none;
 }
 
 /* === Input === */
@@ -6830,6 +7093,43 @@ body {
 }
 @keyframes session-item-spin {
   to { transform: rotate(360deg); }
+}
+
+/* 刚完成徽标：任务真正完成（计时器停止）时，在圈圈的位置换成绿色对勾。
+   只点亮一次，点进该会话即消失；颜色跟随主题成功色，带一次轻微弹入。 */
+.session-item-completed {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-right: -1px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--app-success-foreground, #34d399);
+  cursor: pointer;
+  box-sizing: border-box;
+  animation: session-item-complete-pop 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.session-item-completed svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+.session-item-completed:hover {
+  background: color-mix(in srgb, var(--app-success-foreground, #34d399) 16%, transparent);
+}
+@keyframes session-item-complete-pop {
+  from { transform: scale(0.35); opacity: 0; }
+  60% { transform: scale(1.12); opacity: 1; }
+  to { transform: scale(1); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-item-completed { animation: none; }
 }
 
 /* Kebab (⋮) button — appears on hover or while its menu is open. */
@@ -11325,8 +11625,9 @@ body {
   }
   .turn-nav { display: none; }
   .right-inspector-panel .turn-nav { display: flex !important; height: 100% !important; width: 100% !important; }
-  .right-inspector-panel.collapsed { display: none; }
-  .chat-stage.has-right-panel .right-inspector-panel:not(.collapsed) {
+  /* 移动端是整宽底部抽屉，桌面拖拽条在这里没有意义，还会挡住左边缘手势。 */
+  .right-panel-resizer { display: none !important; }
+  .chat-stage.has-right-panel .right-inspector-panel {
     display: flex !important;
     position: fixed !important;
     left: 0 !important;
@@ -11988,11 +12289,6 @@ body {
   .top-nav-model-slot .model-capsule-provider-badge {
     max-width: 56px;
   }
-  /* 当右侧面板展开或者在中等屏幕时，自动隐藏次要快捷按钮，但坚决保留语言按钮 */
-  .chat-stage.has-right-panel ~ * .top-nav-btn[title="刷新"],
-  .chat-stage.has-right-panel ~ * .top-nav-btn[aria-label="刷新"] {
-    display: none !important;
-  }
   .modal-card.modal-card-xl {
     width: min(840px, 94vw);
     max-height: 88dvh;
@@ -12566,7 +12862,8 @@ body {
   background: rgba(255, 255, 255, 0.28);
 }
 
-.img-lightbox-close-fixed {
+.img-lightbox-close-fixed,
+.img-lightbox-copy-btn {
   width: 38px;
   height: 38px;
   border-radius: 50%;
@@ -12582,11 +12879,114 @@ body {
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
   transition: all 0.15s ease;
 }
-.img-lightbox-close-fixed:hover {
+.img-lightbox-close-fixed:hover,
+.img-lightbox-copy-btn:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.25);
   border-color: rgba(255, 255, 255, 0.6);
   color: #ffffff;
   transform: scale(1.08);
+}
+.img-lightbox-copy-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 相册张数：左上角胶囊，不随图片缩放偏移 */
+.img-lightbox-counter {
+  position: fixed;
+  top: max(18px, env(safe-area-inset-top));
+  left: max(16px, env(safe-area-inset-left));
+  z-index: 100001;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(18, 18, 18, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  user-select: none;
+  pointer-events: auto;
+}
+
+/* 上一张 / 下一张：左右悬浮，手机与桌面都可点 */
+.img-lightbox-nav {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 100001;
+  width: 46px;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(18, 18, 18, 0.72);
+  color: #f4f4f5;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.img-lightbox-nav:hover {
+  background: rgba(255, 255, 255, 0.24);
+  transform: translateY(-50%) scale(1.06);
+}
+.img-lightbox-nav-prev {
+  left: max(14px, env(safe-area-inset-left));
+}
+.img-lightbox-nav-next {
+  right: max(14px, env(safe-area-inset-right));
+}
+
+/* 右键菜单：截图工具式「复制图片」 */
+.img-lightbox-menu {
+  position: fixed;
+  z-index: 100002;
+  min-width: 160px;
+  padding: 4px;
+  border-radius: 10px;
+  background: rgba(24, 24, 27, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.img-lightbox-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #f4f4f5;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.img-lightbox-menu button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+@media (max-width: 768px) {
+  .img-lightbox-nav {
+    width: 42px;
+    height: 42px;
+  }
+  .img-lightbox-nav-prev {
+    left: max(8px, env(safe-area-inset-left));
+  }
+  .img-lightbox-nav-next {
+    right: max(8px, env(safe-area-inset-right));
+  }
 }
 
 .img-lightbox-viewport {
@@ -13251,6 +13651,8 @@ body {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.28);
   transition: border-color 0.15s, box-shadow 0.15s;
   box-sizing: border-box;
+  /* Keep the edit surface reachable above the fixed composer. */
+  scroll-margin: 72px 0 160px;
 }
 
 :root[data-theme='light'] .inline-bubble-editor {
@@ -13318,8 +13720,13 @@ body {
 
 .inline-bubble-textarea {
   width: 100%;
-  min-height: 48px;
-  max-height: 260px;
+  /* A fixed editing viewport: auto-growing moved the toolbar and the scroll
+     thumb on every keystroke, which made the whole bubble jump. */
+  height: 120px;
+  min-height: 120px;
+  max-height: 120px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   background: transparent;
   color: var(--app-primary-foreground, #f3f4f6);
   border: none;
@@ -14502,6 +14909,80 @@ select option {
   font-family: var(--app-monospace-font-family, Consolas, 'Courier New', monospace);
   position: relative;
 }
+
+/* 磁盘版本 vs 本地草稿冲突：只提示，不自动覆盖未保存内容。 */
+.editor-disk-conflict {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(245, 158, 11, 0.14);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.35);
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.editor-disk-conflict-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 220px;
+}
+.editor-disk-conflict-title {
+  font-weight: 600;
+}
+.editor-disk-conflict-desc {
+  opacity: 0.75;
+}
+.editor-disk-conflict-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.editor-disk-conflict-btn {
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.editor-disk-conflict-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.editor-disk-conflict-btn.is-primary {
+  border-color: rgba(245, 158, 11, 0.75);
+  background: rgba(245, 158, 11, 0.22);
+}
+.editor-disk-conflict-btn.is-primary:hover {
+  background: rgba(245, 158, 11, 0.34);
+}
+:root[data-theme='light'] .editor-disk-conflict {
+  background: #fff7e6;
+  border-bottom-color: #f5c26b;
+  color: #7c2d12;
+}
+:root[data-theme='light'] .editor-disk-conflict-btn {
+  border-color: #e3c48c;
+  background: #fffdf7;
+  color: #7c2d12;
+}
+:root[data-theme='light'] .editor-disk-conflict-btn:hover {
+  background: #fdecc8;
+}
+:root[data-theme='light'] .editor-disk-conflict-btn.is-primary {
+  border-color: #d97706;
+  background: #fcd34d;
+}
+:root[data-theme='light'] .editor-disk-conflict-btn.is-primary:hover {
+  background: #fbbf24;
+}
+
 .code-editor-toolbar {
   display: flex;
   align-items: center;
@@ -16040,6 +16521,20 @@ select option {
   white-space: nowrap;
 }
 
+/* 未保存修改的脏点：标签切走/收起时也能一眼看出哪个标签有草稿。 */
+.preview-tab-dirty {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--app-brand, #3b82f6);
+  flex-shrink: 0;
+}
+
+/* 编辑器根节点可聚焦（用于限定快捷键作用域），点击容器时不显示焦点描边。 */
+.code-editor-root:focus {
+  outline: none;
+}
+
 .preview-tab-close {
   background: transparent;
   border: none;
@@ -16134,6 +16629,15 @@ select option {
   overflow-x: hidden;
   position: relative;
   background: var(--app-background, #1e1e1e);
+}
+
+/* 标签保活的编辑舞台槽位：未激活标签只隐藏，不卸载，编辑现场原样保留。 */
+.preview-editor-slot {
+  flex: 1 1 0%;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
 }
 
 .preview-empty-stage {
@@ -17701,7 +18205,6 @@ select option {
     font-weight: 600 !important;
   }
 }
-
 
 
 

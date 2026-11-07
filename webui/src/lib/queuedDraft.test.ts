@@ -9,6 +9,20 @@ import {
   restoreSessionQueued,
 } from './queuedDraft.ts';
 
+test('queueAfterSessionActiveCheck downgrades stale steer cards when the session is idle', () => {
+  const restored = [
+    { id: 1, text: 'queued', kind: 'queue' as const },
+    { id: 2, text: 'steer', kind: 'steer' as const },
+    { id: 3, text: 'steering', kind: 'steering' as const },
+  ];
+  const active = queueAfterSessionActiveCheck({ restored, sessionActive: true });
+  assert.deepEqual(active.map((item) => item.kind), ['queue', 'steer', 'steering']);
+  const idle = queueAfterSessionActiveCheck({ restored, sessionActive: false });
+  assert.deepEqual(idle.map((item) => item.kind), ['queue', 'queue', 'queue']);
+  assert.equal(idle[1]!.text, 'steer');
+  assert.equal(idle[2]!.text, 'steering');
+});
+
 test('queued card wire serialization preserves the selected approval mode and images', () => {
   const card = {
     id: 42,
@@ -24,13 +38,18 @@ test('queued card wire serialization preserves the selected approval mode and im
     text: 'continue',
     images: card.images,
     kind: 'queue',
+    client_input_id: 'local-only-correlation',
     approval_mode: 'plan',
   });
   const restored = deserializeQueuedCard(wire);
   assert.equal(restored.approvalMode, 'plan');
   assert.deepEqual(restored.images, card.images);
   assert.equal(restored.id, card.id);
-  assert.equal('clientInputId' in restored, false);
+  assert.equal(restored.clientInputId, 'local-only-correlation');
+
+  // Legacy wire cards without the correlation id stay valid and unclaimed.
+  const legacy = deserializeQueuedCard({ id: 1, text: 'legacy', kind: 'queue' as const });
+  assert.equal('clientInputId' in legacy, false);
 });
 
 test('all established approval modes survive the wire contract, while legacy missing mode stays missing', () => {

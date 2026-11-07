@@ -179,7 +179,7 @@ test('successful submit wiring excludes validation and failed transports', async
   assert.ok(submit.indexOf('if (uploading) return') < submit.indexOf('recordAcceptedInput();'));
   const stream = api.slice(api.indexOf('export async function streamChat('));
   assert.ok(stream.indexOf('if (!resp.ok)') < stream.indexOf('onAccepted?.();'));
-  assert.match(chat, /const receipt = await postLiveMessage\([\s\S]*?onAccepted\?\.\(sid \?\? undefined\);/);
+  assert.match(chat, /const ack = await postChatPrompt\([\s\S]*?onAccepted\?\.\(boundSessionId\);/);
   assert.ok(chat.indexOf('if (slashOpen)', chat.indexOf('function handleKeyDown')) < chat.indexOf('if (canNavigateInputHistory'));
   assert.doesNotMatch(source, /localStorage|sessionStorage/);
 });

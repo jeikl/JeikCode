@@ -52,7 +52,9 @@ pub struct ResponsesConfig {
     /// Override for [`ReasoningPolicy`] from `reasoning_history = include|exclude`.
     /// `None` ⇒ derive from `reasoning_model` then model name / base URL.
     pub reasoning_policy: Option<ReasoningPolicy>,
-    /// Thinking budget in tokens. When present, passed in `reasoning.max_tokens`.
+    /// Thinking budget in tokens. The Responses API has no official numeric
+    /// budget field (`reasoning` only carries `effort`/`summary`), so this is
+    /// retained for config compatibility and ignored by this adapter.
     pub thinking_budget: Option<u32>,
     /// Thinking type override (e.g. "enabled", "disabled", "adaptive").
     pub thinking_type: Option<String>,
@@ -344,27 +346,19 @@ fn build_request_body(
     if !session_id.is_empty() {
         body.insert("prompt_cache_key".into(), json!(session_id));
     }
-    let is_effort_off = options.reasoning_effort.as_ref().is_some_and(|e| {
-        matches!(e, ReasoningEffort::Off)
-            || e.as_str().eq_ignore_ascii_case("off")
-            || e.as_str().eq_ignore_ascii_case("none")
-    }) || cfg.thinking_enabled == Some(false)
+    let is_effort_off = super::thinking::is_effort_off(options.reasoning_effort.as_ref())
+        || cfg.thinking_enabled == Some(false)
         || cfg.thinking_type.as_deref() == Some("disabled");
 
-    let effective_budget = if is_effort_off {
-        None
-    } else {
-        cfg.thinking_budget
-    };
-
-    let mut max_output_tokens = options.max_tokens.or(cfg.max_tokens).unwrap_or(65536);
-    // 当思考预算大于等于最大输出时，保留扩充
-    if let Some(budget) = effective_budget {
-        if budget >= max_output_tokens {
-            max_output_tokens =
-                (budget + 8192).min(cfg.context_window.saturating_sub(1024).max(budget + 1));
-        }
-    }
+    // The Responses API supports only `reasoning.effort` (+ optional summary).
+    // There is no official numeric thinking-budget field, so `thinking_budget`
+    // is intentionally ignored for this protocol. `max_output_tokens` is the
+    // kernel-resolved output budget; thinking never expands it.
+    let max_output_tokens = options
+        .max_tokens
+        .or(cfg.max_tokens)
+        .unwrap_or(65536)
+        .max(16);
     body.insert("max_output_tokens".into(), json!(max_output_tokens));
 
     // Per-model custom thinking level (`reasoning.effort`). Independent of
@@ -379,11 +373,6 @@ fn build_request_body(
     if let Some(effort) = &wire_effort {
         reasoning_obj.insert("effort".into(), json!(effort));
     }
-    if let Some(budget) = effective_budget {
-        if budget > 0 {
-            reasoning_obj.insert("max_tokens".into(), json!(budget));
-        }
-    }
     if !reasoning_obj.is_empty() {
         body.insert("reasoning".into(), Value::Object(reasoning_obj));
     }
@@ -392,9 +381,8 @@ fn build_request_body(
     // sampling params. Omit temperature whenever effort rides the wire, or the
     // model is marked as a reasoner — otherwise short auxiliary calls (session
     // title) 400 before any TextDelta arrives.
-    let omit_temperature = wire_effort.as_deref().is_some_and(|e| e != "none")
-        || cfg.reasoning_model == Some(true)
-        || effective_budget.is_some_and(|b| b > 0);
+    let omit_temperature =
+        wire_effort.as_deref().is_some_and(|e| e != "none") || cfg.reasoning_model == Some(true);
     if let Some(t) = options.temperature {
         if !omit_temperature {
             body.insert("temperature".into(), json!(t));
@@ -491,6 +479,13 @@ fn format_input(messages: &[Message], supports_vision: bool, echo_reasoning: boo
                 }
             }
             Role::Assistant => {
+                // Empty model round (failed / interrupted stream that persisted nothing
+                // replayable). Drop it before any reasoning echo: a reasoning-only item
+                // has nothing for the model to continue from, and some gateways reject
+                // an assistant turn without a message/function_call item.
+                if m.text.is_empty() && m.tool_calls.is_empty() {
+                    continue;
+                }
                 if echo_reasoning {
                     let mut echoed_block = false;
                     for block in &m.reasoning_blocks {
@@ -1043,6 +1038,23 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_only_model_round_is_dropped_before_reasoning_echo() {
+        let mut lost = Message::assistant("", vec![]);
+        lost.reasoning = Some("partial thinking".into());
+        let out = format_input(
+            &[Message::user("first"), lost, Message::user("retry")],
+            false,
+            true,
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "no reasoning-only item / assistant turn may reach the wire"
+        );
+        assert_eq!(out[0]["role"], "user");
+    }
+
+    #[test]
     fn prefix_is_append_only_across_turns() {
         let h1 = vec![
             Message::system("s"),
@@ -1241,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn body_includes_thinking_budget_and_model_max_output_tokens() {
+    fn body_uses_effort_only_and_respects_model_max_output_tokens() {
         let mut cfg = ResponsesConfig::new("k", "https://api.openai.com/v1", "gpt-5");
         cfg.thinking_budget = Some(16384);
         cfg.max_tokens = Some(65536); // Explicit model max tokens
@@ -1259,7 +1271,9 @@ mod tests {
             "sess-1",
         );
         assert_eq!(body["reasoning"]["effort"], "high");
-        assert_eq!(body["reasoning"]["max_tokens"], 16384);
+        // Responses has no official numeric thinking-budget field; the
+        // configured `thinking_budget` is deliberately ignored.
+        assert!(body["reasoning"].get("max_tokens").is_none());
         // directly outputs model's configured max tokens, no auto expansion
         assert_eq!(body["max_output_tokens"].as_u64(), Some(65536));
         assert!(body.get("temperature").is_none());
@@ -1277,7 +1291,7 @@ mod tests {
         );
         assert_eq!(body_default["max_output_tokens"].as_u64(), Some(65536));
 
-        // When budget >= max_tokens, preserve expansion (8192 <= 16384 -> 16384 + 8192 = 24576)
+        // The output budget is never inflated by thinking config.
         cfg.max_tokens = Some(8192);
         let body_expanded = build_request_body(
             "gpt-5",
@@ -1291,7 +1305,7 @@ mod tests {
             ReasoningPolicy::Include,
             "sess-1",
         );
-        assert_eq!(body_expanded["max_output_tokens"].as_u64(), Some(24576));
+        assert_eq!(body_expanded["max_output_tokens"].as_u64(), Some(8192));
     }
 
     #[test]

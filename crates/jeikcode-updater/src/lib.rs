@@ -203,8 +203,8 @@ fn target_tag(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
-/// Release artifact filename for a given version + target, matching
-/// what `scripts/release.sh` publishes to `dist/<version>/`.
+/// Release artifact filename for a given version + target, matching the
+/// assets published by the GitHub release workflow to `dist/<version>/`.
 pub fn binary_filename(version: &str, target: &str) -> String {
     let tag = if version.starts_with('v') {
         version.to_string()

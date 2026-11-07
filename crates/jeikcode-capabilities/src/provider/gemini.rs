@@ -145,7 +145,7 @@ impl LlmProvider for GeminiProvider {
         let rate_limit_retry_owner = options.rate_limit_retry_owner;
 
         let s = async_stream::stream! {
-            const MAX_STREAM_ATTEMPTS: u32 = 2;
+            const MAX_STREAM_ATTEMPTS: u32 = 6;
             let mut stream_attempt = 0u32;
             let mut reconnect_attempts = 0u32;
             let mut resp = match open_stream(
@@ -395,10 +395,6 @@ pub fn model_supports_thinking(model: &str) -> bool {
     jeikcode_config::config::provider::gemini_defaults_thinking(model)
 }
 
-fn uses_thinking_level(model: &str) -> bool {
-    jeikcode_config::config::provider::gemini_uses_thinking_level(model)
-}
-
 fn thinking_is_on(cfg: &GeminiConfig, options: &ChatOptions) -> bool {
     if cfg.thinking_enabled == Some(false) {
         return false;
@@ -446,18 +442,8 @@ fn thinking_level_for(effort: &ReasoningEffort) -> String {
     }
 }
 
-fn thinking_budget_for(cfg: &GeminiConfig, options: &ChatOptions) -> u32 {
-    if let Some(b) = cfg.thinking_budget {
-        return b;
-    }
-    match &options.reasoning_effort {
-        Some(ReasoningEffort::Off) => 0,
-        Some(ReasoningEffort::Low) => 2048,
-        Some(ReasoningEffort::Medium) => 5120,
-        Some(ReasoningEffort::High | ReasoningEffort::Max | ReasoningEffort::XHigh) => 16384,
-        Some(ReasoningEffort::Custom(s)) => s.parse().unwrap_or(8192),
-        None => 8192,
-    }
+fn max_output_tokens(cfg: &GeminiConfig, options: &ChatOptions) -> u32 {
+    options.max_tokens.or(cfg.max_tokens).unwrap_or(65536)
 }
 
 pub(crate) fn thinking_config_value(cfg: &GeminiConfig, options: &ChatOptions) -> Value {
@@ -468,29 +454,37 @@ pub(crate) fn thinking_config_value(cfg: &GeminiConfig, options: &ChatOptions) -
         return Value::Object(obj);
     }
     obj.insert("includeThoughts".into(), json!(true));
-    if uses_thinking_level(&cfg.model) {
-        if let Some(effort) = &options.reasoning_effort {
-            obj.insert("thinkingLevel".into(), json!(thinking_level_for(effort)));
-        } else if cfg.thinking_budget.is_none() {
-            obj.insert("thinkingLevel".into(), json!("HIGH"));
+
+    if matches!(
+        super::thinking::gemini_family(&cfg.model),
+        super::thinking::ThinkingFamily::Gemini3Plus
+    ) {
+        // Gemini 3+ is level-only. A configured numeric budget is intentionally
+        // ignored so the two mutually-exclusive control surfaces never mix.
+        let level = options
+            .reasoning_effort
+            .as_ref()
+            .map(thinking_level_for)
+            .unwrap_or_else(|| "HIGH".to_string());
+        obj.insert("thinkingLevel".into(), json!(level));
+        return Value::Object(obj);
+    }
+
+    // Gemini 2.5 is budget-only.
+    match super::thinking::resolve_budget(
+        super::thinking::ThinkingFamily::Gemini25,
+        cfg.thinking_budget,
+        options.reasoning_effort.as_ref(),
+        max_output_tokens(cfg, options),
+    ) {
+        Some(plan) => {
+            obj.insert("thinkingBudget".into(), json!(plan.tokens));
         }
-        if let Some(budget) = cfg.thinking_budget {
-            obj.insert("thinkingBudget".into(), json!(budget));
-        }
-    } else {
-        if let Some(budget) = cfg.thinking_budget {
-            obj.insert("thinkingBudget".into(), json!(budget));
-        } else {
-            obj.insert(
-                "thinkingBudget".into(),
-                json!(thinking_budget_for(cfg, options)),
-            );
-        }
-        if let Some(effort) = &options.reasoning_effort {
-            let level = thinking_level_for(effort);
-            if level != "OFF" {
-                obj.insert("thinkingLevel".into(), json!(level));
-            }
+        None => {
+            // Not enough output room for a legal budget + answer: disable
+            // thinking for this request rather than emit an invalid value.
+            obj.insert("thinkingBudget".into(), json!(0));
+            obj.insert("includeThoughts".into(), json!(false));
         }
     }
     Value::Object(obj)
@@ -515,24 +509,9 @@ fn build_request_body(
         body.insert("systemInstruction".into(), json!({ "parts": parts }));
     }
     let mut gen = Map::new();
-    let mut max_tokens = options.max_tokens.or(cfg.max_tokens).unwrap_or(65536);
-    let effective_budget = if !thinking_is_on(cfg, options) {
-        None
-    } else {
-        cfg.thinking_budget.or_else(|| {
-            if !uses_thinking_level(&cfg.model) {
-                Some(thinking_budget_for(cfg, options))
-            } else {
-                None
-            }
-        })
-    };
-    if let Some(budget) = effective_budget {
-        if budget >= max_tokens {
-            max_tokens =
-                (budget + 8192).min(cfg.context_window.saturating_sub(1024).max(budget + 1));
-        }
-    }
+    // The kernel-resolved output budget is authoritative; thinking shrinks to
+    // fit inside it and never expands it.
+    let max_tokens = max_output_tokens(cfg, options);
     gen.insert("maxOutputTokens".into(), json!(max_tokens));
     if let Some(t) = options.temperature {
         gen.insert("temperature".into(), json!(t));
@@ -608,6 +587,12 @@ fn format_contents(
                 // replayable) must NOT become a wire turn: Gemini rejects empty `parts`, and
                 // dropping it lets the surrounding user turns stay adjacent so the merge
                 // below reconstructs a single user block (the lost reply never happened).
+                // Drop BEFORE thought-part synthesis: `echo_thinking` can otherwise turn
+                // stored reasoning into a thought-only model turn with nothing to continue.
+                if m.text.is_empty() && m.tool_calls.is_empty() {
+                    i += 1;
+                    continue;
+                }
                 let parts = model_parts(m, echo_thinking);
                 if !parts.is_empty() {
                     contents.push(json!({
@@ -1076,7 +1061,10 @@ mod tests {
         assert_eq!(v["thinkingBudget"], json!(16384));
         assert_eq!(v["includeThoughts"], json!(true));
 
-        // Test maxOutputTokens default 65536 and expansion when budget >= max_tokens
+        // Gemini 2.5 is budget-only: thinkingLevel must never ride alongside.
+        assert!(v.get("thinkingLevel").is_none());
+
+        // Test maxOutputTokens default 65536 (no thinking-driven expansion).
         let body_default = build_request_body(
             &c,
             &[Message::user("hi")],
@@ -1089,7 +1077,8 @@ mod tests {
             json!(65536)
         );
 
-        // Explicit small max_tokens < budget (8192 <= 16384) -> expands to 24576
+        // Explicit max_tokens 8192 stays 8192; the thinking budget shrinks to
+        // leave MIN_ANSWER_TOKENS (1024): 8192 - 1024.
         opts.max_tokens = Some(8192);
         let body_expanded = build_request_body(
             &c,
@@ -1100,7 +1089,11 @@ mod tests {
         );
         assert_eq!(
             body_expanded["generationConfig"]["maxOutputTokens"],
-            json!(24576)
+            json!(8192)
+        );
+        assert_eq!(
+            body_expanded["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            json!(7168)
         );
     }
 
@@ -1297,6 +1290,28 @@ mod tests {
         assert_eq!(contents[1]["role"], json!("model"));
         assert_eq!(contents[1]["parts"][0]["text"], json!("answer"));
         assert_eq!(contents[2]["role"], json!("user"));
+    }
+
+    #[test]
+    fn reasoning_only_model_round_is_dropped_with_echo_thinking() {
+        let c = cfg("gemini-3-flash");
+        let mut lost = Message::assistant("", vec![]);
+        lost.reasoning = Some("partial thinking".into());
+        let msgs = vec![Message::user("first"), lost, Message::user("retry")];
+        let body = build_request_body(
+            &c,
+            &msgs,
+            &[],
+            &ChatOptions::default(),
+            ReasoningPolicy::Include,
+        );
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(
+            contents.len(),
+            1,
+            "thinking-only model turn must be dropped"
+        );
+        assert_eq!(contents[0]["role"], json!("user"));
     }
 
     #[test]

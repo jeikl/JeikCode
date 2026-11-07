@@ -52,6 +52,9 @@ Visit the official release page: 👉 **[https://github.com/jeikl/JeikCode/relea
 ### 3. Platform Installation Guides
 - **Windows**: Run the `.exe` installer and follow the setup wizard;
 - **macOS**: Mount the `.dmg` image and drag the **JeikCode** app icon into the **Applications** folder;
+  > 💡 **Fix for macOS "is damaged and cannot be opened" prompt**:  
+  > Drag the app into `/Applications`, then open Terminal and run:  
+  > `xattr -cr "/Applications/JeikCode Desktop.app"`
 - **Linux**:
   - *Debian / Ubuntu*: Run `sudo dpkg -i "JeikCode.Desktop_<version>_amd64.deb"`;
   - *AppImage*: Grant execution rights and launch:

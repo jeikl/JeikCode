@@ -117,7 +117,7 @@ export function QueuedCardActions({
       onClick: onSteer,
     });
   }
-  if (kind === 'queue' || kind === 'steer') {
+  if (kind === 'queue' || kind === 'steering' || kind === 'steer') {
     actions.push({
       key: 'sendNow',
       label: labels.sendNow,

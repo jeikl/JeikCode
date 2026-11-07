@@ -13,7 +13,6 @@ import {
   getRuntimeSessions,
   listSessions,
   postChatUserInput,
-  postLivePermission,
   postLiveUserInput,
   postSystemNotify,
   respondPermission,
@@ -29,9 +28,7 @@ import {
   isWindowAway,
   shouldOsNotifyTerminal,
   shouldToastTerminal,
-  showPermissionNotice,
-  takeTerminalEdges,
-  TerminalKind,
+  showPermissionNotice,  TerminalKind,
   TerminalNoticeContext,
   isSessionNoticeSuppressed,
   permissionInstanceKey,
@@ -122,8 +119,6 @@ export function NotificationDock({
   const [toasts, setToasts] = useState<TerminalToast[]>([]);
   /** A decision POST is in flight: resume-reconciliation must never race it. */
   const decisionInFlight = useRef(false);
-  const seenSeq = useRef(new Map<string, number>());
-  const primedSeq = useRef(false);
   const recent = useRef(new Map<string, number>());
   const sentReview = useRef(new Set<string>());
   /** 推送终态通知的本地序号（跨实例推送没有服务端 seq，用递增序号保证 toast id 唯一）。 */
@@ -244,6 +239,9 @@ export function NotificationDock({
   }
 
   function pushTerminal(sessionId: string, kind: TerminalKind, seq: number) {
+    // 手动停止、中途 steer、立即发送导致的 stopped 不是任务真正结束：
+    // 不进右下角卡片、不响系统通知（连去重窗口都不占用）。
+    if (kind === 'stopped') return;
     // 严格遵循用户偏好：手动点击停止、中途steer、或者日常stopped打断，严禁发送系统通知骚扰
     if (isSessionNoticeSuppressed(sessionId)) return;
     const key = `${sessionId}:${kind}`;
@@ -259,8 +257,7 @@ export function NotificationDock({
     if (shouldToastTerminal(noticeCtx)) {
       setToasts((prev) => (prev.some((item) => item.id === id) ? prev : [...prev, { id, sessionId, kind }]));
     }
-    // 日常单纯的 stopped（中途打断/停止）严禁向操作系统发通知；只在真正完成且离开窗口时发
-    if (kind === 'stopped') return;
+    // 日常单纯的 stopped（中途打断/停止）已经在函数入口拦掉；这里只处理真正的完成/失败。
     if (!shouldOsNotifyTerminal(noticeCtx)) return;
     const session = labelFor(sessionId);
     const title = tRef.current(
@@ -366,11 +363,27 @@ export function NotificationDock({
         });
         return;
       }
-      if (event.type === 'activity' && event.terminal) {
-        pushedTerminalSeqRef.current += 1;
-        pushTerminal(event.session_id, event.terminal, pushedTerminalSeqRef.current);
+      if (event.type === 'activity') {
+        // 全局 activity 只用于侧栏/运行状态，绝不作为终态通知源：
+        // 工具轮 / 子任务 / steer 期间都可能出现临时 terminal。
+        // 真正的结束由本端回合的 done 处理器发出 `jeikcode:terminal` 事件。
+        return;
       }
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 真正的终态通知只由本端回合的 done 处理器发出（带 finality 判定），
+  // 全局 activity.terminal 不再参与。
+  useEffect(() => {
+    const onTerminal = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId?: string; kind?: TerminalKind }>).detail;
+      if (!detail?.sessionId || !detail.kind) return;
+      pushedTerminalSeqRef.current += 1;
+      pushTerminal(detail.sessionId, detail.kind, pushedTerminalSeqRef.current);
+    };
+    window.addEventListener('jeikcode:terminal', onTerminal);
+    return () => window.removeEventListener('jeikcode:terminal', onTerminal);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -429,30 +442,6 @@ export function NotificationDock({
         return;
       }
 
-      const edges = takeTerminalEdges(
-        seenSeq.current,
-        runtime.map((row) => ({
-          sessionId: row.session_id,
-          seq: row.terminal_seq ?? 0,
-          kind: row.last_terminal,
-        })),
-        { baseline: !primedSeq.current },
-      );
-      primedSeq.current = true;
-      for (const edge of edges) {
-        const row = runtime.find((item) => item.session_id === edge.sessionId);
-        if (row?.working_dir) {
-          setHints((prev) => ({
-            ...prev,
-            [edge.sessionId]: {
-              name: prev[edge.sessionId]?.name,
-              workingDir: row.working_dir,
-            },
-          }));
-        }
-        pushTerminal(edge.sessionId, edge.kind, edge.seq);
-      }
-
       const ids = new Set(active);
       for (const row of runtime) {
         if (row.activity === 'waiting_approval' || row.activity === 'waiting_user_input') {
@@ -504,7 +493,6 @@ export function NotificationDock({
   }, [toasts]);
 
   const allowPermission = showPermissionNotice(mode);
-  const livePermission = allowPermission ? liveReview?.permission ?? null : null;
   const liveUserInput = liveReview?.userInput ?? null;
   const liveSessionId = liveReview?.sessionId ?? null;
   const chatPerm = allowPermission ? chatPermission : null;
@@ -584,14 +572,6 @@ export function NotificationDock({
     arguments: unknown;
     live: boolean;
   }> = [];
-  if (livePermission && liveSessionId && !samePermissionInstance(chatPerm, livePermission)) {
-    permissionCards.push({
-      key: `live:${permissionInstanceKey(liveSessionId, livePermission)}`,
-      sessionId: liveSessionId,
-      ...livePermission,
-      live: true,
-    });
-  }
   if (chatPerm) {
     permissionCards.push({
       key: `chat:${permissionInstanceKey(chatPerm.session_id, chatPerm)}`,
@@ -870,17 +850,6 @@ export function NotificationDock({
             onDecide={async (decision, toolName) => {
               decisionInFlight.current = true;
               try {
-                if (currentCard.card.live) {
-                  await postLivePermission(
-                    decision,
-                    toolName,
-                    currentCard.card.sessionId,
-                    currentCard.card.runtime_instance_id,
-                    currentCard.card.generation,
-                    currentCard.card.request_id,
-                  );
-                  return;
-                }
                 const result = await respondPermission(
                   currentCard.card.sessionId,
                   currentCard.card.approval_id ?? '',

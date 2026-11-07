@@ -156,10 +156,39 @@ renderer.link = function (href: string, title: string | null | undefined, text: 
   return `<a href="${cleanHref}" target="_blank" rel="noopener noreferrer"${titleAttr}>${text}</a>`;
 };
 
+const MARKDOWN_HTML_CACHE_MAX_ENTRIES = 240;
+const MARKDOWN_HTML_CACHE_MAX_CHARS = 2_000_000;
+const markdownHtmlCache = new Map<string, string>();
+let markdownHtmlChars = 0;
+
 export function markdownToHtml(content: string, options?: { highlight?: boolean }): string {
+  // Bounded LRU: the same historical part is re-rendered on every stream token
+  // otherwise. Key includes the highlight mode because the renderer differs.
+  const key = `${options?.highlight ? '1' : '0'}\u0000${content}`;
+  const cached = markdownHtmlCache.get(key);
+  if (cached !== undefined) {
+    markdownHtmlCache.delete(key);
+    markdownHtmlCache.set(key, cached);
+    return cached;
+  }
+
   const extracted = extractMath(content ?? '');
   const preprocessed = preprocessMarkdown(extracted.text);
   const activeRenderer = options?.highlight ? highlightRenderer : renderer;
   const html = marked.parse(preprocessed, { renderer: activeRenderer }) as string;
-  return restoreMath(html, extracted.slots);
+  const out = restoreMath(html, extracted.slots);
+
+  markdownHtmlCache.set(key, out);
+  markdownHtmlChars += key.length + out.length;
+  while (
+    markdownHtmlCache.size > MARKDOWN_HTML_CACHE_MAX_ENTRIES
+    || markdownHtmlChars > MARKDOWN_HTML_CACHE_MAX_CHARS
+  ) {
+    const oldest = markdownHtmlCache.keys().next().value;
+    if (oldest === undefined) break;
+    const value = markdownHtmlCache.get(oldest);
+    markdownHtmlCache.delete(oldest);
+    markdownHtmlChars -= oldest.length + (value?.length ?? 0);
+  }
+  return out;
 }

@@ -25,9 +25,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod context;
 pub mod display;
+pub mod inputs;
 pub mod instructions;
 pub mod manager;
 mod mtime_file;
+pub mod partial;
 pub mod presentation;
 pub mod recall;
 pub mod rewind;
@@ -40,8 +42,10 @@ pub mod user_wrap;
 pub use crate::tools::write_state::WriteStateHook;
 pub use context::SessionContextHook;
 pub use display::{
-    DisplayHook, DisplayImage, DisplayMeta, DisplayRecord, DisplayToolCall, DISPLAY_VERSION,
+    DisplayHook, DisplayImage, DisplayIndexRow, DisplayMeta, DisplayRecord, DisplayToolCall,
+    DISPLAY_VERSION,
 };
+pub use inputs::SessionInput;
 pub use manager::{
     aggregate_session_cost, CatalogDiagnostic, CatalogDiagnosticKind, CatalogEntry,
     CatalogLocation, CatalogPresence, CatalogScan, DetachedUsageRecorder, ForkInfo, ImportInfo,
@@ -50,6 +54,7 @@ pub use manager::{
     SessionLease, SessionLineage, SessionManager, SessionMeta, SessionOrigin, SessionResult,
     SessionStoreError, StorageOwner, TokenBreakdown, TurnStat,
 };
+pub use partial::{PartialStream, PartialToolCall};
 pub use presentation::{
     anchor_from_legacy_position, DisplayAnchor, LegacyTurnBoundary, PresentationEntry,
     PresentationFile, PresentationRole,

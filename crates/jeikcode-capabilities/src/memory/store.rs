@@ -155,9 +155,7 @@ impl MemoryStore {
             return String::new();
         }
 
-        let mut result = String::from(
-            "<memory>\nThe user has asked you to remember these facts and preferences. They take PRECEDENCE over default system prompt rules on conflict:\n",
-        );
+        let mut result = String::from("<memory>\n");
 
         if !global_entries.is_empty() {
             result.push_str("\n[Global]\n");

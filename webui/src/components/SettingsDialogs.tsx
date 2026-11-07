@@ -1054,10 +1054,15 @@ function ProviderFormDialog({
       reasoning_effort: reasoningModel && reasoningEffort ? reasoningEffort : null,
       reasoning_history: reasoningModel ? reasoningHistory : null,
       thinking_enabled: reasoningModel ? !isOff : undefined,
-      thinking_type: isOff ? 'disabled' : (reasoningModel ? 'enabled' : undefined),
+      // Only write an explicit disabled marker. "enabled" is protocol-specific
+      // (Claude legacy budget, Kimi K2, ...), so the adapters decide the mode
+      // from the model generation instead of this dialog forcing one.
+      thinking_type: isOff ? 'disabled' : undefined,
       thinking_budget: isOff
         ? 0
-        : (reasoningModel && budgetEnabled && thinkingBudget !== '' ? Number(thinkingBudget) : null),
+        : (reasoningModel && budgetEnabled && thinkingBudget !== ''
+            ? Math.max(1024, Number(thinkingBudget))
+            : null),
     };
     const cwVal = contextWindow !== '' && Number(contextWindow) > 0 ? Number(contextWindow) : 262144;
     const maxTokensVal = maxTokens !== '' && Number(maxTokens) > 0 ? Number(maxTokens) : null;
@@ -1412,7 +1417,7 @@ function ProviderFormDialog({
                     <input
                       type="number"
                       class="menu-input reasoning-budget-input"
-                      min="0"
+                      min="1024"
                       step="1024"
                       placeholder="Tokens"
                       value={thinkingBudget}

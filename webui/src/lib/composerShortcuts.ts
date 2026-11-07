@@ -159,3 +159,9 @@ export function resolveComposerEscapeAction(input: {
 export function tailQueuedCard<T>(cards: T[]): T | null {
   return cards.length > 0 ? cards[cards.length - 1] : null;
 }
+
+/** True on touch-first viewports: the soft keyboard's Enter is a real newline. */
+export function isMobileComposer(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.innerWidth <= 768 || ('ontouchstart' in window && window.innerWidth <= 1024);
+}
