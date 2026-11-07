@@ -45,6 +45,8 @@ export interface QueuedCardActionsProps {
    * the composer. The character is forwarded so the typed text is not lost.
    */
   onReturnToComposer?: (typedChar?: string) => void;
+  /** When false, ESC must not cancel/retract the card. Explicit buttons still work. */
+  escapeUndoEnabled?: boolean;
 }
 
 const ACTION_ORDER = ['steer', 'sendNow', 'cancel'] as const;
@@ -96,6 +98,7 @@ export function QueuedCardActions({
   onSendNow,
   onCancel,
   onReturnToComposer,
+  escapeUndoEnabled = true,
 }: QueuedCardActionsProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const buttonRefs = useRef<Partial<Record<ActionKey, HTMLButtonElement | null>>>({});
@@ -201,6 +204,8 @@ export function QueuedCardActions({
       return;
     }
     if (e.key === 'Escape') {
+      // 用户关闭 ESC 撤销后：不拦截、不取消卡片，让事件继续冒泡（显式按钮仍可用）。
+      if (!escapeUndoEnabled) return;
       // Esc 等同于按一次卡片上的最后一个动作（取消）：无论卡片是否已转向，
       // 都把这条待发消息收回输入框。
       e.preventDefault();

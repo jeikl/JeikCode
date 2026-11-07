@@ -46,6 +46,7 @@ export function UserMessageView({
   models,
   currentModel,
   disabled,
+  escCancelEdit,
   cwd,
 }: {
   msg: Message;
@@ -69,6 +70,8 @@ export function UserMessageView({
   models?: ModelInfo[];
   currentModel?: string;
   disabled?: boolean;
+  /** When false, ESC must not exit the inline edit. */
+  escCancelEdit?: boolean;
   cwd?: string;
 }) {
   const t = useT();
@@ -155,6 +158,7 @@ export function UserMessageView({
           onCancel={onCancelEdit}
           onDraftChange={onDraftChange}
           disabled={disabled}
+          escCancelEdit={escCancelEdit}
         />
       </div>
     );

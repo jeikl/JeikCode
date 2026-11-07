@@ -175,7 +175,7 @@ import {
   type GitCommitFile,
   type GitStatusItem,
 } from '../api';
-import { useT } from '../settings';
+import { useSettings } from '../settings';
 import type { MsgKey } from '../i18n';
 import {
   MAX_IMAGES,
@@ -516,7 +516,11 @@ export function Chat({
   onLiveReview,
   onBindReviewDismiss,
 }: ChatProps) {
-  const t = useT();
+  const { t, escUndoEnabled } = useSettings();
+  // Read by window-level keydown handlers that intentionally keep a stable
+  // listener instead of re-subscribing on every settings change.
+  const escUndoEnabledRef = useRef(escUndoEnabled);
+  escUndoEnabledRef.current = escUndoEnabled;
   const [messages, setMessagesState] = useState<Message[]>([]);
   const activeStoreRef = useRef<SessionStore<Message> | null>(null);
   if (!activeStoreRef.current) activeStoreRef.current = new SessionStore<Message>();
@@ -12099,6 +12103,7 @@ export function Chat({
         defaultPrevented: e.defaultPrevented,
         pendingCardCount: queuedRef.current.length,
         busy: busyRef.current || busy || isCompacting,
+        undoEnabled: escUndoEnabledRef.current,
       });
       if (escapeAction === 'cancel-card') {
         const tail = tailQueuedCard(queuedRef.current);
@@ -12733,6 +12738,7 @@ export function Chat({
           defaultPrevented: e.defaultPrevented,
           pendingCardCount: queuedRef.current.length,
           busy: busyRef.current || busy,
+          undoEnabled: escUndoEnabledRef.current,
         });
         if (escapeAction === 'cancel-card') {
           const tail = tailQueuedCard(queuedRef.current);
@@ -13548,6 +13554,7 @@ export function Chat({
                   search={search}
                   isActiveSearchMatch={isActiveSearchMatch}
                   isEditing={isEditing}
+                  escCancelEdit={escUndoEnabled}
                   draftText={hasActiveDraft ? bubbleEditDraft.text : undefined}
                   draftImages={hasActiveDraft ? bubbleEditDraft.images : undefined}
                   draftModel={hasActiveDraft ? bubbleEditDraft.selectedModel : undefined}
@@ -13729,6 +13736,7 @@ export function Chat({
             onSendNow={() => void handleSendImmediately(q)}
             onCancel={() => handleCancelQueuedMessage(q)}
             onReturnToComposer={(typedChar) => returnFocusToComposer(typedChar)}
+            escUndoEnabled={escUndoEnabled}
           />
         ))}
 

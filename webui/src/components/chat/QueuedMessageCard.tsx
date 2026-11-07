@@ -15,6 +15,7 @@ export function QueuedMessageCard({
   onSendNow,
   onCancel,
   onReturnToComposer,
+  escUndoEnabled,
 }: {
   q: QueuedMessage;
   focusCardId: string | null;
@@ -23,6 +24,8 @@ export function QueuedMessageCard({
   onSendNow: () => void;
   onCancel: () => void;
   onReturnToComposer: (typedChar?: string) => void;
+  /** When false, ESC must not cancel/retract this card. */
+  escUndoEnabled?: boolean;
 }) {
   const t = useT();
   return (
@@ -67,6 +70,7 @@ export function QueuedMessageCard({
           onSendNow={onSendNow}
           onCancel={onCancel}
           onReturnToComposer={onReturnToComposer}
+          escapeUndoEnabled={escUndoEnabled}
         />
       </div>
     </div>

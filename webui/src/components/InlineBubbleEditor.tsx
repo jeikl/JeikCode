@@ -22,6 +22,8 @@ export interface InlineBubbleEditorProps {
   onCancel: () => void;
   onDraftChange?: (text: string, images: ImageData[], selectedModel?: string) => void;
   disabled?: boolean;
+  /** When false, ESC must not cancel the edit. Click-outside still cancels. */
+  escCancelEdit?: boolean;
 }
 
 function imagesToPending(images: ImageData[]): PendingAttach[] {
@@ -48,6 +50,7 @@ export function InlineBubbleEditor({
   onCancel,
   onDraftChange,
   disabled = false,
+  escCancelEdit = true,
 }: InlineBubbleEditorProps) {
   const t = useT();
   const [text, setText] = useState(initialText);
@@ -105,7 +108,7 @@ export function InlineBubbleEditor({
   // Click Outside & Escape listener
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && escCancelEdit) {
         e.preventDefault();
         onCancel();
       }
@@ -129,7 +132,7 @@ export function InlineBubbleEditor({
       document.removeEventListener('keydown', handleKeyDown);
       document.removeEventListener('pointerdown', handlePointerDown);
     };
-  }, [onCancel]);
+  }, [onCancel, escCancelEdit]);
 
   async function handleAddFiles(files: FileList | File[]) {
     const list = Array.from(files);

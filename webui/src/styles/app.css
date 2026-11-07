@@ -9026,6 +9026,12 @@ body {
   line-height: 1.4;
 }
 
+.system-settings-esc-hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--app-secondary-foreground, #9ca3af);
+}
+
 .system-settings-actions-row {
   display: flex;
   align-items: center;

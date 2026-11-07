@@ -3,7 +3,7 @@ import { createPortal } from 'preact/compat';
 import { getDesktopSettings, postDesktopSettings, getHealth, type DesktopSettings } from '../api';
 import { bakedAppVersion, normalizeAppVersion } from '../lib/appVersion';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
-import { useT } from '../settings';
+import { useSettings } from '../settings';
 import { ModelConfigView } from './SettingsDialogs';
 
 interface SystemSettingsDialogProps {
@@ -21,7 +21,7 @@ interface ModuleTab {
 }
 
 export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDialogProps) {
-  const t = useT();
+  const { t, escUndoEnabled, setEscUndoEnabled } = useSettings();
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab || 'models');
   const [closeAction, setCloseAction] = useState<'ask' | 'tray' | 'quit'>('ask');
   const [loading, setLoading] = useState(true);
@@ -34,7 +34,7 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
 
   const tabs: ModuleTab[] = [
     { key: 'models', labelKey: 'settings.tabModels', defaultLabel: '模型与配置', icon: '⚡' },
-    { key: 'desktop', labelKey: 'settings.tabDesktop', defaultLabel: '桌面与系统', icon: '🖥️' },
+    { key: 'desktop', labelKey: 'settings.tabDesktop', defaultLabel: '行为与快捷键', icon: '⌨️' },
     { key: 'about', labelKey: 'settings.tabAbout', defaultLabel: '关于与版本', icon: 'ℹ️' },
   ];
 
@@ -146,7 +146,7 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
             {activeTab === 'desktop' && (
               <div class="system-settings-pane">
                 <h4 class="system-settings-pane-title">
-                  {t('settings.desktopBehaviorTitle') || '桌面客户端行为'}
+                  {t('settings.tabDesktop') || '行为与快捷键'}
                 </h4>
 
                 <div class="system-settings-card-box">
@@ -190,6 +190,28 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
                       />
                       <span>{t('settings.closeActionAsk') || '每次询问我'}</span>
                     </label>
+                  </div>
+                </div>
+
+                <div class="system-settings-card-box">
+                  <div class="system-settings-box-title">
+                    {t('settings.shortcutBehaviorTitle') || '快捷键行为'}
+                  </div>
+                  <div class="system-settings-box-desc">
+                    {t('settings.escUndoDesc') || '开启后，ESC 可取消待发卡片、停止并回填上一条消息，或退出编辑状态。'}
+                  </div>
+                  <label class="system-settings-radio-label">
+                    <input
+                      type="checkbox"
+                      checked={escUndoEnabled}
+                      onChange={(e) =>
+                        setEscUndoEnabled((e.target as HTMLInputElement).checked)
+                      }
+                    />
+                    <span>{t('settings.escUndoLabel') || 'ESC 撤销上一条消息'}</span>
+                  </label>
+                  <div class="system-settings-esc-hint">
+                    {t('settings.escUndoImmediate') || '修改后立即生效'}
                   </div>
                 </div>
 

@@ -138,6 +138,7 @@ export type ComposerEscapeAction = 'cancel-card' | 'stop-and-restore' | 'none';
 
 /**
  * Esc inside the composer:
+ * 0. If the user disabled ESC undo, do nothing (no card cancel, no stop/restore).
  * 1. If there is a pending card in the queue, cancel the tail card.
  * 2. If no card is in the queue and the session is running (playing), stop and restore the last message.
  * 3. Otherwise, do nothing.
@@ -146,8 +147,11 @@ export function resolveComposerEscapeAction(input: {
   defaultPrevented?: boolean;
   pendingCardCount: number;
   busy?: boolean;
+  /** User preference; omitted/true keeps the historical ESC undo behavior. */
+  undoEnabled?: boolean;
 }): ComposerEscapeAction {
   if (input.defaultPrevented) return 'none';
+  if (input.undoEnabled === false) return 'none';
   if (input.pendingCardCount > 0) return 'cancel-card';
   if (input.busy) return 'stop-and-restore';
   return 'none';

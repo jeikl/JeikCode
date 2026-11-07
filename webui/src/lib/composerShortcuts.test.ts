@@ -97,6 +97,17 @@ test('Esc in pure playing state stops and restores message', () => {
   assert.equal(resolveComposerEscapeAction({ pendingCardCount: 0, busy: true, defaultPrevented: true }), 'none');
 });
 
+test('ESC undo preference disables both card cancel and stop/restore', () => {
+  assert.equal(resolveComposerEscapeAction({ pendingCardCount: 1, undoEnabled: false }), 'none');
+  assert.equal(
+    resolveComposerEscapeAction({ pendingCardCount: 0, busy: true, undoEnabled: false }),
+    'none',
+  );
+  // Default / explicit true keeps the historical behavior.
+  assert.equal(resolveComposerEscapeAction({ pendingCardCount: 1 }), 'cancel-card');
+  assert.equal(resolveComposerEscapeAction({ pendingCardCount: 1, undoEnabled: true }), 'cancel-card');
+});
+
 test('the tail card is the most recently queued one', () => {
   const cards = [{ id: 1 }, { id: 2 }, { id: 3 }];
   assert.deepEqual(tailQueuedCard(cards), { id: 3 });

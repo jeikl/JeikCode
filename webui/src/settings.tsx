@@ -27,12 +27,16 @@ interface SettingsCtx {
   /** Agent 执行 git 变更命令后是否自动同步/刷新（来自 /config，默认开启）。 */
   autoGitSync: boolean;
   setAutoGitSync: (v: boolean) => Promise<void>;
+  /** ESC 是否执行“撤销上一条消息 / 取消待发卡片 / 退出编辑”（默认开启）。 */
+  escUndoEnabled: boolean;
+  setEscUndoEnabled: (v: boolean) => void;
 }
 
 const Ctx = createContext<SettingsCtx | null>(null);
 
 const THEME_KEY = 'jeikcode.theme';
 const LANG_KEY = 'jeikcode.lang';
+const ESC_UNDO_KEY = 'jeikcode.escUndo';
 
 function readTheme(): Theme {
   try {
@@ -60,6 +64,17 @@ export function detectBrowserPreferredLang(): Lang | null {
     if (match) return match;
   }
   return null;
+}
+
+function readEscUndo(): boolean {
+  try {
+    const v = localStorage.getItem(ESC_UNDO_KEY);
+    if (v === '0' || v === 'false') return false;
+  } catch {
+    /* ignore */
+  }
+  // Default on: ESC keeps its historical undo/restore behavior until opted out.
+  return true;
 }
 
 function readLang(): Lang {
@@ -109,6 +124,7 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
   const [lang, setLangState] = useState<Lang>(readLang);
   const [githubLogo, setGithubLogo] = useState<boolean>(true);
   const [autoGitSync, setAutoGitSyncState] = useState<boolean>(true);
+  const [escUndoEnabled, setEscUndoEnabledState] = useState<boolean>(readEscUndo);
 
   const selectionVersion = useRef(0);
   const pendingSave = useRef(Promise.resolve());
@@ -167,6 +183,26 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
     pendingSave.current = save.catch(() => {});
     return save;
   }
+
+  // ESC 撤销是浏览器本地快捷键偏好：立即持久化，跨标签页通过 storage 事件同步。
+  function setEscUndoEnabled(next: boolean): void {
+    setEscUndoEnabledState(next);
+    try {
+      localStorage.setItem(ESC_UNDO_KEY, next ? '1' : '0');
+    } catch {
+      /* private mode / quota */
+    }
+  }
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== ESC_UNDO_KEY) return;
+      setEscUndoEnabledState(readEscUndo());
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   // 乐观切换 Git 自动同步开关：失败时回滚，保证 UI 与磁盘配置一致。
   function setAutoGitSync(next: boolean): Promise<void> {
@@ -240,7 +276,7 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
 
   return (
     <Ctx.Provider
-      value={{ theme, effectiveTheme, setTheme: setThemeState, lang, setLang, t, githubLogo, autoGitSync, setAutoGitSync }}
+      value={{ theme, effectiveTheme, setTheme: setThemeState, lang, setLang, t, githubLogo, autoGitSync, setAutoGitSync, escUndoEnabled, setEscUndoEnabled }}
     >
       {children}
     </Ctx.Provider>
