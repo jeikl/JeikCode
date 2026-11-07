@@ -2075,7 +2075,9 @@ mod tests {
         assert!(snapshot.messages[0].text.starts_with("<environment>"));
         assert!(!snapshot.messages[0].text.contains("jeikcode:model"));
         assert_eq!(snapshot.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(snapshot.messages[4].text, "SESSION CONTEXT");
+        // Block 3 (`<todo_rules>`) is disabled, so three persona blocks precede the
+        // legacy session context: <environment>, <system_rules>, <explore_strategy>.
+        assert_eq!(snapshot.messages[3].text, "SESSION CONTEXT");
         assert_eq!(snapshot.cache_epoch, 1);
     }
 
@@ -2107,15 +2109,16 @@ mod tests {
         // of what other tests may have set concurrently (we hold the serial lock, so this
         // is safe — no other test in this serial group can observe the removal).
         let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
-        let (b1, b2, b3, b4) = crate::persona::coding_persona_blocks(
+        let (b1, b2, _b3, b4) = crate::persona::coding_persona_blocks(
             "old-model",
             crate::persona::todo_switch_enabled(),
             crate::persona::request_user_input_switch_enabled(),
         );
+        // Block 3 (`<todo_rules>`) is disabled; inserting its empty string would create
+        // the empty system message that reconcile explicitly filters out.
         let mut snapshot = SessionSnapshot::new(vec![
             Message::system(b1),
             Message::system(b2),
-            Message::system(b3),
             Message::system(b4),
             Message::system("SESSION CONTEXT"),
         ]);
@@ -2134,14 +2137,14 @@ mod tests {
             .iter()
             .filter(|message| is_persona_message(message))
             .count();
-        assert_eq!(personas, 4);
+        assert_eq!(personas, 3, "Block 3 (`<todo_rules>`) is disabled");
         assert!(!snapshot.messages[0].text.contains("jeikcode:model"));
         assert!(snapshot.messages[0]
             .text
             .contains(MODEL_CHANGE_CONTEXT_PREFIX));
         assert!(snapshot.messages[0].text.contains("old-model"));
         assert!(snapshot.messages[0].text.contains("deepseek-v4-flash"));
-        assert_eq!(snapshot.messages[4].text, "SESSION CONTEXT");
+        assert_eq!(snapshot.messages[3].text, "SESSION CONTEXT");
         assert_eq!(snapshot.cache_epoch, 1);
     }
 
@@ -2150,7 +2153,7 @@ mod tests {
     fn repeated_model_switch_keeps_one_current_transition_boundary() {
         jeikcode_config::config::offline::reset_offline_verdict_for_test();
         let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
-        let (b1, b2, b3, b4) = crate::persona::coding_persona_blocks(
+        let (b1, b2, _b3, b4) = crate::persona::coding_persona_blocks(
             "model-a",
             crate::persona::todo_switch_enabled(),
             crate::persona::request_user_input_switch_enabled(),
@@ -2158,7 +2161,6 @@ mod tests {
         let mut snapshot = SessionSnapshot::new(vec![
             Message::system(b1),
             Message::system(b2),
-            Message::system(b3),
             Message::system(b4),
             Message::user("what model are you?"),
             Message::assistant("I am model-a", vec![]),
@@ -2185,7 +2187,7 @@ mod tests {
         // is safe.
         let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let cfg = agent_config("deepseek-v4-flash");
-        let (b1, b2, b3, b4) = crate::persona::coding_persona_blocks_with_context(
+        let (b1, b2, _b3, b4) = crate::persona::coding_persona_blocks_with_context(
             "deepseek-v4-flash",
             cfg.preferred_language,
             crate::persona::todo_switch_enabled(),
@@ -2196,7 +2198,6 @@ mod tests {
         let mut snapshot = SessionSnapshot::new(vec![
             Message::system(b1.clone()),
             Message::system(b2.clone()),
-            Message::system(b3.clone()),
             Message::system(b4.clone()),
             Message::system("SESSION CONTEXT"),
         ]);
@@ -2205,8 +2206,8 @@ mod tests {
 
         assert_eq!(snapshot.messages[0].text, b1);
         assert_eq!(snapshot.messages[1].text, b2);
-        assert_eq!(snapshot.messages[2].text, b3);
-        assert_eq!(snapshot.messages[3].text, b4);
+        assert_eq!(snapshot.messages[2].text, b4);
+        assert_eq!(snapshot.messages[3].text, "SESSION CONTEXT");
         assert_eq!(snapshot.cache_epoch, 0);
     }
 
