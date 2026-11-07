@@ -102,7 +102,11 @@ impl ToolMiddleware for DenyOfflineNetwork {
         if jeikcode_config::config::offline::is_offline_active()
             && is_network_egress_tool(&call.name)
         {
-            return BeforeOutcome::deny_turn(format!(
+            // Offline network is a capability boundary, not a hard policy
+            // violation. `Deny` blocks this call without terminating the
+            // subagent turn or cancelling safe siblings already planned in the
+            // same batch; the worker can continue with local tools.
+            return BeforeOutcome::deny(format!(
                 "network egress tool `{}` is disabled for subagents: offline / air-gap mode is active",
                 call.name
             ));
@@ -3307,10 +3311,10 @@ mod tests {
         seed_offline_verdict(OfflineMode::On, None);
         let outcome_offline = gate.before(&mut call, &mock_tool, &rt).await;
         match outcome_offline {
-            BeforeOutcome::DenyTurn { reason } => {
+            BeforeOutcome::Deny { reason } => {
                 assert!(reason.contains("offline / air-gap mode is active"));
             }
-            _ => panic!("Expected DenyTurn when offline, got {:?}", outcome_offline),
+            _ => panic!("Expected Deny when offline, got {:?}", outcome_offline),
         }
 
         // 3. Test web_fetch and whitespace tolerance
@@ -3321,10 +3325,10 @@ mod tests {
         };
         let outcome_fetch = gate.before(&mut fetch_call, &mock_tool, &rt).await;
         match outcome_fetch {
-            BeforeOutcome::DenyTurn { reason } => {
+            BeforeOutcome::Deny { reason } => {
                 assert!(reason.contains("offline / air-gap mode is active"));
             }
-            _ => panic!("Expected DenyTurn for web_fetch when offline"),
+            _ => panic!("Expected Deny for web_fetch when offline"),
         }
 
         // 4. Test read_url_content alias
@@ -3334,7 +3338,7 @@ mod tests {
             arguments: r#"{"url":"https://example.com"}"#.to_string(),
         };
         let outcome_read_url = gate.before(&mut read_url_call, &mock_tool, &rt).await;
-        assert!(matches!(outcome_read_url, BeforeOutcome::DenyTurn { .. }));
+        assert!(matches!(outcome_read_url, BeforeOutcome::Deny { .. }));
 
         // 5. Test safe tools (e.g. read / code_explore / code_search) proceed even in offline mode
         let mut safe_read_call = ToolCall {
@@ -3363,7 +3367,7 @@ mod tests {
             arguments: r#"{"url":"https://example.com"}"#.to_string(),
         };
         let outcome_mcp = gate.before(&mut mcp_call, &mock_tool, &rt).await;
-        assert!(matches!(outcome_mcp, BeforeOutcome::DenyTurn { .. }));
+        assert!(matches!(outcome_mcp, BeforeOutcome::Deny { .. }));
 
         let mut mcp_dunder_call = ToolCall {
             id: "call-mcp-dunder".to_string(),
@@ -3371,7 +3375,7 @@ mod tests {
             arguments: r#"{"query":"test"}"#.to_string(),
         };
         let outcome_mcp_dunder = gate.before(&mut mcp_dunder_call, &mock_tool, &rt).await;
-        assert!(matches!(outcome_mcp_dunder, BeforeOutcome::DenyTurn { .. }));
+        assert!(matches!(outcome_mcp_dunder, BeforeOutcome::Deny { .. }));
 
         let mut mcp_prefixed_call = ToolCall {
             id: "call-mcp-prefixed".to_string(),
@@ -3380,7 +3384,7 @@ mod tests {
         };
         assert!(matches!(
             gate.before(&mut mcp_prefixed_call, &mock_tool, &rt).await,
-            BeforeOutcome::DenyTurn { .. }
+            BeforeOutcome::Deny { .. }
         ));
 
         // 7. Test dynamic flip: offline -> online allows egress again
