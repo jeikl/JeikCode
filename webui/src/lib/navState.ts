@@ -12,7 +12,6 @@ import type { ProjectInfo, SessionMetaWithProject } from '../api';
 const REMEMBERED_SESSION_KEY = 'jeikcode:remembered-session';
 const SIDEBAR_EXPANDED_PROJECTS_KEY = 'jeikcode:sidebar:expanded-projects';
 const SIDEBAR_COLLAPSED_PROJECTS_KEY = 'jeikcode:sidebar:manually-collapsed-projects';
-const SIDEBAR_SHOW_ALL_PROJECTS_KEY = 'jeikcode:sidebar:show-all-projects';
 
 /** 刷新后恢复选中会话所需的最小元数据（完整 id，不是 URL 里的 8 位短 id）。 */
 export interface RememberedSession {
@@ -171,8 +170,6 @@ export interface SidebarMemory {
   expanded: Set<string>;
   /** 用户主动折叠、且自动展开不得覆盖的项目分组。 */
   collapsed: Set<string>;
-  /** 展开了「更多」会话的项目分组。 */
-  showAll: Set<string>;
 }
 
 /**
@@ -183,11 +180,7 @@ export function loadSidebarMemory(): SidebarMemory {
   const expanded = readStoredIdSet(SIDEBAR_EXPANDED_PROJECTS_KEY);
   const collapsed = readStoredIdSet(SIDEBAR_COLLAPSED_PROJECTS_KEY);
   for (const hash of expanded) collapsed.delete(hash);
-  return {
-    expanded,
-    collapsed,
-    showAll: readStoredIdSet(SIDEBAR_SHOW_ALL_PROJECTS_KEY),
-  };
+  return { expanded, collapsed };
 }
 
 export function saveExpandedProjects(ids: Iterable<string>): void {
@@ -196,10 +189,6 @@ export function saveExpandedProjects(ids: Iterable<string>): void {
 
 export function saveManuallyCollapsedProjects(ids: Iterable<string>): void {
   writeStoredIdSet(SIDEBAR_COLLAPSED_PROJECTS_KEY, ids);
-}
-
-export function saveShowAllProjects(ids: Iterable<string>): void {
-  writeStoredIdSet(SIDEBAR_SHOW_ALL_PROJECTS_KEY, ids);
 }
 
 /**

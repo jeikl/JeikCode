@@ -93,3 +93,95 @@ export function uniqueSessionsById<T extends { id?: string }>(list: T[]): T[] {
   }
   return out;
 }
+
+/**
+ * 按可见顺序计算 Shift 点击的连续范围。
+ *
+ * 与 Windows 资源管理器 / Excel 的列多选一致：先在某一行落下锚点，
+ * 再按住 Shift 点击另一行，两行之间的所有行（含两端）都会被选中。
+ * 目标/锚点已不在当前可见列表中时，退化为只选中目标行，避免跨项目误选。
+ */
+export function sessionIdRange(
+  orderedIds: string[],
+  anchorId: string | null | undefined,
+  targetId: string,
+): string[] {
+  const targetIdx = orderedIds.indexOf(targetId);
+  if (targetIdx < 0) return [];
+  if (!anchorId) return [targetId];
+  const anchorIdx = orderedIds.indexOf(anchorId);
+  if (anchorIdx < 0) return [targetId];
+  const start = Math.min(anchorIdx, targetIdx);
+  const end = Math.max(anchorIdx, targetIdx);
+  return orderedIds.slice(start, end + 1);
+}
+
+/** 项目分组折叠时固定展示的会话条数。 */
+export const FOLDED_SESSION_LIMIT = 5;
+
+export interface FoldedSessionList<T> {
+  visible: T[];
+  /** 去重后的项目会话总数。 */
+  total: number;
+  /** 折叠态下是否还有未渲染的会话。 */
+  hasHidden: boolean;
+  /** 是否渲染「展开更多 / 收起」开关。 */
+  canToggle: boolean;
+}
+
+/**
+ * 合并项目桶（权威、未截断）与全局 /sessions（仅最近 50 条）。
+ *
+ * 以项目桶为优先：刷新时不会因为全局列表先到而改写已有行的元数据；
+ * 全局列表只用来补齐桶缓存尚未加载到的新会话（尤其是刚启动的运行中会话）。
+ */
+export function mergeProjectSessions<T extends { id?: string }>(
+  bucket: T[],
+  globalRows: T[],
+): T[] {
+  if (bucket.length === 0) return globalRows;
+  if (globalRows.length === 0) return bucket;
+  return uniqueSessionsById([...bucket, ...globalRows]);
+}
+
+/**
+ * 计算项目分组实际渲染的会话行。
+ *
+ * - 折叠态：固定展示前 limit 条（运行中会话由调用方排序置顶），
+ *   并额外保留当前选中会话与 keepIds（运行中会话），避免它们因折叠消失；
+ * - 展开态：返回全量，因此该项目的所有运行中会话都会被渲染。
+ *
+ * 展开态只要总数超过 limit 就保留「收起」入口；折叠态只有确实存在
+ * 未渲染的会话时才显示「展开更多」，不会出现点了没有变化的空开关。
+ */
+export function foldProjectSessions<T extends { id?: string }>(
+  sorted: T[],
+  options: {
+    showAll: boolean;
+    activeSessionId?: string | null;
+    /** 折叠态也必须保留的行（例如运行中的会话），保证蓝圈不会因折叠消失。 */
+    keepIds?: Iterable<string>;
+    limit?: number;
+  },
+): FoldedSessionList<T> {
+  const unique = uniqueSessionsById(sorted);
+  const limit = Math.max(1, options.limit ?? FOLDED_SESSION_LIMIT);
+  if (options.showAll) {
+    return {
+      visible: unique,
+      total: unique.length,
+      hasHidden: false,
+      canToggle: unique.length > limit,
+    };
+  }
+  const top = unique.slice(0, limit);
+  const keep = new Set(options.keepIds ?? []);
+  if (options.activeSessionId) keep.add(options.activeSessionId);
+  const pinned = unique.filter(
+    (session) => session.id && keep.has(session.id) && !top.some((row) => row.id === session.id),
+  );
+  const visible = pinned.length > 0 ? [...top, ...pinned] : top;
+  const shown = new Set(visible.map((session) => session.id));
+  const hasHidden = unique.some((session) => !shown.has(session.id));
+  return { visible, total: unique.length, hasHidden, canToggle: hasHidden };
+}

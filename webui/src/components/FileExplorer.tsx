@@ -13,7 +13,7 @@ import {
 import { useSettings } from '../settings';
 import { showToast } from './Toast';
 import { ConfirmDialog } from './ConfirmDialog';
-import { getPageZoom } from '../lib/pageZoom';
+import { menuPointFromEvent } from '../lib/menuPosition';
 import { isLoopbackHost } from '../lib/displayPath';
 import { getCachedDirectoryTree, saveCachedDirectoryTree } from '../lib/sessionCache';
 
@@ -663,15 +663,7 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
       setSelectedPaths(currentSelected);
       setLastSelectedPath(node.path);
     }
-    const zoom = getPageZoom() || 1.0;
-    const rawX = Math.round(e.clientX / zoom);
-    const rawY = Math.round(e.clientY / zoom);
-    const menuWidth = 190;
-    const menuHeight = 220;
-    const maxX = (window.innerWidth / zoom) - 10;
-    const maxY = (window.innerHeight / zoom) - 10;
-    const x = rawX + menuWidth > maxX ? Math.max(10, rawX - menuWidth) : rawX;
-    const y = rawY + menuHeight > maxY ? Math.max(10, rawY - menuHeight) : rawY;
+    const { left: x, top: y } = menuPointFromEvent(e.clientX, e.clientY, 190, 220);
 
     setContextMenu({
       x,

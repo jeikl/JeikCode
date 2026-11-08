@@ -16,13 +16,12 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { GitWebhookDialog } from './GitWebhookDialog';
 import { showToast } from './Toast';
 import { CwdPicker } from './CwdPicker';
-import { mergeOptimisticSession, mergeOptimisticSessions, uniqueSessionsById } from '../lib/sessionList';
+import { foldProjectSessions, mergeOptimisticSession, mergeOptimisticSessions, mergeProjectSessions, sessionIdRange, uniqueSessionsById } from '../lib/sessionList';
 import {
   loadSidebarMemory,
   loadSidebarSnapshot,
   saveExpandedProjects,
   saveManuallyCollapsedProjects,
-  saveShowAllProjects,
   saveSidebarSnapshot,
   type SidebarMemory,
   type SidebarSnapshot,
@@ -32,6 +31,16 @@ import { sessionMessagesToMarkdownLines } from '../lib/historyMessages';
 import { collapseHomePath as collapseHomePathShared, displayPath, isLoopbackHost, stripExtendedPathPrefix } from '../lib/displayPath';
 import { FileExplorer } from './FileExplorer';
 import { getPageZoom } from '../lib/pageZoom';
+import { menuPointFromEvent } from '../lib/menuPosition';
+
+/** 会话右键菜单的估算尺寸（用于防漂移翻转/夹取），与 CSS 宽度保持一致。 */
+const SESSION_CONTEXT_MENU_WIDTH = 200;
+const SESSION_CONTEXT_MENU_HEIGHT = 150;
+
+/** 会话菜单锚点：三点按钮用「右/上/下」贴边，右键用光标坐标。 */
+type SessionMenuPos =
+  | { kind: 'anchor'; top?: number; bottom?: number; right: number }
+  | { kind: 'point'; top: number; left: number };
 
 interface SidebarProps {
   activeSessionId: string | null;
@@ -564,9 +573,10 @@ export function Sidebar({
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     () => new Set(initialSidebarMemory.expanded),
   );
-  const [showAllProjects, setShowAllProjects] = useState<Set<string>>(
-    () => new Set(initialSidebarMemory.showAll),
-  );
+  // 「展开更多」只属于当前页面内的展开动作：不写入 localStorage。
+  // 旧实现把它当作跨刷新记忆，导致用户点过一次后每次打开都是全量列表、
+  // 而「收起」入口被顶到长列表底部，看起来就像折叠功能消失了。
+  const [showAllProjects, setShowAllProjects] = useState<Set<string>>(() => new Set());
   const [hiddenProjectHashes, setHiddenProjectHashes] = useState<Set<string>>(
     () => new Set(initialSidebarSnapshot?.hidden ?? []),
   );
@@ -668,10 +678,13 @@ export function Sidebar({
   const [menuFor, setMenuFor] = useState<string | null>(null);
   // top XOR bottom: `top` opens the menu downward below the kebab; `bottom`
   // opens it upward above the kebab (used when there isn't room below, so the
-  // 2-row menu isn't clipped by the viewport edge).
-  const [menuPos, setMenuPos] = useState<
-    { top?: number; bottom?: number; right: number } | null
-  >(null);
+  // 2-row menu isn't clipped by the viewport edge). Right-click menus use
+  // cursor coordinates instead (`kind: 'point'`).
+  const [menuPos, setMenuPos] = useState<SessionMenuPos | null>(null);
+  // Actions in the open menu; >1 means a batch delete (rename/export still
+  // target the primary row). Kept as full rows so older project-bucket sessions
+  // are deletable even when they are outside the capped global /sessions list.
+  const [menuTargets, setMenuTargets] = useState<SessionMetaWithProject[]>([]);
   // Session search: a centered modal dialog (same .modal-overlay/.modal-card
   // family as the rename/delete dialogs), closes on backdrop click / Escape.
   const [searchOpen, setSearchOpen] = useState(false);
@@ -688,6 +701,8 @@ export function Sidebar({
   const [deleteTargets, setDeleteTargets] = useState<SessionMetaWithProject[] | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // Shift 连续多选的锚点：最近一次 Ctrl/普通点击的行。
+  const selectionAnchorRef = useRef<string | null>(null);
   const [pendingDeleteCount, setPendingDeleteCount] = useState(0);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // Settings menu (3 entries → each opens its own dialog), fixed-anchored above the button.
@@ -925,10 +940,6 @@ export function Sidebar({
     saveExpandedProjects(expandedProjects);
   }, [expandedProjects]);
 
-  useEffect(() => {
-    saveShowAllProjects(showAllProjects);
-  }, [showAllProjects]);
-
   // 每次侧栏真实渲染后把这一屏存成快照；刷新首帧先还原它，
   // 服务端数据到达后再按 id 就地合并，绝不再经历“空列表 → 重排 → 选中”。
   const sidebarSnapshotRef = useRef<SidebarSnapshot | null>(null);
@@ -1075,6 +1086,14 @@ export function Sidebar({
     if (next.has(hash)) {
       next.delete(hash);
       manuallyCollapsedProjectsRef.current.add(hash);
+      // 手动收起分组时丢弃该分组的「展开更多」瞬态，
+      // 下次重新展开回到稳定的 5 条 + 展开更多。
+      setShowAllProjects((prev) => {
+        if (!prev.has(hash)) return prev;
+        const rest = new Set(prev);
+        rest.delete(hash);
+        return rest;
+      });
     } else {
       next.add(hash);
       manuallyCollapsedProjectsRef.current.delete(hash);
@@ -1219,8 +1238,16 @@ export function Sidebar({
     let cancelled = false;
     const running = new Set(extraRunningIds !== undefined ? extraRunningIds : activeIds);
     const known = new Map<string, string>();
-    const take = (session: { id: string; project_hash?: string }) => {
-      if (session.id && session.project_hash) known.set(session.id, session.project_hash);
+    const knownRows = new Map<string, SessionMetaWithProject>();
+    const take = (session: SessionMetaWithProject) => {
+      if (!session.id) return;
+      // 与 known 的覆盖顺序保持一致：乐观条目 > 项目桶 > 全局列表。
+      if (session.project_hash) {
+        known.set(session.id, session.project_hash);
+        knownRows.set(session.id, session);
+      } else if (!knownRows.has(session.id)) {
+        knownRows.set(session.id, session);
+      }
     };
     for (const session of sessionsRef.current) take(session);
     for (const list of Object.values(projectSessionsMapRef.current)) {
@@ -1247,17 +1274,33 @@ export function Sidebar({
           const found = await resolveSession(id);
           if (cancelled || !found?.project_hash) continue;
           busyHashes.add(found.project_hash);
-          // 预注入项目会话列表缓存，让忙碌项与 projectIsRunning 立即就位
-          setProjectSessionsMap((prev) => {
-            const list = prev[found.project_hash!] ?? [];
-            if (list.some((s) => s.id === found.id)) return prev;
-            return { ...prev, [found.project_hash!]: [found, ...list] };
-          });
+          knownRows.set(found.id, found);
         } catch {
           /* the next poll retries */
         }
       }
       if (cancelled) return;
+
+      // 运行中的会话必须落在自己的项目桶里：展开分组时才能看到所有蓝圈会话。
+      // 项目桶可能是旧快照 / 只包含已落盘历史，而全局 /sessions 只保留最近 50 条，
+      // 因此这里把当前已知的运行行按 id 补进对应桶（不改动已有行，避免刷新时重排）。
+      const runningRows = [...running]
+        .map((id) => knownRows.get(id))
+        .filter((row): row is SessionMetaWithProject => !!row?.project_hash);
+      if (runningRows.length > 0) {
+        setProjectSessionsMap((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const row of runningRows) {
+            const hash = row.project_hash!;
+            const list = next[hash] ?? [];
+            if (list.some((session) => session.id === row.id)) continue;
+            next[hash] = [row, ...list];
+            changed = true;
+          }
+          return changed ? next : prev;
+        });
+      }
 
       // 1. 如果有包含忙碌会话的项目被隐藏（hidden），自动解除隐藏
       for (const hash of busyHashes) {
@@ -1309,37 +1352,99 @@ export function Sidebar({
       if (el.closest?.('.session-item-kebab')) return;
       close();
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // 捕获阶段截断：菜单打开时 Escape 只负责关闭菜单，
+      // 不让主输入框的 Escape 动作（停止/回填）同时触发。
+      e.stopPropagation();
+      close();
+    };
     document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey, true);
     window.addEventListener('resize', close);
     window.addEventListener('scroll', close, true);
+    // 页面缩放会整体改变 fixed 坐标的视觉比例；菜单打开期间若缩放，
+    // 直接关闭而不是让锚点漂移（与资源管理器右键菜单同样的防漂移策略）。
+    window.addEventListener('jeikcode:zoom_change', close);
     return () => {
       document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey, true);
       window.removeEventListener('resize', close);
       window.removeEventListener('scroll', close, true);
+      window.removeEventListener('jeikcode:zoom_change', close);
     };
   }, [menuFor]);
 
-  function openItemMenu(e: MouseEvent, id: string) {
+  function openItemMenu(e: MouseEvent, session: SessionMetaWithProject) {
     e.preventDefault();
     e.stopPropagation();
-    const zoom = getPageZoom() || 1.0;
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    if (menuFor === id) {
+    if (menuFor === session.id) {
       setMenuFor(null);
       return;
     }
+    const zoom = getPageZoom() || 1.0;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const right = (window.innerWidth - rect.right) / zoom;
     // 3 rows (rename + export + delete); estimate generously so we flip up a touch
     // early rather than let the last item clip off the bottom edge.
     const MENU_EST_HEIGHT = 144;
     const spaceBelow = (window.innerHeight - rect.bottom) / zoom;
+    setMenuTargets([session]);
     if (spaceBelow < MENU_EST_HEIGHT + 8) {
       // Not enough room below → open upward, anchored above the kebab.
-      setMenuPos({ bottom: (window.innerHeight - rect.top + 4) / zoom, right });
+      setMenuPos({ kind: 'anchor', bottom: (window.innerHeight - rect.top + 4) / zoom, right });
     } else {
-      setMenuPos({ top: (rect.bottom + 4) / zoom, right });
+      setMenuPos({ kind: 'anchor', top: (rect.bottom + 4) / zoom, right });
     }
-    setMenuFor(id);
+    setMenuFor(session.id);
+  }
+
+  /**
+   * 右键菜单与三点菜单共用同一套动作。
+   *
+   * 坐标先用 menuPointFromEvent 按页面缩放归一化并夹进视口；右键已选中的行时
+   * 保留多选并把该行置于首位（重命名/导出作用于它，删除作用于全部选中）。
+   */
+  function openContextMenu(e: MouseEvent, session: SessionMetaWithProject) {
+    e.preventDefault();
+    e.stopPropagation();
+    const point = menuPointFromEvent(
+      e.clientX,
+      e.clientY,
+      SESSION_CONTEXT_MENU_WIDTH,
+      SESSION_CONTEXT_MENU_HEIGHT,
+    );
+    let targets: SessionMetaWithProject[];
+    if (selectedIds.has(session.id)) {
+      const others = resolveSessionsByIds(selectedIds).filter((row) => row.id !== session.id);
+      targets = [session, ...others];
+    } else {
+      // 与 Windows 资源管理器一致：右键未选中的行先把它变成唯一选中项。
+      setSelectedIds(new Set([session.id]));
+      selectionAnchorRef.current = session.id;
+      targets = [session];
+    }
+    setMenuTargets(targets);
+    setMenuPos({ kind: 'point', top: point.top, left: point.left });
+    setMenuFor(session.id);
+  }
+
+  /** 按 id 解析完整会话行：全局列表只有最近 50 条，项目桶负责补全历史。 */
+  function resolveSessionsByIds(ids: Iterable<string>): SessionMetaWithProject[] {
+    const wanted = new Set(ids);
+    if (wanted.size === 0) return [];
+    const byId = new Map<string, SessionMetaWithProject>();
+    const put = (row: SessionMetaWithProject) => {
+      if (row.id && !byId.has(row.id)) byId.set(row.id, row);
+    };
+    for (const row of mergeOptimisticSessions(allOptimistic, sessions)) put(row);
+    for (const list of Object.values(projectSessionsMap)) {
+      for (const row of list) put(row);
+    }
+    for (const row of allOptimistic) put(row);
+    return [...wanted]
+      .map((id) => byId.get(id))
+      .filter((row): row is SessionMetaWithProject => !!row);
   }
 
   function handleRenamed(id: string, name: string) {
@@ -1424,11 +1529,13 @@ export function Sidebar({
     }
     setSelectMode(false);
     setSelectedIds(new Set());
+    selectionAnchorRef.current = null;
   }
 
   function exitSelectMode() {
     setSelectMode(false);
     setSelectedIds(new Set());
+    selectionAnchorRef.current = null;
   }
 
   function toggleSelected(id: string) {
@@ -1438,6 +1545,56 @@ export function Sidebar({
       else next.add(id);
       return next;
     });
+  }
+
+  /**
+   * 会话行点击：普通点击照旧打开会话；Ctrl/Cmd 切换单选，Shift 从锚点连续选中。
+   * 修饰键选择不打开会话，且在没有进入显式多选模式时也能用。
+   */
+  function handleSessionClick(e: MouseEvent, session: SessionMetaWithProject) {
+    // Ctrl+Shift 与 Shift 一样扩展连续范围；必须先于 Ctrl 单选分支判断。
+    if (e.shiftKey && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      selectSessionRange(session.id);
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      selectionAnchorRef.current = session.id;
+      toggleSelected(session.id);
+      return;
+    }
+    if (e.shiftKey) {
+      e.preventDefault();
+      selectSessionRange(session.id);
+      return;
+    }
+    if (selectMode) {
+      selectionAnchorRef.current = session.id;
+      toggleSelected(session.id);
+      return;
+    }
+    // 普通点击恢复“只打开这一条”，同时为下一次 Shift 点击落下锚点。
+    if (selectedIds.size > 0) setSelectedIds(new Set());
+    selectionAnchorRef.current = session.id;
+    onSelect(session);
+  }
+
+  /** Shift 连续多选：按当前 DOM 可见顺序选中锚点与目标之间的所有行（Excel/资源管理器语义）。 */
+  function selectSessionRange(targetId: string) {
+    const order = Array.from(
+      document.querySelectorAll<HTMLElement>('.session-list-body .session-item[data-session-id]'),
+    )
+      .map((el) => el.dataset.sessionId)
+      .filter((id): id is string => !!id);
+    const anchor = selectionAnchorRef.current;
+    const anchorVisible = !!anchor && order.includes(anchor);
+    if (!anchorVisible) selectionAnchorRef.current = targetId;
+    const range = sessionIdRange(order, anchorVisible ? anchor : null, targetId);
+    if (range.length === 0) return;
+    // 与资源管理器一致：Shift 扩展会把范围内的行并入已有选择，不丢掉之前
+    // Ctrl 点选的行；锚点保持不变，连续 Shift 点击会从同一行继续延伸。
+    setSelectedIds((current) => new Set([...current, ...range]));
   }
 
   /** Export a session's conversation as a Markdown file and trigger a browser download. */
@@ -2119,20 +2276,40 @@ export function Sidebar({
   });
   const visibleProjects = allProjects.filter((p) => !hiddenProjectHashes.has(p.hash));
 
-  // 会话行归属去重：同一 id 只归第一个包含它的项目分组。
+  // 项目桶（未截断）是分组的权威列表；全局 /sessions（最近 50 条）只用来补齐
+  // 桶缓存尚未加载到的新会话。以桶为优先，刷新时不会因全局列表先到而改写
+  // 已有行的元数据；旧桶缺失的蓝圈会话也能被补进来。
+  // 排序仍由权威的 updated_at + 运行状态决定，不依赖拼接顺序。
+  const rowsForProject = (p: ProjectInfo): SessionMetaWithProject[] => {
+    const bucket = projectSessionsMap[p.hash] ?? [];
+    const globalRows = sessions.filter((s) => s.project_hash === p.hash);
+    return mergeProjectSessions(bucket, globalRows);
+  };
+
+  // 会话行归属去重：同一 id 只归一个项目分组。
   // 项目桶缓存过期或乐观条目同时命中两个分组时，同一条会话会被渲染两遍；
-  // 完成徽标便一次亮两处、点一次消两处。
+  // 完成徽标便一次亮两处、点一次消两处。运行中的行优先归到正在运行的分组，
+  // 避免被过期桶抢走后从“展开全部”里消失。
   const projectOwnerById = new Map<string, string>();
+  const runningOwnerIds = new Set<string>();
   for (const p of visibleProjects) {
     const rows = [
-      ...(projectSessionsMap[p.hash] ?? sessions.filter((s) => s.project_hash === p.hash)),
+      ...rowsForProject(p),
       ...allOptimistic.filter(
         (opt) =>
           opt.project_hash === p.hash || sameProjectDir(opt.working_dir, p.working_dir),
       ),
     ];
     for (const row of rows) {
-      if (row.id && !projectOwnerById.has(row.id)) projectOwnerById.set(row.id, p.hash);
+      if (!row.id) continue;
+      const running = activeSet.has(row.id);
+      if (!projectOwnerById.has(row.id)) {
+        projectOwnerById.set(row.id, p.hash);
+        if (running) runningOwnerIds.add(row.id);
+      } else if (running && !runningOwnerIds.has(row.id)) {
+        projectOwnerById.set(row.id, p.hash);
+        runningOwnerIds.add(row.id);
+      }
     }
   }
 
@@ -2169,6 +2346,11 @@ export function Sidebar({
   );
 
   const filtered = q ? searchFiltered : merged;
+  // 显式多选模式与 Ctrl/Shift 临时多选共用同一套选中状态与批量删除栏。
+  const selectionActive = selectMode || selectedIds.size > 0;
+  // 批量删除栏只在真正存在多选时出现：右键单行选中不改变列表高度，
+  // 避免右键瞬间把被点的行挤走。
+  const showBatchBar = selectMode || selectedIds.size > 1;
 
   // 兜底：即使上游仍送来重复行，同一个会话也只画一个完成徽标。
   const completedRendered = new Set<string>();
@@ -2185,15 +2367,17 @@ export function Sidebar({
     return (
       <div
         key={s.id}
+        data-session-id={s.id}
         ref={active ? activeSessionItemRef : undefined}
         class={
           'session-item' +
           (active && !selectMode ? ' active' : '') +
           (running ? ' running' : '') +
           (menuFor === s.id ? ' menu-open' : '') +
-          (selectMode && selected ? ' selected' : '') +
-          (selectMode ? ' selecting' : '')
+          (selected ? ' selected' : '') +
+          (selectionActive ? ' selecting' : '')
         }
+        onContextMenu={(e) => openContextMenu(e as unknown as MouseEvent, s)}
       >
         {selectMode && (
           <button
@@ -2204,13 +2388,14 @@ export function Sidebar({
             aria-label={label}
             onClick={(e) => {
               e.stopPropagation();
+              selectionAnchorRef.current = s.id;
               toggleSelected(s.id);
             }}
           />
         )}
         <button
           class="session-item-main"
-          onClick={() => (selectMode ? toggleSelected(s.id) : onSelect(s))}
+          onClick={(e) => handleSessionClick(e as unknown as MouseEvent, s)}
           title={dir}
         >
           <div class="session-item-header">
@@ -2245,7 +2430,7 @@ export function Sidebar({
         {!selectMode && (
           <button
             class="session-item-kebab"
-            onClick={(e) => openItemMenu(e as unknown as MouseEvent, s.id)}
+            onClick={(e) => openItemMenu(e as unknown as MouseEvent, s)}
             title={t('sidebar.itemMenu')}
             aria-label={t('sidebar.itemMenu')}
           >
@@ -2256,9 +2441,9 @@ export function Sidebar({
     );
   };
 
-  const menuSession = menuFor
-    ? filtered.find((s) => s.id === menuFor) ?? sessions.find((s) => s.id === menuFor) ?? null
-    : null;
+  // 菜单动作的主行（重命名/导出）与批量删除目标。菜单可能由右键打开，
+  // 主行来自 projectSessionsMap，不能再用 capped 的 filtered/sessions 反查。
+  const menuPrimary = menuTargets[0] ?? null;
 
   // Rail (collapsed desktop): a narrow icon rail instead of hiding the sidebar.
   // 移动端用抽屉；isMobile 随 matchMedia 更新，避免窄屏仍渲染 220px 空 rail。
@@ -2438,10 +2623,10 @@ export function Sidebar({
 
           <div class="session-group-header">
         <span class="session-group-label">
-          {selectMode ? t('sidebar.selectedCount', { n: selectedIds.size }) : t('sidebar.recent')}
+          {selectionActive ? t('sidebar.selectedCount', { n: selectedIds.size }) : t('sidebar.recent')}
         </span>
         <span class="session-group-actions">
-          {selectMode ? (
+          {selectionActive ? (
             <>
               <button
                 type="button"
@@ -2450,6 +2635,7 @@ export function Sidebar({
                   const visible = filtered.map((s) => s.id);
                   const allSelected = visible.length > 0 && visible.every((id) => selectedIds.has(id));
                   setSelectedIds(allSelected ? new Set() : new Set(visible));
+                  selectionAnchorRef.current = allSelected ? null : (visible[0] ?? null);
                 }}
               >
                 {t('sidebar.selectAll')}
@@ -2467,6 +2653,8 @@ export function Sidebar({
                     }
                     return next;
                   });
+                  // 反选后选择集合不再连续，清掉锚点避免下一次 Shift 选中意外的范围。
+                  selectionAnchorRef.current = null;
                 }}
               >
                 {t('sidebar.invertSelect')}
@@ -2486,6 +2674,7 @@ export function Sidebar({
               class="session-select-btn"
               onClick={() => {
                 setMenuFor(null);
+                selectionAnchorRef.current = null;
                 setSelectMode(true);
               }}
               disabled={filtered.length === 0}
@@ -2495,7 +2684,7 @@ export function Sidebar({
           )}
         </span>
       </div>
-      {selectMode && (
+      {showBatchBar && (
         <div class="session-select-delete-bar">
           {deleteError && (
             <div class="session-select-delete-error" role="alert">{deleteError}</div>
@@ -2510,7 +2699,9 @@ export function Sidebar({
             class="session-select-delete-btn"
             disabled={selectedIds.size === 0 || pendingDeleteCount > 0}
             onClick={() => {
-              const targets = filtered.filter((s) => selectedIds.has(s.id));
+              // 选中项可能来自尚未展开/超出全局 50 条的项目桶，按 id 从完整
+              // 会话集合解析，避免批量删除悄悄漏行。
+              const targets = resolveSessionsByIds(selectedIds);
               if (targets.length === 0) return;
               setDeleteError(null);
               setDeleteTargets(targets);
@@ -2575,12 +2766,11 @@ export function Sidebar({
               const isNonEmptySession = (s: SessionMetaWithProject) => {
                 if (allOptimistic.some((opt) => opt.id === s.id)) return true;
                 if (s.id === activeSessionId) return true;
-                if (activeIds.includes(s.id) || extraRunningIds?.includes(s.id)) return true;
+                if (activeSet.has(s.id)) return true;
                 return (s.message_count ?? 0) > 0;
               };
 
-              const rawBase = projectSessionsMap[p.hash] ?? sessions.filter((s) => s.project_hash === p.hash);
-              const baseSessions = rawBase.filter(isNonEmptySession);
+              const baseSessions = rowsForProject(p).filter(isNonEmptySession);
               const projectOptimistics = allOptimistic.filter(
                 (opt) =>
                   opt.project_hash === p.hash ||
@@ -2592,18 +2782,15 @@ export function Sidebar({
                 ? mergeOptimisticSessions(projectOptimistics, baseSessions)
                 : baseSessions;
               const sorted = sortSessions(pSessions);
-              let displayList: SessionMetaWithProject[];
-              if (isShowAll) {
-                displayList = sorted;
-              } else {
-                const top5 = sorted.slice(0, 5);
-                if (activeSessionId && !top5.some((s) => s.id === activeSessionId)) {
-                  const activeItem = sorted.find((s) => s.id === activeSessionId);
-                  displayList = activeItem && isNonEmptySession(activeItem) ? [...top5, activeItem] : top5;
-                } else {
-                  displayList = top5;
-                }
-              }
+              // 折叠态最少展示 5 条，并保留当前选中行与所有运行中会话；
+              // 展开态返回全量，因此“展开更多”不会漏掉任何蓝圈会话。
+              const folded = foldProjectSessions(sorted, {
+                showAll: isShowAll,
+                activeSessionId,
+                // 折叠态永不隐藏正在运行的会话：蓝圈优先于条数上限。
+                keepIds: activeSet,
+              });
+              const displayList = folded.visible;
               const count = pSessions.length;
 
               return (
@@ -2679,19 +2866,17 @@ export function Sidebar({
                   </div>
                   {isExpanded && (
                     <div class="project-sessions-list">
-                      {uniqueSessionsById(
-                        displayList.filter((s) => projectOwnerById.get(s.id) === p.hash),
-                      ).map(renderItem)}
-                      {sorted.length > 5 && (
+                      {displayList.filter((s) => projectOwnerById.get(s.id) === p.hash).map(renderItem)}
+                      {folded.canToggle && (
                         <button
                           type="button"
-                          class="project-show-more-btn"
+                          class={'project-show-more-btn' + (isShowAll ? ' is-expanded' : '')}
                           onClick={() => toggleShowAll(p.hash)}
                         >
                           <span>{isShowAll ? t('sidebar.showLess') : t('sidebar.showMore')}</span>
                         </button>
                       )}
-                      {sorted.length === 0 && (
+                      {folded.total === 0 && (
                         <div class="session-empty" style={{ padding: '6px 12px', fontSize: '11.5px' }}>
                           {t('sidebar.empty')}
                         </div>
@@ -2814,21 +2999,28 @@ export function Sidebar({
       )}
 
       {/* Per-session actions menu. Fixed + portaled to <body> so neither the
-          scroll container nor the mobile drawer's transform/overflow clips it. */}
-      {menuSession && menuPos && createPortal(
+          scroll container nor the mobile drawer's transform/overflow clips it.
+          Right-click menus use the same rows, positioned at the (zoom-normalized)
+          cursor point by menuPointFromEvent. */}
+      {menuFor && menuPrimary && menuPos && createPortal(
         <div
-          class="item-menu"
+          class={'item-menu' + (menuPos.kind === 'point' ? ' session-context-menu' : '')}
           ref={itemMenuRef}
-          style={{
-            top: menuPos.top != null ? `${menuPos.top}px` : undefined,
-            bottom: menuPos.bottom != null ? `${menuPos.bottom}px` : undefined,
-            right: `${menuPos.right}px`,
-          }}
+          style={
+            menuPos.kind === 'point'
+              ? { top: `${menuPos.top}px`, left: `${menuPos.left}px` }
+              : {
+                  top: menuPos.top != null ? `${menuPos.top}px` : undefined,
+                  bottom: menuPos.bottom != null ? `${menuPos.bottom}px` : undefined,
+                  right: `${menuPos.right}px`,
+                }
+          }
+          onContextMenu={(e) => e.preventDefault()}
         >
           <button
             class="item-menu-row"
             onClick={() => {
-              setRenameTarget(menuSession);
+              setRenameTarget(menuPrimary);
               setMenuFor(null);
             }}
           >
@@ -2837,7 +3029,7 @@ export function Sidebar({
           </button>
           <button
             class="item-menu-row"
-            onClick={() => handleExportMarkdown(menuSession)}
+            onClick={() => handleExportMarkdown(menuPrimary)}
           >
             <DownloadIcon />
             <span>{t('sidebar.exportMarkdown')}</span>
@@ -2845,12 +3037,18 @@ export function Sidebar({
           <button
             class="item-menu-row danger"
             onClick={() => {
-              setDeleteTargets([menuSession]);
+              // 右键落在已选中的行上时 menuTargets 是整批选中项；
+              // 三点按钮永远是单行。删除仍走 DeleteDialog 的确认流程。
+              setDeleteTargets(menuTargets.length > 0 ? menuTargets : [menuPrimary]);
               setMenuFor(null);
             }}
           >
             <TrashIcon />
-            <span>{t('sidebar.delete')}</span>
+            <span>
+              {menuTargets.length > 1
+                ? t('sidebar.deleteSelectedCount', { n: menuTargets.length })
+                : t('sidebar.delete')}
+            </span>
           </button>
         </div>,
         document.body,

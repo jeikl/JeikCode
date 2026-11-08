@@ -6895,6 +6895,15 @@ body {
   color: var(--app-primary-foreground);
   background: var(--app-list-hover-background);
 }
+/* 展开态下按钮会落在长列表末尾；吸底后「收起」始终可见，
+   用户不必先滚到列表尽头才能恢复 5 条折叠视图。 */
+.project-show-more-btn.is-expanded {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--app-primary-background);
+  margin-bottom: 0;
+}
 
 .session-group-label {
   letter-spacing: 0.5px;
@@ -7177,6 +7186,11 @@ body {
   background: #ffffff;
   border-color: #cbd5e1;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.1), 0 2px 6px rgba(0, 0, 0, 0.05);
+}
+/* 右键菜单：固定宽度与 JS 里的防漂移估算保持一致。 */
+.item-menu.session-context-menu {
+  width: 200px;
+  min-width: 200px;
 }
 .item-menu-row {
   display: flex;

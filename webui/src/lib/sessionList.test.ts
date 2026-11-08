@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { mergeOptimisticSession, mergeOptimisticSessions, uniqueSessionsById, type SessionLike } from './sessionList.ts';
+import {
+  FOLDED_SESSION_LIMIT,
+  foldProjectSessions,
+  mergeOptimisticSession,
+  mergeOptimisticSessions,
+  mergeProjectSessions,
+  sessionIdRange,
+  uniqueSessionsById,
+  type SessionLike,
+} from './sessionList.ts';
 
 const s = (over: Partial<SessionLike> = {}): SessionLike => ({
   id: 'id-x',
@@ -191,4 +200,141 @@ test('同一会话 id 跨分组只保留一行，完成徽标不会一次亮两�
     uniqueSessionsById(rows).map((row) => row.name),
     ['C（项目 A）', 'D（项目 B）', '无 id 的旧行一', '无 id 的旧行二'],
   );
+});
+
+const sessionRows = (count: number) =>
+  Array.from({ length: count }, (_, i) => ({ id: `session-${i + 1}`, name: `会话 ${i + 1}` }));
+
+test('Shift 点击选中锚点到目标之间的连续范围', () => {
+  const order = ['a', 'b', 'c', 'd', 'e'];
+  assert.deepEqual(sessionIdRange(order, 'a', 'd'), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(sessionIdRange(order, 'd', 'b'), ['b', 'c', 'd'], '反向点击同样有效');
+  assert.deepEqual(sessionIdRange(order, 'c', 'c'), ['c']);
+});
+
+test('没有锚点或锚点已不可见时只选中目标行', () => {
+  const order = ['a', 'b', 'c'];
+  assert.deepEqual(sessionIdRange(order, null, 'b'), ['b']);
+  assert.deepEqual(sessionIdRange(order, 'gone', 'c'), ['c']);
+  assert.deepEqual(sessionIdRange(order, 'a', 'gone'), []);
+});
+
+test('全局列表只补齐项目桶缺失的行，已有行以项目桶为准', () => {
+  const bucket = [
+    { id: 'a', name: 'A（桶）' },
+    { id: 'b', name: 'B（桶）' },
+  ];
+  const globalRows = [
+    { id: 'b', name: 'B（全局）' },
+    { id: 'c', name: 'C（全局）' },
+  ];
+  assert.deepEqual(mergeProjectSessions(bucket, globalRows), [
+    { id: 'a', name: 'A（桶）' },
+    { id: 'b', name: 'B（桶）' },
+    { id: 'c', name: 'C（全局）' },
+  ]);
+});
+
+test('项目桶尚未加载 / 全局列表为空时都能安全退化', () => {
+  const rows = [{ id: 'a' }];
+  assert.deepEqual(mergeProjectSessions([], rows), rows);
+  assert.deepEqual(mergeProjectSessions(rows, []), rows);
+});
+
+test('折叠态固定展示 5 条，存在更多会话时显示展开更多', () => {
+  const folded = foldProjectSessions(sessionRows(8), { showAll: false });
+  assert.equal(FOLDED_SESSION_LIMIT, 5);
+  assert.deepEqual(folded.visible.map((row) => row.id), [
+    'session-1',
+    'session-2',
+    'session-3',
+    'session-4',
+    'session-5',
+  ]);
+  assert.equal(folded.total, 8);
+  assert.equal(folded.hasHidden, true);
+  assert.equal(folded.canToggle, true);
+});
+
+test('折叠态不丢当前选中会话，但不会因此多显示其它未选中的行', () => {
+  const folded = foldProjectSessions(sessionRows(8), {
+    showAll: false,
+    activeSessionId: 'session-8',
+  });
+  assert.deepEqual(folded.visible.map((row) => row.id), [
+    'session-1',
+    'session-2',
+    'session-3',
+    'session-4',
+    'session-5',
+    'session-8',
+  ]);
+  assert.equal(folded.canToggle, true);
+});
+
+test('折叠态保留所有运行中会话（蓝圈），即使它们排在第 5 条之后', () => {
+  const rows = sessionRows(9);
+  const folded = foldProjectSessions(rows, {
+    showAll: false,
+    activeSessionId: 'session-1',
+    keepIds: ['session-8', 'session-9'],
+  });
+  assert.deepEqual(folded.visible.map((row) => row.id), [
+    'session-1',
+    'session-2',
+    'session-3',
+    'session-4',
+    'session-5',
+    'session-8',
+    'session-9',
+  ]);
+  assert.equal(folded.hasHidden, true);
+  assert.equal(folded.canToggle, true);
+});
+
+test('运行中会话已经在前 5 条时不重复追加', () => {
+  const folded = foldProjectSessions(sessionRows(8), {
+    showAll: false,
+    keepIds: ['session-2', 'session-3'],
+  });
+  assert.deepEqual(folded.visible.map((row) => row.id), [
+    'session-1',
+    'session-2',
+    'session-3',
+    'session-4',
+    'session-5',
+  ]);
+  assert.equal(folded.canToggle, true);
+});
+
+test('展开态返回全量（运行中会话由排序置顶后必然包含在内）', () => {
+  const rows = sessionRows(9);
+  const folded = foldProjectSessions(rows, { showAll: true, activeSessionId: 'session-9' });
+  assert.equal(folded.visible.length, 9);
+  assert.deepEqual(folded.visible, rows);
+  assert.equal(folded.hasHidden, false);
+  assert.equal(folded.canToggle, true, '展开态仍需保留收起入口');
+});
+
+test('不足 5 条时不显示空的展开/收起开关', () => {
+  const folded = foldProjectSessions(sessionRows(3), { showAll: false });
+  assert.equal(folded.visible.length, 3);
+  assert.equal(folded.hasHidden, false);
+  assert.equal(folded.canToggle, false);
+});
+
+test('重复 id 不占用折叠名额，5 条可见行去重后仍尽量填满', () => {
+  const rows = [
+    { id: 'a' },
+    { id: 'a' },
+    { id: 'b' },
+    { id: 'c' },
+    { id: 'd' },
+    { id: 'e' },
+    { id: 'f' },
+  ];
+  const folded = foldProjectSessions(rows, { showAll: false });
+  assert.deepEqual(folded.visible.map((row) => row.id), ['a', 'b', 'c', 'd', 'e']);
+  assert.equal(folded.total, 6);
+  assert.equal(folded.canToggle, true);
 });
