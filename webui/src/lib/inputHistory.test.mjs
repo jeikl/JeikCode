@@ -14,6 +14,7 @@ const setup = (...entries) => {
   return h;
 };
 const event = (key = 'ArrowUp', value = '', pos = 0, extras = {}) => ({ key, currentTarget: { value, selectionStart: pos, selectionEnd: pos }, ...extras });
+const rangeEvent = (key, value, start, end, extras = {}) => ({ key, currentTarget: { value, selectionStart: start, selectionEnd: end }, ...extras });
 
 test('empty history leaves native arrows alone', () => {
   const h = setup();
@@ -133,19 +134,32 @@ test('actual submit recorder uses assigned session without reading changed input
   assert.equal(h.navigate('up', ''), ' original\n ');
 });
 test('context keys cannot collide at delimiters', () => assert.notEqual(key('a::b', 'c'), key('a', 'b::c')));
-test('Up only on first logical line and Down only on last', () => {
-  assert.equal(can(event('ArrowUp', 'abc\ndef', 2)), true);
-  assert.equal(can(event('ArrowUp', 'abc\ndef', 4)), false);
-  assert.equal(can(event('ArrowDown', 'abc\ndef', 2)), false);
-  assert.equal(can(event('ArrowDown', 'abc\ndef', 4)), true);
+test('Up/Down recall only while the composer is empty', () => {
+  assert.equal(can(event('ArrowUp', '', 0)), true);
+  assert.equal(can(event('ArrowDown', '', 0)), true);
+  assert.equal(can(event('ArrowUp', 'abc', 0)), false);
+  assert.equal(can(event('ArrowUp', 'abc', 3)), false);
+  assert.equal(can(event('ArrowDown', 'abc', 0)), false);
+  assert.equal(can(event('ArrowUp', 'abc\ndef', 2)), false);
+  assert.equal(can(event('ArrowDown', 'abc\ndef', 4)), false);
 });
-test('CRLF boundaries and trailing blank lines remain native', () => {
-  assert.equal(can(event('ArrowUp', 'a\r\nb', 3)), false);
-  assert.equal(can(event('ArrowDown', 'a\r\nb', 3)), true);
-  assert.equal(can(event('ArrowDown', 'a\n', 1)), false);
-  assert.equal(can(event('ArrowDown', 'a\n', 2)), true);
+
+test('a fully selected draft enables recall; partial selections stay native', () => {
+  assert.equal(can(rangeEvent('ArrowUp', 'abc', 0, 3)), true);
+  assert.equal(can(rangeEvent('ArrowDown', 'abc', 0, 3)), true);
+  assert.equal(can(rangeEvent('ArrowUp', 'abc', 3, 0)), true, 'reversed full selection is still full');
+  assert.equal(can(rangeEvent('ArrowUp', 'abc', 0, 2)), false);
+  assert.equal(can(rangeEvent('ArrowUp', 'abc', 1, 3)), false);
+  assert.equal(can(rangeEvent('ArrowUp', 'abc', 0, 0)), false);
+  assert.equal(can(rangeEvent('ArrowUp', '', 0, 0)), true, 'empty selection is the empty-composer case');
 });
-test('selection must be collapsed', () => assert.equal(can(event('ArrowUp', 'abc', 0, { currentTarget: { value: 'abc', selectionStart: 0, selectionEnd: 2 } })), false));
+
+test('recalled entries are fully selected so consecutive Up/Down keep navigating', async () => {
+  const chat = await readFile(new URL('../components/Chat.tsx', import.meta.url), 'utf8');
+  assert.match(chat, /pendingHistoryCaretRef\.current = \{ context: historyContext, value: next, start: 0, end: next\.length \};/);
+  assert.match(chat, /setSelectionRange\(0, next\.length\)/);
+  assert.match(chat, /setSelectionRange\(pending\.start, pending\.end\)/);
+});
 for (const flag of ['altKey', 'ctrlKey', 'metaKey', 'shiftKey', 'isComposing', 'defaultPrevented']) {
   test(`${flag} keeps native behavior`, () => assert.equal(can(event('ArrowUp', '', 0, { [flag]: true })), false));
 }

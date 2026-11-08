@@ -2144,7 +2144,7 @@ export function Chat({
   const historyProject = activeSession?.id === sessionId
     ? activeSession.project_hash || effectiveWorkingDir || '' : effectiveWorkingDir || '';
   const historyContext = inputHistoryKey(historyProject, sessionId);
-  const pendingHistoryCaretRef = useRef<{ context: string; value: string; position: number } | null>(null);
+  const pendingHistoryCaretRef = useRef<{ context: string; value: string; start: number; end: number } | null>(null);
   useLayoutEffect(() => {
     inputHistoryRef.current.switchContext(historyContext);
     pendingHistoryCaretRef.current = null;
@@ -2155,7 +2155,7 @@ export function Chat({
     pendingHistoryCaretRef.current = null;
     const ta = textareaRef.current;
     if (!pending || !ta || pending.context !== historyContext || pending.value !== input) return;
-    ta.setSelectionRange(pending.position, pending.position);
+    ta.setSelectionRange(pending.start, pending.end);
     resizeComposer(ta);
   }, [input, historyContext]);
 
@@ -12181,11 +12181,13 @@ export function Chat({
       const next = inputHistoryRef.current.navigate(direction, input);
       if (next !== null) {
         e.preventDefault();
-        const position = direction === 'up' ? 0 : next.length;
+        // Recall always selects the whole entry. Consecutive Up/Down therefore
+        // still satisfies the empty-or-fully-selected contract; clicking into
+        // the text collapses the selection and restores native caret movement.
         if (next === input) {
-          textareaRef.current?.setSelectionRange(position, position);
+          textareaRef.current?.setSelectionRange(0, next.length);
         } else {
-          pendingHistoryCaretRef.current = { context: historyContext, value: next, position };
+          pendingHistoryCaretRef.current = { context: historyContext, value: next, start: 0, end: next.length };
           setInput(next);
         }
         return;

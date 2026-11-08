@@ -73,7 +73,16 @@ export function inputHistoryKey(project: string, session: string | null | undefi
   return JSON.stringify([project, session ?? null]);
 }
 
-/** Logical lines, not wrapped visual lines; keep native selection/IME behavior. */
+/**
+ * History recall is opt-in: only an empty composer or a fully selected one may
+ * consume Up/Down. With a caret inside a draft, arrows keep their native
+ * line/caret movement so editing a prompt never replaces the user's text with
+ * a remembered command.
+ *
+ * Recalled entries are selected after insertion (see Chat.tsx), so consecutive
+ * Up/Down still satisfies the empty-or-fully-selected contract. Clicking into
+ * the recalled text collapses that selection and returns arrows to editing.
+ */
 export function canNavigateInputHistory(event: {
   key: string;
   defaultPrevented?: boolean;
@@ -87,10 +96,12 @@ export function canNavigateInputHistory(event: {
 }): boolean {
   if (event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
       event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return false;
   const ta = event.currentTarget;
-  if (!ta || ta.selectionStart === null || ta.selectionStart !== ta.selectionEnd) return false;
-  const pos = ta.selectionStart;
-  if (event.key === 'ArrowUp') return !/[\r\n]/.test(ta.value.slice(0, pos));
-  if (event.key === 'ArrowDown') return !/[\r\n]/.test(ta.value.slice(pos));
-  return false;
+  if (!ta || ta.selectionStart === null || ta.selectionEnd === null) return false;
+  const value = ta.value;
+  if (value.length === 0) return true;
+  const start = Math.min(ta.selectionStart, ta.selectionEnd);
+  const end = Math.max(ta.selectionStart, ta.selectionEnd);
+  return start === 0 && end === value.length;
 }
