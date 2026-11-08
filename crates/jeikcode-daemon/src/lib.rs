@@ -41,6 +41,7 @@ pub mod legacy_convert;
 pub mod live_hub;
 pub mod native_live;
 mod runtime_host;
+mod shell_open;
 mod sidebar_projects;
 mod steer_prompt;
 /// File-sink diagnostic trace (`ctrace!` macro), enabled via `JEIKCODE_TUIX_LOG`.
@@ -17143,35 +17144,22 @@ async fn reveal_file_or_folder(
     if !p.exists() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "success": false, "error": "Path does not exist" })),
+            Json(serde_json::json!({ "success": false, "error": shell_open::PATH_NOT_FOUND })),
         );
     }
     let is_dir = p.is_dir();
-    // 异步后台线程拉起系统文件管理器，无桌面环境或异地请求时静默忽略，杜绝挂起卡死
-    tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "windows")]
-        {
-            if p.is_file() {
-                let _ = std::process::Command::new("explorer")
-                    .arg(format!("/select,{}", p.display()))
-                    .spawn();
-            } else {
-                let _ = std::process::Command::new("explorer").arg(&p).spawn();
-            }
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg(&p).spawn();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if std::env::var_os("DISPLAY").is_some()
-                || std::env::var_os("WAYLAND_DISPLAY").is_some()
-            {
-                let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
-            }
-        }
-    });
+    // 异步派发到一次性后台线程，接口立即返回；线程内失败只记日志，由前端静默忽略。
+    if let Err(err) = shell_open::reveal(&p) {
+        tracing::warn!(
+            error = %err,
+            path = %p.display(),
+            "fs/reveal: failed to dispatch shell reveal"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "success": false, "error": shell_open::SHELL_OPEN_FAILED })),
+        );
+    }
     (
         StatusCode::OK,
         Json(serde_json::json!({ "success": true, "is_dir": is_dir })),
@@ -17208,29 +17196,21 @@ async fn open_file_with_os(
     if !p.exists() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "success": false, "error": "Path does not exist" })),
+            Json(serde_json::json!({ "success": false, "error": shell_open::PATH_NOT_FOUND })),
         );
     }
-    tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "windows")]
-        {
-            let _ = std::process::Command::new("cmd")
-                .args(["/c", "start", "", &p.to_string_lossy()])
-                .spawn();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg(&p).spawn();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if std::env::var_os("DISPLAY").is_some()
-                || std::env::var_os("WAYLAND_DISPLAY").is_some()
-            {
-                let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
-            }
-        }
-    });
+    // 异步派发到一次性后台线程，接口立即返回；线程内失败只记日志，由前端静默忽略。
+    if let Err(err) = shell_open::open(&p) {
+        tracing::warn!(
+            error = %err,
+            path = %p.display(),
+            "fs/open: failed to dispatch shell open"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "success": false, "error": shell_open::SHELL_OPEN_FAILED })),
+        );
+    }
     (StatusCode::OK, Json(serde_json::json!({ "success": true })))
 }
 

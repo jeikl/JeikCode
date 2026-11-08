@@ -515,8 +515,8 @@ export function Markdown({
             .then(() => {
               showToast(t('preview.revealDirSuccess', { path: cleanHref }), 'success');
             })
-            .catch((err) => {
-              showToast(t('preview.revealDirFailed', { error: err?.message || String(err) }), 'error');
+            .catch(() => {
+              // 系统外壳调用失败时静默忽略
             });
           return;
         }
@@ -528,8 +528,8 @@ export function Markdown({
             .then(() => {
               showToast(t('preview.openWithDefaultAppSuccess', { path: fileName }), 'success');
             })
-            .catch((err) => {
-              showToast(t('preview.openWithDefaultAppFailed', { error: err?.message || String(err) }), 'error');
+            .catch(() => {
+              // 系统外壳调用失败时静默忽略
             });
           return;
         }
@@ -731,8 +731,8 @@ export function Markdown({
                     .then(() => {
                       showToast(t('preview.revealDirSuccess', { path: fileBadgeMenu.fileName }), 'success');
                     })
-                    .catch((err) => {
-                      showToast(t('preview.revealDirFailed', { error: err?.message || String(err) }), 'error');
+                    .catch(() => {
+                      // 系统外壳调用失败时静默忽略
                     });
                   setFileBadgeMenu(null);
                 }}
@@ -773,8 +773,8 @@ export function Markdown({
                     .then(() => {
                       showToast(t('preview.openWithDefaultAppSuccess', { path: fileBadgeMenu.fileName }), 'success');
                     })
-                    .catch((err) => {
-                      showToast(t('preview.openWithDefaultAppFailed', { error: err?.message || String(err) }), 'error');
+                    .catch(() => {
+                      // 系统外壳调用失败时静默忽略
                     });
                   setFileBadgeMenu(null);
                 }}
@@ -789,8 +789,8 @@ export function Markdown({
                     .then(() => {
                       showToast(t('explorer.revealInOs'), 'success');
                     })
-                    .catch((err) => {
-                      showToast(String(err?.message || err), 'error');
+                    .catch(() => {
+                      // 系统外壳调用失败时静默忽略
                     });
                   setFileBadgeMenu(null);
                 }}
@@ -903,8 +903,8 @@ export function Markdown({
                     .then(() => {
                       showToast(t('preview.openWithDefaultAppSuccess', { path: fileBadgeMenu.fileName }), 'success');
                     })
-                    .catch((err) => {
-                      showToast(t('preview.openWithDefaultAppFailed', { error: err?.message || String(err) }), 'error');
+                    .catch(() => {
+                      // 系统外壳调用失败时静默忽略
                     });
                   setFileBadgeMenu(null);
                 }}
@@ -919,8 +919,8 @@ export function Markdown({
                     .then(() => {
                       showToast(t('explorer.revealInOs'), 'success');
                     })
-                    .catch((err) => {
-                      showToast(String(err?.message || err), 'error');
+                    .catch(() => {
+                      // 系统外壳调用失败时静默忽略
                     });
                   setFileBadgeMenu(null);
                 }}

@@ -1180,8 +1180,8 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
               try {
                 await revealInFileExplorer(targetPath);
                 showToast(t('explorer.revealInOs'), 'success');
-              } catch (err: any) {
-                showToast(String(err?.message || err), 'error');
+              } catch {
+                // 系统外壳调用失败时静默忽略
               }
             }}
           >

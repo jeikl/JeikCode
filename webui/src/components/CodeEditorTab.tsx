@@ -1262,8 +1262,8 @@ export function CodeEditorTab({
                   try {
                     await openFileWithOs(filePath);
                     showToast(t('preview.openWithDefaultAppSuccess', { path: fileName }), 'success');
-                  } catch (err: any) {
-                    showToast(t('preview.openWithDefaultAppFailed', { error: err?.message || err }), 'error');
+                  } catch {
+                    // 系统外壳调用失败时静默忽略
                   }
                 }}
                 title={t('preview.openWithDefaultApp')}
@@ -1278,8 +1278,8 @@ export function CodeEditorTab({
                   try {
                     await revealInFileExplorer(filePath);
                     showToast(t('preview.revealDirSuccess', { path: fileName }), 'success');
-                  } catch (err: any) {
-                    showToast(t('preview.revealDirFailed', { error: err?.message || err }), 'error');
+                  } catch {
+                    // 系统外壳调用失败时静默忽略
                   }
                 }}
                 title={t('explorer.revealInOs')}
@@ -1300,8 +1300,8 @@ export function CodeEditorTab({
                   try {
                     await openFileWithOs(filePath);
                     showToast(t('preview.openWithDefaultAppSuccess', { path: fileName }), 'success');
-                  } catch (err: any) {
-                    showToast(t('preview.openWithDefaultAppFailed', { error: err?.message || err }), 'error');
+                  } catch {
+                    // 系统外壳调用失败时静默忽略
                   }
                 }}
                 title={t('preview.openWithDefaultApp')}
@@ -1316,8 +1316,8 @@ export function CodeEditorTab({
                   try {
                     await revealInFileExplorer(filePath);
                     showToast(t('preview.revealDirSuccess', { path: fileName }), 'success');
-                  } catch (err: any) {
-                    showToast(t('preview.revealDirFailed', { error: err?.message || err }), 'error');
+                  } catch {
+                    // 系统外壳调用失败时静默忽略
                   }
                 }}
                 title={t('explorer.revealInOs')}
@@ -1645,8 +1645,8 @@ export function CodeEditorTab({
                     try {
                       await openFileWithOs(filePath);
                       showToast(t('preview.openWithDefaultAppSuccess', { path: fileName }), 'success');
-                    } catch (err: any) {
-                      showToast(t('preview.openWithDefaultAppFailed', { error: err?.message || err }), 'error');
+                    } catch {
+                      // 系统外壳调用失败时静默忽略
                     }
                   }}
                 >
@@ -1659,8 +1659,8 @@ export function CodeEditorTab({
                     try {
                       await revealInFileExplorer(filePath);
                       showToast(t('preview.revealDirSuccess', { path: fileName }), 'success');
-                    } catch (err: any) {
-                      showToast(t('preview.revealDirFailed', { error: err?.message || err }), 'error');
+                    } catch {
+                      // 系统外壳调用失败时静默忽略
                     }
                   }}
                 >

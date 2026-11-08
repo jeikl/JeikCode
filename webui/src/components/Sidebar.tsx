@@ -2114,7 +2114,7 @@ export function Sidebar({
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  void revealInFileExplorer(s.dir as string);
+                  void revealInFileExplorer(s.dir as string).catch(() => {});
                 }}
               >
                 <FolderOpenIcon />
@@ -2810,7 +2810,7 @@ export function Sidebar({
                         <button
                           type="button"
                           class="project-group-action-btn"
-                          onClick={() => void revealInFileExplorer(p.working_dir)}
+                          onClick={() => void revealInFileExplorer(p.working_dir).catch(() => {})}
                           title={t('sidebar.revealInExplorer')}
                           aria-label={t('sidebar.revealInExplorer')}
                         >
