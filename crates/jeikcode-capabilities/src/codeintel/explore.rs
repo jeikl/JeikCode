@@ -277,6 +277,10 @@ fn seed_fork_defaults() {
     if !ignore_dest.exists() {
         let _ = std::fs::write(&ignore_dest, CODEGRAPH_IGNORE_ASSET);
     }
+    // Legacy default: `*.log` used to live in `.codegraphignore`. Search now
+    // controls logs via the tool-level `include_logs` switch, so remove only the
+    // standalone default line from existing user configs. Custom rules stay.
+    migrate_legacy_log_ignore(&ignore_dest);
     // .codegraphignore.graph — sensitive rules (`.env*`, keys, SSH). Seeded alongside
     // the noise list; grep/glob exclude these paths by default. include_sensitive=true
     // is the approval-gated switch that can include them.
@@ -284,6 +288,21 @@ fn seed_fork_defaults() {
     if !graph_only_dest.exists() {
         let _ = std::fs::write(&graph_only_dest, CODEGRAPH_GRAPH_ONLY_ASSET);
     }
+}
+
+fn migrate_legacy_log_ignore(path: &Path) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    if !text.lines().any(|line| line.trim() == "*.log") {
+        return;
+    }
+    let filtered: Vec<&str> = text.lines().filter(|line| line.trim() != "*.log").collect();
+    let mut out = filtered.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    let _ = std::fs::write(path, out);
 }
 
 /// Bundled thesaurus dictionaries (this fork's domain word-lists), embedded so
@@ -3123,6 +3142,17 @@ fn render_explore_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_log_ignore_is_removed_but_custom_rules_stay() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join(".codegraphignore");
+        std::fs::write(&path, "# custom\n*.log\nnoise.txt\n").unwrap();
+        migrate_legacy_log_ignore(&path);
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(!out.lines().any(|line| line.trim() == "*.log"));
+        assert!(out.contains("noise.txt"));
+    }
 
     #[test]
     fn test_field_qualified_query_parser() {

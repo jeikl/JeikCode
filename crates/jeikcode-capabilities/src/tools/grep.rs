@@ -706,13 +706,15 @@ impl Tool for GrepTool {
                         hint.sensitive.len(),
                         examples(&hint.sensitive)
                     ));
-                } else if !include_logs && !hint.logs.is_empty() {
+                }
+                if !include_logs && !hint.logs.is_empty() {
                     msg.push_str(&format!(
                         "\n[Log search hint: {} log file(s) under this path are excluded from grep by default (e.g. {}). If the target is one of them, retry with include_logs=true; prefer output_mode=\"files_with_matches\" first.]",
                         hint.logs.len(),
                         examples(&hint.logs)
                     ));
-                } else if !include_ignored && !hint.noise.is_empty() {
+                }
+                if !include_ignored && !hint.noise.is_empty() {
                     msg.push_str(&format!(
                         "\n[Search ignore hint: {} file(s) under this path are excluded by `.codegraphignore` (e.g. {}). If the target is one of them, retry with include_ignored=true.]",
                         hint.noise.len(),
@@ -1949,6 +1951,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join("logs")).unwrap();
         std::fs::write(d.path().join("logs/app.log"), "NEEDLE_LOG\n").unwrap();
+        std::fs::write(d.path().join(".codegraphignore.graph"), ".env\n.env.*\n").unwrap();
+        std::fs::write(d.path().join(".env.local"), "SECRET\n").unwrap();
 
         let r = GrepTool
             .execute(r#"{"pattern":"NEEDLE_LOG"}"#, &ctx(d.path()))
@@ -1960,6 +1964,11 @@ mod tests {
             r.content
         );
         assert!(r.content.contains("include_logs=true"), "{}", r.content);
+        assert!(
+            r.content.contains("Sensitive path hint"),
+            "sensitive and log hints must coexist: {}",
+            r.content
+        );
     }
 
     #[tokio::test]

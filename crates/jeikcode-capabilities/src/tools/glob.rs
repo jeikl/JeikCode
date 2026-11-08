@@ -253,7 +253,8 @@ impl Tool for GlobTool {
                         hint.sensitive.len(),
                         examples(&hint.sensitive)
                     ));
-                } else if !a.include_ignored && !hint.noise.is_empty() {
+                }
+                if !a.include_ignored && !hint.noise.is_empty() {
                     msg.push_str(&format!(
                         "\n[Search ignore hint: {} file(s) under this path are excluded by `.codegraphignore` (e.g. {}). If the target is one of them, retry with include_ignored=true.]",
                         hint.noise.len(),
