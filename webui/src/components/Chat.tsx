@@ -10540,6 +10540,9 @@ export function Chat({
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
         setSlashOpen(false);
         setHistoryHint(null);
+        // 命令执行后仍然回到主输入框，保证连续输入不中断；
+        // 若命令本身打开了弹窗，弹窗的 focus 会在这之后接管。
+        focusComposerSoon();
         try {
           const result = await dispatchSlashCommand(text, slashCommandMap, slashHandlers);
           if (result.handled) recordAcceptedInput();
@@ -10572,6 +10575,8 @@ export function Chat({
       clearComposerDraft(activeIdRef.current || sessionId);
       clearComposerDraft(null);
       if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      // 立即发送（非排队）时把焦点还给输入框；排队/转向路径保持既有卡片焦点设计。
+      if (!busy && !isCompacting) focusComposerSoon();
       setUploading(true);
       try {
         const paths = await uploadSessionFiles(
@@ -10601,6 +10606,8 @@ export function Chat({
       clearComposerDraft(activeIdRef.current || sessionId);
       clearComposerDraft(null);
       if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      // 立即发送（非排队）时把焦点还给输入框；排队/转向路径保持既有卡片焦点设计。
+      if (!busy && !isCompacting) focusComposerSoon();
     }
     setHistoryHint(null);
 
@@ -10639,6 +10646,9 @@ export function Chat({
       return;
     }
 
+    // 立即发送：无论此前是否因上传/短暂忙碌跳过了首帧聚焦，这里都确保
+    // 键盘焦点回到主输入框；排队/转向路径在上面的分支已 return，不受影响。
+    focusComposerSoon();
     await deliver(messageText, images, modeState.confirmedMode, recordAcceptedInput);
   }
 
@@ -12103,6 +12113,19 @@ export function Chat({
         return;
       }
     }
+  }
+
+  /**
+   * 发送后把键盘焦点还给主输入框，保证可以连续输入。
+   * 弹窗/确认框已打开时不抢焦点；排队/转向卡片的聚焦逻辑完全不受影响。
+   */
+  function focusComposerSoon() {
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      if (document.querySelector('.modal-overlay, .confirm-modal-overlay')) return;
+      ta.focus({ preventScroll: true });
+    });
   }
 
   /**
