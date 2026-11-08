@@ -532,7 +532,13 @@ fn build_request_body(
                 json!({
                     "name": td.name,
                     "description": td.description,
-                    "parameters": super::sanitize_schema_for_wire(&td.parameters),
+                    // Gemini accepts standard JSON Schema via `parametersJsonSchema`.
+                    // The old `parameters` field is an OpenAPI subset that rejects
+                    // unions and several standard keywords.
+                    "parametersJsonSchema": super::tool_schema::project(
+                        super::sanitize_schema_for_wire(&td.parameters),
+                        super::tool_schema::SchemaFamily::Gemini,
+                    ),
                 })
             })
             .collect();
@@ -1154,6 +1160,47 @@ mod tests {
         assert_eq!(
             body["tools"][0]["functionDeclarations"][0]["name"],
             json!("read")
+        );
+    }
+
+    #[test]
+    fn gemini_tools_use_parameters_json_schema_and_normalize_dialect() {
+        let c = cfg("gemini-3-flash");
+        let tools = vec![ToolDef {
+            name: "read".into(),
+            description: "d".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pair": {
+                        "type": "array",
+                        "items": [{ "type": "string" }, { "type": "number" }]
+                    }
+                }
+            }),
+        }];
+        let body = build_request_body(
+            &c,
+            &[Message::user("hi")],
+            &tools,
+            &ChatOptions::default(),
+            ReasoningPolicy::Exclude,
+        );
+        let declaration = &body["tools"][0]["functionDeclarations"][0];
+        assert!(
+            declaration.get("parameters").is_none(),
+            "Gemini must use parametersJsonSchema, not the OpenAPI-subset parameters field"
+        );
+        assert_eq!(declaration["parametersJsonSchema"]["type"], "object");
+        assert_eq!(
+            declaration["parametersJsonSchema"]["properties"]["pair"]["prefixItems"],
+            json!([{ "type": "string" }, { "type": "number" }])
+        );
+        assert!(
+            declaration["parametersJsonSchema"]["properties"]["pair"]
+                .get("items")
+                .is_none(),
+            "Draft-07 tuple items must be rewritten to prefixItems"
         );
     }
 

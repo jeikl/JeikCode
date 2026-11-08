@@ -590,7 +590,10 @@ fn build_request_body(
                 json!({
                     "name": td.name,
                     "description": td.description,
-                    "input_schema": super::sanitize_schema_for_wire(&td.parameters),
+                    "input_schema": super::tool_schema::project(
+                        super::sanitize_schema_for_wire(&td.parameters),
+                        super::tool_schema::family_for(&cfg.model, None),
+                    ),
                 })
             })
             .collect();

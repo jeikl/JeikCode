@@ -95,6 +95,12 @@ pub struct OpenAiCompatConfig {
     /// enabling prefix prompt caching per block). Set to `true` for older legacy gateways
     /// that only accept a single system message.
     pub coalesce_system: bool,
+    /// Whether the Chat Completions endpoint accepts the `strict` tool field.
+    /// `None` ⇒ auto-detect (OpenCode parity): known-incompatible dialects omit
+    /// it, everything else gets an explicit `strict: false` so a gateway cannot
+    /// silently auto-strictify optional tool properties. `Some(false)` omits the
+    /// field for gateways that reject unknown keys.
+    pub supports_strict_mode: Option<bool>,
 }
 
 /// Canonical native-stack heuristic for whether a model name looks vision-capable.
@@ -154,6 +160,7 @@ impl OpenAiCompatConfig {
             skip_tls_verify: false,
             supports_vision,
             coalesce_system: false,
+            supports_strict_mode: None,
         }
     }
 }
@@ -1141,22 +1148,50 @@ fn build_request_body(
         }
     }
     if !tools.is_empty() {
+        let family = super::tool_schema::family_for(model, None);
+        let supports_strict = supports_strict_mode(cfg);
         let t: Vec<Value> = tools
             .iter()
             .map(|td| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": td.name,
-                        "description": td.description,
-                        "parameters": super::sanitize_schema_for_wire(&td.parameters),
-                    }
-                })
+                let mut function = json!({
+                    "name": td.name,
+                    "description": td.description,
+                    "parameters": super::tool_schema::project(
+                        super::sanitize_schema_for_wire(&td.parameters),
+                        family,
+                    ),
+                });
+                // OpenCode parity: only send `strict: false` when the endpoint
+                // understands the field. Omitting it lets OpenAI's Chat default
+                // (non-strict) apply; sending it explicitly blocks gateways that
+                // would otherwise normalise optional properties into required.
+                if supports_strict {
+                    function["strict"] = json!(false);
+                }
+                json!({ "type": "function", "function": function })
             })
             .collect();
         body.insert("tools".into(), json!(t));
     }
     Value::Object(body)
+}
+
+/// Whether the Chat Completions endpoint accepts `strict` on a function tool.
+///
+/// OpenCode parity: Moonshot / Together / Cloudflare AI Gateway / NVIDIA reject
+/// the field, so it is omitted there; every other endpoint gets an explicit
+/// `strict: false`. The config can override the heuristic either way.
+fn supports_strict_mode(cfg: &OpenAiCompatConfig) -> bool {
+    cfg.supports_strict_mode.unwrap_or_else(|| {
+        let url = cfg.base_url.to_ascii_lowercase();
+        let model = cfg.model.to_ascii_lowercase();
+        let incompatible = url.contains("api.moonshot.")
+            || model.contains("kimi")
+            || url.contains("api.together.")
+            || url.contains("gateway.ai.cloudflare.com")
+            || url.contains("integrate.api.nvidia.com");
+        !incompatible
+    })
 }
 
 /// DeepSeek V4 thinking models reject the `tool_choice` control parameter while
@@ -2508,6 +2543,101 @@ mod tests {
         );
         assert_eq!(body["tool_choice"]["type"], "function");
         assert_eq!(body["tool_choice"]["function"]["name"], "todowrite");
+    }
+
+    fn tool_schema_fixture() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": { "content": { "type": "string" } },
+                        "required": []
+                    }
+                }
+            },
+            "required": ["actions"]
+        })
+    }
+
+    #[test]
+    fn chat_tools_send_strict_false_and_preserve_optional_fields() {
+        let cfg = OpenAiCompatConfig::new("k", "https://api.openai.com/v1", "gpt-5");
+        let tools = vec![ToolDef {
+            name: "todo_write".into(),
+            description: "d".into(),
+            parameters: tool_schema_fixture(),
+        }];
+        let body = build_request_body(
+            "gpt-5",
+            &[Message::user("hi")],
+            &tools,
+            &ChatOptions::default(),
+            &cfg,
+            ReasoningPolicy::Exclude,
+        );
+        let function = &body["tools"][0]["function"];
+        assert_eq!(function["strict"], json!(false));
+        assert_eq!(function["parameters"]["required"], json!(["actions"]));
+        assert_eq!(
+            function["parameters"]["properties"]["actions"]["items"]["required"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn chat_tools_omit_strict_for_moonshot() {
+        let cfg = OpenAiCompatConfig::new("k", "https://api.moonshot.cn/v1", "kimi-k2");
+        let tools = vec![ToolDef {
+            name: "read".into(),
+            description: "d".into(),
+            parameters: json!({ "type": "object" }),
+        }];
+        let body = build_request_body(
+            "kimi-k2",
+            &[Message::user("hi")],
+            &tools,
+            &ChatOptions::default(),
+            &cfg,
+            ReasoningPolicy::Exclude,
+        );
+        assert!(
+            body["tools"][0]["function"].get("strict").is_none(),
+            "Moonshot rejects the strict tool field"
+        );
+    }
+
+    #[test]
+    fn chat_strict_mode_override_is_honored() {
+        let mut cfg = OpenAiCompatConfig::new("k", "https://api.moonshot.cn/v1", "kimi-k2");
+        let tools = vec![ToolDef {
+            name: "read".into(),
+            description: "d".into(),
+            parameters: json!({ "type": "object" }),
+        }];
+        cfg.supports_strict_mode = Some(true);
+        let body = build_request_body(
+            "kimi-k2",
+            &[Message::user("hi")],
+            &tools,
+            &ChatOptions::default(),
+            &cfg,
+            ReasoningPolicy::Exclude,
+        );
+        assert_eq!(body["tools"][0]["function"]["strict"], json!(false));
+
+        cfg.supports_strict_mode = Some(false);
+        let body = build_request_body(
+            "kimi-k2",
+            &[Message::user("hi")],
+            &tools,
+            &ChatOptions::default(),
+            &cfg,
+            ReasoningPolicy::Exclude,
+        );
+        assert!(body["tools"][0]["function"].get("strict").is_none());
     }
 
     #[test]

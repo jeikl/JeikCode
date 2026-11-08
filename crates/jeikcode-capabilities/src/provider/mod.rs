@@ -30,6 +30,7 @@ mod retry;
 mod sign;
 mod thinking;
 mod timeouts;
+mod tool_schema;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
 pub fn signer_available() -> bool {
@@ -245,13 +246,13 @@ pub(crate) fn friendly_http_error(code: u16, detail: &str) -> String {
     format!("{headline} (HTTP {code})")
 }
 
-/// Recursively clean and normalize tool parameter schemas for universal LLM wire compatibility
-/// (OpenAI, Anthropic, Gemini gateways, Ollama, Bedrock, etc.).
+/// Recursively clean tool parameter schemas for universal LLM wire compatibility.
 ///
 /// Cleans external MCP artifacts (leaked headers, pseudo-objects like Brave Search),
-/// converts Draft-6+ `const: "val"` to OpenAPI-3.0-standard `enum: ["val"]`,
-/// flattens polymorphic `oneOf`/`anyOf` discriminator objects into clean flat schemas,
-/// and strips meta keywords like `$schema`/`$id` that cause upstream 400s (e.g. Gemini Schema errors).
+/// converts Draft-6+ `const: "val"` to OpenAPI-3.0-standard `enum: ["val"]`, and
+/// strips meta keywords like `$schema`/`$id` that cause upstream 400s. Standard
+/// JSON Schema unions are preserved: protocol-specific dialect projection lives in
+/// [`tool_schema`] instead of destructively flattening the schema here.
 pub(crate) fn sanitize_schema_for_wire(val: &Value) -> Value {
     let sanitized = crate::schema_sanitizer::sanitize_mcp_schema(val.clone());
     sanitize_schema_for_wire_inner(&sanitized, 0)
@@ -266,86 +267,6 @@ fn sanitize_schema_for_wire_inner(val: &Value, depth: usize) -> Value {
     match val {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
-
-            // Check if this object is a oneOf / anyOf container of object variants that should be normalized
-            if let Some(one_of) = map
-                .get("oneOf")
-                .or_else(|| map.get("anyOf"))
-                .and_then(|v| v.as_array())
-            {
-                let is_object_union = !one_of.is_empty()
-                    && one_of.iter().all(|item| {
-                        item.as_object().map_or(false, |obj| {
-                            obj.get("type").and_then(|t| t.as_str()) == Some("object")
-                                || obj.get("properties").is_some()
-                        })
-                    });
-                if is_object_union {
-                    let mut merged_props = serde_json::Map::new();
-                    let mut merged_desc = map.get("description").cloned();
-                    let mut kinds = Vec::new();
-
-                    for item in one_of {
-                        if let Some(item_obj) = item.as_object() {
-                            if merged_desc.is_none() {
-                                merged_desc = item_obj.get("description").cloned();
-                            }
-                            if let Some(props) =
-                                item_obj.get("properties").and_then(|p| p.as_object())
-                            {
-                                for (k, v) in props {
-                                    if k == "kind" || k == "type" || k == "action" {
-                                        if let Some(c) = v.get("const").and_then(|c| c.as_str()) {
-                                            if !kinds.contains(&c.to_string()) {
-                                                kinds.push(c.to_string());
-                                            }
-                                        } else if let Some(e) =
-                                            v.get("enum").and_then(|e| e.as_array())
-                                        {
-                                            for ev in e {
-                                                if let Some(s) = ev.as_str() {
-                                                    if !kinds.contains(&s.to_string()) {
-                                                        kinds.push(s.to_string());
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            merged_props.insert(
-                                                k.clone(),
-                                                sanitize_schema_for_wire_inner(v, depth + 1),
-                                            );
-                                        }
-                                    } else {
-                                        merged_props.insert(
-                                            k.clone(),
-                                            sanitize_schema_for_wire_inner(v, depth + 1),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !kinds.is_empty() {
-                        let kind_prop = json!({
-                            "type": "string",
-                            "enum": kinds,
-                            "description": "Scope kind or discriminator."
-                        });
-                        merged_props.insert("kind".to_string(), kind_prop);
-                    }
-
-                    if !merged_props.is_empty() {
-                        out.insert("type".to_string(), json!("object"));
-                        if let Some(desc) = merged_desc {
-                            out.insert("description".to_string(), desc);
-                        }
-                        out.insert("properties".to_string(), Value::Object(merged_props));
-                        return Value::Object(out);
-                    }
-                }
-            }
-
             for (k, v) in map {
                 // Strip unsupported meta fields
                 if k == "$schema" || k == "$id" {
@@ -507,7 +428,8 @@ mod wire_dump_tests {
             json!(["working_tree"])
         );
 
-        // Test 2: oneOf discriminator normalization
+        // Test 2: standard JSON Schema unions are preserved (no synthetic
+        // `kind` discriminator). Protocol-specific projection owns dialects.
         let one_of_schema = json!({
             "oneOf": [
                 { "type": "object", "properties": { "kind": { "const": "working_tree" } }, "required": ["kind"] },
@@ -519,11 +441,14 @@ mod wire_dump_tests {
         let res = sanitize_schema_for_wire(&one_of_schema);
         assert_eq!(res["type"], "object");
         assert_eq!(res["description"], "Scope selection");
+        let variants = res["oneOf"].as_array().expect("oneOf preserved");
+        assert_eq!(variants.len(), 3);
         assert_eq!(
-            res["properties"]["kind"]["enum"],
-            json!(["working_tree", "staged", "range"])
+            variants[0]["properties"]["kind"]["enum"],
+            json!(["working_tree"])
         );
-        assert_eq!(res["properties"]["base"]["type"], "string");
+        assert_eq!(variants[2]["properties"]["base"]["type"], "string");
+        assert!(res.get("properties").is_none(), "must not flatten oneOf");
     }
 
     #[test]

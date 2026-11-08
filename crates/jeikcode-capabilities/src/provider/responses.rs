@@ -411,7 +411,15 @@ fn build_request_body(
                     "type": "function",
                     "name": td.name,
                     "description": td.description,
-                    "parameters": super::sanitize_schema_for_wire(&td.parameters),
+                    "parameters": super::tool_schema::project(
+                        super::sanitize_schema_for_wire(&td.parameters),
+                        super::tool_schema::family_for(&cfg.model, None),
+                    ),
+                    // Responses 在省略 `strict` 时会尝试把 schema 自动归一化为 strict：
+                    // 把所有 properties 提升为 required。我们的工具依赖可选字段（例如
+                    // todo_write 用「哪些字段存在」推断动作），必须显式退出 strict，
+                    // 否则模型会被迫把每个可选参数都填上默认值。
+                    "strict": false,
                 })
             })
             .collect();
@@ -1184,6 +1192,51 @@ mod tests {
         assert_eq!(parts[0]["type"], "input_text");
         assert_eq!(parts[1]["type"], "input_image");
         assert_eq!(parts[1]["image_url"], "data:image/png;base64,QUJD");
+    }
+
+    #[test]
+    fn function_tools_opt_out_of_responses_strict_normalization() {
+        // Responses 默认会尝试 strict 化：把 schema 的可选字段全部变成必填。
+        // 显式 `strict: false` 才能保留 best-effort 调用，字段的"可选"语义才生效。
+        let cfg = ResponsesConfig::new("k", "https://api.openai.com/v1", "gpt-5");
+        let tools = vec![ToolDef {
+            name: "todo_write".into(),
+            description: "d".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "content": { "type": "string" } },
+                            "required": []
+                        }
+                    }
+                },
+                "required": ["actions"]
+            }),
+        }];
+        let body = build_request_body(
+            "gpt-5",
+            &[Message::user("hi")],
+            &tools,
+            &ChatOptions::default(),
+            &cfg,
+            ReasoningPolicy::Include,
+            "sess-1",
+        );
+        let tool = &body["tools"][0];
+        assert_eq!(
+            tool["strict"],
+            json!(false),
+            "Responses must not auto-strictify optional tool fields"
+        );
+        assert_eq!(
+            tool["parameters"]["properties"]["actions"]["items"]["required"],
+            json!([]),
+            "the nested optional-field declaration must survive sanitization"
+        );
     }
 
     #[test]
