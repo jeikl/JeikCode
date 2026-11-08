@@ -13,10 +13,12 @@
 
 /* === Base layout === */
 html {
-  /* 视口高度统一由 visualViewport 驱动：软键盘收起后不会残留一条等于浏览器
-     工具栏高度的底部黑边，也不会因键盘期间的可视区平移而裁掉顶部。 */
-  min-height: calc(var(--app-vvh, 100vh) * var(--app-zoom-inv, 1));
-  height: calc(var(--app-vvh, 100vh) * var(--app-zoom-inv, 1));
+  /* 视口几何统一由 visualViewport 驱动：
+     --app-vvh     = 键盘/浏览器控件之外的真实可见高度；
+     --app-vv-top  = 浏览器为了露出输入框而向下平移的量。
+     文档高度要包住平移后的整个可见底边，避免残留可滚动区域或底部黑边。 */
+  min-height: calc((var(--app-vvh, 100vh) + var(--app-vv-top, 0px)) * var(--app-zoom-inv, 1));
+  height: calc((var(--app-vvh, 100vh) + var(--app-vv-top, 0px)) * var(--app-zoom-inv, 1));
   min-width: calc(100vw * var(--app-zoom-inv, 1));
   width: calc(100vw * var(--app-zoom-inv, 1));
 }
@@ -37,6 +39,11 @@ body {
 
 #app {
   display: flex;
+  /* 相对定位只负责把整个应用下移到可视区顶部，不创建 fixed 子元素的包含块。
+     可视视口被浏览器平移时，输入台会跟着贴在键盘上沿，而不是被切掉顶部、
+     在底部留出一条等高的空区。 */
+  position: relative;
+  top: calc(var(--app-vv-top, 0px) * var(--app-zoom-inv, 1));
   height: calc(var(--app-vvh, 100dvh) * var(--app-zoom-inv, 1));
   min-height: calc(var(--app-vvh, 100dvh) * var(--app-zoom-inv, 1));
   width: 100%;
@@ -5555,6 +5562,14 @@ body {
   z-index: 10;
   border-top: 1px solid var(--app-primary-border-color, rgba(128, 128, 128, 0.14));
   box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
+}
+
+/* 键盘占据底部时，导航条/Home 指示条已经被输入法覆盖：底部安全区必须清零。
+   Android 底部地址栏 + 手势导航下 env(safe-area-inset-bottom) 在键盘弹起时
+   仍可能返回导航条高度，表现就是输入台与键盘之间多出一条空隙。 */
+html[data-keyboard-open] .input-container,
+html[data-keyboard-open] .chat-landing {
+  padding-bottom: 8px;
 }
 
 /* Centered responsive input column (input box + cwd breadcrumb below it; see --app-content-max-width). */
@@ -12225,8 +12240,10 @@ body {
     min-width: min(220px, calc(100vw - 16px));
   }
 
-  /* === Mobile Landing Page (Gemini-style Bottom-docked Composer) === */
-  .chat-landing {
+  /* === Mobile Landing Page (Gemini-style Bottom-docked Composer) ===
+     基础 .chat-landing/.landing-inner 定义在移动端规则之后，这里用子选择器
+     提高优先级，避免后写的基础样式把移动端布局再次盖掉。 */
+  .chat-main-column > .chat-landing {
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -12237,7 +12254,7 @@ body {
     overflow-y: auto;
     box-sizing: border-box;
   }
-  .landing-inner {
+  .chat-landing > .landing-inner {
     flex: 1;
     margin-bottom: 0;
     padding-top: 12px;
@@ -12245,6 +12262,14 @@ body {
     justify-content: flex-start;
     width: 100%;
     max-width: 100%;
+  }
+  /* 键盘弹起时落地页只保留输入台：品牌区留在顶部，输入台被 margin-top:auto
+     顶到键盘上沿，建议胶囊隐藏（它们会把输入台再次推离键盘形成大空隙）。 */
+  html[data-keyboard-open] .landing-input {
+    margin-top: auto;
+  }
+  html[data-keyboard-open] .landing-chips {
+    display: none;
   }
   .landing-brand-logo svg {
     width: 40px;

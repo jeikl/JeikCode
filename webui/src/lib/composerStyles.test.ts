@@ -51,3 +51,20 @@ test('mobile composer integrates media upload and action controls into a single 
   assert.match(css, /@media \(max-width: 768px\)[\s\S]*?\.input-footer\s*\{[^}]*flex-direction:\s*row\s*!important;/);
   assert.match(css, /padding:\s*6px 8px max\(8px, env\(safe-area-inset-bottom\)\);/);
 });
+
+test('mobile keyboard keeps the composer against the IME without a dead gap', () => {
+  const html = readFileSync(join(root, 'index.html'), 'utf8');
+  const css = readFileSync(join(root, 'src/styles/app.css'), 'utf8');
+
+  // Android Chromium：让浏览器把布局视口直接缩到键盘上方，避免
+  // visualViewport 与底部地址栏各扣一次键盘高度。
+  assert.match(html, /interactive-widget=resizes-content/);
+  // 可视区被浏览器平移时用相对定位补偿，输入台始终贴住键盘。
+  assert.match(css, /#app\s*\{[^}]*position:\s*relative;[^}]*top:\s*calc\(var\(--app-vv-top, 0px\)/s);
+  assert.match(css, /html\s*\{[^}]*var\(--app-vvh, 100vh\) \+ var\(--app-vv-top, 0px\)/s);
+  // 键盘弹起时底部安全区必须归零，防止导航条高度把输入台再抬高一条。
+  assert.match(css, /html\[data-keyboard-open\] \.input-container,[\s\S]*?\.chat-landing\s*\{[^}]*padding-bottom:\s*8px;/);
+  // 落地页键盘弹起时输入台沉底、建议胶囊隐藏。
+  assert.match(css, /html\[data-keyboard-open\] \.landing-input\s*\{[^}]*margin-top:\s*auto;/s);
+  assert.match(css, /html\[data-keyboard-open\] \.landing-chips\s*\{[^}]*display:\s*none;/s);
+});
