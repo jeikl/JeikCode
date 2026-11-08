@@ -793,25 +793,56 @@ export interface QueuedMessageApiItem {
   forceSend?: boolean;
 }
 
-export async function getChatQueue(sessionId: string): Promise<QueuedMessageApiItem[]> {
+export interface ChatQueueSnapshot {
+  revision: number;
+  items: QueuedMessageApiItem[];
+}
+
+export async function getChatQueue(sessionId: string): Promise<ChatQueueSnapshot> {
   const resp = await apiFetch(`/chat/queue?session_id=${encodeURIComponent(sessionId)}`, {
     headers: authHeaders(),
   });
-  if (!resp.ok) return [];
+  if (!resp.ok) return { revision: 0, items: [] };
   try {
-    const list = await resp.json();
-    return Array.isArray(list) ? list : [];
+    const data = await resp.json();
+    // New daemons return `{ revision, items }`; accept the legacy bare array too.
+    if (Array.isArray(data)) return { revision: 0, items: data };
+    return {
+      revision: typeof data?.revision === 'number' ? data.revision : 0,
+      items: Array.isArray(data?.items) ? data.items : [],
+    };
   } catch {
-    return [];
+    return { revision: 0, items: [] };
   }
 }
 
-export async function saveChatQueue(sessionId: string, items: QueuedMessageApiItem[]): Promise<void> {
-  await apiFetch('/chat/queue', {
+export async function saveChatQueue(
+  sessionId: string,
+  items: QueuedMessageApiItem[],
+  baseRevision?: number,
+): Promise<{ revision: number; conflict: boolean; items?: QueuedMessageApiItem[] }> {
+  const resp = await apiFetch('/chat/queue', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ session_id: sessionId, items }),
-  }).catch(() => {});
+    body: JSON.stringify({
+      session_id: sessionId,
+      items,
+      ...(typeof baseRevision === 'number' ? { base_revision: baseRevision } : {}),
+    }),
+  }).catch(() => null);
+  if (!resp) return { revision: baseRevision ?? 0, conflict: false };
+  const data = await resp.json().catch(() => null);
+  if (resp.status === 409) {
+    return {
+      revision: typeof data?.revision === 'number' ? data.revision : 0,
+      conflict: true,
+      items: Array.isArray(data?.items) ? data.items : [],
+    };
+  }
+  return {
+    revision: typeof data?.revision === 'number' ? data.revision : (baseRevision ?? 0),
+    conflict: false,
+  };
 }
 
 /** Atomically take ownership of one queued card. Exactly one tab can win. */
@@ -1399,6 +1430,8 @@ export interface SessionDetail {
   origin?: 'manual' | 'scheduled' | 'protocol';
   /** Authoritative active todo list from backend transcript. */
   todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>;
+  /** Monotonic server revision of `todos`; lower revisions must never overwrite higher ones. */
+  todos_revision?: number;
 }
 
 /** Token footer snapshot from session turn_stats (GET /projects/:hash/sessions/:id).

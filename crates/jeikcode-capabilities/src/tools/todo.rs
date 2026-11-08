@@ -1081,6 +1081,11 @@ pub type TodoLive = Arc<Mutex<Vec<TodoItem>>>;
 pub struct TodoBoard {
     pub id: String,
     pub seq: u64,
+    /// Persisted monotonic version of this session's checklist. Every commit,
+    /// rebind, close and clear advances it, so clients can arbitrate snapshots
+    /// by revision instead of comparing arrival order.
+    #[serde(default)]
+    pub revision: u64,
     pub items: Vec<TodoItem>,
 }
 
@@ -1088,6 +1093,8 @@ struct TodoSlot {
     board: Option<TodoBoard>,
     /// Set when a completed board was closed after stop. Blocks reloading that file.
     closed: bool,
+    /// Survives `clear`, so a reopened board never reuses an older revision.
+    revision: u64,
 }
 
 fn todo_registry() -> &'static std::sync::RwLock<std::collections::HashMap<String, TodoSlot>> {
@@ -1190,6 +1197,7 @@ pub fn restore_todo_board(session_id: &str, board: TodoBoard) {
     guard.insert(
         session_id.to_string(),
         TodoSlot {
+            revision: board.revision,
             board: Some(board),
             closed: false,
         },
@@ -1204,11 +1212,15 @@ pub fn commit_todo_board(session_id: &str, items: &[TodoItem]) -> TodoBoard {
     let slot = guard.entry(session_id.to_string()).or_insert(TodoSlot {
         board: None,
         closed: false,
+        revision: 0,
     });
     slot.closed = false;
+    slot.revision = slot.revision.saturating_add(1);
+    let revision = slot.revision;
     let board = match slot.board.take() {
         Some(mut existing) => {
             existing.seq = existing.seq.saturating_add(1);
+            existing.revision = revision;
             existing.items = items.to_vec();
             existing
         }
@@ -1221,6 +1233,7 @@ pub fn commit_todo_board(session_id: &str, items: &[TodoItem]) -> TodoBoard {
                     .unwrap_or(1)
             ),
             seq: 1,
+            revision,
             items: items.to_vec(),
         },
     };
@@ -1251,12 +1264,16 @@ pub fn rebind_todo_board(session_id: &str, items: &[TodoItem]) -> Option<TodoBoa
         // 整轮被删干净：板随之关闭（禁止旧槽/磁盘快照复活），身份到此结束。
         slot.board = None;
         slot.closed = true;
+        slot.revision = slot.revision.saturating_add(1);
         return None;
     }
     slot.closed = false;
+    slot.revision = slot.revision.saturating_add(1);
+    let revision = slot.revision;
     let board = match slot.board.take() {
         Some(mut existing) => {
             existing.seq = existing.seq.saturating_add(1);
+            existing.revision = revision;
             existing.items = items.to_vec();
             existing
         }
@@ -1269,6 +1286,7 @@ pub fn rebind_todo_board(session_id: &str, items: &[TodoItem]) -> Option<TodoBoa
                     .unwrap_or(1)
             ),
             seq: 1,
+            revision,
             items: items.to_vec(),
         },
     };
@@ -1281,11 +1299,17 @@ pub fn clear_todo_board(session_id: &str) {
     let mut guard = todo_registry()
         .write()
         .unwrap_or_else(|err| err.into_inner());
+    let revision = guard
+        .get(session_id)
+        .map(|slot| slot.revision)
+        .unwrap_or(0)
+        .saturating_add(1);
     guard.insert(
         session_id.to_string(),
         TodoSlot {
             board: None,
             closed: true,
+            revision,
         },
     );
 }
@@ -1785,6 +1809,7 @@ mod tests {
             TodoBoard {
                 id: "todo-ghost".into(),
                 seq: 9,
+                revision: 0,
                 items: vec![TodoItem {
                     content: "幽灵步骤".into(),
                     status: TodoStatus::Pending,
@@ -1907,6 +1932,7 @@ mod tests {
             TodoBoard {
                 id: "todo-ghost-rebind".into(),
                 seq: 7,
+                revision: 0,
                 items: vec![TodoItem {
                     content: "幽灵步骤".into(),
                     status: TodoStatus::Pending,

@@ -1210,6 +1210,7 @@ mod session_window_tests {
             token_usage: None,
             origin: jeikcode_capabilities::session::SessionOrigin::Manual,
             todos: Vec::new(),
+            todos_revision: 0,
         };
         let first = session_detail_response(&HeaderMap::new(), detail.clone());
         assert_eq!(first.status(), StatusCode::OK);
@@ -2889,6 +2890,10 @@ pub struct SessionDetail {
     /// The session's single live checklist. Empty after a completed board is closed on stop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todos: Vec<jeikcode_capabilities::tools::TodoItem>,
+    /// Monotonic version of `todos` (server-assigned). Clients must arbitrate
+    /// snapshots by revision; a lower revision may never overwrite a higher one.
+    #[serde(default)]
+    pub todos_revision: u64,
 }
 
 fn is_manual_session_origin(origin: &jeikcode_capabilities::session::SessionOrigin) -> bool {
@@ -8027,17 +8032,24 @@ async fn get_session_detail(
                 (turns, message_count, offset, messages, pinned_user_index)
             };
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
-            let todos = if let Some(board) = jeikcode_capabilities::tools::read_todo_board(&id) {
-                if jeikcode_capabilities::tools::list_fully_completed(&board.items) && !turn_running
-                {
-                    let _ = jeikcode_capabilities::tools::close_todo_board_if_complete(&id);
-                    Vec::new()
+            let (todos, todos_revision) =
+                if let Some(board) = jeikcode_capabilities::tools::read_todo_board(&id) {
+                    if jeikcode_capabilities::tools::list_fully_completed(&board.items)
+                        && !turn_running
+                    {
+                        let closed =
+                            jeikcode_capabilities::tools::close_todo_board_if_complete(&id);
+                        (
+                            Vec::new(),
+                            closed.map(|board| board.revision).unwrap_or(board.revision),
+                        )
+                    } else {
+                        let revision = board.revision;
+                        (board.items, revision)
+                    }
                 } else {
-                    board.items
-                }
-            } else {
-                Vec::new()
-            };
+                    (Vec::new(), 0)
+                };
             let cursor = SessionCursor {
                 oldest_seq: messages.iter().find_map(|message| message.seq),
                 total: message_count,
@@ -8083,6 +8095,7 @@ async fn get_session_detail(
                 token_usage,
                 origin: session.meta.origin,
                 todos,
+                todos_revision,
             };
             session_detail_response(&headers, detail)
         }
@@ -8119,6 +8132,7 @@ async fn get_session_detail(
                 token_usage: None,
                 origin: jeikcode_capabilities::session::SessionOrigin::Manual,
                 todos: Vec::new(),
+                todos_revision: 0,
             };
             session_detail_response(&headers, detail)
         }
@@ -15839,6 +15853,10 @@ struct ChatQueueQuery {
 struct ChatQueueUpdateRequest {
     session_id: String,
     items: Vec<QueuedMessageItem>,
+    /// Queue revision the caller last observed. Present ⇒ compare-and-swap:
+    /// a mismatch returns 409 with the current revision and items.
+    #[serde(default)]
+    base_revision: Option<u64>,
 }
 
 static SESSION_QUEUES: tokio::sync::OnceCell<
@@ -15855,6 +15873,57 @@ static SESSION_QUEUE_CLAIMS: tokio::sync::OnceCell<
 static QUEUE_CLAIM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const MAX_QUEUE_CLAIMS: usize = 512;
+
+/// Persisted queue document. Older daemons wrote a bare array; both shapes are
+/// accepted on read, but every new write carries a revision so a stale
+/// whole-list writer can be rejected instead of silently overwriting.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct QueueFile {
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    items: Vec<QueuedMessageItem>,
+}
+
+static SESSION_QUEUE_REVISIONS: tokio::sync::OnceCell<
+    tokio::sync::RwLock<HashMap<String, u64>>,
+> = tokio::sync::OnceCell::const_new();
+
+async fn get_session_queue_revisions_map() -> &'static tokio::sync::RwLock<HashMap<String, u64>> {
+    SESSION_QUEUE_REVISIONS
+        .get_or_init(|| async { tokio::sync::RwLock::new(HashMap::new()) })
+        .await
+}
+
+async fn queue_revision(session_id: &str) -> u64 {
+    get_session_queue_revisions_map()
+        .await
+        .read()
+        .await
+        .get(session_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+async fn set_queue_revision(session_id: &str, revision: u64) {
+    get_session_queue_revisions_map()
+        .await
+        .write()
+        .await
+        .insert(session_id.to_string(), revision);
+}
+
+async fn bump_queue_revision(session_id: &str) -> u64 {
+    let map = get_session_queue_revisions_map().await;
+    let mut writer = map.write().await;
+    let next = writer
+        .get(session_id)
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(1);
+    writer.insert(session_id.to_string(), next);
+    next
+}
 
 async fn get_session_queues_map(
 ) -> &'static tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>> {
@@ -16031,6 +16100,7 @@ async fn retire_folded_steers_from_queue(
         }
     };
     if queue_changed {
+        bump_queue_revision(sid).await;
         persist_session_queue(sid).await;
     }
 }
@@ -16069,7 +16139,7 @@ fn claim_queue_item(
 async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
     let sid = q.session_id.trim();
     if sid.is_empty() {
-        return Json(serde_json::json!([]));
+        return Json(serde_json::json!({ "revision": 0, "items": [] }));
     }
     let claims = load_effective_queue_claims(sid).await;
     let map = get_session_queues_map().await;
@@ -16081,7 +16151,15 @@ async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
         if let Some(path) = session_queue_file_path(sid) {
             if path.exists() {
                 if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(loaded) = serde_json::from_str::<Vec<QueuedMessageItem>>(&content) {
+                    // New shape first; fall back to the legacy bare array.
+                    let loaded = serde_json::from_str::<QueueFile>(&content)
+                        .map(|file| (file.items, file.revision))
+                        .or_else(|_| {
+                            serde_json::from_str::<Vec<QueuedMessageItem>>(&content)
+                                .map(|items| (items, 0u64))
+                        });
+                    if let Ok((loaded, revision)) = loaded {
+                        set_queue_revision(sid, revision).await;
                         let mut writer = map.write().await;
                         writer.insert(sid.to_string(), loaded.clone());
                         items = Some(loaded);
@@ -16091,7 +16169,8 @@ async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
         }
     }
     let items = drop_claimed_queue_items(items.unwrap_or_default(), &claims);
-    Json(serde_json::to_value(items).unwrap_or_default())
+    let revision = queue_revision(sid).await;
+    Json(serde_json::json!({ "revision": revision, "items": items }))
 }
 
 async fn persist_session_queue(session_id: &str) {
@@ -16102,10 +16181,11 @@ async fn persist_session_queue(session_id: &str) {
         .get(session_id)
         .cloned()
         .unwrap_or_default();
+    let revision = queue_revision(session_id).await;
     if let Some(path) = session_queue_file_path(session_id) {
         if items.is_empty() {
             let _ = tokio::fs::remove_file(path).await;
-        } else if let Ok(json_str) = serde_json::to_string_pretty(&items) {
+        } else if let Ok(json_str) = serde_json::to_string_pretty(&QueueFile { revision, items }) {
             let _ = tokio::fs::write(path, json_str).await;
         }
     }
@@ -16147,6 +16227,24 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
         // Serialize with claim/release: a stale whole-list write must not
         // resurrect a card another tab already claimed.
         let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+        // CAS: a stale tab's whole-list write is rejected instead of overwriting
+        // a newer queue. The caller re-pulls and merges.
+        let current = queue_revision(&sid).await;
+        if let Some(base) = req.base_revision {
+            if base != current {
+                let map = get_session_queues_map().await;
+                let items = map.read().await.get(&sid).cloned().unwrap_or_default();
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "revision": current,
+                        "items": items,
+                    })),
+                )
+                    .into_response();
+            }
+        }
         let claims = load_effective_queue_claims(&sid).await;
         let items = drop_claimed_queue_items(req.items, &claims);
         let map = get_session_queues_map().await;
@@ -16160,14 +16258,19 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
             }
             changed
         };
+        let revision = bump_queue_revision(&sid).await;
         if changed {
             persist_session_queue(&sid).await;
             // 广播放在锁外：对端收到信号会再拉 `/chat/queue`，绝不能在持锁期间等它。
             // 只带会话 id：卡片里的图片可能是整张 base64，不背进全局通道。
-            publish_global(GlobalWireEvent::QueueUpdated { session_id: sid });
+            publish_global(GlobalWireEvent::QueueUpdated {
+                session_id: sid.clone(),
+            });
         }
+        return Json(serde_json::json!({ "success": true, "revision": revision }))
+            .into_response();
     }
-    Json(serde_json::json!({ "success": true }))
+    Json(serde_json::json!({ "success": true, "revision": 0 })).into_response()
 }
 
 /// Atomically take ownership of one queued card. Exactly one caller wins; the
@@ -16202,13 +16305,16 @@ async fn claim_chat_queue(Json(req): Json<ChatQueueClaimRequest>) -> impl IntoRe
         return Json(serde_json::json!({ "claimed": false })).into_response();
     }
     save_queue_claims(&sid, &claims).await;
+    let revision = bump_queue_revision(&sid).await;
     if queue_changed {
         persist_session_queue(&sid).await;
     }
     // Broadcast even for a local-only claim: other tabs must drop their stale
     // copy even though the server queue never contained it.
-    publish_global(GlobalWireEvent::QueueUpdated { session_id: sid });
-    Json(serde_json::json!({ "claimed": true })).into_response()
+    publish_global(GlobalWireEvent::QueueUpdated {
+        session_id: sid.clone(),
+    });
+    Json(serde_json::json!({ "claimed": true, "revision": revision })).into_response()
 }
 
 /// Undo a claim when the winning tab could not deliver (busy/transport). The
@@ -16248,11 +16354,14 @@ async fn release_chat_queue(Json(req): Json<ChatQueueReleaseRequest>) -> impl In
             }
         }
     }
+    let revision = bump_queue_revision(&sid).await;
     if added {
         persist_session_queue(&sid).await;
-        publish_global(GlobalWireEvent::QueueUpdated { session_id: sid });
+        publish_global(GlobalWireEvent::QueueUpdated {
+            session_id: sid.clone(),
+        });
     }
-    Json(serde_json::json!({ "released": true })).into_response()
+    Json(serde_json::json!({ "released": true, "revision": revision })).into_response()
 }
 
 #[cfg(test)]

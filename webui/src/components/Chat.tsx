@@ -268,6 +268,7 @@ import {
   stashSessionQueued,
   restoreSessionQueued,
 } from '../lib/queuedDraft';
+import { shouldApplyRevision } from '../lib/stateRevision';
 import { bumpSessionSendNowEpoch, consumesProgrammaticStopMark, isCurrentSessionSendNowEpoch, isStaleProgrammaticStopFrame, isStaleTerminalForArmedTurn, isTurnHandoverProtected, runningTurnStopAliases, stopAliasAllowsNextTurn, type ProgrammaticStopMark } from '../lib/turnStop';
 import { loadAppliedTodoCallIds, saveAppliedTodoCallIds } from '../lib/todoAppliedIds';
 import {
@@ -1056,7 +1057,16 @@ export function Chat({
     const inFlightKeys = next.map(queueCardSyncKey);
     for (const key of inFlightKeys) localUnsyncedQueueIdsRef.current.add(key);
     // 跨设备后端队列同步持久化：换别的手机打开或刷新卡片永不丢失
-    void saveChatQueue(sid, next.map(serializeQueuedCard) as QueuedMessageApiItem[])
+    void saveChatQueue(
+      sid,
+      next.map(serializeQueuedCard) as QueuedMessageApiItem[],
+      queueRevisionBySessionRef.current.get(sid),
+    )
+      .then((result) => {
+        queueRevisionBySessionRef.current.set(sid, result.revision);
+        // CAS 冲突：本次整表写基于旧版本，改为以服务端为准重新拉取。
+        if (result.conflict) refreshQueuedFromServer(sid);
+      })
       .catch(() => {})
       .finally(() => {
         for (const key of inFlightKeys) localUnsyncedQueueIdsRef.current.delete(key);
@@ -1133,10 +1143,15 @@ export function Chat({
       // 单向状态秩铁律：queue (0) -> steering (1) -> steer (2)。
       // 服务端滞后广播返回的旧状态（如 queue 或 steering）绝不能把本地已升级到更高阶
       // （如 steer）的卡片反向覆盖降级！彻底根除按钮消失或来回弹跳！
-      if (kindRank(match.kind) > kindRank(serverCard.kind)) {
-        return { ...serverCard, kind: match.kind };
-      }
-      return serverCard;
+      const images =
+        serverCard.images && serverCard.images.length > 0
+          ? serverCard.images
+          : match.images;
+      const ranked =
+        kindRank(match.kind) > kindRank(serverCard.kind)
+          ? { ...serverCard, kind: match.kind }
+          : serverCard;
+      return images && images.length > 0 ? { ...ranked, images } : ranked;
     });
 
     const serverIds = new Set(mergedServerItems.map((item) => String(item.id)));
@@ -1158,7 +1173,16 @@ export function Chat({
     else queuedBySessionRef.current.delete(sid);
     saveQueuedToStorage(queuedBySessionRef.current);
     if (droppedServerCards) {
-      void saveChatQueue(sid, next.map(serializeQueuedCard) as QueuedMessageApiItem[]).catch(() => {});
+      void saveChatQueue(
+        sid,
+        next.map(serializeQueuedCard) as QueuedMessageApiItem[],
+        queueRevisionBySessionRef.current.get(sid),
+      )
+        .then((result) => {
+          queueRevisionBySessionRef.current.set(sid, result.revision);
+          if (result.conflict) refreshQueuedFromServer(sid);
+        })
+        .catch(() => {});
     }
     if (isCurrentView) {
       queuedRef.current = next;
@@ -1170,7 +1194,12 @@ export function Chat({
   function refreshQueuedFromServer(sid: string) {
     if (!sid) return;
     void getChatQueue(sid)
-      .then((serverItems) => applyServerQueue(sid, serverItems))
+      .then((snapshot) => {
+        const known = queueRevisionBySessionRef.current.get(sid) ?? 0;
+        if (!shouldApplyRevision(known, snapshot.revision)) return;
+        queueRevisionBySessionRef.current.set(sid, snapshot.revision);
+        applyServerQueue(sid, snapshot.items);
+      })
       .catch(() => {});
   }
 
@@ -1500,6 +1529,10 @@ export function Chat({
   const [activeTodos, setActiveTodos] = useState<TodoItem[] | null>(null);
   const activeTodosRef = useRef<TodoItem[] | null>(null);
   activeTodosRef.current = activeTodos;
+  /** Server-assigned monotonic todo revision per session. A lower snapshot never wins. */
+  const todoRevisionBySessionRef = useRef(new Map<string, number>());
+  /** Last queue revision observed from `/chat/queue`; guards stale whole-list writes. */
+  const queueRevisionBySessionRef = useRef(new Map<string, number>());
   const activeTodosBySessionRef = useRef<Map<string, TodoItem[]>>(new Map());
   // 每个会话一份实时清单。revision 是总线上最后一次 todo 调用，重放同一调用不会改文档。
   const todoLiveBySessionRef = useRef<Map<string, LiveTodoDocument>>(new Map());
@@ -1567,6 +1600,9 @@ export function Chat({
         activeTodosBySessionRef.current.delete(sessionId);
       }
     }
+    // 会话隔离硬约束：后台会话的晚到响应只更新 per-session 缓存，绝不写当前视图。
+    // 否则 A 会话的 todo 会串进正在查看的 B 会话面板与缓存。
+    if (sessionId && sessionId !== activeIdRef.current) return;
     // 关键防抖：全量比对（数量、内容、状态）。若完全相等，直接跳过，杜绝任何 DOM 抖动闪烁！
     if (areTodosEqual(current, sticky)) return;
     // 只要有任何一处不一致（无论是数量变化还是状态变动），直接以服务端为权威整体覆盖并反写缓存，干脆快速！
@@ -1602,7 +1638,7 @@ export function Chat({
     void pullSession({ projectHash: hash, sessionId, mode: 'snapshot', limit: 1 })
       .then((detail) => {
         const items = Array.isArray(detail?.todos) ? detail.todos : [];
-        writeLiveTodo(sessionId, reduceLiveTodo(null, { type: 'hydrate', items }));
+        applyAuthoritativeTodos(sessionId, items, undefined, detail?.todos_revision);
       })
       .catch(() => {
         writeLiveTodo(sessionId, null);
@@ -1639,10 +1675,17 @@ export function Chat({
     sessionId: string | null | undefined,
     items: TodoItem[] | null | undefined,
     requestEpoch?: number,
+    revision?: number,
   ): boolean {
     if (!sessionId) return false;
     if (requestEpoch !== undefined && todoLiveEpoch(sessionId) !== requestEpoch) return false;
     if (!Array.isArray(items)) return false;
+    // 版本仲裁：服务端是唯一写入者，低 revision 的晚到快照绝不能回滚高版本。
+    if (typeof revision === 'number') {
+      const current = todoRevisionBySessionRef.current.get(sessionId) ?? 0;
+      if (!shouldApplyRevision(current, revision)) return false;
+      todoRevisionBySessionRef.current.set(sessionId, revision);
+    }
     writeLiveTodo(sessionId, reduceLiveTodo(null, { type: 'hydrate', items }));
     return true;
   }
@@ -2695,7 +2738,7 @@ export function Chat({
         ) {
           // 重连必须用服务端权威整表覆盖本地清单（含空表清空）。旧实现在“本地已有清单”时
           // 直接丢弃服务端结果，导致断网期间推进的 todo 永远追不回来。
-          applyAuthoritativeTodos(loadId, detail?.todos, todoEpochAtPull);
+          applyAuthoritativeTodos(loadId, detail?.todos, todoEpochAtPull, detail?.todos_revision);
           if (detail && Array.isArray(detail.messages) && detail.messages.length > 0 && messagesRef.current.length === 0) {
             const loaded = sessionMessagesToDisplay(detail.messages, detail.offset ?? 0, detail.pinned_user_index, { running: true });
             adoptAuthoritativeDiskTail(effectiveProjectHash, loadId, loaded, detail.offset ?? 0, detail, todoEpochAtPull);
@@ -2896,6 +2939,7 @@ export function Chat({
     diskOffset: number,
     meta: {
       todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>;
+      todos_revision?: number;
       turns?: SessionTurnOutline[];
       token_usage?: SessionTokenUsage | null;
       revision?: number;
@@ -2946,6 +2990,7 @@ export function Chat({
     commitCanvasCache(hash, sid, {
       messages: clean,
       todos: meta.todos,
+      todoRevision: meta.todos_revision ?? 0,
       turns: meta.turns,
       tokenUsage: meta.token_usage,
       revision: meta.revision,
@@ -2978,7 +3023,7 @@ export function Chat({
       // 服务端 board 是清单唯一真值（工具每次执行同步提交），不是滞后的磁盘快照：
       // 运行中同样整表覆盖，空表 = 权威清空（全部完成已关闭 / 已回溯）。
       // 响应期间若有实时帧推进了清单，epoch 已变化，本次响应直接丢弃。
-      applyAuthoritativeTodos(sid, meta.todos, todoEpochAtPull);
+      applyAuthoritativeTodos(sid, meta.todos, todoEpochAtPull, meta.todos_revision);
       pruneDeliveredQueuedCards(sid, clean);
     }
     return { messages: clean, keptUnpersistedTail: clean.length !== diskTail.length };
@@ -3121,7 +3166,7 @@ export function Chat({
     commitActiveTodosIntoLastAssistant();
     // 服务端 board 是唯一真值：整表覆盖（空表 = 权威清空）。部分完成（中途 Stop）会
     // 原样返回全量清单，不能被“全完成才保留”的展示过滤掉。
-    applyAuthoritativeTodos(id, detail.todos, todoEpochAtPull);
+    applyAuthoritativeTodos(id, detail.todos, todoEpochAtPull, detail.todos_revision);
     seedAppliedTodoIds(id, todoCallIdsFromMessages(messagesRef.current));
     return fresh.running;
   }
@@ -3682,11 +3727,19 @@ export function Chat({
           const cachedQueue = activeIdRef.current === sid
             ? queuedRef.current
             : (queuedBySessionRef.current.get(sid) ?? []);
-          const foldedInputs = (event.inputs ?? []).map((input) => ({
-            text: input.text,
-            // 广播不带图片本体；图片由本端队列卡片 / 磁盘补齐。
-            images: [],
-          }));
+          const foldedInputs = (event.inputs ?? []).map((input, idx) => {
+            const cid = event.client_input_ids?.[idx] ?? input.message_id ?? null;
+            const localCard = cid
+              ? cachedQueue.find(
+                  (card) => card.clientInputId === cid || String(card.id) === cid,
+                )
+              : undefined;
+            return {
+              text: input.text,
+              // 广播不带图片本体：本端折叠优先用队列卡片；跨端/刷新后由展示转录对账补齐。
+              images: localCard?.images ?? [],
+            };
+          });
           const candidateIds = (event.inputs ?? []).map(
             (input, idx) => event.client_input_ids?.[idx] ?? input.message_id ?? null,
           );
@@ -4202,14 +4255,17 @@ export function Chat({
       if (sessionId) {
         const queueSid = sessionId;
         const queueGeneration = sessionGenerationRef.current;
-        void getChatQueue(queueSid).then((serverItems) => {
+        void getChatQueue(queueSid).then((snapshot) => {
           if (
             activeIdRef.current !== queueSid ||
             sessionGenerationRef.current !== queueGeneration
           ) {
             return;
           }
-          applyServerQueue(queueSid, serverItems);
+          const known = queueRevisionBySessionRef.current.get(queueSid) ?? 0;
+          if (!shouldApplyRevision(known, snapshot.revision)) return;
+          queueRevisionBySessionRef.current.set(queueSid, snapshot.revision);
+          applyServerQueue(queueSid, snapshot.items);
         });
       }
       setUserInputReq(null);
@@ -4491,7 +4547,6 @@ export function Chat({
     const loadId = sessionId;
     const loadGeneration = sessionGenerationRef.current;
     if (!hideLoadChrome) {
-      const idbTodoEpoch = todoLiveEpoch(loadId);
       getSessionCache(projectHash, loadId).then((idb) => {
         const cursorSeq = readStreamCursor(loadId)?.seq;
         const cacheSeqBehind =
@@ -4532,12 +4587,39 @@ export function Chat({
             historyTotalBySessionRef.current.set(loadId, diskTotal);
             hasOlderBySessionRef.current.set(loadId, olderExists);
           }
-          // 缓存里的待办只是首屏垫底：若权威清单已先一步落地（epoch 变化），绝不回流旧值。
-          if (todoLiveEpoch(loadId) === idbTodoEpoch) {
+          // 缓存里的待办只是首屏垫底：只有缓存 revision 不低于已知服务端 revision 时才可用。
+          // 刷新后内存 epoch 归零，不能再用它判断新鲜度（否则旧 todo 会无条件回流）。
+          const knownTodoRevision = todoRevisionBySessionRef.current.get(loadId) ?? 0;
+          const cachedTodoRevision =
+            typeof idb.todoRevision === 'number' ? idb.todoRevision : 0;
+          if (shouldApplyRevision(knownTodoRevision, cachedTodoRevision)) {
             if (idb.todos && idb.todos.length > 0 && idb.todos.some((t: any) => t.status !== 'completed')) {
               applySessionStickyTodos(loadId, idb.todos);
             } else {
               applySessionStickyTodos(loadId, null);
+            }
+            todoRevisionBySessionRef.current.set(
+              loadId,
+              Math.max(knownTodoRevision, cachedTodoRevision),
+            );
+          }
+          // 队列快照同样只是首屏垫底：带 revision 且不得低于已知版本；
+          // 服务端 `/chat/queue` 随后会以权威快照覆盖（图片也来自那里）。
+          const knownQueueRevision = queueRevisionBySessionRef.current.get(loadId) ?? 0;
+          const cachedQueueRevision =
+            typeof idb.queueRevision === 'number' ? idb.queueRevision : 0;
+          if (
+            Array.isArray(idb.queue) &&
+            idb.queue.length > 0 &&
+            shouldApplyRevision(knownQueueRevision, cachedQueueRevision)
+          ) {
+            const restoredQueue = idb.queue.map(deserializeQueuedCard) as unknown as QueuedMessage[];
+            queuedBySessionRef.current.set(loadId, restoredQueue);
+            saveQueuedToStorage(queuedBySessionRef.current);
+            queueRevisionBySessionRef.current.set(loadId, cachedQueueRevision);
+            if (activeIdRef.current === loadId) {
+              queuedRef.current = restoredQueue;
+              setQueuedState(restoredQueue);
             }
           }
           if (idb.approvalMode) {
@@ -4855,6 +4937,7 @@ export function Chat({
               commitCanvasCache(projectHash, loadId, {
                 messages: displayMessages,
                 todos: sessionResult.value.todos,
+                todoRevision: sessionResult.value.todos_revision ?? 0,
                 turns: turnOutlineBySessionRef.current.get(loadId) ?? sessionResult.value.turns,
                 tokenUsage: sessionResult.value.token_usage,
                 historyOffset: effectiveOffset,
@@ -4868,7 +4951,12 @@ export function Chat({
               serverActive === true ||
               localTurnSessionsRef.current.has(loadId) ||
               backgroundRunningSessionsRef.current.has(loadId);
-            applyAuthoritativeTodos(loadId, sessionResult.value.todos, todoEpochAtLoad);
+            applyAuthoritativeTodos(
+              loadId,
+              sessionResult.value.todos,
+              todoEpochAtLoad,
+              sessionResult.value.todos_revision,
+            );
             if (!turnStillRunning) {
               // 运行中决不能提前将 displayMessages 里的在途 todo 调用塞进 seedAppliedTodoIds，
               // 否则 /chat/watch 随后的实时重放会被当成已消费跳过，导致面板卡在初始 0/N 状态！
@@ -7181,7 +7269,7 @@ export function Chat({
       }
       if (detail.todos !== undefined) {
         // 唤醒对账同样以服务端 board 为准（含空表清空）；即使没有新消息也要对齐。
-        applyAuthoritativeTodos(sid, detail.todos, todoEpochAtPull);
+        applyAuthoritativeTodos(sid, detail.todos, todoEpochAtPull, detail.todos_revision);
       }
       if (rows.length === 0) {
         // 没有新内容：total 一致就算成功（零渲染），否则降级。
@@ -7203,6 +7291,7 @@ export function Chat({
       commitCanvasCache(hash, sid, {
         messages: next,
         todos: detail.todos,
+        todoRevision: detail.todos_revision ?? 0,
         turns: turnOutlineRef.current,
         tokenUsage: detail.token_usage,
         historyTotal: nextTotal,
@@ -7553,6 +7642,9 @@ export function Chat({
         setHistoryHint(null);
         scheduleCanvasCacheSave();
         writeLiveTodo(id, reduceLiveTodo(null, { type: 'hydrate', items: detail.todos ?? [] }));
+        if (typeof detail.todos_revision === 'number') {
+          todoRevisionBySessionRef.current.set(id, detail.todos_revision);
+        }
         seedAppliedTodoIds(id, todoCallIdsFromMessages(loaded));
       }
     } catch { /* refresh failure is non-fatal; the notice still gives feedback */ }
@@ -8430,9 +8522,16 @@ export function Chat({
           : turnOutlineBySessionRef.current.get(target) ?? [];
       const payload = canvasCachePayload(target);
       const tokenSnapshot = tokenUsageCacheRef.current.get(target);
+      // 缓存必须按 target 会话取状态：禁止把当前视图的 todos 写进后台会话缓存。
+      const cacheTodos =
+        activeTodosBySessionRef.current.get(target) ??
+        (target === activeIdRef.current ? activeTodosRef.current : null);
       commitCanvasCache(hash, target, {
         messages: payload.messages,
-        todos: activeTodosRef.current,
+        todos: cacheTodos,
+        todoRevision: todoRevisionBySessionRef.current.get(target) ?? 0,
+        queue: queuedBySessionRef.current.get(target) ?? null,
+        queueRevision: queueRevisionBySessionRef.current.get(target) ?? 0,
         turns: outline,
         tokenUsage: tokenSnapshot?.tokens ?? null,
         // 快照存在时总是显式写入布尔值：真实 usage 后为 false（清除压缩标记），
@@ -10533,7 +10632,16 @@ export function Chat({
         queuedBySessionRef.current.delete(targetSid);
       }
       saveQueuedToStorage(queuedBySessionRef.current);
-      void saveChatQueue(targetSid, updatedList.map(serializeQueuedCard) as QueuedMessageApiItem[]);
+      void saveChatQueue(
+        targetSid,
+        updatedList.map(serializeQueuedCard) as QueuedMessageApiItem[],
+        queueRevisionBySessionRef.current.get(targetSid),
+      )
+        .then((result) => {
+          queueRevisionBySessionRef.current.set(targetSid, result.revision);
+          if (result.conflict) refreshQueuedFromServer(targetSid);
+        })
+        .catch(() => {});
     }
 
     if (q.text) {

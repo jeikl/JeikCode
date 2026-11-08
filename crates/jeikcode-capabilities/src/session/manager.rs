@@ -6880,6 +6880,7 @@ mod tests {
         let board = crate::tools::TodoBoard {
             id: "cold-board-1".into(),
             seq: 1,
+            revision: 0,
             items: vec![crate::tools::TodoItem {
                 content: "cold persisted task".into(),
                 status: crate::tools::TodoStatus::Pending,
@@ -6973,6 +6974,7 @@ mod tests {
         let completed_board = crate::tools::TodoBoard {
             id: "todo-done".into(),
             seq: 1,
+            revision: 0,
             items: vec![crate::tools::TodoItem {
                 content: "already done task".into(),
                 status: crate::tools::TodoStatus::Completed,
@@ -7003,6 +7005,7 @@ mod tests {
         let stale_board = crate::tools::TodoBoard {
             id: "todo-stale".into(),
             seq: 1,
+            revision: 0,
             items: vec![crate::tools::TodoItem {
                 content: "step 1".into(),
                 status: crate::tools::TodoStatus::InProgress,

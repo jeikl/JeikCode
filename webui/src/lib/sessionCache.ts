@@ -47,6 +47,11 @@ export interface CachedSessionData {
   /** Operation that produced this snapshot (new daemon). */
   operationId?: string | null;
   todos?: any[] | null;
+  /** Server-assigned monotonic revision of `todos` in this snapshot. */
+  todoRevision?: number;
+  /** Queue snapshot (cards may carry image bytes); never a source of truth. */
+  queue?: any[] | null;
+  queueRevision?: number;
   turns?: any[] | null;
   tokenUsage?: any | null;
   /** tokenUsage 是否来自一次已提交的压缩；刷新后优先于服务端压缩前的旧 usage。 */
@@ -80,6 +85,9 @@ export interface CachePatch {
   phase?: 'live' | 'terminal' | null;
   operationId?: string | null;
   todos?: any[] | null;
+  todoRevision?: number | null;
+  queue?: any[] | null;
+  queueRevision?: number | null;
   turns?: any[] | null;
   tokenUsage?: any | null;
   compacted?: boolean | null;
@@ -222,6 +230,9 @@ export function mergeCachePatch(
     phase: pick(patch.phase, previous?.phase),
     operationId: nextOperationId,
     todos: pick(patch.todos, previous?.todos),
+    todoRevision: pick(patch.todoRevision, previous?.todoRevision),
+    queue: pick(patch.queue, previous?.queue),
+    queueRevision: pick(patch.queueRevision, previous?.queueRevision),
     turns: pick(patch.turns, previous?.turns),
     tokenUsage: pick(patch.tokenUsage, previous?.tokenUsage),
     compacted: pick(patch.compacted, previous?.compacted),
