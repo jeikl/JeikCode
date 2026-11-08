@@ -51,7 +51,7 @@ export function SessionTodoPanel({
       {!collapsed && (
         <div class="session-todo-list">
           {items.map((item, i) => (
-            <div class={'session-todo-row status-' + item.status} key={i}>
+            <div class={'session-todo-row status-' + item.status} key={item.id ?? `${item.content}:${i}`}>
               <span class="session-todo-glyph" aria-hidden="true">
                 {item.status === 'completed' ? '√' : item.status === 'in_progress' ? '•' : '○'}
               </span>

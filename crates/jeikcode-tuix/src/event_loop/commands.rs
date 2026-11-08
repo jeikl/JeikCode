@@ -6213,6 +6213,7 @@ fn add_todo(ctx: &mut LoopCtx, state: &mut UiState, content: &str) {
         .map(|board| board.items)
         .unwrap_or_default();
     items.push(jeikcode_capabilities::tools::TodoItem {
+        id: None,
         content: content.to_string(),
         status: jeikcode_capabilities::tools::todo::TodoStatus::Pending,
     });

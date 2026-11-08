@@ -24996,6 +24996,7 @@ pub(crate) fn patch_live_todos_from_action(
             p.items
                 .iter()
                 .map(|(s, c)| TodoItem {
+                    id: None,
                     status: *s,
                     content: c.clone(),
                 })

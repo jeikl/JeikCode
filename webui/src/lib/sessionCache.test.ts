@@ -7,6 +7,7 @@ import {
   mergeCachePatch,
   writeSessionCache,
   shouldAcceptCacheWrite,
+  stripUnbackedProvisionalTurns,
   clearAllSessionCache,
 } from './sessionCache.ts';
 
@@ -42,6 +43,23 @@ test('sessionCache manages L1 memory LRU correctly', async () => {
 
   await clearAllSessionCache();
   assert.equal(hasMemorySession(p, s), false);
+});
+
+test('provisional outline rows without a persisted user message are not cached', async () => {
+  const p = 'proj-provisional';
+  const s = 'sess-provisional';
+  const turns = [
+    { index: 0, id: 'u-1', label: 'persisted', provisional: true },
+    { index: 1, id: 'steer-ghost', label: 'unsent steer', provisional: true },
+  ];
+  const messages = [{ role: 'user', id: 'u-1', content: 'persisted' }];
+  assert.deepEqual(
+    stripUnbackedProvisionalTurns(turns, messages),
+    [{ index: 0, id: 'u-1', label: 'persisted', provisional: true }],
+  );
+  writeSessionCache(p, s, { messages, turns });
+  assert.deepEqual(getMemorySession(p, s)?.turns, [turns[0]]);
+  await clearAllSessionCache();
 });
 
 test('sessionCache preserves turns outline', async () => {

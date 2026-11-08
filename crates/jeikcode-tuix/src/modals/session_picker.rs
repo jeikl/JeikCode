@@ -1488,6 +1488,7 @@ mod tests {
         jeikcode_capabilities::tools::commit_todo_board(
             &session.id,
             &[jeikcode_capabilities::tools::TodoItem {
+                id: None,
                 content: "task C".into(),
                 status: jeikcode_capabilities::tools::todo::TodoStatus::Pending,
             }],

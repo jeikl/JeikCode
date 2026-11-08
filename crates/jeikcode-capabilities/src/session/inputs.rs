@@ -8,7 +8,7 @@
 //! - `id` = the client correlation id (`/chat` request_id / `/chat/steer`
 //!   client_input_id) which is also the persisted user message id;
 //! - `seq` = a session-scoped monotonic admission order;
-//! - `status` = admitted → promoted | cancelled.
+//! - `status` = admitted → submitted → promoted | rejected | cancelled.
 //!
 //! The log is intentionally small: only user inputs, not assistant/tool rows.
 //! It is keyed by session id under the global config dir, so it works before a
@@ -37,7 +37,7 @@ pub struct SessionInput {
     /// `prompt` | `steer` | `queue`.
     #[serde(default)]
     pub delivery: String,
-    /// `admitted` | `promoted` | `cancelled`.
+    /// `admitted` | `submitted` | `promoted` | `rejected` | `cancelled`.
     #[serde(default)]
     pub status: String,
     #[serde(default)]
@@ -254,6 +254,13 @@ pub fn list_global(session_id: &str) -> Vec<SessionInput> {
     list(&global_root(), session_id)
 }
 
+/// Latest durable row for one client correlation id.
+pub fn find_global(session_id: &str, input_id: &str) -> Option<SessionInput> {
+    list_global(session_id)
+        .into_iter()
+        .find(|input| input.id == input_id)
+}
+
 /// Append one admission row. `seq` is assigned by this writer.
 pub fn append(root: &Path, input: &mut SessionInput) -> std::io::Result<()> {
     let _guard = lock();
@@ -337,8 +344,82 @@ pub fn mark_promoted_global(
     mark_promoted(&global_root(), session_id, pairs)
 }
 
-/// Mark admitted entries matching `client_input_id` (or `text` when no id is
-/// given) as `cancelled` so they no longer appear in `pending_for_operation`.
+fn mark_status(
+    root: &Path,
+    session_id: &str,
+    client_input_id: &str,
+    allowed_from: &[&str],
+    status: &str,
+) -> std::io::Result<bool> {
+    let client_input_id = client_input_id.trim();
+    if client_input_id.is_empty() {
+        return Ok(false);
+    }
+    let _guard = lock();
+    with_file_lock(root, session_id, || {
+        let path = path_for(root, session_id);
+        let mut rows = read_file(&path);
+        let mut next = rows.iter().map(|row| row.seq).max().unwrap_or(0);
+        let Some(index) = rows.iter().position(|row| row.id == client_input_id) else {
+            return Ok(false);
+        };
+        if !allowed_from.contains(&rows[index].status.as_str()) {
+            return Ok(false);
+        }
+        next = next.saturating_add(1);
+        rows[index].seq = next;
+        rows[index].status = status.to_string();
+        let row = rows[index].clone();
+        append_row(&path, &row)?;
+        remember_seq(root, session_id, &path, next.saturating_add(1));
+        maybe_compact_locked(root, session_id)?;
+        Ok(true)
+    })
+}
+
+/// The kernel accepted the steer and will fold it at the next round boundary.
+/// A retry in this window must not submit a second copy.
+pub fn mark_submitted(
+    root: &Path,
+    session_id: &str,
+    client_input_id: &str,
+) -> std::io::Result<bool> {
+    mark_status(
+        root,
+        session_id,
+        client_input_id,
+        &["admitted", "rejected"],
+        "submitted",
+    )
+}
+
+pub fn mark_submitted_global(session_id: &str, client_input_id: &str) -> std::io::Result<bool> {
+    mark_submitted(&global_root(), session_id, client_input_id)
+}
+
+/// A steer request was admitted by the endpoint but the running turn rejected it.
+/// Keep its queue card as an ordinary queued message, not as a phantom live steer.
+pub fn mark_rejected(
+    root: &Path,
+    session_id: &str,
+    client_input_id: &str,
+) -> std::io::Result<bool> {
+    mark_status(
+        root,
+        session_id,
+        client_input_id,
+        &["admitted", "submitted"],
+        "rejected",
+    )
+}
+
+pub fn mark_rejected_global(session_id: &str, client_input_id: &str) -> std::io::Result<bool> {
+    mark_rejected(&global_root(), session_id, client_input_id)
+}
+
+/// Mark admitted/submitted/rejected entries matching `client_input_id` (or `text`
+/// when no id is given) as `cancelled` so they no longer appear in
+/// `pending_for_operation`.
 pub fn mark_cancelled(
     root: &Path,
     session_id: &str,
@@ -357,7 +438,7 @@ pub fn mark_cancelled(
         let mut next = rows.iter().map(|row| row.seq).max().unwrap_or(0);
         let mut out: Vec<SessionInput> = Vec::new();
         for row in &mut rows {
-            if row.status != "admitted" {
+            if row.status != "admitted" && row.status != "submitted" && row.status != "rejected" {
                 continue;
             }
             let matched = if let Some(id) = cid {
@@ -420,7 +501,7 @@ pub fn pending_for_operation(
     list(root, session_id)
         .into_iter()
         .filter(|row| {
-            row.status == "admitted"
+            (row.status == "admitted" || row.status == "submitted")
                 && row.operation_id.as_deref() == Some(operation_id)
                 && (!row.text.trim().is_empty() || !row.images.is_empty())
         })
@@ -440,8 +521,9 @@ pub fn clear(root: &Path, session_id: &str) {
     });
 }
 
-/// Rewrite the log with the latest row per id, keeping every `admitted` row and
-/// the most recent promoted rows. Returns how many physical lines were dropped.
+/// Rewrite the log with the latest row per id, keeping every unresolved row
+/// (`admitted` / `submitted`) and the most recent completed rows. Returns how
+/// many physical lines were dropped.
 pub fn compact(root: &Path, session_id: &str) -> std::io::Result<usize> {
     let _guard = lock();
     let result = with_file_lock(root, session_id, || compact_locked(root, session_id));
@@ -468,7 +550,9 @@ fn compact_locked(root: &Path, session_id: &str) -> std::io::Result<usize> {
     let kept: Vec<SessionInput> = rows
         .into_iter()
         .enumerate()
-        .filter(|(index, row)| row.status == "admitted" || *index >= keep_from)
+        .filter(|(index, row)| {
+            row.status == "admitted" || row.status == "submitted" || *index >= keep_from
+        })
         .map(|(_, row)| row)
         .collect();
     if kept.len() >= before_lines {
@@ -607,18 +691,74 @@ mod tests {
     }
 
     #[test]
-    fn mark_cancelled_retires_admitted_steer_from_pending() {
+    fn rejected_steer_leaves_no_pending_outline_but_can_still_be_promoted_if_folded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut row = input("s1", "steer-1", "retry me");
+        append(root, &mut row).unwrap();
+
+        assert!(mark_rejected(root, "s1", "steer-1").unwrap());
+        assert!(pending_for_operation(root, "s1", "op-1").is_empty());
+        assert_eq!(list(root, "s1")[0].status, "rejected");
+
+        // A timeout may race a late kernel fold; the durable kernel event wins.
+        mark_promoted(root, "s1", &[(Some("steer-1".into()), Some("m-1".into()))]).unwrap();
+        let mut rows = list(root, "s1");
+        let promoted = rows.remove(0);
+        assert_eq!(promoted.status, "promoted");
+        assert_eq!(promoted.message_id.as_deref(), Some("m-1"));
+    }
+
+    #[test]
+    fn submitted_steer_is_retry_idempotent_and_still_cancellable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut row = input("s1", "steer-1", "submitted");
+        append(root, &mut row).unwrap();
+
+        assert!(mark_submitted(root, "s1", "steer-1").unwrap());
+        assert!(!mark_submitted(root, "s1", "steer-1").unwrap());
+        assert_eq!(pending_for_operation(root, "s1", "op-1").len(), 1);
+
+        mark_cancelled(root, "s1", Some("steer-1"), None).unwrap();
+        let rows = list(root, "s1");
+        assert_eq!(rows[0].status, "cancelled");
+        assert!(pending_for_operation(root, "s1", "op-1").is_empty());
+    }
+
+    #[test]
+    fn submitted_steer_can_be_rejected_after_restart_or_turn_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut row = input("s1", "steer-orphan", "orphan");
+        append(root, &mut row).unwrap();
+        mark_submitted(root, "s1", "steer-orphan").unwrap();
+
+        assert!(mark_rejected(root, "s1", "steer-orphan").unwrap());
+        let rows = list(root, "s1");
+        assert_eq!(rows[0].status, "rejected");
+        assert!(pending_for_operation(root, "s1", "op-1").is_empty());
+    }
+
+    #[test]
+    fn mark_cancelled_retires_admitted_or_rejected_steers_from_pending() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let mut s1 = input("s1", "steer-1", "123");
         let mut s2 = input("s1", "steer-2", "456");
         append(root, &mut s1).unwrap();
         append(root, &mut s2).unwrap();
+        assert!(mark_rejected(root, "s1", "steer-1").unwrap());
 
         mark_cancelled(root, "s1", Some("steer-1"), None).unwrap();
         let pending = pending_for_operation(root, "s1", "op-1");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "steer-2");
+        let rows = list(root, "s1");
+        assert_eq!(
+            rows.iter().find(|row| row.id == "steer-1").unwrap().status,
+            "cancelled"
+        );
     }
 
     #[test]

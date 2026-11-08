@@ -11,6 +11,7 @@ const assistant = (id: string, seq?: number) => ({
   parts: [],
   ...(seq != null ? { seq } : {}),
 });
+const notice = (id: string) => ({ id, role: 'system', parts: [] });
 
 test('混用两套 seq 坐标系时，转向行不会被重排到会话最前面', () => {
   // 磁盘行是 DisplayRecord.seq（上千），直播 / 转向行是本地自增值（个位数）。
@@ -27,9 +28,27 @@ test('混用两套 seq 坐标系时，转向行不会被重排到会话最前面
   );
 });
 
-test('回放补回的转向：锚点之后没有助手行时才插回中间', () => {
-  const rows = [user('q'), assistant('a1'), user('notify')];
+test('回放补回的转向：锚点之后没有助手或用户行时才插回中间', () => {
+  const rows = [user('q'), assistant('a1'), notice('notice')];
   assert.equal(steerInsertPosition(rows, { messageId: 'a1' }, true), 2);
+  assert.equal(
+    steerInsertPosition([user('q'), assistant('a1'), user('later')], { messageId: 'a1' }, true),
+    -1,
+    'never insert an earlier steer ahead of a later user row',
+  );
+});
+
+test('权威服务端锚点允许在其后已有行时按真实 fold 位置插入', () => {
+  const rows = [user('q'), assistant('a1'), user('later'), assistant('a2')];
+  assert.equal(
+    steerInsertPosition(rows, { messageId: 'a1', authoritative: true }, true),
+    2,
+  );
+  assert.equal(
+    steerInsertPosition(rows, { messageId: 'a1', authoritative: true }, false),
+    2,
+    'server anchor is valid for live events too',
+  );
 });
 
 test('锚点后面还跟着同一批工具卡时，绝不插到中间（否则 Read/Read 被劈开）', () => {

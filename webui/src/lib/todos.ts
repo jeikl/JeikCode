@@ -11,6 +11,8 @@
 export type TodoStatus = 'pending' | 'in_progress' | 'completed';
 
 export interface TodoItem {
+  /** Stable server identity; legacy transcript-derived rows may omit it. */
+  id?: string;
   content: string;
   status: TodoStatus;
 }
@@ -82,6 +84,9 @@ function validateActionsMix(actions: Record<string, unknown>[]): boolean {
   for (const item of actions) {
     const kind = actionKind(item);
     if (!kind) return false;
+    if (kind === 'clear' && typeof item.content === 'string' && item.content.trim() !== '') {
+      return false;
+    }
     kinds.add(kind);
   }
   if (kinds.has('delete') && [...kinds].some((kind) => kind !== 'delete')) return false;
@@ -357,6 +362,7 @@ export function applyTodoAction(list: TodoItem[], args: string): TodoItem[] {
     return applyBatch(list, actions);
   }
 
+  if (!validateActionsMix([v])) return list;
   return applyOne(list, v);
 }
 
@@ -592,21 +598,6 @@ export function restoreStickyTodos(input: {
     return input.authoritativeTodos.length > 0 ? cloneTodos(input.authoritativeTodos) : null;
   }
   return input.stashed && input.stashed.length > 0 ? cloneTodos(input.stashed) : null;
-}
-
-/**
- * 回合结束后，输入框上方 sticky 面板应该展示哪份清单。
- *
- * 规则：**部分完成必须保留全量**（含已完成项），否则用户 Stop 时 10 项会
- * 突然缩成 2 项未完成；只有「全部完成」才代表本回合已归档、不应再挂回输入区。
- * 空清单返回 null（不要用空数组覆盖仍在途的面板）。
- */
-export function stickyTodosAfterTerminal(
-  items: TodoItem[] | null | undefined,
-): TodoItem[] | null {
-  if (!Array.isArray(items) || items.length === 0) return null;
-  if (items.every((item) => item.status === 'completed')) return null;
-  return cloneTodos(items);
 }
 
 /**

@@ -76,7 +76,7 @@ const STEER_NATURAL_DRAIN_GRACE_MS = 1500;
  * （subscribe_live_with_replay），把已画完的正文/思考再落一遍。
  */
 const WATCH_REATTACH_AFTER_HIDDEN_MS = 60000;
-import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatRuntime, getChatPending, watchChatSession, SSEEvent, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, ApprovalMode, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, claimChatQueue, releaseChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, admitChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatRuntime, getChatPending, watchChatSession, SSEEvent, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, ApprovalMode, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, claimChatQueue, releaseChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
 import { pullSession } from '../lib/sessionPull';
 import { InlineBubbleEditor } from './InlineBubbleEditor';
 import {
@@ -144,7 +144,7 @@ import { projectCanvas } from '../lib/canvas/project';
 import { isCanvasEventAction, reduceCanvasEvent, type CanvasEventAction } from '../lib/canvas/actions';
 import type { CanvasRecord as Message } from '../lib/canvas/records';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
-import { buildTurnNavItems, buildTurnNavItemsFromOutline, canLoadOlder, compactTurnNavText, computeEffectiveHasOlder, filterTurnNavItems, fullerOutline, hasOlderVisibleMessages, historyCursorFor, mergeServerWithLocalOutline, remainingUnloadedTurns, resolveActiveTurnId, turnNavId, turnNavScrollTop, visibleOlderRemainingCount } from '../lib/turnNav';
+import { buildTurnNavItems, buildTurnNavItemsFromOutline, canLoadOlder, compactTurnNavText, computeEffectiveHasOlder, filterTurnNavItems, fullerOutline, hasOlderVisibleMessages, historyCursorFor, mergeServerWithLocalOutline, remainingUnloadedTurns, removeOutlineRowsById, resolveActiveTurnId, turnNavId, turnNavScrollTop, visibleOlderRemainingCount } from '../lib/turnNav';
 import { randomUUID } from '../lib/randomId';
 import {
   dispatchSystemNotification,
@@ -254,6 +254,7 @@ import {
   clearAllSessionCache,
   getMemorySession,
   flushPendingPersist,
+  stripUnbackedProvisionalTurns,
   updateSessionCacheMeta,
 } from '../lib/sessionCache';
 import { gitStore, type GitProjectState } from '../lib/gitStore';
@@ -262,8 +263,8 @@ import { legacyUserTextsMatch as userTextsMatch, resolveEditable, resolveInterna
 import {
   deserializeQueuedCard,
   loadQueuedFromStorage,
+  mergeQueuedCardState,
   mergeQueuedIntoDraft,
-  queueAfterSessionActiveCheck,
   saveQueuedToStorage,
   serializeQueuedCard,
   stashSessionQueued,
@@ -307,6 +308,7 @@ import {
   findPaintedUserRow,
   queueCardAlreadyDelivered,
   queueCardAlreadyOnCanvas,
+  queueCardPresentInOutline,
   steerCardBubbleOnCanvas,
   findPendingSelfEchoIndex,
   dropSnapshotDuplicates,
@@ -372,7 +374,6 @@ import {
   clearStreamCursor,
   readStreamCursor,
   resolveAfterSeq,
-  resolveHydratedStreamCursor,
   writeStreamCursor,
 } from '../lib/streamCursor';
 import {
@@ -794,7 +795,7 @@ export function Chat({
       const known = runtimeRevisionBySessionRef.current.get(sid) ?? -1;
       if (runtime.revision < known) return;
       runtimeRevisionBySessionRef.current.set(sid, runtime.revision);
-      runtimeAuthoritativeBySessionRef.current.add(sid);
+      markRuntimeAuthoritative(sid);
     }
     const compacting =
       runtime?.phase === 'compacting' || runtime?.status === 'compacting';
@@ -980,7 +981,7 @@ export function Chat({
    * 需要接管键盘焦点的待发卡片 id：用户在输入框按回车生成卡片后，卡片按钮
    * 立刻获得焦点，方向键即可在「转向 / 立即发送 / 取消」之间移动、回车即点击。
    */
-  const [focusCardId, setFocusCardId] = useState<number | null>(null);
+  const [focusCardId, setFocusCardId] = useState<string | null>(null);
   const queuedBySessionRef = useRef<Map<string, QueuedMessage[]>>(loadQueuedFromStorage());
   // 「立即发送」发起的程序化停止标记：命中后旧回合的 stopped 终态不得再把其余排队卡片回吐到输入框。
   const programmaticStopMarkRef = useRef<ProgrammaticStopMark | null>(null);
@@ -1003,7 +1004,14 @@ export function Chat({
   const runtimeRevisionBySessionRef = useRef<Map<string, number>>(new Map());
   /** 该会话已从服务端拿到带 revision 的执行态；只有这类会话才忽略旧 activity。 */
   const runtimeAuthoritativeBySessionRef = useRef<Set<string>>(new Set());
+  /** Forces the queue-drain effect to re-evaluate once runtime authority lands. */
+  const [runtimeAuthorityEpoch, setRuntimeAuthorityEpoch] = useState(0);
   const runtimeAuthorityFetchRef = useRef<Map<string, Promise<RuntimeAuthoritySnapshot>>>(new Map());
+  function markRuntimeAuthoritative(sid: string) {
+    if (runtimeAuthoritativeBySessionRef.current.has(sid)) return;
+    runtimeAuthoritativeBySessionRef.current.add(sid);
+    setRuntimeAuthorityEpoch((epoch) => epoch + 1);
+  }
   function fetchRuntimeAuthority(sid: string): Promise<RuntimeAuthoritySnapshot> {
     const key = `${sid}|${currentOperationBySessionRef.current.get(sid) ?? ''}`;
     const existing = runtimeAuthorityFetchRef.current.get(key);
@@ -1041,6 +1049,8 @@ export function Chat({
    *  仅对这些由本标签页发起且在途的卡片做防闪烁保留；其它端撤回（Esc/取消）或已消费的卡片
    *  一旦从服务端队列消失，收到 `queue_updated` 时必须立即从本端同步移除。 */
   const localUnsyncedQueueIdsRef = useRef<Set<string>>(new Set());
+  /** One deterministic replay of a server-owned `steering` card per page. */
+  const steerReplayAttemptedRef = useRef<Set<string>>(new Set());
   function queueCardSyncKey(item: { id: number | string; clientInputId?: string }): string {
     return item.clientInputId || String(item.id);
   }
@@ -1057,21 +1067,41 @@ export function Chat({
     saveQueuedToStorage(queuedBySessionRef.current);
     const inFlightKeys = next.map(queueCardSyncKey);
     for (const key of inFlightKeys) localUnsyncedQueueIdsRef.current.add(key);
-    // 跨设备后端队列同步持久化：换别的手机打开或刷新卡片永不丢失
+    const baseRevision = queueRevisionBySessionRef.current.get(sid);
+    // Never issue an unconditional whole-list write while the server snapshot is
+    // still loading. The next authoritative queue read will merge and flush these
+    // local changes with its revision.
+    if (baseRevision === undefined) {
+      refreshQueuedFromServer(sid);
+      return;
+    }
     void saveChatQueue(
       sid,
       next.map(serializeQueuedCard) as QueuedMessageApiItem[],
-      queueRevisionBySessionRef.current.get(sid),
+      baseRevision,
     )
       .then((result) => {
         queueRevisionBySessionRef.current.set(sid, result.revision);
-        // CAS 冲突：本次整表写基于旧版本，改为以服务端为准重新拉取。
-        if (result.conflict) refreshQueuedFromServer(sid);
+        if (result.conflict) {
+          // Keep local mutations marked until the conflict snapshot has merged
+          // them and a CAS retry succeeds.
+          refreshQueuedFromServer(sid);
+        } else {
+          for (const key of inFlightKeys) localUnsyncedQueueIdsRef.current.delete(key);
+        }
       })
-      .catch(() => {})
-      .finally(() => {
-        for (const key of inFlightKeys) localUnsyncedQueueIdsRef.current.delete(key);
-      });
+      .catch(() => {});
+  }
+
+  function setQueuedLocal(next: QueuedMessage[]) {
+    queuedRef.current = next;
+    const sid = activeIdRef.current;
+    if (sid) {
+      if (next.length > 0) queuedBySessionRef.current.set(sid, [...next]);
+      else queuedBySessionRef.current.delete(sid);
+      saveQueuedToStorage(queuedBySessionRef.current);
+    }
+    setQueuedState(next);
   }
 
   /**
@@ -1114,47 +1144,54 @@ export function Chat({
    * 只写本地三处（内存映射 / localStorage / 前台 state），**不回写后端** ——
    * 否则“广播 → 回写 → 再广播”会回声。
    */
-  function applyServerQueue(sid: string, serverItems: QueuedMessageApiItem[] | null | undefined) {
+  function applyServerQueue(
+    sid: string,
+    serverItems: QueuedMessageApiItem[] | null | undefined,
+    opts?: { hydration?: boolean },
+  ) {
     if (!sid || !Array.isArray(serverItems)) return;
     const isCurrentView = activeIdRef.current === sid;
     const known = [
       ...(isCurrentView ? messagesRef.current : []),
       ...(messageCacheRef.current.get(sid) ?? []),
     ];
+    // The server queue is authoritative except for this tab's unconfirmed writes.
+    const local = isCurrentView ? queuedRef.current : (queuedBySessionRef.current.get(sid) ?? []);
     const items = (serverItems.map(deserializeQueuedCard) as unknown as QueuedMessage[]).filter(
       (item) => !queuedCardOnCanvas(known, item, sid) && !steerCardAlreadyFolded(item, sid, known),
     );
-    // A folded steer can remain in the server queue when the client that would
-    // have removed it disconnected. Persist the cleaned list once; subsequent
-    // queue_updated echoes converge without another write.
-    const droppedServerCards = items.length !== serverItems.length;
-    const local = isCurrentView ? queuedRef.current : (queuedBySessionRef.current.get(sid) ?? []);
     const localByKey = new Map<string, QueuedMessage>();
     for (const card of local) {
       if (card.clientInputId) localByKey.set(card.clientInputId, card);
       localByKey.set(String(card.id), card);
     }
 
-    const kindRank = (k: QueuedMessage['kind']): number =>
-      k === 'steer' ? 2 : k === 'steering' ? 1 : 0;
     const mergedServerItems = items.map((serverCard) => {
       const match = (serverCard.clientInputId ? localByKey.get(serverCard.clientInputId) : undefined)
         ?? localByKey.get(String(serverCard.id));
       if (!match) return serverCard;
-      // 单向状态秩铁律：queue (0) -> steering (1) -> steer (2)。
-      // 服务端滞后广播返回的旧状态（如 queue 或 steering）绝不能把本地已升级到更高阶
-      // （如 steer）的卡片反向覆盖降级！彻底根除按钮消失或来回弹跳！
+      const localMutationInFlight = [
+        queueCardSyncKey(match),
+        match.clientInputId,
+        String(match.id),
+      ].some((key) => !!key && localUnsyncedQueueIdsRef.current.has(key));
+      // Only an unconfirmed mutation in this tab may outrank the server.
+      // After refresh, the revisioned server snapshot decides whether a steer
+      // was accepted or must return to the ordinary queue state.
+      const ranked = mergeQueuedCardState(serverCard, match, localMutationInFlight);
       const images =
         serverCard.images && serverCard.images.length > 0
           ? serverCard.images
           : match.images;
-      const ranked =
-        kindRank(match.kind) > kindRank(serverCard.kind)
-          ? { ...serverCard, kind: match.kind }
-          : serverCard;
       return images && images.length > 0 ? { ...ranked, images } : ranked;
     });
-
+    // Once the server confirms steering/steer, its queue record is authoritative.
+    // Drop the local unsynced marker so no whole-list echo is written back.
+    for (const item of mergedServerItems) {
+      if (item.kind === 'steering' || item.kind === 'steer') {
+        localUnsyncedQueueIdsRef.current.delete(queueCardSyncKey(item));
+      }
+    }
     const serverIds = new Set(mergedServerItems.map((item) => String(item.id)));
     const serverClientIds = new Set(
       mergedServerItems.map((item) => item.clientInputId).filter((id): id is string => !!id),
@@ -1173,21 +1210,66 @@ export function Chat({
     if (next.length > 0) queuedBySessionRef.current.set(sid, next);
     else queuedBySessionRef.current.delete(sid);
     saveQueuedToStorage(queuedBySessionRef.current);
-    if (droppedServerCards) {
+    const unsynced = next.filter((item) =>
+      localUnsyncedQueueIdsRef.current.has(queueCardSyncKey(item)),
+    );
+    const revision = queueRevisionBySessionRef.current.get(sid);
+    if (unsynced.length > 0 && revision === undefined) {
+      refreshQueuedFromServer(sid);
+    } else if (unsynced.length > 0) {
+      const persisted = serverItems.map(deserializeQueuedCard) as unknown as QueuedMessage[];
+      for (const localCard of unsynced) {
+        const index = persisted.findIndex((item) =>
+          (localCard.clientInputId && item.clientInputId === localCard.clientInputId) ||
+          String(item.id) === String(localCard.id),
+        );
+        if (index < 0) {
+          persisted.push(localCard);
+          continue;
+        }
+        const serverCard = persisted[index]!;
+        const kindRank = (kind: QueuedMessage['kind']) =>
+          kind === 'steer' ? 2 : kind === 'steering' ? 1 : 0;
+        persisted[index] = {
+          ...serverCard,
+          ...(kindRank(localCard.kind) > kindRank(serverCard.kind) ? { kind: localCard.kind } : {}),
+          ...(localCard.images?.length && !serverCard.images?.length ? { images: localCard.images } : {}),
+        };
+      }
+      const keys = unsynced.map(queueCardSyncKey);
       void saveChatQueue(
         sid,
-        next.map(serializeQueuedCard) as QueuedMessageApiItem[],
+        persisted.map(serializeQueuedCard) as QueuedMessageApiItem[],
         queueRevisionBySessionRef.current.get(sid),
       )
         .then((result) => {
           queueRevisionBySessionRef.current.set(sid, result.revision);
-          if (result.conflict) refreshQueuedFromServer(sid);
+          if (result.conflict) {
+            refreshQueuedFromServer(sid);
+          } else {
+            for (const key of keys) localUnsyncedQueueIdsRef.current.delete(key);
+          }
         })
         .catch(() => {});
     }
     if (isCurrentView) {
       queuedRef.current = next;
       setQueuedState(next);
+    }
+    if (opts?.hydration) {
+      // The queue record is the durable intent. Replaying its submission is
+      // deterministic and idempotent on the server; no local intent key needed.
+      replayServerSteeringCards(sid, next.filter((item) => item.kind === 'steering'));
+    }
+  }
+
+  /** Replay one server-recorded `steering` admission per page identity. */
+  function replayServerSteeringCards(sid: string, cards: QueuedMessage[]) {
+    for (const card of cards) {
+      const key = queueCardSyncKey(card);
+      if (steerReplayAttemptedRef.current.has(key)) continue;
+      steerReplayAttemptedRef.current.add(key);
+      void handleSteerQueuedMessage({ ...card, kind: 'queue' }, { silentFailure: true });
     }
   }
 
@@ -1233,7 +1315,6 @@ export function Chat({
     };
     updateQueuedForSession(sid, (list) => resolveLingeringSteers(list, running, isOnCanvas));
   }
-  const queueIdRef = useRef(0);
   // Stop restores the queue into the composer. Block one drain so a busy→idle
   // render cannot send those messages before the cleared queue commits.
   const blockQueueDrainRef = useRef(false);
@@ -2987,12 +3068,21 @@ export function Chat({
     }
     messageCacheRef.current.set(sid, clean);
     noteCacheRevision(sid, meta.revision);
+    // The disk/catch-up outline may predate the current turn's pending steer.
+    // Compute the merged rail once and use the SAME result for cache + canvas;
+    // writing raw `meta.turns` here made the title appear and then vanish on the
+    // next refresh.
+    const localTurnsBeforeCatchUp = turnOutlineBySessionRef.current.get(sid) ?? [];
+    const mergedTurnsForCatchUp = mergeServerWithLocalOutline(
+      meta.turns ?? [],
+      localTurnsBeforeCatchUp,
+    );
     // 权威反写缓存：必须带上历史偏移与总数，杜绝 IndexedDB 缓存保留旧的 0 偏移！
     commitCanvasCache(hash, sid, {
       messages: clean,
       todos: meta.todos,
       todoRevision: meta.todos_revision ?? 0,
-      turns: meta.turns,
+      turns: mergedTurnsForCatchUp,
       tokenUsage: meta.token_usage,
       revision: meta.revision,
       historyOffset: hasCausalGap ? diskOffset : undefined,
@@ -3008,15 +3098,11 @@ export function Chat({
       setMessages({ type: 'replace', rows: clean });
       timelineFollowRef.current?.endSwap();
       if (meta.turns && meta.turns.length > 0) {
-        // The disk outline predates the current turn's display flush. When the
-        // canvas kept an unpersisted tail, keep its rail entries too — the old
-        // wholesale replace is exactly the "bubble stays, nav disappears" bug.
-        const localTurns = turnOutlineBySessionRef.current.get(sid) ?? [];
-        // The disk catch-up can carry a tail-window outline; always merge the
-        // local rail so a shorter disk slice never drops earlier questions.
-        const nextTurns = hasCausalGap ? (meta.turns ?? []) : mergeServerWithLocalOutline(meta.turns, localTurns);
-        turnOutlineBySessionRef.current.set(sid, nextTurns);
-        setTurnOutline(nextTurns);
+        // Even on a causal gap, the disk outline may be a tail window that
+        // predates the current pending steer. Merge unconditionally: identity
+        // rows from the server win, while provisional/newer local rows survive.
+        turnOutlineBySessionRef.current.set(sid, mergedTurnsForCatchUp);
+        setTurnOutline(mergedTurnsForCatchUp);
       }
       if (meta.token_usage) {
         applySessionTokens(sid, clean, meta.token_usage);
@@ -3722,7 +3808,13 @@ export function Chat({
             event.client_input_ids,
             sid,
             event.timestamps,
-            { skipQueued: true, seq: (event as { seq?: number }).seq },
+            {
+              skipQueued: true,
+              seq: (event as { seq?: number }).seq,
+              ...(event.anchor_message_id
+                ? { replay: true, anchor: { messageId: event.anchor_message_id, authoritative: true } }
+                : {}),
+            },
           );
           // 2) 卡片队列清理（纯本地回写，不触发 saveChatQueue 避免回声）：
           const cachedQueue = activeIdRef.current === sid
@@ -3811,7 +3903,7 @@ export function Chat({
           const known = runtimeRevisionBySessionRef.current.get(sid) ?? -1;
           if (event.revision < known) return;
           runtimeRevisionBySessionRef.current.set(sid, event.revision);
-          runtimeAuthoritativeBySessionRef.current.add(sid);
+          markRuntimeAuthoritative(sid);
           if (event.phase === 'compacting' && event.running !== false) {
             setSessionCompacting(sid, true, event.phase_started_at ?? undefined);
           } else {
@@ -4249,7 +4341,7 @@ export function Chat({
       const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId).filter(
         (item) => !queuedItemOnCanvas(item),
       );
-      setQueued(stashedQueued);
+      setQueuedLocal(stashedQueued);
       // 异步与后端同步队列（跨设备/换手机打开该会话时无缝同步恢复）。
       // 后端是“哪些卡片真的会被发送”的权威：本地存储里已被对端消费的旧卡片
       // 必须在这里被剔除，否则刷新/冷启动会把已转向成功的卡片复活并再发一次。
@@ -4266,7 +4358,7 @@ export function Chat({
           const known = queueRevisionBySessionRef.current.get(queueSid) ?? 0;
           if (!shouldApplyRevision(known, snapshot.revision)) return;
           queueRevisionBySessionRef.current.set(queueSid, snapshot.revision);
-          applyServerQueue(queueSid, snapshot.items);
+          applyServerQueue(queueSid, snapshot.items, { hydration: true });
         });
       }
       setUserInputReq(null);
@@ -4567,9 +4659,10 @@ export function Chat({
             }
             timelineFollow.jump();
           }
-          if (idb.turns && idb.turns.length > 0) {
+          const cachedTurns = stripUnbackedProvisionalTurns(idb.turns, idb.messages) ?? [];
+          if (cachedTurns.length > 0) {
             const nextOutline = fullerOutline(
-              idb.turns,
+              cachedTurns,
               turnOutlineBySessionRef.current.get(loadId),
             );
             turnOutlineRef.current = nextOutline;
@@ -4604,25 +4697,8 @@ export function Chat({
               Math.max(knownTodoRevision, cachedTodoRevision),
             );
           }
-          // 队列快照同样只是首屏垫底：带 revision 且不得低于已知版本；
-          // 服务端 `/chat/queue` 随后会以权威快照覆盖（图片也来自那里）。
-          const knownQueueRevision = queueRevisionBySessionRef.current.get(loadId) ?? 0;
-          const cachedQueueRevision =
-            typeof idb.queueRevision === 'number' ? idb.queueRevision : 0;
-          if (
-            Array.isArray(idb.queue) &&
-            idb.queue.length > 0 &&
-            shouldApplyRevision(knownQueueRevision, cachedQueueRevision)
-          ) {
-            const restoredQueue = idb.queue.map(deserializeQueuedCard) as unknown as QueuedMessage[];
-            queuedBySessionRef.current.set(loadId, restoredQueue);
-            saveQueuedToStorage(queuedBySessionRef.current);
-            queueRevisionBySessionRef.current.set(loadId, cachedQueueRevision);
-            if (activeIdRef.current === loadId) {
-              queuedRef.current = restoredQueue;
-              setQueuedState(restoredQueue);
-            }
-          }
+          // Queue state is hydrated from localStorage and then reconciled with
+          // `/chat/queue`; the canvas cache can predate a steer state transition.
           if (idb.approvalMode) {
             modeCacheRef.current.set(loadId, idb.approvalMode as ApprovalMode);
             if (activeIdRef.current === loadId && !modeState.pendingMode) {
@@ -4687,7 +4763,7 @@ export function Chat({
         if (hydratedRevision >= knownRuntimeRevision) {
           runtimeRevisionBySessionRef.current.set(loadId, hydratedRevision);
           if (typeof hydratedRuntime?.revision === 'number') {
-            runtimeAuthoritativeBySessionRef.current.add(loadId);
+            markRuntimeAuthoritative(loadId);
           }
         }
         const hydratedCompacting =
@@ -4884,23 +4960,11 @@ export function Chat({
                 messagesRef.current = displayMessages;
                 messageCacheRef.current.set(loadId, displayMessages);
                 setMessages({ type: 'replace', rows: displayMessages });
-                // 缓存快照已被采用上屏：仅当服务端确认当前仍在运行、该快照是同一活跃回合
-                // （operationId === runtime.turn_id）原子落盘的 live 快照、且上屏画布确实覆盖了
-                // 该快照的 messages 时，才将其绑定的流空间游标恢复至当前页面。
-                const runtimeIsRunning = serverRuntimeRunning(hydratedRuntime);
-                const restoredStreamSeq = resolveHydratedStreamCursor({
-                  cacheAdopted: true,
-                  serverRunning: runtimeIsRunning,
-                  cachedPhase: cachedEntry?.phase,
-                  cachedOperationId: cachedEntry?.operationId,
-                  cachedLastSeq: cachedEntry?.lastSeq,
-                  activeTurnId: runtimeIsRunning ? hydratedRuntime?.turn_id : undefined,
-                  adoptedMessages: displayMessages,
-                  cachedMessages: cachedEntry?.messages,
-                });
-                if (restoredStreamSeq !== undefined) {
-                  writeStreamCursor(loadId, restoredStreamSeq);
-                }
+                // Never resurrect a stream cursor from L2: it belongs to a previous
+                // page document and may sit ahead of a partially flushed canvas.
+                // A new document must replay from the server and dedupe by identity;
+                // restoring the cached high-water mark skipped already-rendered SSE
+                // text on fast refreshes.
                 if (atBottomRef.current) {
                   timelineFollow.jump();
                 }
@@ -5042,10 +5106,6 @@ export function Chat({
             setBusyAndClock(true, effectiveResumeTs);
             busyRef.current = true;
             requestIdRef.current = loadId;
-            setQueued(queueAfterSessionActiveCheck({
-              restored: queuedRef.current,
-              sessionActive: true,
-            }));
             if (effectiveResumeTs) {
               adoptTurnUserTs(effectiveResumeTs, true);
             }
@@ -5093,10 +5153,6 @@ export function Chat({
           requestIdRef.current = loadId;
           transitionChatRecovery({ type: 'active_check_failed' });
           setBusyAndClock(false);
-          setQueued(queueAfterSessionActiveCheck({
-            restored: queuedRef.current,
-            sessionActive: false,
-          }));
           nextHint = t('chat.activeCheckFailed', { error: String(activeResult.reason) });
           // Allow a later metadata/session refresh to retry discovery.
           loadedForRef.current = null;
@@ -6600,7 +6656,13 @@ export function Chat({
     const compact = compactTurnNavText(clean);
     if (!compact) return;
     const sid = targetSid ?? activeIdRef.current ?? sessionId;
-    const entry: SessionTurnOutline = { ordinal, index, label: compact, ...(id ? { id } : {}) };
+    const entry: SessionTurnOutline = {
+      ordinal,
+      index,
+      label: compact,
+      provisional: true,
+      ...(id ? { id } : {}),
+    };
     const merge = (prev: SessionTurnOutline[]): SessionTurnOutline[] => {
       // 身份优先：同一落盘 id 只允许一条；index 只是“这次没拿到 id”时的兜底。
       if (id) {
@@ -6614,12 +6676,13 @@ export function Chat({
           next[idx] = {
             ...existing,
             pending: false,
+            provisional: true,
             ...(compact.length > existing.label.length ? { label: compact } : {}),
           };
           return next;
         }
       }
-      if (prev.some((item) => item.index === index)) return prev;
+      if (!id && prev.some((item) => item.index === index)) return prev;
       return [...prev, entry].sort((a, b) => a.index - b.index);
     };
     if (!sid) {
@@ -6668,6 +6731,37 @@ export function Chat({
     if (next.length !== prev.length) {
       turnOutlineBySessionRef.current.set(sid, next);
     }
+  }
+
+  /** Cancelling a steer retires its local provisional outline immediately. */
+  function forgetCancelledSteerOutline(
+    targetSid: string | null | undefined,
+    q: QueuedMessage,
+  ) {
+    const sid = targetSid ?? activeIdRef.current ?? sessionId;
+    if (!sid) return;
+    const ids = new Set<string>();
+    if (q.clientInputId) ids.add(q.clientInputId);
+    if (q.id != null) ids.add(String(q.id));
+    if (ids.size === 0) return;
+    const remove = (prev: SessionTurnOutline[]) => removeOutlineRowsById(
+      prev,
+      ids,
+      (turn) => turn.provisional === true || turn.pending === true,
+    );
+    if (sid === activeIdRef.current) {
+      setTurnOutline((prev) => {
+        const next = remove(prev);
+        if (next === prev) return prev;
+        turnOutlineRef.current = next;
+        turnOutlineBySessionRef.current.set(sid, next);
+        return next;
+      });
+      return;
+    }
+    const prev = turnOutlineBySessionRef.current.get(sid) ?? [];
+    const next = remove(prev);
+    if (next !== prev) turnOutlineBySessionRef.current.set(sid, next);
   }
 
   /** A real user echo/persisted row supersedes its pending-input projection. */
@@ -7155,9 +7249,37 @@ export function Chat({
     const index = anchored?.sourceIndex ?? item.index;
     const sid = activeIdRef.current;
     const generation = sessionGenerationRef.current;
-    pendingJumpIdRef.current = id;
     setActiveTurnId(id);
     turnNavPinUntilRef.current = Date.now() + 1800;
+    // A pending steer has no transcript bubble yet. Its outline index is a
+    // synthetic insertion point, so loading history by that index lands on an
+    // unrelated tool row. Anchor to the actual queue card, or keep the view at
+    // the pending tail where the bubble will appear after the fold.
+    if (item.pending && !anchored) {
+      pendingJumpIdRef.current = null;
+      const root = scrollRef.current;
+      const key = item.messageId ?? '';
+      const card = key
+        ? root?.querySelector<HTMLElement>(
+            `.user-message-wrapper.queued[data-client-input-id="${CSS.escape(key)}"]`,
+          )
+        : null;
+      if (root) {
+        timelineFollow.pause();
+        const nextTop = card
+          ? Math.max(
+              0,
+              card.getBoundingClientRect().top -
+                root.getBoundingClientRect().top +
+                root.scrollTop -
+                24,
+            )
+          : root.scrollHeight;
+        root.scrollTo({ top: nextTop, behavior: 'smooth' });
+      }
+      return;
+    }
+    pendingJumpIdRef.current = id;
     const busyGuard = () =>
       activeIdRef.current !== sid || sessionGenerationRef.current !== generation;
     // 判据必须是“**画布上真的有这一行**”：已在画布上时直接滚动定位，绝不发起多余拉取或替换画布！
@@ -7633,10 +7755,11 @@ export function Chat({
         historyOffsetBySessionRef.current.set(id, newOffset);
         historyTotalBySessionRef.current.set(id, newTotal);
         hasOlderBySessionRef.current.set(id, olderExists);
-        // 压缩会重排/删除转录行，旧大纲的绝对下标已经失效：以服务端返回的
-        // 新大纲整表覆盖，避免右栏/跳转指向不存在的消息。
+        // 压缩会重排/删除转录行，旧大纲的绝对下标已经失效；但 pending steer
+        // 不是“旧下标”，它必须在重载后继续存在。按 identity 合并，服务端行
+        // 覆盖坐标，provisional/更晚的本地行保留。
         if (Array.isArray(detail.turns)) {
-          const nextOutline = detail.turns;
+          const nextOutline = mergeServerWithLocalOutline(detail.turns, turnOutlineRef.current);
           turnOutlineRef.current = nextOutline;
           turnOutlineBySessionRef.current.set(id, nextOutline);
           setTurnOutline(nextOutline);
@@ -7900,7 +8023,7 @@ export function Chat({
           setQueued((q) => [
             ...q,
             {
-              id: queueIdRef.current++,
+              id: randomUUID(),
               text,
               approvalMode: modeState.confirmedMode,
               kind: 'queue' as const,
@@ -8152,7 +8275,10 @@ export function Chat({
         event.client_input_ids,
         targetSid,
         (event as any).timestamps,
-        { seq: (event as { seq?: number }).seq },
+        {
+          seq: (event as { seq?: number }).seq,
+          ...(anchorForSteer(event) ? { replay: true, anchor: anchorForSteer(event) } : {}),
+        },
       );
       return;
     }
@@ -8785,7 +8911,7 @@ export function Chat({
               || (!serverCapsRef.current.includes('explicit_replay')
                 && (event as { replay?: boolean }).replay === undefined
                 && typeof (event as { seq?: number }).seq === 'number'),
-            anchor: opts?.steerAnchor,
+            anchor: anchorForSteer(event) ?? opts?.steerAnchor,
             seq: (event as { seq?: number }).seq,
           },
         );
@@ -10135,9 +10261,8 @@ export function Chat({
      *  tombstone, restore the card, and let the paused drain retry it. */
     const restoreClaimedQueueCard = async (sid?: string | null) => {
       const claimId = opts?.requestId;
-      const restoredId = queueIdRef.current++;
       const restored: QueuedMessage = {
-        id: restoredId,
+        id: randomUUID(),
         text,
         images,
         approvalMode,
@@ -10492,7 +10617,7 @@ export function Chat({
 
     if (busy || isCompacting) {
       const card: QueuedMessage = {
-        id: queueIdRef.current++,
+        id: randomUUID(),
         text: messageText,
         images: images.length ? images : undefined,
         approvalMode: modeState.confirmedMode,
@@ -10510,7 +10635,7 @@ export function Chat({
         return;
       }
       // 普通回车：把键盘焦点交给卡片按钮，方向键切换动作、回车即点击。
-      setFocusCardId(card.id);
+      setFocusCardId(queueCardSyncKey(card));
       return;
     }
 
@@ -10535,8 +10660,15 @@ export function Chat({
         localTurnSessionsRef.current.has(currentSid) ||
         compactingSessionsRef.current.has(currentSid)
       ));
+    // Hydration restores local cards before the server runtime snapshot lands.
+    // Draining in that window can claim a card while the turn is actually busy,
+    // then lose it when the page refreshes again. Only an authoritative runtime
+    // snapshot may open the drain gate.
+    const runtimeAuthoritative = !!currentSid
+      && runtimeAuthoritativeBySessionRef.current.has(currentSid);
     if (
       isSessionRunning ||
+      !runtimeAuthoritative ||
       queued.length === 0 ||
       modeState.pendingMode ||
       isSessionLoading ||
@@ -10568,7 +10700,7 @@ export function Chat({
     void dispatchQueuedCard(next);
     // deliver 为组件内函数声明，闭包始终取最新渲染值；仅以 busy/queued 触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, isCompacting, queued, messages, loading, modeState.pendingMode, chatRecovery]);
+  }, [busy, isCompacting, queued, messages, loading, modeState.pendingMode, chatRecovery, runtimeAuthorityEpoch]);
 
   /** Stop / 外部停止：把还没发出去的队列（含尚未确认的转向）整段还回输入框。 */
   async function restoreQueuedToComposer() {
@@ -10627,11 +10759,13 @@ export function Chat({
       }
     }
 
-    setQueued((arr) => arr.filter((x) => x.id !== q.id));
+    const cancelKey = queueCardSyncKey(q);
+    setQueued((arr) => arr.filter((item) => queueCardSyncKey(item) !== cancelKey));
     const targetSid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+    forgetCancelledSteerOutline(targetSid, q);
     if (targetSid) {
       const currentList = queuedBySessionRef.current.get(targetSid) ?? [];
-      const updatedList = currentList.filter((item) => item.id !== q.id);
+      const updatedList = currentList.filter((item) => queueCardSyncKey(item) !== cancelKey);
       if (updatedList.length > 0) {
         queuedBySessionRef.current.set(targetSid, updatedList);
       } else {
@@ -10698,12 +10832,13 @@ export function Chat({
       updater: (item: QueuedMessage) => QueuedMessage,
       opts?: { localOnly?: boolean },
     ) => {
+      const targetKey = queueCardSyncKey(q);
       const applyTo = (items: QueuedMessage[]) =>
-        items.map((item) => (item.id === q.id ? updater(item) : item));
+        items.map((item) => (queueCardSyncKey(item) === targetKey ? updater(item) : item));
       if (opts?.localOnly) {
         // `steering` 只是 `postChatSteer` 飞行几十毫秒的本端过渡态，只改本地响应式状态，
         // 不触发 `saveChatQueue` 网络请求，彻底消除与落定后 `kind: 'steer'` 的并发 POST 乱序竞态。
-        if (activeIdRef.current === targetSid || queuedRef.current.some((item) => item.id === q.id)) {
+        if (activeIdRef.current === targetSid || queuedRef.current.some((item) => queueCardSyncKey(item) === targetKey)) {
           const next = applyTo(queuedRef.current);
           queuedRef.current = next;
           if (targetSid) {
@@ -10722,7 +10857,7 @@ export function Chat({
       }
       // 卡片就在当前视图里时走响应式更新：新建会话的 request id 别名尚未绑定
       // session id，此刻 activeIdRef 仍为空，卡片状态不能只写进后台持久化副本。
-      if (activeIdRef.current === targetSid || queuedRef.current.some((item) => item.id === q.id)) {
+      if (activeIdRef.current === targetSid || queuedRef.current.some((item) => queueCardSyncKey(item) === targetKey)) {
         setQueued(applyTo);
         return;
       }
@@ -10736,15 +10871,56 @@ export function Chat({
     localUnsyncedQueueIdsRef.current.add(clientInputId);
     localUnsyncedQueueIdsRef.current.add(String(q.id));
     try {
-      await postChatSteer(targetSid, q.text, q.images, clientInputId, q.createdAt ?? Date.now());
+      // Persist the intent first so a reload cannot strand a click that never
+      // reached the daemon. A failed queue write still allows the POST below,
+      // whose server fallback also records the steering card.
+      await admitChatSteer(
+        targetSid,
+        q.text,
+        q.images,
+        clientInputId,
+        q.createdAt ?? Date.now(),
+        q.approvalMode,
+      );
+      // Admission made the server queue authoritative; never echo this card
+      // back through /chat/queue from the generic unsynced reconciler.
+      localUnsyncedQueueIdsRef.current.delete(clientInputId);
+      localUnsyncedQueueIdsRef.current.delete(String(q.id));
+      await postChatSteer(
+        targetSid,
+        q.text,
+        q.images,
+        clientInputId,
+        q.createdAt ?? Date.now(),
+        q.approvalMode,
+      );
       // 成功投递后，卡片保留并更新为 'steer' 状态（展示「转向已排队 · 等待当前步骤完成」与取消按钮）！
-      updateTargetQueued((item) => ({ ...item, kind: 'steer' as const }));
+      // 状态转换只做本地展示；服务端 /chat/steer 已原子更新队列，避免并发整表写回。
+      updateTargetQueued((item) => ({ ...item, kind: 'steer' as const }), { localOnly: true });
+      // Keep the pending rail row alive immediately; waiting for the next
+      // detail poll made the title flash/disappear while the model was thinking.
+      if (!turnOutlineRef.current.some((turn) => turn.id === clientInputId)) {
+        rememberTurnOutline(
+          q.text || (q.images?.length ? '[图片]' : ''),
+          nextTurnNavIndex(),
+          nextOutlineOrdinal(),
+          clientInputId,
+          targetSid,
+        );
+      }
       // 服务端已把转向收进运行中的回合 —— 这是「会话仍在干活」的权威证据，
       // 立即点亮运行态，避免上一轮终态把按钮误切回发送箭头。
       armRunningForSession(targetSid);
       return true;
     } catch (error) {
-      updateTargetQueued((item) => (item.kind === 'steering' ? { ...item, kind: 'queue' as const } : item));
+      // A reload/network abort may leave the server-owned `steering` record
+      // intact. Never overwrite it with a stale whole-list write here; the
+      // daemon already demotes genuine rejections and broadcasts the new queue.
+      updateTargetQueued(
+        (item) => (item.kind === 'steering' ? { ...item, kind: 'queue' as const } : item),
+        { localOnly: true },
+      );
+      forgetCancelledSteerOutline(targetSid, { ...q, clientInputId });
       if (!opts?.silentFailure) {
         pushCommandNotice(t('chat.steerFailed', { msg: error instanceof Error ? error.message : String(error) }));
       }
@@ -10778,13 +10954,14 @@ export function Chat({
    * 卡片随消息真正成为正文而自然销毁——drain 自动发送与「立即发送」共用此通道。
    */
   async function dispatchQueuedCard(item: QueuedMessage) {
+    const itemKey = queueCardSyncKey(item);
     // 以 ref 为准做去重：两个投递入口可能在同一批渲染里竞争同一张卡片。
-    if (!queuedRef.current.some((entry) => entry.id === item.id)) return;
+    if (!queuedRef.current.some((entry) => queueCardSyncKey(entry) === itemKey)) return;
     const sid = activeIdRef.current ?? sessionId;
     // Stable identity: claim key == eventual prompt id. Legacy cards fall back
     // to their local id so two tabs still share one key.
     const claimId = item.clientInputId ?? String(item.id);
-    setQueued((current) => current.filter((entry) => entry.id !== item.id));
+    setQueued((current) => current.filter((entry) => queueCardSyncKey(entry) !== itemKey));
 
     if (sid) {
       let claimed: boolean | null;
@@ -10799,7 +10976,7 @@ export function Chat({
       }
       if (claimed === false) {
         // Another tab already owns this card; drop the stale local copy.
-        setQueued((current) => current.filter((entry) => entry.id !== item.id));
+        setQueued((current) => current.filter((entry) => queueCardSyncKey(entry) !== itemKey));
         return;
       }
       if (claimed === null) {
@@ -10807,7 +10984,7 @@ export function Chat({
         // duplicate delivery on the next pass.
         blockQueueDrainRef.current = true;
         setQueued((current) => (
-          current.some((entry) => entry.id === item.id) ? current : [item, ...current]
+          current.some((entry) => queueCardSyncKey(entry) === itemKey) ? current : [item, ...current]
         ));
         return;
       }
@@ -10830,7 +11007,7 @@ export function Chat({
     );
     if (outcome === 'ok') return;
     // `deliver` already requeues a 409 card; only restore when no copy exists.
-    if (queuedRef.current.some((entry) => entry.clientInputId === claimId || entry.id === item.id)) return;
+    if (queuedRef.current.some((entry) => queueCardSyncKey(entry) === claimId)) return;
     if (sid) {
       await releaseChatQueue(
         sid,
@@ -10845,7 +11022,7 @@ export function Chat({
     }
     blockQueueDrainRef.current = true;
     setQueued((current) => (
-      current.some((entry) => entry.clientInputId === claimId || entry.id === item.id)
+      current.some((entry) => queueCardSyncKey(entry) === claimId)
         ? current
         : [{ ...item, kind: 'queue', forceSend: true, clientInputId: claimId }, ...current]
     ));
@@ -10932,7 +11109,7 @@ export function Chat({
     const cid = item.clientInputId;
     if (cid) {
       const outline = (sid ? turnOutlineBySessionRef.current.get(sid) : undefined) ?? turnOutlineRef.current;
-      if (outline.some((turn) => turn.id === cid)) return true;
+      if (queueCardPresentInOutline(outline, cid)) return true;
     }
     return queueCardAlreadyOnCanvas(messages, item)
       || steerCardBubbleOnCanvas(messages, item);
@@ -10969,21 +11146,22 @@ export function Chat({
 
   /** 只回收卡片（内存 / localStorage / 后端三处），不碰输入框。 */
   function retireQueuedCard(q: QueuedMessage, sid: string | null) {
-    if (queuedRef.current.some((item) => item.id === q.id)) {
-      setQueued((items) => items.filter((item) => item.id !== q.id));
+    const key = queueCardSyncKey(q);
+    if (queuedRef.current.some((item) => queueCardSyncKey(item) === key)) {
+      setQueued((items) => items.filter((item) => queueCardSyncKey(item) !== key));
     } else if (sid) {
-      updateQueuedForSession(sid, (items) => items.filter((item) => item.id !== q.id));
+      updateQueuedForSession(sid, (items) => items.filter((item) => queueCardSyncKey(item) !== key));
     }
   }
 
   /** 等待正在投递的转向卡落定（steering → steer / queue），返回最新卡片。 */
   async function waitForSteerCardSettled(
-    cardId: number,
+    cardKey: string,
     timeoutMs = 8000,
   ): Promise<QueuedMessage | null> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const current = queuedRef.current.find((item) => item.id === cardId) ?? null;
+      const current = queuedRef.current.find((item) => queueCardSyncKey(item) === cardKey) ?? null;
       if (!current) return null;
       if (current.kind !== 'steering' || Date.now() >= deadline) return current;
       await new Promise((resolve) => window.setTimeout(resolve, 80));
@@ -11026,9 +11204,9 @@ export function Chat({
         sameIdentity: !!q.clientInputId && latestUser?.id === q.clientInputId,
         sameText: !q.clientInputId && userTextsMatch(visibleUserText(latestText), visibleUserText(q.text)),
       })) {
-        setQueued((items) => items.filter((item) => item.id !== q.id));
+        setQueued((items) => items.filter((item) => queueCardSyncKey(item) !== queueCardSyncKey(q)));
         if (!currentSid) return;
-        updateQueuedForSession(currentSid, (items) => items.filter((item) => item.id !== q.id));
+        updateQueuedForSession(currentSid, (items) => items.filter((item) => queueCardSyncKey(item) !== queueCardSyncKey(q)));
         return;
       }
     }
@@ -11043,7 +11221,7 @@ export function Chat({
     if (isSteerCard) {
       let effectiveKind = q.kind;
       if (effectiveKind === 'steering') {
-        const settled = await waitForSteerCardSettled(q.id);
+        const settled = await waitForSteerCardSettled(queueCardSyncKey(q));
         if (!settled) return; // 卡片已被消费 / 撤掉
         effectiveKind = settled.kind;
       }
@@ -11094,10 +11272,10 @@ export function Chat({
         return;
       }
       if (!claimed) {
-        if (queuedRef.current.some((item) => item.id === q.id)) {
-          setQueued((items) => items.filter((item) => item.id !== q.id));
+        if (queuedRef.current.some((item) => queueCardSyncKey(item) === queueCardSyncKey(q))) {
+          setQueued((items) => items.filter((item) => queueCardSyncKey(item) !== queueCardSyncKey(q)));
         } else {
-          updateQueuedForSession(currentSid, (items) => items.filter((item) => item.id !== q.id));
+          updateQueuedForSession(currentSid, (items) => items.filter((item) => queueCardSyncKey(item) !== queueCardSyncKey(q)));
         }
         return;
       }
@@ -11110,10 +11288,10 @@ export function Chat({
       recordUserSteer(sid);
     }
 
-    if (queuedRef.current.some((item) => item.id === q.id)) {
-      setQueued((items) => items.filter((item) => item.id !== q.id));
+    if (queuedRef.current.some((item) => queueCardSyncKey(item) === queueCardSyncKey(q))) {
+      setQueued((items) => items.filter((item) => queueCardSyncKey(item) !== queueCardSyncKey(q)));
     } else if (currentSid) {
-      updateQueuedForSession(currentSid, (items) => items.filter((item) => item.id !== q.id));
+      updateQueuedForSession(currentSid, (items) => items.filter((item) => queueCardSyncKey(item) !== queueCardSyncKey(q)));
     }
 
     // 1. 「立即发送」会把当前 turn 换掉。标记必须绑定旧 operation id：
@@ -11221,7 +11399,7 @@ export function Chat({
       // 复位 blockQueueDrainRef：一旦仍在收尾的旧回合最终结束，允许 drain 立即自动发出该 forceSend 卡，绝不死锁。
       blockQueueDrainRef.current = false;
       setQueued((current) => (
-        current.some((entry) => entry.clientInputId === requestId || entry.id === card.id)
+        current.some((entry) => queueCardSyncKey(entry) === requestId)
           ? current
           : [...current, card]
       ));
@@ -11945,8 +12123,8 @@ export function Chat({
   }
 
   /** 把焦点送进指定待发卡片的动作区（方向键可达）。 */
-  function focusQueuedCardActions(cardId: number) {
-    const container = document.querySelector(`[data-queued-card-actions="${cardId}"]`);
+  function focusQueuedCardActions(cardId: string) {
+    const container = document.querySelector(`[data-queued-card-actions="${CSS.escape(cardId)}"]`);
     if (!container) return;
     const button = container.querySelector<HTMLButtonElement>('button[data-action]:not(:disabled)');
     button?.focus();
@@ -11964,7 +12142,7 @@ export function Chat({
       const target = tailQueuedCard(queuedRef.current);
       if (!target) return;
       e.preventDefault();
-      focusQueuedCardActions(target.id);
+      focusQueuedCardActions(queueCardSyncKey(target));
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -13520,7 +13698,7 @@ export function Chat({
         {/* 排队中的消息：执行中输入、待当前回合结束后自动发送，卡片下方提供立即发送、转向、取消按钮。 */}
         {queued.map((q) => (
           <QueuedMessageCard
-            key={`q-${q.id}`}
+            key={`q-${queueCardSyncKey(q)}`}
             q={q}
             focusCardId={focusCardId}
             onAutoFocusDone={() => setFocusCardId(null)}

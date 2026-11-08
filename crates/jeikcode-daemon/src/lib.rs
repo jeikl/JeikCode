@@ -2407,48 +2407,68 @@ fn append_snapshot_tail(
 /// overlays the same content into the model context and clears the sidecar; this
 /// projection only makes the recovered text visible before the retry.
 fn append_interrupted_partial(messages: &mut Vec<MessageInfo>, session_id: &str, running: bool) {
+    fn already_present(
+        messages: &[MessageInfo],
+        partial: &jeikcode_capabilities::session::PartialStream,
+    ) -> bool {
+        partial.message_id.as_deref().is_some_and(|id| {
+            messages
+                .iter()
+                .any(|message| message.id.as_deref() == Some(id))
+        }) || (!partial.text.trim().is_empty()
+            && messages.iter().any(|message| {
+                message.role == "assistant" && message.content.contains(partial.text.trim())
+            }))
+    }
+    fn append_one(
+        messages: &mut Vec<MessageInfo>,
+        partial: jeikcode_capabilities::session::PartialStream,
+    ) {
+        if partial.text.trim().is_empty() && partial.reasoning.trim().is_empty() {
+            return;
+        }
+        if already_present(messages, &partial) {
+            return;
+        }
+        let next_seq = messages
+            .iter()
+            .filter_map(|message| message.seq)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        messages.push(message_info! {
+            turn_id: None,
+            seq: Some(next_seq),
+            role: "assistant".into(),
+            id: partial.message_id,
+            content: partial.text,
+            reasoning: (!partial.reasoning.trim().is_empty()).then_some(partial.reasoning),
+            synthetic: false,
+            internal_origin: Some("interrupted_partial".into()),
+            tool_calls: None,
+            tool_result: None,
+            artifacts: None,
+            images: None,
+            created_at: Some(partial.updated_at),
+            elapsed_ms: None,
+        });
+    }
+    // Archived partials belong to an older turn whose display slice has not
+    // flushed yet. Keep showing them even while the next turn is running.
+    let archived = jeikcode_capabilities::session::partial::load_archived_global(session_id);
+    if let Some(archived) = archived {
+        if already_present(messages, &archived) {
+            jeikcode_capabilities::session::partial::clear_archived_global(session_id);
+        } else {
+            append_one(messages, archived);
+        }
+    }
     if running {
         return;
     }
-    let Some(partial) = jeikcode_capabilities::session::partial::load_global(session_id) else {
-        return;
-    };
-    if partial.text.trim().is_empty() && partial.reasoning.trim().is_empty() {
-        return;
+    if let Some(partial) = jeikcode_capabilities::session::partial::load_global(session_id) {
+        append_one(messages, partial);
     }
-    if partial.message_id.as_deref().is_some_and(|id| {
-        messages
-            .iter()
-            .any(|message| message.id.as_deref() == Some(id))
-    }) || (!partial.text.trim().is_empty()
-        && messages.iter().any(|message| {
-            message.role == "assistant" && message.content.contains(partial.text.trim())
-        }))
-    {
-        return;
-    }
-    let next_seq = messages
-        .iter()
-        .filter_map(|message| message.seq)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    messages.push(message_info! {
-        turn_id: None,
-        seq: Some(next_seq),
-        role: "assistant".into(),
-        id: partial.message_id,
-        content: partial.text,
-        reasoning: (!partial.reasoning.trim().is_empty()).then_some(partial.reasoning),
-        synthetic: false,
-        internal_origin: Some("interrupted_partial".into()),
-        tool_calls: None,
-        tool_result: None,
-        artifacts: None,
-        images: None,
-        created_at: Some(partial.updated_at),
-        elapsed_ms: None,
-    });
 }
 
 /// Overlay a per-token crash checkpoint onto the canonical conversation.
@@ -2525,7 +2545,7 @@ fn append_pending_inputs(
     working_dir: &std::path::Path,
     absolute_index_base: usize,
 ) {
-    let existing: std::collections::HashSet<String> = messages
+    let mut existing: std::collections::HashSet<String> = messages
         .iter()
         .filter_map(|message| message.id.clone())
         .collect();
@@ -2604,6 +2624,67 @@ fn append_pending_inputs(
             });
         }
     }
+    // A promoted steer is already a real persisted user message, but display.jsonl
+    // is only flushed at turn end. Project it into `messages` now so a refresh in
+    // the fold→settle window cannot lose BOTH the queue card (already retired) and
+    // the canvas bubble (not yet flushed).
+    for input in &all_inputs {
+        if input.delivery != "steer" || input.status != "promoted" {
+            continue;
+        }
+        if let (Some(current), Some(input_op)) = (operation_id, input.operation_id.as_deref()) {
+            if current != input_op {
+                continue;
+            }
+        }
+        let message_id = input
+            .message_id
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| input.id.clone());
+        if existing.contains(&message_id) || existing.contains(&input.id) {
+            continue;
+        }
+        if turns.iter().any(|turn| {
+            turn.id.as_deref() == Some(message_id.as_str())
+                || turn.id.as_deref() == Some(input.id.as_str())
+        }) {
+            continue;
+        }
+        let content =
+            jeikcode_capabilities::session::user_text_for_display(working_dir, &input.text);
+        let images: Vec<ImageData> = input
+            .images
+            .iter()
+            .map(|image| ImageData {
+                media_type: image.media_type.clone(),
+                data: image.data.clone(),
+                missing: false,
+            })
+            .collect();
+        if content.trim().is_empty() && images.is_empty() {
+            continue;
+        }
+        next_seq = next_seq.saturating_add(1);
+        messages.push(message_info! {
+            turn_id: None,
+            seq: Some(next_seq),
+            role: "user".into(),
+            id: Some(message_id.clone()),
+            content,
+            reasoning: None,
+            synthetic: false,
+            internal_origin: Some("promoted_steer".into()),
+            tool_calls: None,
+            tool_result: None,
+            artifacts: None,
+            images: (!images.is_empty()).then_some(images),
+            created_at: Some(input.created_at),
+            elapsed_ms: None,
+        });
+        existing.insert(message_id);
+        existing.insert(input.id.clone());
+    }
     append_folded_steer_outline(
         messages,
         turns,
@@ -2633,7 +2714,11 @@ fn append_folded_steer_outline(
         turns.iter().filter_map(|turn| turn.id.clone()).collect();
     let mut added = 0usize;
     for input in inputs {
-        if input.delivery != "steer" || (input.status != "admitted" && input.status != "promoted") {
+        if input.delivery != "steer"
+            || (input.status != "admitted"
+                && input.status != "submitted"
+                && input.status != "promoted")
+        {
             continue;
         }
         // `/chat` steers carry the owning operation's client id. A live-runtime
@@ -2644,7 +2729,12 @@ fn append_folded_steer_outline(
                 continue;
             }
         }
-        if existing.contains(&input.id) {
+        let outline_identity = input
+            .message_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(input.id.as_str());
+        if existing.contains(&input.id) || existing.contains(outline_identity) {
             continue;
         }
         let content =
@@ -2661,14 +2751,25 @@ fn append_folded_steer_outline(
         if label.is_empty() {
             continue;
         }
+        let message_id = input
+            .message_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(input.id.as_str());
+        let projected_index = messages.iter().position(|message| {
+            message.id.as_deref() == Some(message_id)
+                || message.id.as_deref() == Some(input.id.as_str())
+        });
         turns.push(SessionTurnOutline {
             ordinal: turns.len(),
             id: Some(input.id.clone()),
-            // Provisional canvas coordinate: the pending row is jumped by id and
-            // replaced by the display row once the turn settles.
-            index: absolute_index_base + messages.len() + added,
+            // Promoted rows now have a canvas index; pending rows remain jumped
+            // by id until display.jsonl flushes.
+            index: projected_index
+                .map(|position| absolute_index_base + position)
+                .unwrap_or(absolute_index_base + messages.len() + added),
             label,
-            pending: true,
+            pending: projected_index.is_none(),
             seq: Some(input.seq),
         });
         added = added.saturating_add(1);
@@ -4411,6 +4512,8 @@ pub(crate) enum GlobalWireEvent {
         inputs: Vec<SteerFoldedInputWire>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         client_input_ids: Vec<Option<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_message_id: Option<String>,
     },
     /// 模型配置变更（会话聊天模型 / 思考强度 / 思考预算）。
     ///
@@ -4870,6 +4973,87 @@ mod folded_steer_outline_tests {
             0,
         );
         assert_eq!(turns.len(), 1);
+    }
+
+    #[test]
+    fn promoted_steer_is_projected_as_a_user_message_before_display_flush() {
+        let session_id = format!("promoted-steer-projection-{}", std::process::id());
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+        let mut input = jeikcode_capabilities::session::SessionInput {
+            id: "steer-1".into(),
+            seq: 0,
+            session_id: session_id.clone(),
+            delivery: "steer".into(),
+            status: "promoted".into(),
+            text: "folded but display not flushed".into(),
+            images: Vec::new(),
+            created_at: 1_700_000_000_000,
+            message_id: Some("steer-1".into()),
+            operation_id: Some("op-1".into()),
+        };
+        jeikcode_capabilities::session::inputs::append_global(&mut input).unwrap();
+
+        let mut messages = Vec::new();
+        let mut turns = Vec::new();
+        append_pending_inputs(
+            &mut messages,
+            &mut turns,
+            &session_id,
+            Some("op-1"),
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].id.as_deref(), Some("steer-1"));
+        assert!(messages[0]
+            .content
+            .contains("folded but display not flushed"));
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].index, 0);
+        assert!(
+            !turns[0].pending,
+            "promoted row already has a canvas bubble"
+        );
+
+        // A later detail read (display still lagging) must be idempotent.
+        append_pending_inputs(
+            &mut messages,
+            &mut turns,
+            &session_id,
+            Some("op-1"),
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(turns.len(), 1);
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+    }
+
+    #[test]
+    fn rejected_steer_is_not_left_in_the_live_outline() {
+        let inputs = vec![jeikcode_capabilities::session::SessionInput {
+            id: "steer-rejected".into(),
+            seq: 7,
+            session_id: "session-1".into(),
+            delivery: "steer".into(),
+            status: "rejected".into(),
+            text: "failed steer".into(),
+            images: Vec::new(),
+            created_at: 1_700_000_000_000,
+            message_id: None,
+            operation_id: Some("op-1".into()),
+        }];
+        let mut turns = Vec::new();
+        append_folded_steer_outline(
+            &[],
+            &mut turns,
+            &inputs,
+            Some("op-1"),
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert!(turns.is_empty());
     }
 
     #[test]
@@ -5379,6 +5563,7 @@ pub(crate) fn fanout_chat_events_for_session(
                 ChatEvent::Steered {
                     inputs,
                     client_input_ids,
+                    anchor_message_id,
                     ..
                 } => {
                     // 中途转向已并入本轮：异地客户端即使没在看这个会话，也要把这条
@@ -5403,6 +5588,7 @@ pub(crate) fn fanout_chat_events_for_session(
                                 .map(SteerFoldedInputWire::from_kernel)
                                 .collect(),
                             client_input_ids: client_input_ids.clone(),
+                            anchor_message_id: anchor_message_id.clone(),
                         });
                     }
                 }
@@ -7739,6 +7925,41 @@ fn session_detail_response(headers: &HeaderMap, detail: SessionDetail) -> axum::
     response
 }
 
+fn session_todo_snapshot(session_id: &str) -> (Vec<jeikcode_capabilities::tools::TodoItem>, u64) {
+    jeikcode_capabilities::tools::read_todo_board(session_id)
+        .map(|board| (board.items, board.revision))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod session_todo_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn completed_board_read_does_not_settle_or_close_it() {
+        let session_id = format!("session-todo-read-{}", std::process::id());
+        jeikcode_capabilities::tools::purge_todo_board(&session_id);
+        let items = vec![jeikcode_capabilities::tools::TodoItem {
+            id: None,
+            content: "done but not terminal yet".into(),
+            status: jeikcode_capabilities::tools::todo::TodoStatus::Completed,
+        }];
+        let board = jeikcode_capabilities::tools::commit_todo_board(&session_id, &items);
+
+        assert_eq!(
+            session_todo_snapshot(&session_id),
+            (items.clone(), board.revision)
+        );
+        assert_eq!(
+            jeikcode_capabilities::tools::read_todo_board(&session_id)
+                .unwrap()
+                .items,
+            items
+        );
+        jeikcode_capabilities::tools::purge_todo_board(&session_id);
+    }
+}
+
 /// GET /projects/:hash/sessions/:id - Get session detail
 async fn get_session_detail(
     State(state): State<AppState>,
@@ -8032,23 +8253,7 @@ async fn get_session_detail(
                 (turns, message_count, offset, messages, pinned_user_index)
             };
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
-            let (todos, todos_revision) = if let Some(board) =
-                jeikcode_capabilities::tools::read_todo_board(&id)
-            {
-                if jeikcode_capabilities::tools::list_fully_completed(&board.items) && !turn_running
-                {
-                    let closed = jeikcode_capabilities::tools::close_todo_board_if_complete(&id);
-                    (
-                        Vec::new(),
-                        closed.map(|board| board.revision).unwrap_or(board.revision),
-                    )
-                } else {
-                    let revision = board.revision;
-                    (board.items, revision)
-                }
-            } else {
-                (Vec::new(), 0)
-            };
+            let (todos, todos_revision) = session_todo_snapshot(&id);
             let cursor = SessionCursor {
                 oldest_seq: messages.iter().find_map(|message| message.seq),
                 total: message_count,
@@ -11363,6 +11568,9 @@ pub enum ChatEvent {
         client_input_ids: Vec<Option<String>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         timestamps: Vec<Option<u64>>,
+        /// Assistant row directly before the causal fold point.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_message_id: Option<String>,
     },
     /// Tool call completed
     #[serde(rename = "tool_result")]
@@ -12036,6 +12244,7 @@ mod chat_event_type_tests {
     #[test]
     fn native_steered_event_reaches_chat_projection() {
         let mut projector = ChatRuntimeProjector::default();
+        projector.current_message_id = Some("assistant-before-steer".into());
         let events = projector.project_agent(
             jeikcode_kernel::event::AgentEvent::Steered {
                 count: 1,
@@ -12049,7 +12258,12 @@ mod chat_event_type_tests {
         );
         assert!(matches!(
             events.as_slice(),
-            [ChatEvent::Steered { count: 1, inputs, .. }] if inputs[0].text == "next instruction"
+            [ChatEvent::Steered {
+                count: 1,
+                inputs,
+                anchor_message_id: Some(anchor),
+                ..
+            }] if inputs[0].text == "next instruction" && anchor == "assistant-before-steer"
         ));
     }
 
@@ -13311,9 +13525,9 @@ impl ChatRuntimeProjector {
         }
         let now = std::time::Instant::now();
         let due = self.partial_last_save.map_or(true, |last| {
-            now.duration_since(last) >= std::time::Duration::from_millis(250)
+            now.duration_since(last) >= std::time::Duration::from_millis(100)
         });
-        if !due && self.partial_bytes_since_save < 8192 {
+        if !due && self.partial_bytes_since_save < 4096 {
             return;
         }
         self.partial_last_save = Some(now);
@@ -13721,6 +13935,7 @@ impl ChatRuntimeProjector {
                 // A new turn starts: the previous turn's partial must have been
                 // committed/cleared; drop any stale checkpoint.
                 self.reset_partial_stream();
+                let _ = jeikcode_capabilities::session::partial::archive_global(session_id);
                 jeikcode_capabilities::session::partial::clear_global(session_id);
                 vec![ChatEvent::UserIdentified {
                     message_id,
@@ -13943,6 +14158,7 @@ impl ChatRuntimeProjector {
                 message_id: self.notice_anchor(),
             }],
             Agent::Steered { count, inputs } => {
+                let anchor_message_id = self.current_message_id.clone();
                 let mut events = Vec::new();
                 if let Some(event) = self.finish() {
                     events.push(event);
@@ -13960,6 +14176,7 @@ impl ChatRuntimeProjector {
                     inputs,
                     client_input_ids: Vec::new(),
                     timestamps: Vec::new(),
+                    anchor_message_id,
                 });
                 events
             }
@@ -14498,7 +14715,14 @@ async fn finalize_chat_task(
             }
         }
     }
+    let session_id = cleanup_chats
+        .session_id(cleanup_operation_id)
+        .await
+        .unwrap_or_else(|| requested_session_id.to_string());
     cleanup_chats.complete(cleanup_operation_id).await;
+    if cleanup_chats.steer_sender(&session_id).await.is_none() {
+        reconcile_stale_steer_queue(&session_id).await;
+    }
 }
 
 /// Process a chat request and stream events
@@ -14693,7 +14917,8 @@ pub(crate) async fn process_chat_request(
         // turn continues with the interrupted context instead of starting over.
         if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&session_id) {
             let _ = overlay_partial_stream(&mut conv, &partial);
-            jeikcode_capabilities::session::partial::clear_global(&session_id);
+            // Keep the sidecar until Agent::UserMessage archives it; clearing on
+            // a read/resume attachment loses the half answer before display flushes.
         }
         let mut user_msg = if images.is_empty() {
             Message::user(runtime_text.clone())
@@ -14911,6 +15136,7 @@ pub(crate) async fn process_chat_request(
                 inputs,
                 client_input_ids,
                 timestamps,
+                ..
             } = &mut chat_event
             {
                 if client_input_ids.is_empty() {
@@ -14956,6 +15182,7 @@ pub(crate) async fn process_chat_request(
                                 ids
                             },
                             timestamps: effective_ts,
+                            anchor_message_id: projector.current_message_id.clone(),
                         });
                     }
                 }
@@ -15818,6 +16045,8 @@ struct ChatSteerRequest {
     client_input_id: Option<String>,
     #[serde(default)]
     created_at: Option<u64>,
+    #[serde(default)]
+    approval_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -15831,7 +16060,7 @@ pub struct QueuedMessageItem {
     #[serde(default)]
     pub images: Option<serde_json::Value>,
     #[serde(default)]
-    pub kind: String, // "queue" | "steering" | "steered"
+    pub kind: String, // "queue" | "steering" | "steer"
     #[serde(default)]
     pub approval_mode: Option<String>,
     /// 卡片创建时间（epoch ms）。webui 的 `createdAt`：跨端 / 刷新恢复时保留
@@ -15964,8 +16193,9 @@ fn session_queue_file_path(session_id: &str) -> Option<PathBuf> {
     if clean.is_empty() {
         return None;
     }
-    let home = jeikcode_config::util::real_home_dir()?;
-    let dir = home.join(".jeikcode").join("state").join("queues");
+    let dir = jeikcode_config::Config::config_dir()
+        .join("state")
+        .join("queues");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir.join(format!("{clean}.json")))
 }
@@ -15975,8 +16205,9 @@ fn session_queue_claims_path(session_id: &str) -> Option<PathBuf> {
     if clean.is_empty() {
         return None;
     }
-    let home = jeikcode_config::util::real_home_dir()?;
-    let dir = home.join(".jeikcode").join("state").join("queues");
+    let dir = jeikcode_config::Config::config_dir()
+        .join("state")
+        .join("queues");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir.join(format!("{clean}.claimed.json")))
 }
@@ -16096,6 +16327,7 @@ async fn retire_folded_steers_from_queue(
         return;
     }
     let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    ensure_session_queue_loaded(sid).await;
     let mut claims = load_queue_claims(sid).await;
     let mut claims_changed = false;
     for id in &retired_ids {
@@ -16161,6 +16393,136 @@ fn claim_queue_item(
         claims.drain(..drop);
     }
     true
+}
+
+fn set_queued_steer_kind(
+    items: &mut Vec<QueuedMessageItem>,
+    client_input_id: &str,
+    kind: &str,
+    fallback: Option<QueuedMessageItem>,
+) -> bool {
+    if let Some(item) = items
+        .iter_mut()
+        .find(|item| queue_claim_id(item).as_deref() == Some(client_input_id))
+    {
+        if item.kind == kind {
+            return false;
+        }
+        item.kind = kind.to_string();
+        return true;
+    }
+    let Some(mut fallback) = fallback else {
+        return false;
+    };
+    fallback.kind = kind.to_string();
+    items.push(fallback);
+    true
+}
+
+async fn update_chat_queue_steer_state(
+    session_id: &str,
+    client_input_id: &str,
+    kind: &str,
+    fallback: Option<QueuedMessageItem>,
+) {
+    let sid = session_id.trim();
+    let cid = client_input_id.trim();
+    if sid.is_empty() || cid.is_empty() {
+        return;
+    }
+    let guard = QUEUE_CLAIM_LOCK.lock().await;
+    ensure_session_queue_loaded(sid).await;
+    let claims = load_effective_queue_claims(sid).await;
+    if claims.iter().any(|claimed| claimed == cid) {
+        drop(guard);
+        return;
+    }
+    let map = get_session_queues_map().await;
+    let changed = {
+        let mut writer = map.write().await;
+        let items = writer.entry(sid.to_string()).or_default();
+        set_queued_steer_kind(items, cid, kind, fallback)
+    };
+    if changed {
+        bump_queue_revision(sid).await;
+        persist_session_queue(sid).await;
+    }
+    drop(guard);
+    if changed {
+        publish_global(GlobalWireEvent::QueueUpdated {
+            session_id: sid.to_string(),
+        });
+    }
+}
+
+async fn reconcile_stale_steer_queue(session_id: &str) {
+    let guard = QUEUE_CLAIM_LOCK.lock().await;
+    ensure_session_queue_loaded(session_id).await;
+    let claims = load_effective_queue_claims(session_id).await;
+    let status_by_id: HashMap<String, String> =
+        jeikcode_capabilities::session::inputs::list_global(session_id)
+            .into_iter()
+            .map(|row| (row.id, row.status))
+            .collect();
+    let map = get_session_queues_map().await;
+    let mut downgraded = Vec::new();
+    let changed = {
+        let mut writer = map.write().await;
+        let items = writer.entry(session_id.to_string()).or_default();
+        let before = items.len();
+        items.retain_mut(|item| {
+            let Some(id) = queue_claim_id(item) else {
+                return true;
+            };
+            if claims.iter().any(|claimed| claimed == &id) {
+                return true;
+            }
+            match status_by_id.get(&id).map(String::as_str) {
+                Some("promoted") | Some("cancelled") => false,
+                _ if item.kind == "steering" || item.kind == "steer" => {
+                    item.kind = "queue".into();
+                    downgraded.push(id);
+                    true
+                }
+                _ => true,
+            }
+        });
+        items.len() != before || !downgraded.is_empty()
+    };
+    if changed {
+        bump_queue_revision(session_id).await;
+        persist_session_queue(session_id).await;
+    }
+    drop(guard);
+    for id in downgraded {
+        let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(session_id, &id);
+    }
+    if changed {
+        publish_global(GlobalWireEvent::QueueUpdated {
+            session_id: session_id.to_string(),
+        });
+    }
+}
+
+/// Startup recovery: no turn can be active before the listener is up, so every
+/// `steering`/`steer` card left on disk is an orphan from a crash/restart.
+async fn reconcile_all_stale_steer_queues() {
+    let dir = jeikcode_config::Config::config_dir()
+        .join("state")
+        .join("queues");
+    let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".json") || name.ends_with(".claimed.json") {
+            continue;
+        }
+        let session_id = name.trim_end_matches(".json");
+        if !session_id.is_empty() {
+            reconcile_stale_steer_queue(session_id).await;
+        }
+    }
 }
 
 async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
@@ -16436,6 +16798,44 @@ mod chat_queue_tests {
         );
     }
 
+    #[test]
+    fn steer_admission_lock_is_shared_per_identity() {
+        let first = steer_admission_lock("s-1", "cid-1");
+        let same = steer_admission_lock("s-1", "cid-1");
+        let other = steer_admission_lock("s-1", "cid-2");
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &other));
+    }
+
+    #[test]
+    fn server_steer_acknowledgement_persists_card_transitions() {
+        let mut card = item("steer request", "queue");
+        card.client_input_id = Some("cid-1".into());
+        let mut items = vec![card];
+
+        assert!(set_queued_steer_kind(&mut items, "cid-1", "steering", None));
+        assert_eq!(items[0].kind, "steering");
+        assert!(set_queued_steer_kind(&mut items, "cid-1", "steer", None));
+        assert_eq!(items[0].kind, "steer");
+        assert!(set_queued_steer_kind(&mut items, "cid-1", "queue", None));
+        assert_eq!(items[0].kind, "queue");
+        assert!(!set_queued_steer_kind(
+            &mut items, "missing", "steering", None
+        ));
+
+        let mut recovered = Vec::new();
+        let mut fallback = item("recovered", "queue");
+        fallback.client_input_id = Some("cid-2".into());
+        assert!(set_queued_steer_kind(
+            &mut recovered,
+            "cid-2",
+            "steering",
+            Some(fallback),
+        ));
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].kind, "steering");
+    }
+
     /// 全局 `steer_folded` 只带轻量字段：图片本体（可能是一整张 base64）
     /// 绝不跟着广播跑到每个实例，否则一次带图转向会把所有连接打爆。
     #[test]
@@ -16452,11 +16852,13 @@ mod chat_queue_tests {
             session_id: "s-1".into(),
             inputs: vec![SteerFoldedInputWire::from_kernel(&input)],
             client_input_ids: vec![Some("web-1".into())],
+            anchor_message_id: Some("assistant-before-steer".into()),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "steer_folded");
         assert_eq!(json["session_id"], "s-1");
         assert_eq!(json["inputs"][0]["message_id"], "m-steer");
+        assert_eq!(json["anchor_message_id"], "assistant-before-steer");
         assert_eq!(json["inputs"][0]["has_images"], true);
         assert!(json["inputs"][0].get("images").is_none());
         assert!(!json.to_string().contains("BASE64-BODY-SHOULD-STAY-LOCAL"));
@@ -17759,6 +18161,254 @@ struct ChatSteerResponse {
     error: Option<String>,
 }
 
+fn steer_queue_item(req: &ChatSteerRequest, client_id: String, kind: &str) -> QueuedMessageItem {
+    QueuedMessageItem {
+        id: serde_json::Value::String(client_id.clone()),
+        client_input_id: Some(client_id),
+        text: req.message.clone(),
+        images: (!req.images.is_empty()).then(|| {
+            serde_json::Value::Array(
+                req.images
+                    .iter()
+                    .map(|image| {
+                        serde_json::json!({
+                            "media_type": image.media_type,
+                            "data": image.data,
+                        })
+                    })
+                    .collect(),
+            )
+        }),
+        kind: kind.to_string(),
+        approval_mode: req.approval_mode.clone(),
+        created_at: req.created_at,
+        force_send: None,
+    }
+}
+
+/// POST /chat/steer/admit — durably reserve the steer intent + queue card
+/// before the client tries to submit it. This is the only client write needed;
+/// a refresh can then render the server-owned `steering` card and replay
+/// `/chat/steer` idempotently.
+async fn admit_chat_steer(
+    State(state): State<AppState>,
+    Json(req): Json<ChatSteerRequest>,
+) -> impl IntoResponse {
+    if req.message.trim().is_empty() && req.images.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ChatSteerResponse {
+                accepted: false,
+                error: Some("steer message is empty".into()),
+            }),
+        );
+    }
+    let Some(client_id) = req
+        .client_input_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ChatSteerResponse {
+                accepted: false,
+                error: Some("client_input_id is required".into()),
+            }),
+        );
+    };
+    let lock = steer_admission_lock(&req.session_id, &client_id);
+    let _guard = lock.lock().await;
+    let active_turn = state
+        .active_chats
+        .steer_sender(&req.session_id)
+        .await
+        .is_some();
+    if let Some(existing) =
+        jeikcode_capabilities::session::inputs::find_global(&req.session_id, &client_id)
+    {
+        match existing.status.as_str() {
+            "promoted" => {
+                retire_folded_steers_from_queue(
+                    &req.session_id,
+                    &[(Some(client_id), existing.message_id)],
+                )
+                .await;
+                return (
+                    StatusCode::OK,
+                    Json(ChatSteerResponse {
+                        accepted: true,
+                        error: None,
+                    }),
+                );
+            }
+            "submitted" => {
+                if !active_turn {
+                    let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
+                        &req.session_id,
+                        &client_id,
+                    );
+                    update_chat_queue_steer_state(
+                        &req.session_id,
+                        &client_id,
+                        "queue",
+                        Some(steer_queue_item(&req, client_id.clone(), "queue")),
+                    )
+                    .await;
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(ChatSteerResponse {
+                            accepted: false,
+                            error: Some("turn ended before the steer was submitted".into()),
+                        }),
+                    );
+                }
+
+                update_chat_queue_steer_state(
+                    &req.session_id,
+                    &client_id,
+                    "steer",
+                    Some(steer_queue_item(&req, client_id.clone(), "steer")),
+                )
+                .await;
+                return (
+                    StatusCode::OK,
+                    Json(ChatSteerResponse {
+                        accepted: true,
+                        error: None,
+                    }),
+                );
+            }
+            "cancelled" => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ChatSteerResponse {
+                        accepted: false,
+                        error: Some("steer was cancelled".into()),
+                    }),
+                );
+            }
+            "admitted" => {
+                if !active_turn {
+                    let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
+                        &req.session_id,
+                        &client_id,
+                    );
+                    update_chat_queue_steer_state(
+                        &req.session_id,
+                        &client_id,
+                        "queue",
+                        Some(steer_queue_item(&req, client_id.clone(), "queue")),
+                    )
+                    .await;
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(ChatSteerResponse {
+                            accepted: false,
+                            error: Some("no active turn to steer".into()),
+                        }),
+                    );
+                }
+
+                update_chat_queue_steer_state(
+                    &req.session_id,
+                    &client_id,
+                    "steering",
+                    Some(steer_queue_item(&req, client_id.clone(), "steering")),
+                )
+                .await;
+                return (
+                    StatusCode::OK,
+                    Json(ChatSteerResponse {
+                        accepted: true,
+                        error: None,
+                    }),
+                );
+            }
+            _ => {}
+        }
+    }
+    if !active_turn {
+        return (
+            StatusCode::CONFLICT,
+            Json(ChatSteerResponse {
+                accepted: false,
+                error: Some("no active turn to steer".into()),
+            }),
+        );
+    }
+    let operation_id = state
+        .active_chats
+        .admitted_user_for_session(&req.session_id)
+        .await
+        .and_then(|user| user.client_input_id);
+    let mut input = jeikcode_capabilities::session::SessionInput {
+        id: client_id.clone(),
+        seq: 0,
+        session_id: req.session_id.clone(),
+        delivery: "steer".into(),
+        status: "admitted".into(),
+        text: req.message.clone(),
+        images: req
+            .images
+            .iter()
+            .map(|image| jeikcode_kernel::message::ImageContent {
+                media_type: image.media_type.clone(),
+                data: image.data.clone(),
+            })
+            .collect(),
+        created_at: req.created_at.unwrap_or_else(|| {
+            u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0)
+        }),
+        message_id: None,
+        operation_id,
+    };
+    if jeikcode_capabilities::session::inputs::append_global(&mut input).is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ChatSteerResponse {
+                accepted: false,
+                error: Some("failed to persist steer intent".into()),
+            }),
+        );
+    }
+    update_chat_queue_steer_state(
+        &req.session_id,
+        &client_id,
+        "steering",
+        Some(steer_queue_item(&req, client_id.clone(), "steering")),
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(ChatSteerResponse {
+            accepted: true,
+            error: None,
+        }),
+    )
+}
+
+/// Serialize duplicate submissions for one `(session, client_input_id)` across
+/// refreshes/tabs. Weak values let completed keys disappear once the guard drops.
+fn steer_admission_lock(session_id: &str, client_input_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let key = format!("{session_id}\u{1f}{client_input_id}");
+    let mut locks = LOCKS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if locks.len() > 512 {
+        locks.retain(|_, weak| weak.strong_count() > 0);
+    }
+    if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
 /// POST /chat/steer — fold a queued follow-up into the running turn.
 ///
 /// Does not cancel the in-flight model call or tool batch. The kernel drains
@@ -17777,6 +18427,90 @@ async fn chat_steer(
             }),
         );
     }
+    let make_queue_item = |client_id: String, kind: &str| QueuedMessageItem {
+        id: serde_json::Value::String(client_id.clone()),
+        client_input_id: Some(client_id),
+        text: req.message.clone(),
+        images: (!req.images.is_empty()).then(|| {
+            serde_json::Value::Array(
+                req.images
+                    .iter()
+                    .map(|image| {
+                        serde_json::json!({
+                            "media_type": image.media_type,
+                            "data": image.data,
+                        })
+                    })
+                    .collect(),
+            )
+        }),
+        kind: kind.to_string(),
+        approval_mode: req.approval_mode.clone(),
+        created_at: req.created_at,
+        force_send: None,
+    };
+    let admission_lock = req
+        .client_input_id
+        .as_deref()
+        .map(|client_id| steer_admission_lock(&req.session_id, client_id));
+    let _admission_guard = match &admission_lock {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    // Idempotent admission state machine: submitted/promoted requests are already
+    // owned by the kernel and must never be appended or submitted a second time.
+    let existing = req.client_input_id.as_deref().and_then(|client_id| {
+        jeikcode_capabilities::session::inputs::find_global(&req.session_id, client_id)
+    });
+    if let Some(existing) = &existing {
+        match existing.status.as_str() {
+            "promoted" => {
+                retire_folded_steers_from_queue(
+                    &req.session_id,
+                    &[(req.client_input_id.clone(), existing.message_id.clone())],
+                )
+                .await;
+                return (
+                    StatusCode::OK,
+                    Json(ChatSteerResponse {
+                        accepted: true,
+                        error: None,
+                    }),
+                );
+            }
+            "submitted" => {
+                if let Some(client_id) = req.client_input_id.as_deref() {
+                    update_chat_queue_steer_state(
+                        &req.session_id,
+                        client_id,
+                        "steer",
+                        Some(make_queue_item(client_id.to_string(), "steer")),
+                    )
+                    .await;
+                }
+                return (
+                    StatusCode::OK,
+                    Json(ChatSteerResponse {
+                        accepted: true,
+                        error: None,
+                    }),
+                );
+            }
+            "cancelled" => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ChatSteerResponse {
+                        accepted: false,
+                        error: Some("steer was cancelled".into()),
+                    }),
+                );
+            }
+            _ => {}
+        }
+    }
+    let existing_admitted = existing
+        .as_ref()
+        .is_some_and(|row| row.status == "admitted");
     let Some(tx) = state.active_chats.steer_sender(&req.session_id).await else {
         return (
             StatusCode::CONFLICT,
@@ -17789,14 +18523,14 @@ async fn chat_steer(
     // Durable steer admission: visible in the rail even before the kernel folds
     // it, and recovered after a refresh. Promotion by the `Steered` fan-out
     // retires this row by the same client id.
-    if let Some(client_id) = req.client_input_id.clone() {
+    let fallback_queue_item = if let Some(client_id) = req.client_input_id.clone() {
         let operation_id = state
             .active_chats
             .admitted_user_for_session(&req.session_id)
             .await
             .and_then(|user| user.client_input_id);
         let mut input = jeikcode_capabilities::session::SessionInput {
-            id: client_id,
+            id: client_id.clone(),
             seq: 0,
             session_id: req.session_id.clone(),
             delivery: "steer".into(),
@@ -17816,7 +18550,16 @@ async fn chat_steer(
             message_id: None,
             operation_id,
         };
-        let _ = jeikcode_capabilities::session::inputs::append_global(&mut input);
+        if !existing_admitted {
+            let _ = jeikcode_capabilities::session::inputs::append_global(&mut input);
+        }
+        Some(make_queue_item(client_id, "steering"))
+    } else {
+        None
+    };
+    if let Some(client_id) = req.client_input_id.as_deref() {
+        update_chat_queue_steer_state(&req.session_id, client_id, "steering", fallback_queue_item)
+            .await;
     }
     // Record the client correlation id and timestamp BEFORE submitting
     state
@@ -17838,6 +18581,13 @@ async fn chat_steer(
         done: done_tx,
     };
     if tx.send(live_api::ChatSteerSignal::Submit(pending)).is_err() {
+        if let Some(client_id) = req.client_input_id.as_deref() {
+            let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
+                &req.session_id,
+                client_id,
+            );
+            update_chat_queue_steer_state(&req.session_id, client_id, "queue", None).await;
+        }
         return (
             StatusCode::CONFLICT,
             Json(ChatSteerResponse {
@@ -17853,6 +18603,13 @@ async fn chat_steer(
     };
     match outcome {
         Ok(()) => {
+            if let Some(client_id) = req.client_input_id.as_deref() {
+                let _ = jeikcode_capabilities::session::inputs::mark_submitted_global(
+                    &req.session_id,
+                    client_id,
+                );
+                update_chat_queue_steer_state(&req.session_id, client_id, "steer", None).await;
+            }
             // 服务端已将转向接收进运行中的回合：这是「会话仍在干活」的权威证据，
             // 广播出去让任何一端（包括刚清过 busy 的观察者）立即回到运行态。
             crate::publish_global(crate::GlobalWireEvent::Activity {
@@ -17869,13 +18626,22 @@ async fn chat_steer(
                 }),
             )
         }
-        Err(error) => (
-            StatusCode::CONFLICT,
-            Json(ChatSteerResponse {
-                accepted: false,
-                error: Some(error),
-            }),
-        ),
+        Err(error) => {
+            if let Some(client_id) = req.client_input_id.as_deref() {
+                let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
+                    &req.session_id,
+                    client_id,
+                );
+                update_chat_queue_steer_state(&req.session_id, client_id, "queue", None).await;
+            }
+            (
+                StatusCode::CONFLICT,
+                Json(ChatSteerResponse {
+                    accepted: false,
+                    error: Some(error),
+                }),
+            )
+        }
     }
 }
 
@@ -20956,6 +21722,11 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         extra_remote: Arc::new(std::sync::Mutex::new(None)),
     };
 
+    // Crash recovery before accepting traffic: no active turn survives a daemon
+    // restart, so orphaned steering/steer queue cards must be reconciled here,
+    // never as a side effect of GET /chat/queue.
+    reconcile_all_stale_steer_queues().await;
+
     // 公开路由（无需 token）：仅页面 + 静态资源 + 健康检查 + 外部 Git Webhook 回调（由 HMAC 专有验签保护）。
     let public = Router::new()
         // Health check
@@ -21072,6 +21843,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             post(chat_steer)
                 .delete(chat_steer_cancel)
                 .layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/chat/steer/admit",
+            post(admit_chat_steer).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
         )
         .route(
             "/chat/steer/cancel",

@@ -603,6 +603,8 @@ function paintUserMessageInner<T extends ProjectionMessage>(
 export interface TurnUserAnchor {
   messageId?: string;
   toolId?: string;
+  /** Server-provided causal boundary; unlike replay inference it may cross later rows. */
+  authoritative?: boolean;
 }
 
 /**

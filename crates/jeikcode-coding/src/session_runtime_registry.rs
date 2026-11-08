@@ -102,6 +102,7 @@ pub enum SessionViewEvent {
         count: usize,
         inputs: Vec<jeikcode_kernel::event::SteeredInput>,
         client_input_ids: Vec<Option<String>>,
+        anchor_message_id: Option<String>,
     },
     CommandOutput(String),
     RequestResolved {

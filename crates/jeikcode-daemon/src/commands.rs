@@ -891,14 +891,9 @@ fn exec_todo(
 
 fn todo_items_from_board(session_id: &str) -> Vec<TodoItemJson> {
     use jeikcode_capabilities::tools::todo::TodoStatus;
-    let todos = match jeikcode_capabilities::tools::read_todo_board(session_id) {
-        Some(board) if jeikcode_capabilities::tools::list_fully_completed(&board.items) => {
-            let _ = jeikcode_capabilities::tools::close_todo_board_if_complete(session_id);
-            Vec::new()
-        }
-        Some(board) => board.items,
-        None => Vec::new(),
-    };
+    let todos = jeikcode_capabilities::tools::read_todo_board(session_id)
+        .map(|board| board.items)
+        .unwrap_or_default();
 
     todos
         .into_iter()
@@ -1396,10 +1391,12 @@ mod tests {
             &session_id,
             &[
                 jeikcode_capabilities::tools::TodoItem {
+                    id: None,
                     content: "写测试".into(),
                     status: jeikcode_capabilities::tools::todo::TodoStatus::InProgress,
                 },
                 jeikcode_capabilities::tools::TodoItem {
+                    id: None,
                     content: "提交".into(),
                     status: jeikcode_capabilities::tools::todo::TodoStatus::Pending,
                 },
@@ -1412,6 +1409,29 @@ mod tests {
         assert_eq!(todos[1].content, "提交");
         let _ = messages;
         let _ = args;
+    }
+
+    #[test]
+    fn todo_projection_keeps_completed_board_until_terminal_settlement() {
+        let session_id = format!("daemon-todo-completed-{}", std::process::id());
+        jeikcode_capabilities::tools::purge_todo_board(&session_id);
+        let items = vec![jeikcode_capabilities::tools::TodoItem {
+            id: None,
+            content: "finished task".into(),
+            status: jeikcode_capabilities::tools::todo::TodoStatus::Completed,
+        }];
+        jeikcode_capabilities::tools::commit_todo_board(&session_id, &items);
+
+        let projected = todo_items_from_board(&session_id);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].content, "finished task");
+        assert_eq!(
+            jeikcode_capabilities::tools::read_todo_board(&session_id)
+                .unwrap()
+                .items,
+            items,
+        );
+        jeikcode_capabilities::tools::purge_todo_board(&session_id);
     }
 
     #[test]

@@ -113,10 +113,14 @@ export function stashSessionQueued<T>(
 /**
  * Restore a session's stashed queued/steer items when switching back or refreshing.
  */
-export function restoreSessionQueued<T>(
+export function restoreSessionQueued<
+  T extends { id?: unknown; clientInputId?: string },
+>(
   stash: Map<string, T[]>,
   sessionId: string | null | undefined,
 ): T[] {
+  const identity = (item: T | undefined): string =>
+    item?.clientInputId || String(item?.id ?? '');
   if (!sessionId) return [];
   let found = stash.get(sessionId);
   // Always query storage so any cross-tab or refreshed items are thoroughly restored
@@ -128,11 +132,12 @@ export function restoreSessionQueued<T>(
         stash.set(sessionId, loaded);
         found = loaded;
       } else {
-        // Merge without duplicating IDs
-        const existingIds = new Set(found.map((item: any) => String(item?.id ?? '')));
+        // Merge by the stable client identity first; numeric ids collide after
+        // refreshes and are only a legacy fallback.
+        const existingIds = new Set(found.map(identity));
         const merged = [...found];
         for (const it of loaded) {
-          if (!existingIds.has(String((it as any)?.id ?? ''))) {
+          if (!existingIds.has(identity(it))) {
             merged.push(it);
           }
         }
@@ -144,31 +149,25 @@ export function restoreSessionQueued<T>(
   return found && found.length > 0 ? [...found] : [];
 }
 
-/**
- * Keep this tab's follow-up queue when `/chat/active` says the session is
- * still running. Clearing it hid queued and steered chrome after a sidebar
- * switch even though `postChatSteer` continued to apply at the next step.
- */
-export function queueAfterSessionActiveCheck<T extends { kind?: string }>(input: {
-  restored: T[];
-  sessionActive: boolean;
-}): T[] {
-  if (input.sessionActive) return input.restored;
-  // A `steer` / `steering` card is only meaningful while its turn is live.
-  // After a refresh lands on an already-idle session, the in-flight POST and
-  // the kernel fold are gone: downgrade the card to a normal queued turn so
-  // the drain can deliver it instead of leaving a blue "steering" card stuck
-  // at the tail forever. Cards already on canvas are filtered by the caller.
-  let changed = false;
-  const next = input.restored.map((item) => {
-    if (item.kind === 'steer' || item.kind === 'steering') {
-      changed = true;
-      return { ...item, kind: 'queue' } as T;
-    }
-    return item;
-  });
-  return changed ? next : input.restored;
+const QUEUE_KIND_RANK: Record<string, number> = { queue: 0, steering: 1, steer: 2 };
+
+/** A local stage only overrides the server while its write is still in flight. */
+export function mergeQueuedCardState<T extends { kind?: string }>(
+  serverCard: T,
+  localCard: T | undefined,
+  localMutationInFlight: boolean,
+): T {
+  if (
+    !localCard ||
+    !localMutationInFlight ||
+    (QUEUE_KIND_RANK[localCard.kind ?? ''] ?? 0) <= (QUEUE_KIND_RANK[serverCard.kind ?? ''] ?? 0)
+  ) {
+    return serverCard;
+  }
+  return { ...serverCard, kind: localCard.kind };
 }
+
+
 
 /**
  * Put queued follow-ups back into the composer.

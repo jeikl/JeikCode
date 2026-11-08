@@ -10,6 +10,7 @@ import {
   hasOlderVisibleMessages,
   historyCursorFor,
   mergeServerWithLocalOutline,
+  removeOutlineRowsById,
   remainingUnloadedTurns,
   canvasAtVeryBeginning,
   resolveActiveTurnId,
@@ -405,6 +406,47 @@ test('mergeServerWithLocalOutline 不把同文案的不同 id 误并', () => {
   const local = [{ index: 90, id: 'u-2', label: '继续' }];
   const merged = mergeServerWithLocalOutline(server, local);
   assert.equal(merged.length, 2, '两次真实的「继续」是两个提问');
+});
+
+test('removeOutlineRowsById drops a cancelled steer but keeps other questions', () => {
+  const turns = [
+    { index: 0, id: 'u-1', label: 'main' },
+    { index: 1, id: 'steer-cancelled', label: 'cancelled steer' },
+    { index: 2, id: 'u-2', label: 'next' },
+  ];
+  const out = removeOutlineRowsById(turns, new Set(['steer-cancelled']));
+  assert.deepEqual(out.map((turn) => turn.id), ['u-1', 'u-2']);
+  assert.equal(removeOutlineRowsById(turns, new Set()), turns, 'no ids is a no-op');
+});
+
+test('mergeServerWithLocalOutline preserves a provisional steer when its index collides', () => {
+  const server = [
+    { index: 42, id: 'older-question', label: '较早的问题' },
+    { index: 80, id: 'latest-question', label: '较新的问题' },
+  ];
+  const steer = {
+    index: 42,
+    id: 'steer-1',
+    label: '转向后的用户消息',
+    provisional: true,
+  };
+  const merged = mergeServerWithLocalOutline(server, [...server, steer]);
+  assert.equal(merged.length, 3);
+  assert.ok(merged.some((turn) => turn.id === 'steer-1'));
+});
+
+test('a server row with the same id supersedes the provisional local outline', () => {
+  const server = [{ index: 84, id: 'steer-1', label: '转向后的用户消息' }];
+  const local = [{
+    index: 42,
+    id: 'steer-1',
+    label: '转向后的用户消息',
+    provisional: true,
+  }];
+  const merged = mergeServerWithLocalOutline(server, local);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]?.index, 84);
+  assert.equal(merged[0]?.provisional, undefined);
 });
 
 test('刷新后本地大纲为空时，服务端 pending steer 仍必须保留', () => {

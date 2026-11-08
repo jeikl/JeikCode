@@ -56,8 +56,57 @@ impl std::fmt::Display for TodoStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TodoItem {
+    /// Stable identity. Legacy boards omit it; `commit_todo_board` migrates by
+    /// matching existing content and generates an id only for genuinely new rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub content: String,
     pub status: TodoStatus,
+}
+
+fn new_todo_id() -> String {
+    format!(
+        "todo-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(1)
+    )
+}
+
+fn normalize_todo_content_key(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Assign identities to legacy rows and dedupe repeated ids. Existing content
+/// keeps its id across a full-list replace; new rows get a fresh one.
+fn normalize_todo_ids(existing: &[TodoItem], items: &mut [TodoItem]) {
+    let mut unused: Vec<(String, String)> = existing
+        .iter()
+        .filter_map(|item| {
+            item.id
+                .as_ref()
+                .map(|id| (normalize_todo_content_key(&item.content), id.clone()))
+        })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for item in items.iter_mut() {
+        if item.id.is_none() {
+            let key = normalize_todo_content_key(&item.content);
+            if let Some(index) = unused.iter().position(|(content, _)| content == &key) {
+                item.id = Some(unused.remove(index).1);
+            }
+        }
+        if item.id.is_none() {
+            item.id = Some(new_todo_id());
+        }
+        if let Some(id) = item.id.as_ref() {
+            if !seen.insert(id.clone()) {
+                item.id = Some(new_todo_id());
+                seen.insert(item.id.clone().unwrap_or_default());
+            }
+        }
+    }
 }
 
 /// Terminal-safe status glyph. Unicode `[•]`/`[✓]` gated behind `unicode`; ASCII
@@ -575,7 +624,14 @@ fn upsert_todo(
     }
     let status = status.unwrap_or(TodoStatus::Pending);
     let idx = destination_index(position, list.len());
-    list.insert(idx, TodoItem { content, status });
+    list.insert(
+        idx,
+        TodoItem {
+            id: Some(new_todo_id()),
+            content,
+            status,
+        },
+    );
     if status == TodoStatus::InProgress {
         ensure_single_in_progress(list, idx);
     }
@@ -1192,10 +1248,12 @@ pub fn todo_session_is_closed(session_id: &str) -> bool {
 }
 
 /// Install a board loaded from disk, unless this process already has a newer slot.
-pub fn restore_todo_board(session_id: &str, board: TodoBoard) {
+pub fn restore_todo_board(session_id: &str, mut board: TodoBoard) {
     if session_id.is_empty() || board.items.is_empty() || list_fully_completed(&board.items) {
         return;
     }
+    let legacy = board.items.clone();
+    normalize_todo_ids(&legacy, &mut board.items);
     let mut guard = todo_registry()
         .write()
         .unwrap_or_else(|err| err.into_inner());
@@ -1225,24 +1283,25 @@ pub fn commit_todo_board(session_id: &str, items: &[TodoItem]) -> TodoBoard {
     slot.closed = false;
     slot.revision = slot.revision.saturating_add(1);
     let revision = slot.revision;
+    let previous_items = slot
+        .board
+        .as_ref()
+        .map(|board| board.items.clone())
+        .unwrap_or_default();
+    let mut next_items = items.to_vec();
+    normalize_todo_ids(&previous_items, &mut next_items);
     let board = match slot.board.take() {
         Some(mut existing) => {
             existing.seq = existing.seq.saturating_add(1);
             existing.revision = revision;
-            existing.items = items.to_vec();
+            existing.items = next_items;
             existing
         }
         None => TodoBoard {
-            id: format!(
-                "todo-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|elapsed| elapsed.as_nanos())
-                    .unwrap_or(1)
-            ),
+            id: new_todo_id(),
             seq: 1,
             revision,
-            items: items.to_vec(),
+            items: next_items,
         },
     };
     slot.board = Some(board.clone());
@@ -1278,24 +1337,25 @@ pub fn rebind_todo_board(session_id: &str, items: &[TodoItem]) -> Option<TodoBoa
     slot.closed = false;
     slot.revision = slot.revision.saturating_add(1);
     let revision = slot.revision;
+    let previous_items = slot
+        .board
+        .as_ref()
+        .map(|board| board.items.clone())
+        .unwrap_or_default();
+    let mut next_items = items.to_vec();
+    normalize_todo_ids(&previous_items, &mut next_items);
     let board = match slot.board.take() {
         Some(mut existing) => {
             existing.seq = existing.seq.saturating_add(1);
             existing.revision = revision;
-            existing.items = items.to_vec();
+            existing.items = next_items;
             existing
         }
         None => TodoBoard {
-            id: format!(
-                "todo-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|elapsed| elapsed.as_nanos())
-                    .unwrap_or(1)
-            ),
+            id: new_todo_id(),
             seq: 1,
             revision,
-            items: items.to_vec(),
+            items: next_items,
         },
     };
     slot.board = Some(board.clone());
@@ -1622,13 +1682,6 @@ impl Tool for TodoTool {
             Some([only]) if action_kind(only) == Some("list")
         ) {
             let items = self.board_items();
-            if list_fully_completed(&items) {
-                if let Some(session_id) = todo_session_of(&self.live) {
-                    let _ = close_todo_board_if_complete(&session_id);
-                }
-                *self.lock_live() = Vec::new();
-                return ok("Current task list:\n\n(no tasks)".to_string());
-            }
             return ok(format!(
                 "Current task list:\n\n{}",
                 render_todos_numbered(&items, false)
@@ -1795,6 +1848,7 @@ mod tests {
         commit_todo_board(
             sid,
             &[TodoItem {
+                id: None,
                 content: "残留步骤".into(),
                 status: TodoStatus::InProgress,
             }],
@@ -1819,6 +1873,7 @@ mod tests {
                 seq: 9,
                 revision: 0,
                 items: vec![TodoItem {
+                    id: None,
                     content: "幽灵步骤".into(),
                     status: TodoStatus::Pending,
                 }],
@@ -1835,12 +1890,62 @@ mod tests {
     /// `commit` 回去。这是跨轮次回溯的正确语义：只回退被删掉的那些动作，
     /// 更早轮次建立/修改过的项原样保留。
     #[test]
+    fn commit_assigns_stable_ids_and_preserves_them_by_content() {
+        let sid = "todo-stable-ids";
+        purge_todo_board(sid);
+        let first = commit_todo_board(
+            sid,
+            &[
+                TodoItem {
+                    id: None,
+                    content: "alpha".into(),
+                    status: TodoStatus::Pending,
+                },
+                TodoItem {
+                    id: None,
+                    content: "beta".into(),
+                    status: TodoStatus::InProgress,
+                },
+            ],
+        );
+        let ids = first
+            .items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        assert!(ids.iter().all(Option::is_some));
+        assert_ne!(ids[0], ids[1]);
+
+        // Full-list replace with changed status keeps the content identity.
+        let second = commit_todo_board(
+            sid,
+            &[
+                TodoItem {
+                    id: None,
+                    content: "alpha".into(),
+                    status: TodoStatus::Completed,
+                },
+                TodoItem {
+                    id: None,
+                    content: "beta".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+        );
+        assert_eq!(second.revision, first.revision + 1);
+        assert_eq!(second.items[0].id, ids[0]);
+        assert_eq!(second.items[1].id, ids[1]);
+        purge_todo_board(sid);
+    }
+
+    #[test]
     fn rewound_board_recommits_the_remaining_transcript() {
         let sid = "rewind-rebuild";
         purge_todo_board(sid);
         commit_todo_board(
             sid,
             &[TodoItem {
+                id: None,
                 content: "A 轮计划".into(),
                 status: TodoStatus::Completed,
             }],
@@ -1852,14 +1957,22 @@ mod tests {
 
         // ……再按剩余转录重建（这些项来自更早的轮次，必须留住）。
         let rebuilt = vec![TodoItem {
+            id: None,
             content: "A 轮计划".into(),
             status: TodoStatus::InProgress,
         }];
         let board = commit_todo_board(sid, &rebuilt);
-        assert_eq!(board.items, rebuilt);
+        let pairs = |items: &[TodoItem]| {
+            items
+                .iter()
+                .map(|item| (item.content.clone(), item.status))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pairs(&board.items), pairs(&rebuilt));
+        assert!(board.items.iter().all(|item| item.id.is_some()));
         assert_eq!(
-            read_todo_board(sid).map(|b| b.items),
-            Some(rebuilt),
+            read_todo_board(sid).map(|b| pairs(&b.items)),
+            Some(pairs(&rebuilt)),
             "rebuild after clear must be readable"
         );
         assert!(
@@ -1878,6 +1991,7 @@ mod tests {
         let first = commit_todo_board(
             sid,
             &[TodoItem {
+                id: None,
                 content: "A 轮计划".into(),
                 status: TodoStatus::InProgress,
             }],
@@ -1886,10 +2000,12 @@ mod tests {
         // steer 轮只改了两项 → 回溯后用剩余转录推导出的状态重绑。
         let rebuilt = vec![
             TodoItem {
+                id: None,
                 content: "A 轮计划".into(),
                 status: TodoStatus::Completed,
             },
             TodoItem {
+                id: None,
                 content: "A 轮补充项".into(),
                 status: TodoStatus::Pending,
             },
@@ -1897,13 +2013,28 @@ mod tests {
         let board = rebind_todo_board(sid, &rebuilt).expect("live slot must rebind in place");
         assert_eq!(board.id, first.id, "板身份必须保留");
         assert_eq!(board.seq, first.seq + 1, "seq 只增不减");
-        assert_eq!(read_todo_board(sid).map(|b| b.items), Some(rebuilt));
+        let pairs = |items: &[TodoItem]| {
+            items
+                .iter()
+                .map(|item| (item.content.clone(), item.status))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            read_todo_board(sid).map(|b| pairs(&b.items)),
+            Some(pairs(&rebuilt))
+        );
+        assert_eq!(
+            read_todo_board(sid).unwrap().items[0].id,
+            first.items[0].id,
+            "same content must keep its item identity across rebind"
+        );
         assert!(!todo_session_is_closed(sid), "重建后的板是活的");
 
         // 再回溯一次：seq 继续前进，id 仍然不变。
         let again = rebind_todo_board(
             sid,
             &[TodoItem {
+                id: None,
                 content: "A 轮计划".into(),
                 status: TodoStatus::Pending,
             }],
@@ -1927,6 +2058,7 @@ mod tests {
         commit_todo_board(
             sid,
             &[TodoItem {
+                id: None,
                 content: "将被删光的计划".into(),
                 status: TodoStatus::InProgress,
             }],
@@ -1942,6 +2074,7 @@ mod tests {
                 seq: 7,
                 revision: 0,
                 items: vec![TodoItem {
+                    id: None,
                     content: "幽灵步骤".into(),
                     status: TodoStatus::Pending,
                 }],
@@ -2024,10 +2157,12 @@ mod tests {
     fn render_text_ascii() {
         let todos = vec![
             TodoItem {
+                id: None,
                 content: "first".into(),
                 status: TodoStatus::Completed,
             },
             TodoItem {
+                id: None,
                 content: "second".into(),
                 status: TodoStatus::InProgress,
             },
@@ -2117,6 +2252,7 @@ mod tests {
     fn todo_board_stays_until_stop_closes_a_finished_list() {
         let session = format!("todo-board-{}", std::process::id());
         let open = vec![TodoItem {
+            id: None,
             content: "still".into(),
             status: TodoStatus::Pending,
         }];
@@ -2125,6 +2261,7 @@ mod tests {
         assert!(close_todo_board_if_complete(&session).is_none());
         assert_eq!(read_todo_board(&session).unwrap().items.len(), 1);
         let done = vec![TodoItem {
+            id: None,
             content: "still".into(),
             status: TodoStatus::Completed,
         }];
@@ -2522,6 +2659,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_action_does_not_close_a_completed_live_board() {
+        let session_id = format!("todo-list-complete-{}", std::process::id());
+        purge_todo_board(&session_id);
+        let tool = TodoTool::new();
+        bind_todo_session(&tool.live, &session_id);
+        let done = vec![TodoItem {
+            id: None,
+            content: "finished".into(),
+            status: TodoStatus::Completed,
+        }];
+        commit_todo_board(&session_id, &done);
+        *tool.lock_live() = done.clone();
+
+        let listed = tool.execute(r#"{"action":"list"}"#, &ctx()).await;
+        assert!(!listed.is_error, "{}", listed.content);
+        assert!(listed.content.contains("finished"), "{}", listed.content);
+        let listed_items = read_todo_board(&session_id).unwrap().items;
+        assert_eq!(
+            listed_items
+                .iter()
+                .map(|item| (item.content.clone(), item.status))
+                .collect::<Vec<_>>(),
+            done.iter()
+                .map(|item| (item.content.clone(), item.status))
+                .collect::<Vec<_>>(),
+        );
+        assert!(listed_items.iter().all(|item| item.id.is_some()));
+        assert_eq!(*tool.lock_live(), done);
+
+        unbind_todo_session(&tool.live);
+        purge_todo_board(&session_id);
+    }
+
+    #[tokio::test]
     async fn list_action_rejects_being_batched_with_a_mutation() {
         let t = TodoTool::new();
         let r = t
@@ -2757,10 +2928,12 @@ mod tests {
     fn apply_todo_actions_batch_is_transactional() {
         let mut list = vec![
             TodoItem {
+                id: None,
                 content: "a".into(),
                 status: TodoStatus::Pending,
             },
             TodoItem {
+                id: None,
                 content: "b".into(),
                 status: TodoStatus::Pending,
             },
@@ -2786,14 +2959,17 @@ mod tests {
     fn apply_todo_actions_updates_are_id_addressed_order_independent() {
         let mut list = vec![
             TodoItem {
+                id: None,
                 content: "a".into(),
                 status: TodoStatus::Pending,
             },
             TodoItem {
+                id: None,
                 content: "b".into(),
                 status: TodoStatus::Pending,
             },
             TodoItem {
+                id: None,
                 content: "c".into(),
                 status: TodoStatus::Pending,
             },
@@ -2818,10 +2994,12 @@ mod tests {
     fn apply_todo_actions_rejects_mixed_id_shifting_kinds() {
         let mut list = vec![
             TodoItem {
+                id: None,
                 content: "a".into(),
                 status: TodoStatus::Pending,
             },
             TodoItem {
+                id: None,
                 content: "b".into(),
                 status: TodoStatus::Pending,
             },
@@ -2847,10 +3025,12 @@ mod tests {
     fn apply_todo_actions_clear_then_add_update_replaces_plan() {
         let mut list = vec![
             TodoItem {
+                id: None,
                 content: "old-1".into(),
                 status: TodoStatus::Completed,
             },
             TodoItem {
+                id: None,
                 content: "old-2".into(),
                 status: TodoStatus::InProgress,
             },
@@ -2870,10 +3050,12 @@ mod tests {
     fn add_on_finished_list_auto_clears_so_ids_restart() {
         let mut list = vec![
             TodoItem {
+                id: None,
                 content: "done-1".into(),
                 status: TodoStatus::Completed,
             },
             TodoItem {
+                id: None,
                 content: "done-2".into(),
                 status: TodoStatus::Completed,
             },
@@ -2901,6 +3083,7 @@ mod tests {
         // The live failure: list is `[x] 1. 查询…`, model adds a follow-up as
         // id 2 and updates id 2. Completed list must smoothly append.
         let mut list = vec![TodoItem {
+            id: None,
             content: "查询沉睡资源客户列表".into(),
             status: TodoStatus::Completed,
         }];
@@ -2919,6 +3102,7 @@ mod tests {
     fn update_and_multiple_adds_on_in_progress_list_does_not_clear() {
         let mut list = (1..=6)
             .map(|i| TodoItem {
+                id: None,
                 content: format!("task-{i}"),
                 status: if i == 6 {
                     TodoStatus::InProgress
@@ -2984,6 +3168,7 @@ mod tests {
     #[test]
     fn add_duplicate_title_upserts_instead_of_duplicating() {
         let mut list = vec![TodoItem {
+            id: None,
             content: "导出Excel".into(),
             status: TodoStatus::Pending,
         }];
@@ -2999,14 +3184,17 @@ mod tests {
     fn insert_duplicate_title_re_ranks() {
         let mut list = vec![
             TodoItem {
+                id: None,
                 content: "a".into(),
                 status: TodoStatus::Pending,
             },
             TodoItem {
+                id: None,
                 content: "b".into(),
                 status: TodoStatus::Pending,
             },
             TodoItem {
+                id: None,
                 content: "c".into(),
                 status: TodoStatus::Pending,
             },
@@ -3025,10 +3213,12 @@ mod tests {
     fn add_on_unfinished_list_does_not_auto_clear() {
         let mut list = vec![
             TodoItem {
+                id: None,
                 content: "done".into(),
                 status: TodoStatus::Completed,
             },
             TodoItem {
+                id: None,
                 content: "still-open".into(),
                 status: TodoStatus::Pending,
             },
@@ -3042,10 +3232,12 @@ mod tests {
     fn apply_todo_insert_then_update_uses_post_insert_ids() {
         let mut list = vec![
             TodoItem {
+                id: None,
                 content: "a".into(),
                 status: TodoStatus::Pending,
             },
             TodoItem {
+                id: None,
                 content: "b".into(),
                 status: TodoStatus::Pending,
             },
@@ -3088,6 +3280,7 @@ mod tests {
     #[test]
     fn apply_accepts_string_ids() {
         let mut list = vec![TodoItem {
+            id: None,
             content: "a".into(),
             status: TodoStatus::Pending,
         }];

@@ -100,6 +100,31 @@ export interface CachePatch {
   mtimeMs?: number | null;
 }
 
+/**
+ * Drop local-only provisional outline rows that have no matching user message.
+ * A queue card or an interrupted steer must never leave a ghost in the rail
+ * after refresh; the authoritative server outline or the canvas row restores
+ * the title once the input is really persisted.
+ */
+export function stripUnbackedProvisionalTurns(
+  turns: any[] | null | undefined,
+  messages: any[] | null | undefined,
+): any[] | null {
+  if (!Array.isArray(turns)) return turns ?? null;
+  const userIds = new Set<string>();
+  for (const message of messages ?? []) {
+    if (message?.role !== 'user') continue;
+    if (typeof message.id === 'string' && message.id) userIds.add(message.id);
+    if (typeof message.clientInputId === 'string' && message.clientInputId) {
+      userIds.add(message.clientInputId);
+    }
+  }
+  return turns.filter((turn) => (
+    turn?.provisional !== true ||
+    (typeof turn.id === 'string' && userIds.has(turn.id))
+  ));
+}
+
 const DB_NAME = 'jeikcode_cache';
 const DB_VERSION = 2;
 const STORE_SESSIONS = 'sessions';
@@ -602,6 +627,11 @@ export function writeSessionCache(
     ? { ...patch, messages: normalizeCanvas(patch.messages) }
     : patch;
   const next = mergeCachePatch(projectHash, sessionId, previous, normalizedPatch);
+  const outline = stripUnbackedProvisionalTurns(next.turns, next.messages);
+  if (outline !== next.turns) {
+    next.turns = outline ?? undefined;
+    next.size = estimateCachedBytes(next);
+  }
   if (typeof next.revision === 'number') knownRevisions.set(key, next.revision);
   setMemorySession(projectHash, sessionId, next);
   queuePersist(next);

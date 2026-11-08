@@ -54,7 +54,16 @@ export function compactTurnNavText(text: string): string {
  *    合并为单一真实条目，保留更早的权威 index 与更完整的内容；
  * 3. 严格按 index 升序排列。
  */
-type OutlineLike = { index: number; id?: string; label?: string; text?: string; ordinal?: number; pending?: boolean; seq?: number };
+type OutlineLike = {
+  index: number;
+  id?: string;
+  label?: string;
+  text?: string;
+  ordinal?: number;
+  pending?: boolean;
+  provisional?: boolean;
+  seq?: number;
+};
 
 function outlineText(t: OutlineLike): string {
   return t.label ?? t.text ?? '';
@@ -82,13 +91,29 @@ export function mergeServerWithLocalOutline<T extends OutlineLike>(
 
   // 筛选出本地更新的、明显在服务端大纲之后或尚未落盘的大纲条目
   const trailingLocal = localTurns.filter((local) => {
-    if (local.id && serverIds.has(local.id)) return false;
+    if (local.id) {
+      if (serverIds.has(local.id)) return false;
+      // A live steer can collide with another row's stale index; identity wins.
+      return local.provisional === true || local.index > maxServerIndex;
+    }
     if (serverIndices.has(local.index)) return false;
-    // 只有绝对下标大于服务端最大下标（真正的尾部最新提问）才保留
     return local.index > maxServerIndex;
   });
 
   return dedupeTurnOutline([...serverTurns, ...trailingLocal]);
+}
+
+/** Remove outline rows by stable identity (cancel/rewind must not leave ghosts). */
+export function removeOutlineRowsById<T extends OutlineLike>(
+  turns: T[],
+  ids: ReadonlySet<string>,
+  removable?: (turn: T) => boolean,
+): T[] {
+  if (!turns?.length || ids.size === 0) return turns ?? [];
+  const next = turns.filter((turn) => !(
+    turn.id && ids.has(turn.id) && (!removable || removable(turn))
+  ));
+  return next.length === turns.length ? turns : next;
 }
 
 export function fullerOutline<T extends OutlineLike>(
@@ -144,6 +169,7 @@ export function dedupeTurnOutline<T extends OutlineLike>(turns: T[]): T[] {
         ordinal: existing.ordinal ?? t.ordinal,
         // A promoted row supersedes a pending row with the same identity.
         ...(existing.pending === true && t.pending !== true ? { pending: false } : {}),
+        provisional: existing.provisional === true && t.provisional === true ? true : undefined,
         seq: existing.seq ?? t.seq,
       };
     } else {

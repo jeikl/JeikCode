@@ -514,7 +514,7 @@ export type SSEEvent =
   | { type: 'permission_request'; session_id: string; approval_id: string; tool_name: string; reason: string; call_id: string; arguments: unknown }
   | UserInputRequestEvent
   | { type: 'user_input_resolved'; request_id: number }
-  | { type: 'steered'; count: number; inputs: { text: string; images?: ImageData[]; message_id?: string }[]; client_input_ids?: Array<string | null>; timestamps?: Array<number | null> }
+  | { type: 'steered'; count: number; inputs: { text: string; images?: ImageData[]; message_id?: string }[]; client_input_ids?: Array<string | null>; timestamps?: Array<number | null>; anchor_message_id?: string }
   | { type: 'done'; tokens: unknown; tool_calls: unknown; session_id: string; stop_reason?: string; message?: string; message_id?: string; operation_id?: string }
   | { type: 'stopped'; session_id?: string; operation_id?: string }
   | { type: 'error'; message: string; message_id?: string; operation_id?: string }
@@ -690,6 +690,26 @@ export async function stopChat(requestId: string): Promise<StopChatResult> {
   }
 }
 
+/** Durably reserve the steer intent + steering queue card on the server. */
+export async function admitChatSteer(
+  sessionId: string,
+  message: string,
+  images?: ImageData[],
+  clientInputId?: string,
+  createdAt?: number,
+  approvalMode?: ApprovalMode,
+): Promise<void> {
+  await postChatSteerEndpoint(
+    '/chat/steer/admit',
+    sessionId,
+    message,
+    images,
+    clientInputId,
+    createdAt,
+    approvalMode,
+  );
+}
+
 /** Fold a queued follow-up into the running `/chat` turn at the next step. */
 export async function postChatSteer(
   sessionId: string,
@@ -697,8 +717,29 @@ export async function postChatSteer(
   images?: ImageData[],
   clientInputId?: string,
   createdAt?: number,
+  approvalMode?: ApprovalMode,
 ): Promise<void> {
-  const resp = await apiFetch('/chat/steer', {
+  await postChatSteerEndpoint(
+    '/chat/steer',
+    sessionId,
+    message,
+    images,
+    clientInputId,
+    createdAt,
+    approvalMode,
+  );
+}
+
+async function postChatSteerEndpoint(
+  path: '/chat/steer' | '/chat/steer/admit',
+  sessionId: string,
+  message: string,
+  images?: ImageData[],
+  clientInputId?: string,
+  createdAt?: number,
+  approvalMode?: ApprovalMode,
+): Promise<void> {
+  const resp = await apiFetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
@@ -707,6 +748,7 @@ export async function postChatSteer(
       ...(images && images.length ? { images } : {}),
       ...(clientInputId ? { client_input_id: clientInputId } : {}),
       ...(createdAt ? { created_at: createdAt } : {}),
+      ...(approvalMode ? { approval_mode: approvalMode } : {}),
     }),
   });
   let body: { accepted?: boolean; error?: string } = {};
@@ -1382,6 +1424,8 @@ export interface SessionTurnOutline {
   label: string;
   /** Admitted but not yet folded/persisted (durable input log). */
   pending?: boolean;
+  /** Local live row not yet confirmed by the authoritative server outline. */
+  provisional?: boolean;
   /** Admission sequence from the input log. */
   seq?: number;
 }
@@ -1429,7 +1473,7 @@ export interface SessionDetail {
   /** `manual` / `scheduled` / `protocol`. Protocol sessions are observed in Auto. */
   origin?: 'manual' | 'scheduled' | 'protocol';
   /** Authoritative active todo list from backend transcript. */
-  todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>;
+  todos?: Array<{ id?: string; content: string; status: 'pending' | 'in_progress' | 'completed' }>;
   /** Monotonic server revision of `todos`; lower revisions must never overwrite higher ones. */
   todos_revision?: number;
 }
@@ -2627,6 +2671,7 @@ export type GlobalWireEvent =
       inputs: Array<{ text: string; message_id?: string; has_images?: boolean }>;
       client_input_ids?: Array<string | null>;
       timestamps?: Array<number | null>;
+      anchor_message_id?: string;
     }
   /**
    * 模型配置变更（会话聊天模型 / 提供商 / 模型 id / 思考强度 / 思考预算）。

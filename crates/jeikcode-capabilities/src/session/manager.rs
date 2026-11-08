@@ -6783,6 +6783,7 @@ mod tests {
         mgr.save_snapshot("s_purge", &snap(&["task turn"])).unwrap();
 
         let item = crate::tools::TodoItem {
+            id: None,
             content: "in-memory task to purge".into(),
             status: crate::tools::TodoStatus::InProgress,
         };
@@ -6820,6 +6821,7 @@ mod tests {
         .unwrap();
 
         let task = crate::tools::TodoItem {
+            id: None,
             content: "retained branched task".into(),
             status: crate::tools::TodoStatus::InProgress,
         };
@@ -6882,6 +6884,7 @@ mod tests {
             seq: 1,
             revision: 0,
             items: vec![crate::tools::TodoItem {
+                id: None,
                 content: "cold persisted task".into(),
                 status: crate::tools::TodoStatus::Pending,
             }],
@@ -6930,6 +6933,7 @@ mod tests {
 
         // 1. Commit active task, then commit_native_runtime_mutation -> .todo should be persisted on disk
         let task = crate::tools::TodoItem {
+            id: None,
             content: "task in progress".into(),
             status: crate::tools::TodoStatus::InProgress,
         };
@@ -6944,6 +6948,7 @@ mod tests {
         // 2. Mark completed and closed -> commit_native_runtime_mutation must delete the .todo file
         assert!(crate::tools::close_todo_board_if_complete(session_id).is_none()); // only 1 task and it's in_progress
         let completed_task = crate::tools::TodoItem {
+            id: None,
             content: "task in progress".into(),
             status: crate::tools::TodoStatus::Completed,
         };
@@ -6976,6 +6981,7 @@ mod tests {
             seq: 1,
             revision: 0,
             items: vec![crate::tools::TodoItem {
+                id: None,
                 content: "already done task".into(),
                 status: crate::tools::TodoStatus::Completed,
             }],
@@ -7007,6 +7013,7 @@ mod tests {
             seq: 1,
             revision: 0,
             items: vec![crate::tools::TodoItem {
+                id: None,
                 content: "step 1".into(),
                 status: crate::tools::TodoStatus::InProgress,
             }],

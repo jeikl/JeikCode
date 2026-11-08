@@ -1,6 +1,10 @@
 import { useT } from '../../settings';
 import type { QueuedMessage } from '../../lib/queuedMessage';
 import { QueuedCardActions } from '../QueuedCardActions';
+
+function cardKey(q: QueuedMessage): string {
+  return q.clientInputId || String(q.id);
+}
 import { MsgImage } from './ImageLightbox';
 
 export function QueuedMessageCard({
@@ -13,7 +17,7 @@ export function QueuedMessageCard({
   onReturnToComposer,
 }: {
   q: QueuedMessage;
-  focusCardId: number | null;
+  focusCardId: string | null;
   onAutoFocusDone: () => void;
   onSteer: () => void;
   onSendNow: () => void;
@@ -22,7 +26,11 @@ export function QueuedMessageCard({
 }) {
   const t = useT();
   return (
-    <div class="user-message-wrapper queued">
+    <div
+      class="user-message-wrapper queued"
+      data-client-input-id={q.clientInputId}
+      data-message-id={q.clientInputId}
+    >
       <div class="user-message-bubble queued-bubble">
         {q.images && q.images.length > 0 && (
           <div class="msg-images">
@@ -42,7 +50,7 @@ export function QueuedMessageCard({
         </div>
         <div class="queued-text-content">{q.text}</div>
         <QueuedCardActions
-          cardId={q.id}
+          cardId={cardKey(q)}
           kind={q.kind}
           labels={{
             steer: t('chat.steerAction'),
@@ -53,7 +61,7 @@ export function QueuedMessageCard({
             cancelTitle: t('chat.removeQueued'),
             groupTitle: t('chat.queuedCardActions'),
           }}
-          autoFocus={q.id === focusCardId}
+          autoFocus={cardKey(q) === focusCardId}
           onAutoFocusDone={onAutoFocusDone}
           onSteer={onSteer}
           onSendNow={onSendNow}

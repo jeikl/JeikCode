@@ -29,8 +29,8 @@ export interface QueuedCardActionsLabels {
 }
 
 export interface QueuedCardActionsProps {
-  /** Queue card id; also used as the DOM hook for focus lookups. */
-  cardId: number;
+  /** Stable queue card identity; also used as the DOM hook for focus lookups. */
+  cardId: number | string;
   kind: QueuedCardKind;
   labels: QueuedCardActionsLabels;
   /** Focus the first action when the card appears (composer-created cards). */

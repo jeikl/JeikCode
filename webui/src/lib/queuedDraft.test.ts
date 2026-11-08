@@ -2,25 +2,27 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   deserializeQueuedCard,
+  mergeQueuedCardState,
   mergeQueuedIntoDraft,
-  queueAfterSessionActiveCheck,
   serializeQueuedCard,
   stashSessionQueued,
   restoreSessionQueued,
 } from './queuedDraft.ts';
 
-test('queueAfterSessionActiveCheck downgrades stale steer cards when the session is idle', () => {
-  const restored = [
-    { id: 1, text: 'queued', kind: 'queue' as const },
-    { id: 2, text: 'steer', kind: 'steer' as const },
-    { id: 3, text: 'steering', kind: 'steering' as const },
-  ];
-  const active = queueAfterSessionActiveCheck({ restored, sessionActive: true });
-  assert.deepEqual(active.map((item) => item.kind), ['queue', 'steer', 'steering']);
-  const idle = queueAfterSessionActiveCheck({ restored, sessionActive: false });
-  assert.deepEqual(idle.map((item) => item.kind), ['queue', 'queue', 'queue']);
-  assert.equal(idle[1]!.text, 'steer');
-  assert.equal(idle[2]!.text, 'steering');
+test('server queue state wins after refresh, while an in-flight local transition stays visible', () => {
+  const staleLocal = { id: 1, kind: 'steer' };
+  const serverQueue = { id: 1, kind: 'queue' };
+  assert.equal(mergeQueuedCardState(serverQueue, staleLocal, false).kind, 'queue');
+  assert.equal(
+    mergeQueuedCardState(serverQueue, { ...staleLocal, kind: 'steering' }, false).kind,
+    'queue',
+    'after refresh the server-owned card state is authoritative',
+  );
+  assert.equal(mergeQueuedCardState(serverQueue, { ...staleLocal, kind: 'steering' }, true).kind, 'steering');
+  assert.equal(
+    mergeQueuedCardState({ ...serverQueue, kind: 'steer' }, { ...serverQueue, kind: 'steering' }, true).kind,
+    'steer',
+  );
 });
 
 test('queued card wire serialization preserves the selected approval mode and images', () => {
@@ -128,6 +130,39 @@ test('stashSessionQueued and restoreSessionQueued isolate and restore queues acr
   stashSessionQueued(map, 'session-A', []);
   assert.equal(map.has('session-A'), false);
   assert.deepEqual(restoreSessionQueued(map, 'session-A'), []);
+});
+
+test('queued restore merges by client identity, not the recycled numeric id', async () => {
+  const store = new Map<string, string>();
+  const mockStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => store.set(k, String(v)),
+    removeItem: (k: string) => store.delete(k),
+  };
+  const original = (globalThis as any).window;
+  (globalThis as any).window = { localStorage: mockStorage, sessionStorage: mockStorage };
+  try {
+    const { saveQueuedToStorage } = await import('./queuedDraft.ts');
+    const map = new Map<string, Array<{ id: number; clientInputId: string; text: string }>>();
+    map.set('session-1', [
+      { id: 0, clientInputId: 'cid-a', text: 'queued in memory' },
+    ]);
+    saveQueuedToStorage(map);
+
+    const disk = new Map<string, Array<{ id: number; clientInputId: string; text: string }>>();
+    disk.set('session-1', [
+      { id: 0, clientInputId: 'cid-b', text: 'same numeric id, different card' },
+      { id: 0, clientInputId: 'cid-a', text: 'same card' },
+    ]);
+    saveQueuedToStorage(disk);
+    const fresh = new Map<string, Array<{ id: number; clientInputId: string; text: string }>>();
+    fresh.set('session-1', [{ id: 0, clientInputId: 'cid-a', text: 'queued in memory' }]);
+    const restored = restoreSessionQueued(fresh, 'session-1');
+    assert.equal(restored.length, 2, 'different identities must both survive');
+    assert.deepEqual(restored.map((item) => item.clientInputId).sort(), ['cid-a', 'cid-b']);
+  } finally {
+    (globalThis as any).window = original;
+  }
 });
 
 test('loadQueuedFromStorage and saveQueuedToStorage round-trip across simulated refreshes', async () => {

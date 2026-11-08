@@ -23,6 +23,7 @@ import {
   findPaintedUserRow,
   queueCardAlreadyDelivered,
   queueCardAlreadyOnCanvas,
+  queueCardPresentInOutline,
   steerCardBubbleOnCanvas,
   unpaintedReplaySuffix,
   mergeDiskWithUnpersistedTail,
@@ -47,6 +48,17 @@ import {
   findPendingSelfEchoIndex,
 } from './chatTerminal.ts';
 import { spliceAuthoritativeDiskTail } from './sessionProjection.ts';
+
+test('pending or local-only steer outline does not consume its queue card', () => {
+  const pending = [{ id: 'steer-1', pending: true }];
+  const provisional = [{ id: 'steer-1', provisional: true }];
+  const folded = [{ id: 'steer-1', pending: false }];
+  const legacySettled = [{ id: 'steer-1' }];
+  assert.equal(queueCardPresentInOutline(pending, 'steer-1'), false);
+  assert.equal(queueCardPresentInOutline(provisional, 'steer-1'), false);
+  assert.equal(queueCardPresentInOutline(folded, 'steer-1'), true);
+  assert.equal(queueCardPresentInOutline(legacySettled, 'steer-1'), true);
+});
 
 test('legacy done and stopped are natural completions that preserve queued messages', () => {
   assert.deepEqual(classifyChatDone({}), {

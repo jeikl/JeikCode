@@ -487,6 +487,18 @@ export interface QueueCardOnCanvas {
   createdAt?: number;
 }
 
+export function queueCardPresentInOutline(
+  turns: ReadonlyArray<{ id?: string | null; pending?: boolean; provisional?: boolean }>,
+  clientInputId?: string | null,
+): boolean {
+  // Only a server-confirmed outline row proves the card was folded. A local
+  // provisional row (optimistic send / stale cache) must never consume a queue
+  // card, or a refresh hides a card that the server still owns.
+  return !!clientInputId && turns.some(
+    (turn) => turn.id === clientInputId && turn.pending !== true && turn.provisional !== true,
+  );
+}
+
 /**
  * Is THIS queue/steer card already represented on the canvas?
  *

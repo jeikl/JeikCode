@@ -283,6 +283,7 @@ mod tests {
                 &items
                     .iter()
                     .map(|(content, status)| TodoItem {
+                        id: None,
                         content: (*content).to_string(),
                         status: *status,
                     })

@@ -66,6 +66,7 @@ pub enum LiveViewEvent {
         count: usize,
         inputs: Vec<jeikcode_kernel::event::SteeredInput>,
         client_input_ids: Vec<Option<String>>,
+        anchor_message_id: Option<String>,
     },
     CommandOutput(String),
     /// A driver successfully delivered the response for a previously published
@@ -221,6 +222,23 @@ impl HubState {
             Some(stashed) => &mut stashed.snapshot_error,
             None => &mut self.snapshot_error,
         }
+    }
+
+    fn exec_last_assistant_message_id(&self) -> Option<String> {
+        let replay = self
+            .stashed_execution
+            .as_ref()
+            .map(|stashed| &stashed.replay)
+            .unwrap_or(&self.replay);
+        replay
+            .iter()
+            .rev()
+            .find_map(|observation| match &observation.event {
+                LiveViewEvent::Runtime(CodingRuntimeEvent::Agent(
+                    jeikcode_kernel::event::AgentEvent::AssistantMessage { message_id },
+                )) => Some(message_id.clone()),
+                _ => None,
+            })
     }
 
     fn execution_session_id(&self) -> Option<&str> {
@@ -1342,11 +1360,11 @@ impl LiveViewHub {
             })
             .flatten();
         let mapped_steer = match &event {
-            CodingRuntimeEvent::Agent(AgentEvent::Steered { count, inputs }) => Some((
-                *count,
-                inputs.clone(),
-                correlate_web_steers_locked(&mut state, inputs),
-            )),
+            CodingRuntimeEvent::Agent(AgentEvent::Steered { count, inputs }) => {
+                let anchor = state.exec_last_assistant_message_id();
+                let client_ids = correlate_web_steers_locked(&mut state, inputs);
+                Some((*count, inputs.clone(), client_ids, anchor))
+            }
             _ => None,
         };
         let mut replay = state.exec_turn_active();
@@ -1471,13 +1489,14 @@ impl LiveViewHub {
             }
         }
         self.publish_view_locked(&mut state, LiveViewEvent::Runtime(event), replay);
-        if let Some((count, inputs, client_input_ids)) = mapped_steer {
+        if let Some((count, inputs, client_input_ids, anchor_message_id)) = mapped_steer {
             self.publish_view_locked(
                 &mut state,
                 LiveViewEvent::Steered {
                     count,
                     inputs,
                     client_input_ids,
+                    anchor_message_id: anchor_message_id.clone(),
                 },
                 replay,
             );
@@ -1701,6 +1720,7 @@ impl LiveViewHub {
                 if let LiveViewEvent::Steered {
                     inputs,
                     client_input_ids,
+                    anchor_message_id,
                     ..
                 } = &event
                 {
@@ -1711,6 +1731,7 @@ impl LiveViewHub {
                             .map(crate::SteerFoldedInputWire::from_kernel)
                             .collect(),
                         client_input_ids: client_input_ids.clone(),
+                        anchor_message_id: anchor_message_id.clone(),
                     });
                 }
             }
@@ -1778,10 +1799,12 @@ fn session_view_from_live(
             count,
             inputs,
             client_input_ids,
+            anchor_message_id,
         } => Some(SessionViewEvent::Steered {
             count: *count,
             inputs: inputs.clone(),
             client_input_ids: client_input_ids.clone(),
+            anchor_message_id: anchor_message_id.clone(),
         }),
         LiveViewEvent::CommandOutput(text) => Some(SessionViewEvent::CommandOutput(text.clone())),
         LiveViewEvent::RequestResolved { request_id, kind } => {

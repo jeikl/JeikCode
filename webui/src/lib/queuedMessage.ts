@@ -1,7 +1,8 @@
 import type { ApprovalMode, ImageData } from '../api';
 
 export interface QueuedMessage {
-  id: number;
+  /** Local/UI identity. New cards use a UUID; legacy persisted cards may be numeric. */
+  id: number | string;
   text: string;
   images?: ImageData[];
   approvalMode: ApprovalMode;

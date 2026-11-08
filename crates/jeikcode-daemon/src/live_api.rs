@@ -2041,6 +2041,8 @@ pub(crate) enum LiveWireEvent {
         count: usize,
         inputs: Vec<jeikcode_kernel::event::SteeredInput>,
         client_input_ids: Vec<Option<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_message_id: Option<String>,
     },
     #[serde(rename = "session_switched")]
     SessionSwitched { session_id: String },
@@ -2186,10 +2188,12 @@ impl NativeLiveWireProjector {
                 count,
                 inputs,
                 client_input_ids,
+                anchor_message_id,
             } => LiveWireEvent::Steered {
                 count,
                 inputs,
                 client_input_ids,
+                anchor_message_id,
             },
             crate::live_hub::LiveViewEvent::RequestResolved { request_id, kind } => {
                 if kind == jeikcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND
@@ -2356,11 +2360,10 @@ impl NativeLiveWireProjector {
                 | Kernel::Snapshot { .. }
                 | Kernel::TurnComplete { .. }
                 | Kernel::Cancelled => return None,
-                Kernel::Steered { count, inputs } => LiveWireEvent::Steered {
-                    count,
-                    inputs,
-                    client_input_ids: Vec::new(),
-                },
+                // LiveHub emits a separate enriched `LiveViewEvent::Steered`
+                // immediately after this runtime event. Projecting both creates
+                // an unanchored duplicate first, which can strand the card at tail.
+                Kernel::Steered { .. } => return None,
                 _ => return None,
             },
             crate::live_hub::LiveViewEvent::Runtime(Runtime::Request(request)) => {
@@ -2696,10 +2699,12 @@ fn project_registry_event(
                 count,
                 inputs,
                 client_input_ids,
+                anchor_message_id,
             } => crate::live_hub::LiveViewEvent::Steered {
                 count,
                 inputs,
                 client_input_ids,
+                anchor_message_id,
             },
             SessionViewEvent::CommandOutput(text) => {
                 crate::live_hub::LiveViewEvent::CommandOutput(text)
@@ -2738,7 +2743,6 @@ fn live_stream_from_registry(
     // overlaid here too, before the snapshot becomes the runtime prefix.
     if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&session_id) {
         let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
-        jeikcode_capabilities::session::partial::clear_global(&session_id);
     }
     let session_name = {
         let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&working_dir);
@@ -2861,7 +2865,6 @@ fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::respo
         jeikcode_capabilities::session::partial::load_global(&join.binding.session_id)
     {
         let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
-        jeikcode_capabilities::session::partial::clear_global(&join.binding.session_id);
     }
     let session_name = {
         let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&snapshot_wd);
@@ -5666,6 +5669,25 @@ mod tests {
     }
 
     #[test]
+    fn native_live_projector_ignores_raw_steer_runtime_event() {
+        let mut projector = NativeLiveWireProjector::default();
+        assert!(projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                jeikcode_coding::CodingRuntimeEvent::Agent(
+                    jeikcode_kernel::event::AgentEvent::Steered {
+                        count: 1,
+                        inputs: vec![jeikcode_kernel::event::SteeredInput {
+                            text: "unanchored duplicate".into(),
+                            images: Vec::new(),
+                            message_id: Some("m-steer-1".into()),
+                        }],
+                    },
+                ),
+            ))
+            .is_none());
+    }
+
+    #[test]
     fn native_live_projector_exposes_exact_steered_inputs() {
         let mut projector = NativeLiveWireProjector::default();
         let wire = projector
@@ -5677,6 +5699,7 @@ mod tests {
                     message_id: Some("m-steer-1".into()),
                 }],
                 client_input_ids: vec![Some("web-1".into())],
+                anchor_message_id: Some("assistant-before".into()),
             })
             .expect("steer acknowledgement must reach the live wire");
         let json = serde_json::to_value(wire).unwrap();
@@ -5686,6 +5709,7 @@ mod tests {
         assert_eq!(json["inputs"][0]["images"], serde_json::json!([]));
         assert_eq!(json["inputs"][0]["message_id"], "m-steer-1");
         assert_eq!(json["client_input_ids"][0], "web-1");
+        assert_eq!(json["anchor_message_id"], "assistant-before");
     }
 
     #[test]
