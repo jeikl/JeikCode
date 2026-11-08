@@ -3,13 +3,14 @@
 //! applied: VCS ignore rules describe what should be committed, not what the user
 //! may ask us to search. The curated `.codegraphignore` / `.codegraignore` noise
 //! rules are the search-visibility authority; `include_ignored=true` bypasses the
-//! non-sensitive noise/log layers. Sensitive paths from `.codegraphignore.graph` are excluded by
-//! default; `include_sensitive=true` is approval-gated (Build prompts, Auto continues).
+//! build/cache/dependency layers, while `include_logs=true` opens logs independently.
+//! Sensitive paths from `.codegraphignore.graph` are excluded by default;
+//! `include_sensitive=true` is approval-gated (Build prompts, Auto continues).
 //! Smart-case when `case_insensitive` is omitted (insensitive unless the pattern has
 //! an uppercase letter); `true`/`false` force the mode. Regex mode treats a bare `{`
 //! as a literal (PCRE / GNU ERE semantics) instead of failing the build; a pattern
 //! that is still invalid falls back to a literal search. Build/VCS/cache dirs are
-//! skipped by default; log files are included only with `include_ignored=true`.
+//! skipped by default; log files are included only with `include_logs=true`.
 //! A `path` pointing at a single file ignores `glob`/`type`
 //! so models that pass both do not get a spurious "0 files searched".
 
@@ -90,8 +91,9 @@ struct Args {
     word_match: Option<bool>,
     #[serde(default)]
     output_mode: OutputMode,
-    /// Bypass `.codegraphignore` / `.codegraignore` and show files normally
-    /// filtered from search. `.gitignore` is never applied to search.
+    /// Bypass `.codegraphignore` / `.codegraignore` build/cache/dependency noise.
+    /// Logs are controlled separately by `include_logs`; `.gitignore` is never
+    /// applied to search.
     #[serde(
         default,
         alias = "no_ignore",
@@ -99,6 +101,9 @@ struct Args {
         alias = "include_filtered"
     )]
     include_ignored: bool,
+    /// Include log files/directories. Independent from `include_ignored`.
+    #[serde(default, alias = "logs", alias = "include_log")]
+    include_logs: bool,
     /// Include sensitive credential paths. Approval-gated outside Auto mode.
     #[serde(
         default,
@@ -364,7 +369,7 @@ impl Tool for GrepTool {
         "grep"
     }
     fn description(&self) -> &str {
-        "Search file contents by keyword or regular expression. Defaults exclude build/cache/dependency paths and logs; include_ignored=true opens them. Sensitive credentials require include_sensitive=true (approval) or read."
+        "Search file contents by keyword or regular expression. Defaults exclude build/cache/dependency paths and logs; include_ignored=true opens build/cache/dependency paths, include_logs=true opens logs. Sensitive credentials require include_sensitive=true (approval) or read."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -420,7 +425,12 @@ impl Tool for GrepTool {
                 "include_ignored": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Include non-sensitive paths filtered from search: build artifacts, caches, dependencies, and logs (default false)."
+                    "description": "Include non-sensitive paths filtered from search: build artifacts, caches, and dependencies (default false)."
+                },
+                "include_logs": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include log files and log directories (default false). Independent from include_ignored."
                 },
                 "include_sensitive": {
                     "type": "boolean",
@@ -575,6 +585,7 @@ impl Tool for GrepTool {
         let deadline = Instant::now() + Duration::from_secs(search_secs);
         let output_mode = a.output_mode;
         let include_ignored = a.include_ignored;
+        let include_logs = a.include_logs;
         let include_sensitive = a.include_sensitive;
         let res = tokio::task::spawn_blocking(move || {
             let mut result = search(
@@ -587,6 +598,7 @@ impl Tool for GrepTool {
                 &base,
                 glob_filter.as_ref(),
                 include_ignored,
+                include_logs,
                 include_sensitive,
                 deadline,
             );
@@ -617,6 +629,7 @@ impl Tool for GrepTool {
                                 &base,
                                 glob_filter.as_ref(),
                                 include_ignored,
+                                include_logs,
                                 include_sensitive,
                                 deadline,
                             );
@@ -646,6 +659,7 @@ impl Tool for GrepTool {
                             &base,
                             glob_filter.as_ref(),
                             include_ignored,
+                            include_logs,
                             include_sensitive,
                             deadline,
                         );
@@ -660,7 +674,7 @@ impl Tool for GrepTool {
             // actually contain this pattern. Sensitive files are never read here;
             // their hint is a path-level hard-exclusion notice.
             let hint = result.0.is_empty().then(|| {
-                super::search_visibility_hint(&root, include_sensitive, include_ignored, |path| {
+                super::search_visibility_hint(&root, include_sensitive, include_logs, |path| {
                     file_matches_pattern(&initial_matcher, path)
                 })
             });
@@ -692,9 +706,9 @@ impl Tool for GrepTool {
                         hint.sensitive.len(),
                         examples(&hint.sensitive)
                     ));
-                } else if !include_ignored && !hint.logs.is_empty() {
+                } else if !include_logs && !hint.logs.is_empty() {
                     msg.push_str(&format!(
-                        "\n[Log search hint: {} log file(s) under this path are excluded from grep by default (e.g. {}). If the target is one of them, retry with include_ignored=true; prefer output_mode=\"files_with_matches\" first.]",
+                        "\n[Log search hint: {} log file(s) under this path are excluded from grep by default (e.g. {}). If the target is one of them, retry with include_logs=true; prefer output_mode=\"files_with_matches\" first.]",
                         hint.logs.len(),
                         examples(&hint.logs)
                     ));
@@ -732,6 +746,7 @@ impl Tool for GrepTool {
                     timed_out,
                     byte_overflow,
                     include_ignored,
+                    include_logs,
                     has_context: before_ctx > 0 || after_ctx > 0,
                 });
                 if byte_overflow {
@@ -1000,6 +1015,7 @@ struct GrepOverflow<'a> {
     timed_out: bool,
     byte_overflow: bool,
     include_ignored: bool,
+    include_logs: bool,
     has_context: bool,
 }
 
@@ -1014,20 +1030,28 @@ fn grep_overflow_hint(o: &GrepOverflow<'_>) -> String {
     }
     let file_count = files.len();
     let first = files.first().copied().unwrap_or("<file>");
-    let broad_scan = if o.include_ignored {
-        " include_ignored=true expanded the scan to logs/build artifacts; narrow path/glob (e.g. path=\"logs\") to keep it focused."
-    } else {
-        ""
-    };
+    let mut broad_scan = String::new();
+    if o.include_ignored {
+        broad_scan.push_str(
+            " include_ignored=true expanded the scan to build artifacts/caches/dependencies; narrow path/glob to keep it focused.",
+        );
+    }
+    if o.include_logs {
+        broad_scan.push_str(
+            " include_logs=true expanded the scan to log files; narrow path/glob (e.g. path=\"logs\") to keep it focused.",
+        );
+    }
 
     if o.timed_out {
+        let mut disable = String::new();
+        if o.include_ignored {
+            disable.push_str(", set include_ignored=false");
+        }
+        if o.include_logs {
+            disable.push_str(", set include_logs=false");
+        }
         return format!(
-            "[Search timed out after the configured limit. Next: narrow path/glob{}, or use code_explore for a semantic query.]",
-            if o.include_ignored {
-                ", set include_ignored=false"
-            } else {
-                ""
-            }
+            "[Search timed out after the configured limit. Next: narrow path/glob{disable}, or use code_explore for a semantic query.]"
         );
     }
 
@@ -1210,6 +1234,7 @@ fn search(
     base: &std::path::Path,
     glob_filter: Option<&(GlobMatcher, String)>,
     include_ignored: bool,
+    include_logs: bool,
     include_sensitive: bool,
     deadline: Instant,
 ) -> (Vec<String>, usize, usize, bool) {
@@ -1238,7 +1263,7 @@ fn search(
         root,
         false,
         include_ignored,
-        include_ignored,
+        include_logs,
         include_sensitive,
         |entry| {
             if Instant::now() >= deadline {
@@ -1258,9 +1283,9 @@ fn search(
                     return true;
                 }
             }
-            // Log contents are high-cost and high-noise. `include_ignored=true` is
-            // the explicit "search logs too" switch; it also ascends LOG_DIRS.
-            if !include_ignored
+            // Log contents are high-cost and high-noise. `include_logs=true` is
+            // the independent "search logs too" switch; it also ascends LOG_DIRS.
+            if !include_logs
                 && path
                     .extension()
                     .map(|x| x.eq_ignore_ascii_case("log"))
@@ -1877,7 +1902,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logs_are_default_skipped_and_include_ignored_opens_them() {
+    async fn logs_are_default_skipped_and_include_logs_opens_them() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join("logs")).unwrap();
         std::fs::write(d.path().join("logs/app.log"), "NEEDLE_LOG\n").unwrap();
@@ -1893,15 +1918,28 @@ mod tests {
             default.content
         );
 
-        let opened = GrepTool
+        // include_ignored is independent: it must NOT open logs.
+        let ignored = GrepTool
             .execute(
                 r#"{"pattern":"NEEDLE_LOG","include_ignored":true}"#,
                 &ctx(d.path()),
             )
             .await;
         assert!(
+            !ignored.content.contains("logs/app.log"),
+            "include_ignored must not open logs: {}",
+            ignored.content
+        );
+
+        let opened = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE_LOG","include_logs":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
             opened.content.contains("logs/app.log"),
-            "include_ignored must open log files: {}",
+            "include_logs must open log files: {}",
             opened.content
         );
     }
@@ -1921,7 +1959,7 @@ mod tests {
             "zero-match must explain the default log exclusion: {}",
             r.content
         );
-        assert!(r.content.contains("include_ignored=true"), "{}", r.content);
+        assert!(r.content.contains("include_logs=true"), "{}", r.content);
     }
 
     #[tokio::test]
@@ -1969,6 +2007,7 @@ mod tests {
             timed_out: false,
             byte_overflow: false,
             include_ignored: false,
+            include_logs: false,
             has_context: false,
         });
         assert!(many.contains("files_with_matches"), "{many}");
@@ -1982,6 +2021,7 @@ mod tests {
             timed_out: false,
             byte_overflow: false,
             include_ignored: false,
+            include_logs: false,
             has_context: false,
         });
         assert!(single.contains("read(path=\"a.rs\""), "{single}");
@@ -1994,10 +2034,12 @@ mod tests {
             timed_out: false,
             byte_overflow: true,
             include_ignored: true,
+            include_logs: true,
             has_context: true,
         });
         assert!(byte.contains("40KB"), "{byte}");
         assert!(byte.contains("include_ignored=true"), "{byte}");
+        assert!(byte.contains("include_logs=true"), "{byte}");
 
         let timeout = grep_overflow_hint(&GrepOverflow {
             matches: 0,
@@ -2007,6 +2049,7 @@ mod tests {
             timed_out: true,
             byte_overflow: false,
             include_ignored: false,
+            include_logs: false,
             has_context: false,
         });
         assert!(timeout.contains("timed out"), "{timeout}");

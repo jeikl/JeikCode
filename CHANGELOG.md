@@ -25,8 +25,8 @@
 
 - **[Tool Search & Approval] Two-switch search visibility for grep and glob**:
   - `.gitignore` / `.ignore` no longer hide search results; the default filter is now the curated `.codegraphignore` noise list plus build/cache/dependency directories.
-  - `include_ignored=true` opens non-sensitive filtered content, including log files for grep; `include_sensitive=true` opens credential paths and requires approval outside Auto mode.
-  - `glob` includes log paths by default; `grep` skips log contents by default. Zero-match responses explain the filter and point to the correct switch.
+  - `include_ignored=true` opens build/cache/dependency paths; `include_logs=true` independently opens log contents for grep; `include_sensitive=true` opens credential paths and requires approval outside Auto mode.
+  - `glob` includes log paths by default; `grep` skips log contents by default. Zero-match responses explain the filter and point to the correct switch (`include_ignored` or `include_logs`).
   - `read` now reuses the same `.codegraphignore.graph` sensitive rules through `SensitivePathGate` (Build prompts, Auto continues).
   - Truncated results return shape-aware guidance (`files_with_matches`, `count`, narrower path/glob, or a focused `read` window) instead of only a raw truncation notice.
   - Removed `before_context` / `after_context`; `context` now controls both sides.
@@ -35,8 +35,8 @@
 
 - **[工具搜索与审批] grep / glob 双开关搜索可见性**：
   - `.gitignore` / `.ignore` 不再隐藏搜索结果；默认过滤改为 `.codegraphignore` 噪声规则加构建/缓存/依赖目录。
-  - `include_ignored=true` 打开非敏感过滤内容（grep 同时打开日志）；`include_sensitive=true` 打开敏感凭据路径，Build 模式需审批，Auto 自动继续。
-  - `glob` 默认包含日志路径；`grep` 默认跳过日志内容。零匹配时会解释过滤原因并提示正确的开关。
+  - `include_ignored=true` 打开构建/缓存/依赖路径；`include_logs=true` 独立打开 grep 的日志内容；`include_sensitive=true` 打开敏感凭据路径，Build 模式需审批，Auto 自动继续。
+  - `glob` 默认包含日志路径；`grep` 默认跳过日志内容。零匹配时会解释过滤原因并提示正确的开关（`include_ignored` 或 `include_logs`）。
   - `read` 通过 `SensitivePathGate` 复用同一套 `.codegraphignore.graph` 敏感规则（Build 弹审核，Auto 自动继续）。
   - 结果被截断时返回按形状区分的引导（`files_with_matches`、`count`、缩小 path/glob，或使用聚焦的 `read` 窗口），不再只给裸截断提示。
   - 删除 `before_context` / `after_context`，统一由 `context` 控制前后文。

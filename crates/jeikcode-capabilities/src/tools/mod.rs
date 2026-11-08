@@ -436,7 +436,7 @@ pub(crate) const DEFAULT_SKIP_DIRS: &[&str] = &[
 ];
 
 /// Log/ops directories. `glob` includes these by default (path discovery is
-/// cheap); `grep` only reads them when `include_ignored=true`.
+/// cheap); `grep` only reads them when `include_logs=true`.
 pub(crate) const LOG_DIRS: &[&str] = &["datalog", "logs", "log", "runs"];
 
 /// Should a directory with this name be skipped by the default search policy?
@@ -555,8 +555,8 @@ fn gitignore_off_walk(root: &Path) -> WalkBuilder {
 /// ignore rules describe what should be committed, not what the user may ask
 /// us to search. The curated `.codegraphignore` / `.codegraignore` noise rules
 /// are the single search-visibility authority; `include_ignored` bypasses the
-/// non-sensitive noise/log layers (including `LOG_DIRS`), while `include_sensitive`
-/// is an approval-gated switch for credential paths.
+/// non-sensitive build/cache/dependency layers, `include_logs` opens `LOG_DIRS`
+/// independently, and `include_sensitive` is an approval-gated switch for credentials.
 ///
 /// `hidden` selects whether dotfiles are visited. The upload store is always
 /// walked with hidden+ignore off so pasted attachments remain findable after
@@ -650,7 +650,7 @@ pub(crate) fn for_each_project_entry(
 pub(crate) struct SearchVisibilityHint {
     /// Files hidden by the user-toggleable `.codegraphignore` noise list.
     pub noise: Vec<PathBuf>,
-    /// Log files hidden by the grep default log policy. `include_ignored` opens them.
+    /// Log files hidden by the grep default log policy. `include_logs` opens them.
     pub logs: Vec<PathBuf>,
     /// Credential files hidden by the sensitive list. They are available only
     /// through the approval-gated `include_sensitive` switch (or explicit `read`).

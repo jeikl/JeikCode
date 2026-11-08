@@ -3109,6 +3109,17 @@ mod tests {
                 props.get("include_sensitive").is_some(),
                 "{name} must expose include_sensitive to subagents"
             );
+            if name == "grep" {
+                assert!(
+                    props.get("include_logs").is_some(),
+                    "grep must expose include_logs to subagents"
+                );
+            } else {
+                assert!(
+                    props.get("include_logs").is_none(),
+                    "glob must not expose grep-only include_logs"
+                );
+            }
         }
 
         let worker = child_reg.mount(&[

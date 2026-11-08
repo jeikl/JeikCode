@@ -176,7 +176,7 @@ Pods/
 *~
 .DS_Store
 Thumbs.db
-# Log files are controlled by the tool-level `include_ignored` switch:
+# Log files are controlled by the tool-level `include_logs` switch:
 # `glob` lists log paths by default; `grep` reads log contents only when enabled.
 
 # ------------------------------------------------------------------------------

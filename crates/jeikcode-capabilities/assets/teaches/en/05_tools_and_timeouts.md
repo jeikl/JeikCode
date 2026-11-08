@@ -39,7 +39,8 @@ Short commands undergo health checks at every `silent_kill_secs`: pager/REPL/ful
 
 - Default search covers source, docs, tests, and ordinary config; build artifacts/caches/dependencies are ignored.
 - `glob` includes log paths by default (paths only); `grep` skips log contents by default.
-- `include_ignored=true` opens build artifacts/caches/dependencies; for grep it also opens log contents.
+- `include_ignored=true` opens build artifacts/caches/dependencies.
+- `include_logs=true` independently opens grep log contents (default false, independent from `include_ignored`); glob includes log paths by default.
 - `include_sensitive=true` opens sensitive credential paths; Build/AcceptEdits/Plan prompt, Auto continues.
 - `read` does not apply the ignore filter to an explicit path; sensitive paths go through `SensitivePathGate`.
 

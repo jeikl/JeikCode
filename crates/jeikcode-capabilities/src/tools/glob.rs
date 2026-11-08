@@ -2,8 +2,9 @@
 //! `.gitignore` / `.ignore` are intentionally NOT applied: VCS ignore rules describe
 //! what should be committed, not what the user may ask us to find. The curated
 //! `.codegraphignore` / `.codegraignore` rules are the search-visibility authority;
-//! `include_ignored=true` bypasses the non-sensitive noise/log layers. Sensitive
-//! paths from `.codegraphignore.graph` are excluded by default; `include_sensitive=true`
+//! `include_ignored=true` bypasses the build/cache/dependency layers. Log paths are
+//! included by default. Sensitive paths from `.codegraphignore.graph` are excluded by
+//! default; `include_sensitive=true`
 //! is approval-gated (Build prompts, Auto continues). Read-only ⇒ always `Safe`.
 //! Standard ripgrep / grok-build glob semantics:
 //! - Patterns without `/` (e.g. `*.sh`, `*release*`) match against filename and recursively penetrate subdirectories.
@@ -41,8 +42,8 @@ struct Args {
     /// Default false = files only. Set true to also return matching directories.
     #[serde(default)]
     include_dirs: bool,
-    /// Bypass `.codegraphignore` / `.codegraignore` and show files normally
-    /// filtered from search. `.gitignore` is never applied to search.
+    /// Bypass `.codegraphignore` / `.codegraignore` build/cache/dependency noise.
+    /// Log paths are already included by glob; `.gitignore` is never applied to search.
     #[serde(
         default,
         alias = "no_ignore",
@@ -87,7 +88,7 @@ impl Tool for GlobTool {
                 "include_ignored": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Include non-sensitive paths filtered from search: build artifacts, caches, dependencies, and logs (default false)."
+                    "description": "Include non-sensitive paths filtered from search: build artifacts, caches, and dependencies. Log paths are already included by glob."
                 },
                 "include_sensitive": {
                     "type": "boolean",
@@ -321,7 +322,7 @@ fn glob_overflow_hint(
     );
     if include_ignored {
         hint.push_str(
-            " include_ignored=true expanded the scan to logs/build artifacts; narrow path/glob (e.g. path=\"logs\") first.",
+            " include_ignored=true expanded the scan to build artifacts, caches, and dependencies; narrow path/glob first.",
         );
     }
     if pattern.contains("**/*") || pattern == "**" || pattern == "*" {

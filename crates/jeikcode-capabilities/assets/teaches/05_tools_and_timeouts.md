@@ -44,7 +44,8 @@ long_bash_command_keyword = []  # 长任务关键词列表（如 ["build", "test
 
 - 默认搜索源码、文档、测试、普通配置；构建产物/缓存/依赖默认忽略。
 - `glob` 默认包含日志路径（只列路径）；`grep` 默认跳过日志内容。
-- `include_ignored=true`：打开构建产物/缓存/依赖；grep 同时打开日志内容。
+- `include_ignored=true`：打开构建产物/缓存/依赖。
+- `include_logs=true`：独立打开 grep 的日志内容（默认 false，与 `include_ignored` 独立）；glob 默认包含日志路径。
 - `include_sensitive=true`：打开敏感凭据路径；Build/AcceptEdits/Plan 弹审核，Auto 自动继续。
 - `read` 的显式路径不套 ignore；敏感路径统一走 `SensitivePathGate`。
 
