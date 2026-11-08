@@ -40,6 +40,14 @@ long_bash_command_keyword = []  # 长任务关键词列表（如 ["build", "test
 - 未定义变量**原样保留**（绝不静默删除），因此写错变量名时路径会以相对形式落在工作区内并在
   报错信息中暴露，而不是逃逸到盘根。
 
+### 1.3 grep / glob 搜索可见性
+
+- 默认搜索源码、文档、测试、普通配置；构建产物/缓存/依赖默认忽略。
+- `glob` 默认包含日志路径（只列路径）；`grep` 默认跳过日志内容。
+- `include_ignored=true`：打开构建产物/缓存/依赖；grep 同时打开日志内容。
+- `include_sensitive=true`：打开敏感凭据路径；Build/AcceptEdits/Plan 弹审核，Auto 自动继续。
+- `read` 的显式路径不套 ignore；敏感路径统一走 `SensitivePathGate`。
+
 ---
 
 ## 2. 进程内短超时预算 (`[tools.timeouts]`)

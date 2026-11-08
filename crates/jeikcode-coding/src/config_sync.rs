@@ -64,12 +64,12 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
     BundledFileEntry {
         relative_path: ".codegraphignore",
         content: include_str!("../../jeikcode-capabilities/assets/.codegraphignore"),
-        description: "代码图谱忽略规则 (.codegraphignore)",
+        description: "代码图谱 + 搜索默认忽略规则 (.codegraphignore)",
     },
     BundledFileEntry {
         relative_path: ".codegraphignore.graph",
         content: include_str!("../../jeikcode-capabilities/assets/.codegraphignore.graph"),
-        description: "图谱专用敏感凭据忽略规则 (.codegraphignore.graph)",
+        description: "敏感凭据忽略规则（图谱 + 搜索默认排除）(.codegraphignore.graph)",
     },
     BundledFileEntry {
         relative_path: "thesaurus/admin_system.txt",
@@ -244,9 +244,9 @@ pub fn localized_asset_description(relative_path: &str, zh_fallback: &str) -> St
         "builtin-tools.txt" => "Built-in tool list (builtin-tools.txt)",
         "mcp.json" => "Default MCP servers (mcp.json)",
         "user-wrap.md" => "User prompt wrap template (user-wrap.md, {{input}})",
-        ".codegraphignore" => "Code graph ignore rules (.codegraphignore)",
+        ".codegraphignore" => "Code graph + default search ignore rules (.codegraphignore)",
         ".codegraphignore.graph" => {
-            "Graph-only sensitive-credential ignore rules (.codegraphignore.graph)"
+            "Sensitive-credential ignore rules (graph + default search exclusion) (.codegraphignore.graph)"
         }
         "thesaurus/admin_system.txt" => "Thesaurus: admin systems",
         "thesaurus/agent_core.txt" => "Thesaurus: agent core",

@@ -3093,6 +3093,24 @@ mod tests {
         assert!(defs.contains(&"grep"), "explore subagent must have grep");
         assert!(defs.contains(&"glob"), "explore subagent must have glob");
 
+        // Mounted tools carry the REAL schema: the two visibility switches must
+        // reach subagents, otherwise they cannot search logs/sensitive paths.
+        for name in ["grep", "glob"] {
+            let def = explore_defs
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name} def missing"));
+            let props = &def.parameters["properties"];
+            assert!(
+                props.get("include_ignored").is_some(),
+                "{name} must expose include_ignored to subagents"
+            );
+            assert!(
+                props.get("include_sensitive").is_some(),
+                "{name} must expose include_sensitive to subagents"
+            );
+        }
+
         let worker = child_reg.mount(&[
             "read",
             "code_explore",

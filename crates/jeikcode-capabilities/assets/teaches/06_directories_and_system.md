@@ -31,8 +31,8 @@
 | **`mcp.json`** | 全局外部 MCP 工具配置 | 需触发热生效（调用 `jeikcode_config(action="reload")` 或 `/mcp reload`） |
 | **`memory.md`** | 跨会话长期记忆文件 | 启动会话时读取 |
 | **`user-wrap.md`** | 用户提问外层包装模板 | **自动热生效**（下一轮对话生效） |
-| `.codegraphignore` | 符号索引与图谱构建忽略规则（噪声类：构建产物、依赖目录；**同时**作用于 glob/grep 搜索） | 保存后下次建索引生效 |
-| `.codegraphignore.graph` | **图谱专用**忽略规则（敏感凭据：`.env`/`.env.*`、`*.pem`、`*.key`、`id_rsa*`、`.ssh/`）；glob/grep **不套用**，用户明确搜索仍能找到这些文件 | 保存后下次建索引生效 |
+| `.codegraphignore` | 符号索引与图谱构建忽略规则（噪声类：构建产物、依赖目录；**同时**作为 glob/grep 默认过滤，`include_ignored=true` 可打开） | 保存后下次建索引/搜索生效 |
+| `.codegraphignore.graph` | 敏感凭据规则（`.env`/`.env.*`、`*.pem`、`*.key`、`id_rsa*`、`.ssh/`）：图谱建图 + glob/grep **默认排除**；`include_sensitive=true` 经审批后可包含（Build 弹审核，Auto 自动继续） | 保存后下次建索引/搜索生效 |
 | `webui-listen.json` | 桌面端与 WebUI 端口和 Token 配置 | 运行时更新 |
 | `builtin-tools.txt` | 当前版本所有内置工具清单摘要 | 只读参考 |
 

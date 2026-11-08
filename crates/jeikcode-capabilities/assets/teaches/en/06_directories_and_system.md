@@ -31,8 +31,8 @@ Global root directory path: `~/.jeikcode/` (or `$JEIKCODE_HOME`).
 | **`mcp.json`** | Global external MCP tool configurations | Requires active reload (call `jeikcode_config(action="reload")` or `/mcp reload`) |
 | **`memory.md`** | Cross-session long-term memory | Read at session startup |
 | **`user-wrap.md`** | User prompt outer wrapping template | **Automatic hot-reload** (Takes effect on next turn) |
-| `.codegraphignore` | Symbol index and graph ignore patterns (Noise: build artifacts, dependencies; **also applied** to glob/grep searches) | Takes effect on next index build |
-| `.codegraphignore.graph` | **Graph-only** ignore patterns (Credentials: `.env`/`.env.*`, `*.pem`, `*.key`, `id_rsa*`, `.ssh/`); **not applied** to glob/grep, allowing explicit search to find them | Takes effect on next index build |
+| `.codegraphignore` | Symbol index and graph ignore patterns (Noise: build artifacts, dependencies; **also the default** glob/grep filter, opened by `include_ignored=true`) | Takes effect on the next index build/search |
+| `.codegraphignore.graph` | Sensitive-credential rules (`.env`/`.env.*`, `*.pem`, `*.key`, `id_rsa*`, `.ssh/`): graph indexing **and** glob/grep default exclusion; `include_sensitive=true` includes them after approval (Build prompts, Auto continues) | Takes effect on the next index build/search |
 | `webui-listen.json` | Desktop and WebUI port and token registry | Updated at runtime |
 | `builtin-tools.txt` | Read-only summary catalog of all built-in tools | Read-only reference |
 

@@ -1,9 +1,11 @@
 # ------------------------------------------------------------------------------
-# 图谱专用：敏感凭据文件 (GRAPH-ONLY: sensitive credentials)
+# 敏感凭据文件（图谱 + 搜索默认排除）(Sensitive credentials: graph + default search exclusion)
 # ------------------------------------------------------------------------------
-# 本文件只被 codegraph 建图读取（codeintel::index::load_codegraph_ignore），
-# **不**作用于 glob / grep 搜索：搜索必须能找到用户明确 asking 的文件
-# （`grep DATABASE_URL` 不能装作 `.env` 不存在）。
+# 本文件同时用于两块：
+# 1) codegraph 建图读取（codeintel::index::load_codegraph_ignore）；
+# 2) grep / glob 的默认敏感排除：include_ignored 不会包含；
+#    include_sensitive=true 经审批后可包含（Build 弹审核，Auto 自动继续）。
+# read / grep / glob 的显式敏感访问统一走 SensitivePathGate。
 # 生效范围：项目根 / 项目 .jeikcode / 用户配置目录（~/.jeikcode）。
 # 噪声类规则（构建产物、依赖目录等）放在 .codegraphignore —— 两者分工，勿重复。
 # ------------------------------------------------------------------------------

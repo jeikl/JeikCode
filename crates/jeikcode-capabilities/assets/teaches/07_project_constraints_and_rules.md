@@ -38,8 +38,8 @@
 | **提问包装** | `<workspace>/.jeikcode/user-wrap.md` 或 `<workspace>/user-wrap.md` |
 | **专属 MCP** | `<workspace>/.mcp.json` |
 | **专属词林** | `<workspace>/.jeikcode/thesaurus/*.txt` |
-| **索引忽略** | `<workspace>/.codegraphignore`（构建符号图谱时忽略的文件，即便已入 Git 也会被忽略；噪声类规则同样作用于 glob/grep） |
-| **凭据忽略（仅图谱）** | `<workspace>/.codegraphignore.graph`（`.env`、密钥、SSH 等敏感凭据**只对图谱**隐藏，显式 glob/grep 仍能搜到） |
+| **索引/搜索忽略** | `<workspace>/.codegraphignore`（构建符号图谱与 glob/grep 默认过滤的噪声规则；`include_ignored=true` 可打开） |
+| **敏感凭据规则（图谱 + 搜索默认排除）** | `<workspace>/.codegraphignore.graph`（`.env`、密钥、SSH 等敏感凭据图谱与 glob/grep 默认都不返回；`include_sensitive=true` 经审批后可搜索） |
 
 ---
 

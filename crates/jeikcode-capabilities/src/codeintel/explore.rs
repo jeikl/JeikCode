@@ -277,9 +277,9 @@ fn seed_fork_defaults() {
     if !ignore_dest.exists() {
         let _ = std::fs::write(&ignore_dest, CODEGRAPH_IGNORE_ASSET);
     }
-    // .codegraphignore.graph — GRAPH-ONLY sensitive rules (`.env*`, keys, SSH). Seeded
-    // alongside the noise list; the search walker never registers this filename, so
-    // glob/grep can still find what the user explicitly asks for.
+    // .codegraphignore.graph — sensitive rules (`.env*`, keys, SSH). Seeded alongside
+    // the noise list; grep/glob exclude these paths by default. include_sensitive=true
+    // is the approval-gated switch that can include them.
     let graph_only_dest = dir.join(".codegraphignore.graph");
     if !graph_only_dest.exists() {
         let _ = std::fs::write(&graph_only_dest, CODEGRAPH_GRAPH_ONLY_ASSET);
@@ -342,8 +342,8 @@ static MCP_JSON_ASSET: &str = include_str!("../../assets/mcp.json");
 /// Bundled default code-graph ignore rules (generated/minified artifacts,
 /// vendored deps), seeded as `~/.jeikcode/.codegraphignore` on first run.
 static CODEGRAPH_IGNORE_ASSET: &str = include_str!("../../assets/.codegraphignore");
-/// GRAPH-ONLY sensitive-credential rules (`assets/.codegraphignore.graph`): applied by
-/// `codeintel::index::load_codegraph_ignore` only — never by the glob/grep search walker.
+/// Sensitive-credential rules (`assets/.codegraphignore.graph`): applied by code graph
+/// indexing and as the default glob/grep exclusion; `include_sensitive` is approval-gated.
 static CODEGRAPH_GRAPH_ONLY_ASSET: &str = include_str!("../../assets/.codegraphignore.graph");
 
 #[derive(Deserialize)]

@@ -176,16 +176,17 @@ Pods/
 *~
 .DS_Store
 Thumbs.db
-*.log
+# Log files are controlled by the tool-level `include_ignored` switch:
+# `glob` lists log paths by default; `grep` reads log contents only when enabled.
 
 # ------------------------------------------------------------------------------
-# 8. 构建残留/杂项（凭据类规则已移到图谱专用文件 `.codegraphignore.graph`）
-#    (Sensitive-credential rules live in the GRAPH-ONLY file `.codegraphignore.graph`:
-#     this list also drives glob/grep search, which must be able to find what the
-#     user explicitly asks for — see that file's header.)
+# 8. 构建残留/杂项（凭据类规则已移到 `.codegraphignore.graph`）
+#    (Sensitive-credential rules live in `.codegraphignore.graph`:
+#     that file is also the default search exclusion; include_sensitive=true
+#     is the approval-gated switch that can include it.)
 # ------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------
-# 9. 凭据类规则已移至图谱专用文件（见上方第 8 节说明）。
+# 9. 凭据类规则已移至 `.codegraphignore.graph`（见上方第 8 节说明）。
 # ==============================================================================
 # 💡 可选配置与文档层过滤 (默认开启索引，如需关闭请取消对应行注释)
 # ==============================================================================

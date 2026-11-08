@@ -1,17 +1,24 @@
-//! `grep` — regex content search under a directory, gitignore-aware. Read-only ⇒
-//! always `Safe`. Smart-case when `case_insensitive` is omitted (insensitive unless
-//! the pattern has an uppercase letter); `true`/`false` force the mode. Regex mode
-//! treats a bare `{` as a literal (PCRE / GNU ERE semantics) instead of failing the
-//! build; a pattern that is still invalid falls back to a literal search. Build/VCS/
-//! cache dirs and `.log` files are skipped. A `path` pointing at a single file
-//! ignores `glob`/`type` so models that pass both do not get a spurious "0 files
-//! searched".
+//! `grep` — regex content search under a directory, codegraphignore-aware.
+//! Read-only ⇒ always `Safe`. `.gitignore` / `.ignore` are intentionally NOT
+//! applied: VCS ignore rules describe what should be committed, not what the user
+//! may ask us to search. The curated `.codegraphignore` / `.codegraignore` noise
+//! rules are the search-visibility authority; `include_ignored=true` bypasses the
+//! non-sensitive noise/log layers. Sensitive paths from `.codegraphignore.graph` are excluded by
+//! default; `include_sensitive=true` is approval-gated (Build prompts, Auto continues).
+//! Smart-case when `case_insensitive` is omitted (insensitive unless the pattern has
+//! an uppercase letter); `true`/`false` force the mode. Regex mode treats a bare `{`
+//! as a literal (PCRE / GNU ERE semantics) instead of failing the build; a pattern
+//! that is still invalid falls back to a literal search. Build/VCS/cache dirs are
+//! skipped by default; log files are included only with `include_ignored=true`.
+//! A `path` pointing at a single file ignores `glob`/`type`
+//! so models that pass both do not get a spurious "0 files searched".
 
 use super::read::lenient_usize;
 use super::{err, for_each_project_entry, not_found_hint, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use globset::{GlobBuilder, GlobMatcher};
+use grep::matcher::Matcher as _;
 use grep::regex::{RegexMatcher, RegexMatcherBuilder};
 use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use jeikcode_kernel::tool::{Tool, ToolContext, ToolResult};
@@ -57,20 +64,6 @@ struct Args {
     max_results: Option<usize>,
     #[serde(default, alias = "-C", deserialize_with = "lenient_usize")]
     context: Option<usize>,
-    #[serde(
-        default,
-        rename = "-B",
-        alias = "before_context",
-        deserialize_with = "lenient_usize"
-    )]
-    before_context: Option<usize>,
-    #[serde(
-        default,
-        rename = "-A",
-        alias = "after_context",
-        deserialize_with = "lenient_usize"
-    )]
-    after_context: Option<usize>,
     /// File-name glob (`*.rs`, `*.{ts,tsx}`, `src/**/*.go`). Ripgrep-style:
     /// a pattern with no `/` matches at any depth.
     #[serde(default)]
@@ -97,6 +90,22 @@ struct Args {
     word_match: Option<bool>,
     #[serde(default)]
     output_mode: OutputMode,
+    /// Bypass `.codegraphignore` / `.codegraignore` and show files normally
+    /// filtered from search. `.gitignore` is never applied to search.
+    #[serde(
+        default,
+        alias = "no_ignore",
+        alias = "show_filtered",
+        alias = "include_filtered"
+    )]
+    include_ignored: bool,
+    /// Include sensitive credential paths. Approval-gated outside Auto mode.
+    #[serde(
+        default,
+        alias = "show_sensitive",
+        alias = "include_filtered_sensitive"
+    )]
+    include_sensitive: bool,
 }
 
 fn lenient_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
@@ -355,7 +364,7 @@ impl Tool for GrepTool {
         "grep"
     }
     fn description(&self) -> &str {
-        "Search file contents by keyword or regular expression."
+        "Search file contents by keyword or regular expression. Defaults exclude build/cache/dependency paths and logs; include_ignored=true opens them. Sensitive credentials require include_sensitive=true (approval) or read."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -403,18 +412,20 @@ impl Tool for GrepTool {
                     "type": "integer",
                     "description": "Number of lines of context before and after each match."
                 },
-                "before_context": {
-                    "type": "integer",
-                    "description": "Number of lines of context before each match."
-                },
-                "after_context": {
-                    "type": "integer",
-                    "description": "Number of lines of context after each match."
-                },
                 "max_results": {
                     "type": "integer",
                     "default": 200,
                     "description": "Maximum number of matching lines or files to return (default 200)."
+                },
+                "include_ignored": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include non-sensitive paths filtered from search: build artifacts, caches, dependencies, and logs (default false)."
+                },
+                "include_sensitive": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include sensitive credential paths (default false). Requires approval outside Auto mode."
                 }
             },
             "required": ["pattern"]
@@ -475,16 +486,9 @@ impl Tool for GrepTool {
             .max_results
             .unwrap_or(DEFAULT_MAX_RESULTS)
             .clamp(1, MAX_RESULTS_CAP);
-        let before_ctx = a
-            .before_context
-            .or(a.context)
-            .unwrap_or(DEFAULT_CONTEXT)
-            .min(MAX_CONTEXT);
-        let after_ctx = a
-            .after_context
-            .or(a.context)
-            .unwrap_or(DEFAULT_CONTEXT)
-            .min(MAX_CONTEXT);
+        let context_lines = a.context.unwrap_or(DEFAULT_CONTEXT).min(MAX_CONTEXT);
+        let before_ctx = context_lines;
+        let after_ctx = context_lines;
         let effective_glob = a
             .glob
             .as_deref()
@@ -570,6 +574,8 @@ impl Tool for GrepTool {
         let search_secs = super::tool_timeouts().search_secs;
         let deadline = Instant::now() + Duration::from_secs(search_secs);
         let output_mode = a.output_mode;
+        let include_ignored = a.include_ignored;
+        let include_sensitive = a.include_sensitive;
         let res = tokio::task::spawn_blocking(move || {
             let mut result = search(
                 &root,
@@ -580,6 +586,8 @@ impl Tool for GrepTool {
                 output_mode,
                 &base,
                 glob_filter.as_ref(),
+                include_ignored,
+                include_sensitive,
                 deadline,
             );
 
@@ -608,6 +616,8 @@ impl Tool for GrepTool {
                                 output_mode,
                                 &base,
                                 glob_filter.as_ref(),
+                                include_ignored,
+                                include_sensitive,
                                 deadline,
                             );
                             if !retry_res.0.is_empty() {
@@ -635,6 +645,8 @@ impl Tool for GrepTool {
                             output_mode,
                             &base,
                             glob_filter.as_ref(),
+                            include_ignored,
+                            include_sensitive,
                             deadline,
                         );
                         if !retry_res.0.is_empty() {
@@ -644,11 +656,19 @@ impl Tool for GrepTool {
                 }
             }
 
-            result
+            // Zero matches: look for files hidden by `.codegraphignore` that
+            // actually contain this pattern. Sensitive files are never read here;
+            // their hint is a path-level hard-exclusion notice.
+            let hint = result.0.is_empty().then(|| {
+                super::search_visibility_hint(&root, include_sensitive, include_ignored, |path| {
+                    file_matches_pattern(&initial_matcher, path)
+                })
+            });
+            (result, hint)
         })
         .await;
         match res {
-            Ok((lines, _, files, timed_out)) if lines.is_empty() => {
+            Ok(((lines, _, files, timed_out), hint)) if lines.is_empty() => {
                 let mut msg = format!(
                     "No matches found for '{pattern}' in {display_path} ({files} files searched)"
                 );
@@ -656,6 +676,34 @@ impl Tool for GrepTool {
                     msg.push_str(
                         "\n[Search timed out; narrow `path` / `glob` or use code_explore]",
                     );
+                }
+                let hint = hint.unwrap_or_default();
+                let examples = |paths: &[std::path::PathBuf]| {
+                    paths
+                        .iter()
+                        .take(3)
+                        .map(|p| crate::pathnorm::to_display(p))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if !hint.sensitive.is_empty() {
+                    msg.push_str(&format!(
+                        "\n[Sensitive path hint: {} credential file(s) under this path are excluded from search (e.g. {}). Use `read` with explicit approval, or retry with include_sensitive=true (approval required outside Auto mode).]",
+                        hint.sensitive.len(),
+                        examples(&hint.sensitive)
+                    ));
+                } else if !include_ignored && !hint.logs.is_empty() {
+                    msg.push_str(&format!(
+                        "\n[Log search hint: {} log file(s) under this path are excluded from grep by default (e.g. {}). If the target is one of them, retry with include_ignored=true; prefer output_mode=\"files_with_matches\" first.]",
+                        hint.logs.len(),
+                        examples(&hint.logs)
+                    ));
+                } else if !include_ignored && !hint.noise.is_empty() {
+                    msg.push_str(&format!(
+                        "\n[Search ignore hint: {} file(s) under this path are excluded by `.codegraphignore` (e.g. {}). If the target is one of them, retry with include_ignored=true.]",
+                        hint.noise.len(),
+                        examples(&hint.noise)
+                    ));
                 }
                 if !explicit_regex {
                     if let Some(hint) = literal_metachar_hint(&pattern) {
@@ -668,30 +716,29 @@ impl Tool for GrepTool {
                 }
                 ok(msg)
             }
-            Ok((lines, matches, _, timed_out)) => {
-                let capped = matches >= max;
+            Ok(((lines, matches, _, timed_out), _)) => {
                 let mut out = match a.output_mode {
                     OutputMode::FilesWithMatches => {
                         format!("{} files with matches:\n{}", lines.len(), lines.join("\n"))
                     }
                     OutputMode::Count | OutputMode::Content => lines.join("\n"),
                 };
-                if out.len() > MAX_OUTPUT_BYTES {
-                    out = truncate_grep_output(&lines, a.output_mode);
-                } else if capped {
-                    let entity = if a.output_mode == OutputMode::FilesWithMatches {
-                        "files"
-                    } else {
-                        "matches"
-                    };
-                    out.push_str(&format!(
-                        "\n\n[Results capped at {max} {entity}; raise `max_results` or add `glob` / `type` / a more specific `path`. For a feature/design/logic question, prefer code_explore(path, query='{pattern}').]"
-                    ));
-                }
-                if timed_out {
-                    out.push_str(&format!(
-                        "\n[Search timed out after {search_secs}s; showing matches collected so far. Narrow `path`/`glob` or use code_explore.]"
-                    ));
+                let byte_overflow = out.len() > MAX_OUTPUT_BYTES;
+                let hint = grep_overflow_hint(&GrepOverflow {
+                    matches,
+                    max,
+                    lines: &lines,
+                    mode: a.output_mode,
+                    timed_out,
+                    byte_overflow,
+                    include_ignored,
+                    has_context: before_ctx > 0 || after_ctx > 0,
+                });
+                if byte_overflow {
+                    out = truncate_grep_output(&lines, a.output_mode, &hint);
+                } else if !hint.is_empty() {
+                    out.push_str("\n\n");
+                    out.push_str(&hint);
                 }
                 if let Some(note) = recovered {
                     out = format!("{note}\n{out}");
@@ -717,7 +764,10 @@ async fn missing_path_fallback(
     // ① 工作区内同名候选（最多列 5 个；唯一时才自动选中）。
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     let deadline = Instant::now() + Duration::from_millis(800);
-    for_each_project_entry(working_dir, false, |entry| {
+    // The requested path is missing; include ignored files so a same-named
+    // local doc is still discovered and reported as a fallback candidate. Keep
+    // sensitive files out of the automatic fallback.
+    for_each_project_entry(working_dir, false, true, true, false, |entry| {
         if Instant::now() >= deadline || candidates.len() >= 6 {
             return false;
         }
@@ -940,9 +990,99 @@ fn next_constraint_field_start(rest: &str) -> usize {
     cut
 }
 
+/// Shape of a grep result that filled the display window. The hint tells the
+/// model which strategy to switch to instead of blindly raising `max_results`.
+struct GrepOverflow<'a> {
+    matches: usize,
+    max: usize,
+    lines: &'a [String],
+    mode: OutputMode,
+    timed_out: bool,
+    byte_overflow: bool,
+    include_ignored: bool,
+    has_context: bool,
+}
+
+fn grep_overflow_hint(o: &GrepOverflow<'_>) -> String {
+    let mut files: Vec<&str> = Vec::new();
+    for line in o.lines {
+        if let Some(path) = grep_match_path(line) {
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+    }
+    let file_count = files.len();
+    let first = files.first().copied().unwrap_or("<file>");
+    let broad_scan = if o.include_ignored {
+        " include_ignored=true expanded the scan to logs/build artifacts; narrow path/glob (e.g. path=\"logs\") to keep it focused."
+    } else {
+        ""
+    };
+
+    if o.timed_out {
+        return format!(
+            "[Search timed out after the configured limit. Next: narrow path/glob{}, or use code_explore for a semantic query.]",
+            if o.include_ignored {
+                ", set include_ignored=false"
+            } else {
+                ""
+            }
+        );
+    }
+
+    if o.byte_overflow {
+        if file_count <= 1 {
+            return format!(
+                "[Output exceeded 40KB in {first}. Next: grep(path=\"{first}\", max_results=50) or read(path=\"{first}\", keyword=\"...\", upward=20, downward=60); use output_mode=\"count\" to gauge volume.]{broad_scan}"
+            );
+        }
+        return format!(
+            "[Output exceeded 40KB across {file_count} files. Next: switch output_mode to \"files_with_matches\" or \"count\", then grep one path at a time; remove -C context if not needed.]{broad_scan}"
+        );
+    }
+
+    if o.matches < o.max {
+        return String::new();
+    }
+
+    let mode_hint = match o.mode {
+        OutputMode::FilesWithMatches => {
+            "The file list itself hit the cap; narrow path/glob or use output_mode=\"count\"."
+        }
+        OutputMode::Count => {
+            "The count rows hit the cap; narrow path/glob or add a more specific pattern."
+        }
+        OutputMode::Content if file_count <= 1 => "",
+        OutputMode::Content if file_count <= 3 => {
+            "Next: switch output_mode=\"files_with_matches\" or \"count\", then grep one path at a time."
+        }
+        OutputMode::Content => {
+            "Next: switch output_mode=\"files_with_matches\", pick 1-2 paths, and narrow with path/glob."
+        }
+    };
+
+    let content_hint = if o.mode == OutputMode::Content && file_count <= 1 {
+        format!(
+            "Next: grep(path=\"{first}\", max_results=50) or read(path=\"{first}\", keyword=\"...\", upward=20, downward=60) for a focused window."
+        )
+    } else {
+        mode_hint.to_string()
+    };
+    let context_hint = if o.has_context {
+        " Drop -C context if not needed."
+    } else {
+        ""
+    };
+    format!(
+        "[Output window full: {} matches across {file_count} files. {content_hint}{context_hint}{broad_scan}]",
+        o.matches
+    )
+}
+
 /// When content mode blows the 40KB display budget, return a file-list summary plus a
 /// short prefix of matches. Raising `max_results` cannot increase this byte cap.
-fn truncate_grep_output(lines: &[String], mode: OutputMode) -> String {
+fn truncate_grep_output(lines: &[String], mode: OutputMode, hint: &str) -> String {
     let mut files: Vec<String> = Vec::new();
     for line in lines {
         if let Some(path) = grep_match_path(line) {
@@ -951,11 +1091,15 @@ fn truncate_grep_output(lines: &[String], mode: OutputMode) -> String {
             }
         }
     }
-    let mut summary = format!(
-        "[Content exceeded 40KB ({} output lines across {} files). `max_results` does not increase this byte budget — use output_mode='files_with_matches', then grep individual files without `glob`/`-C`.]\nFiles with matches:\n",
-        lines.len(),
-        files.len()
-    );
+    let mut summary = if hint.is_empty() {
+        format!(
+            "[Content exceeded 40KB ({} output lines across {} files).]\nFiles with matches:\n",
+            lines.len(),
+            files.len()
+        )
+    } else {
+        format!("{hint}\nFiles with matches:\n")
+    };
     const FILE_LIST_CAP: usize = 80;
     for f in files.iter().take(FILE_LIST_CAP) {
         summary.push_str(f);
@@ -1037,6 +1181,25 @@ fn grep_glob_matches(rel: &Path, matcher: &GlobMatcher, pattern: &str) -> bool {
     false
 }
 
+/// Content check for a zero-match visibility hint. Only `.codegraphignore`
+/// noise files reach this helper; sensitive files are never read for a hint.
+fn file_matches_pattern(matcher: &RegexMatcher, path: &Path) -> bool {
+    const MAX_HINT_FILE_BYTES: u64 = 2 * 1024 * 1024;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > MAX_HINT_FILE_BYTES {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    if bytes.contains(&0) {
+        return false;
+    }
+    matcher.is_match(&bytes).unwrap_or(false)
+}
+
 fn search(
     root: &std::path::Path,
     matcher: &RegexMatcher,
@@ -1046,6 +1209,8 @@ fn search(
     output_mode: OutputMode,
     base: &std::path::Path,
     glob_filter: Option<&(GlobMatcher, String)>,
+    include_ignored: bool,
+    include_sensitive: bool,
     deadline: Instant,
 ) -> (Vec<String>, usize, usize, bool) {
     let mut out: Vec<String> = Vec::new();
@@ -1066,56 +1231,67 @@ fn search(
         .heap_limit(Some(MAX_LINE_BUF_BYTES))
         .build();
 
-    // hidden=true: grep historically skips dotfiles. `.jeikcode_store` is still
-    // visited even when hidden and gitignored, so uploaded attachments stay searchable.
-    for_each_project_entry(root, true, |entry| {
-        if Instant::now() >= deadline {
-            timed_out = true;
-            return false;
-        }
-        if match_count >= max {
-            return false;
-        }
-        let path = entry.path();
-        if !path.is_file() {
-            return true;
-        }
-        if let Some((glob, pat)) = glob_filter {
-            let rel = path.strip_prefix(root).unwrap_or(path);
-            if !grep_glob_matches(rel, glob, pat) {
+    // hidden=false: search must find dotfiles such as `.env` when explicitly asked.
+    // `.jeikcode_store` is still visited even when gitignored, so uploaded
+    // attachments stay searchable.
+    for_each_project_entry(
+        root,
+        false,
+        include_ignored,
+        include_ignored,
+        include_sensitive,
+        |entry| {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                return false;
+            }
+            if match_count >= max {
+                return false;
+            }
+            let path = entry.path();
+            if !path.is_file() {
                 return true;
             }
-        }
-        if path
-            .extension()
-            .map(|x| x.eq_ignore_ascii_case("log"))
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        files_searched += 1;
-        if files_searched % 64 == 0 {
-            std::thread::yield_now();
-        }
-        let rel = crate::pathnorm::to_display(path.strip_prefix(base).unwrap_or(path));
-        let mut file_matches = 0usize;
-        {
-            let mut sink = GrepSink {
-                rel: &rel,
-                out: &mut out,
-                match_count: &mut match_count,
-                max,
-                output_mode,
-                file_matches: &mut file_matches,
-            };
-            // io / binary / decode errors ⇒ skip the file (same as the old read failure).
-            let _ = searcher.search_path(matcher, path, &mut sink);
-        }
-        if output_mode == OutputMode::Count && file_matches > 0 {
-            out.push(format!("{}: {} matches", rel, file_matches));
-        }
-        true
-    });
+            if let Some((glob, pat)) = glob_filter {
+                let rel = path.strip_prefix(root).unwrap_or(path);
+                if !grep_glob_matches(rel, glob, pat) {
+                    return true;
+                }
+            }
+            // Log contents are high-cost and high-noise. `include_ignored=true` is
+            // the explicit "search logs too" switch; it also ascends LOG_DIRS.
+            if !include_ignored
+                && path
+                    .extension()
+                    .map(|x| x.eq_ignore_ascii_case("log"))
+                    .unwrap_or(false)
+            {
+                return true;
+            }
+            files_searched += 1;
+            if files_searched % 64 == 0 {
+                std::thread::yield_now();
+            }
+            let rel = crate::pathnorm::to_display(path.strip_prefix(base).unwrap_or(path));
+            let mut file_matches = 0usize;
+            {
+                let mut sink = GrepSink {
+                    rel: &rel,
+                    out: &mut out,
+                    match_count: &mut match_count,
+                    max,
+                    output_mode,
+                    file_matches: &mut file_matches,
+                };
+                // io / binary / decode errors ⇒ skip the file (same as the old read failure).
+                let _ = searcher.search_path(matcher, path, &mut sink);
+            }
+            if output_mode == OutputMode::Count && file_matches > 0 {
+                out.push(format!("{}: {} matches", rel, file_matches));
+            }
+            true
+        },
+    );
     (out, match_count, files_searched, timed_out)
 }
 
@@ -1556,10 +1732,285 @@ mod tests {
             r.content
         );
         assert!(
-            !r.content.contains("hidden.txt"),
-            "other gitignored files stay hidden: {}",
+            r.content.contains("hidden.txt"),
+            ".gitignore must not hide a searchable file: {}",
             r.content
         );
+    }
+
+    #[tokio::test]
+    async fn codegraphignore_filters_and_include_ignored_bypasses_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".codegraphignore"), "noise.txt\n").unwrap();
+        std::fs::write(d.path().join("noise.txt"), "NEEDLE noise\n").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "NEEDLE keep\n").unwrap();
+
+        let default = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(default.content.contains("keep.rs"), "{}", default.content);
+        assert!(
+            !default.content.contains("noise.txt"),
+            "codegraphignore must filter noise by default: {}",
+            default.content
+        );
+
+        let unfiltered = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE","include_ignored":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            unfiltered.content.contains("noise.txt"),
+            "include_ignored must bypass codegraphignore: {}",
+            unfiltered.content
+        );
+    }
+
+    #[tokio::test]
+    async fn searches_hidden_dotfiles_by_default() {
+        let d = tempfile::tempdir().unwrap();
+        // Non-credential dotfile: sensitive paths remain hard-excluded below.
+        std::fs::write(d.path().join(".hidden-notes"), "NEEDLE dotfile\n").unwrap();
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE","include_ignored":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            r.content.contains(".hidden-notes"),
+            "grep must search hidden files by default: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_match_hints_codegraphignore() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".codegraphignore"), "noise.txt\n").unwrap();
+        std::fs::write(d.path().join("noise.txt"), "NEEDLE_NOISE\n").unwrap();
+
+        let noise = GrepTool
+            .execute(r#"{"pattern":"NEEDLE_NOISE"}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            noise.content.contains("No matches found"),
+            "{}",
+            noise.content
+        );
+        assert!(
+            noise.content.contains("Search ignore hint"),
+            "noise zero-match must guide include_ignored: {}",
+            noise.content
+        );
+        assert!(
+            noise.content.contains("include_ignored=true"),
+            "{}",
+            noise.content
+        );
+
+        // Regex mode must also drive the hint through the real matcher.
+        let regex = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE_\\w+","is_regex":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            regex.content.contains("Search ignore hint"),
+            "regex zero-match must use the same hint path: {}",
+            regex.content
+        );
+
+        // A pattern that does not occur in the ignored file must NOT produce
+        // the ignore hint: the response stays the ordinary zero-match message.
+        let unrelated = GrepTool
+            .execute(r#"{"pattern":"NO_SUCH_TOKEN_ANYWHERE"}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            !unrelated.content.contains("Search ignore hint"),
+            "unrelated zero-match must keep the plain message: {}",
+            unrelated.content
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_match_hints_sensitive_paths() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".codegraphignore.graph"), ".env\n.env.*\n").unwrap();
+        std::fs::write(d.path().join(".env.local"), "SECRET_TOKEN\n").unwrap();
+
+        let sensitive = GrepTool
+            .execute(r#"{"pattern":"SECRET_TOKEN"}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            sensitive.content.contains("Sensitive path hint"),
+            "sensitive zero-match must explain the hard exclusion: {}",
+            sensitive.content
+        );
+        assert!(
+            sensitive.content.contains("read"),
+            "sensitive hint must point to approval-based read: {}",
+            sensitive.content
+        );
+        assert!(
+            !sensitive
+                .content
+                .contains("retry with include_ignored=true"),
+            "sensitive files must not be offered through include_ignored: {}",
+            sensitive.content
+        );
+
+        let still_hidden = GrepTool
+            .execute(
+                r#"{"pattern":"SECRET_TOKEN","include_ignored":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            still_hidden.content.contains("Sensitive path hint"),
+            "include_ignored must not expose sensitive files: {}",
+            still_hidden.content
+        );
+    }
+
+    #[tokio::test]
+    async fn logs_are_default_skipped_and_include_ignored_opens_them() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("logs")).unwrap();
+        std::fs::write(d.path().join("logs/app.log"), "NEEDLE_LOG\n").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "NEEDLE_LOG\n").unwrap();
+
+        let default = GrepTool
+            .execute(r#"{"pattern":"NEEDLE_LOG"}"#, &ctx(d.path()))
+            .await;
+        assert!(default.content.contains("keep.rs"), "{}", default.content);
+        assert!(
+            !default.content.contains("logs/app.log"),
+            "log files are default-excluded from grep: {}",
+            default.content
+        );
+
+        let opened = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE_LOG","include_ignored":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            opened.content.contains("logs/app.log"),
+            "include_ignored must open log files: {}",
+            opened.content
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_match_hints_logs() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("logs")).unwrap();
+        std::fs::write(d.path().join("logs/app.log"), "NEEDLE_LOG\n").unwrap();
+
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE_LOG"}"#, &ctx(d.path()))
+            .await;
+        assert!(r.content.contains("No matches found"), "{}", r.content);
+        assert!(
+            r.content.contains("Log search hint"),
+            "zero-match must explain the default log exclusion: {}",
+            r.content
+        );
+        assert!(r.content.contains("include_ignored=true"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn sensitive_paths_are_default_skipped_and_include_sensitive_opens_them() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".codegraphignore.graph"), ".env\n.env.*\n").unwrap();
+        std::fs::write(d.path().join(".env.local"), "NEEDLE_SECRET\n").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "NEEDLE_SECRET\n").unwrap();
+
+        let default = GrepTool
+            .execute(r#"{"pattern":"NEEDLE_SECRET"}"#, &ctx(d.path()))
+            .await;
+        assert!(default.content.contains("keep.rs"), "{}", default.content);
+        assert!(
+            !default.content.contains(".env.local"),
+            "sensitive files are default-excluded from grep: {}",
+            default.content
+        );
+
+        let opened = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE_SECRET","include_sensitive":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            opened.content.contains(".env.local"),
+            "include_sensitive must open sensitive files: {}",
+            opened.content
+        );
+    }
+
+    #[test]
+    fn grep_overflow_hint_shapes() {
+        let many_files = vec![
+            "a.rs:1:needle".to_string(),
+            "b.rs:1:needle".to_string(),
+            "c.rs:1:needle".to_string(),
+        ];
+        let many = grep_overflow_hint(&GrepOverflow {
+            matches: 3,
+            max: 3,
+            lines: &many_files,
+            mode: OutputMode::Content,
+            timed_out: false,
+            byte_overflow: false,
+            include_ignored: false,
+            has_context: false,
+        });
+        assert!(many.contains("files_with_matches"), "{many}");
+
+        let one_file = vec!["a.rs:1:needle".to_string(), "a.rs:2:needle".to_string()];
+        let single = grep_overflow_hint(&GrepOverflow {
+            matches: 2,
+            max: 2,
+            lines: &one_file,
+            mode: OutputMode::Content,
+            timed_out: false,
+            byte_overflow: false,
+            include_ignored: false,
+            has_context: false,
+        });
+        assert!(single.contains("read(path=\"a.rs\""), "{single}");
+
+        let byte = grep_overflow_hint(&GrepOverflow {
+            matches: 10,
+            max: 200,
+            lines: &many_files,
+            mode: OutputMode::Content,
+            timed_out: false,
+            byte_overflow: true,
+            include_ignored: true,
+            has_context: true,
+        });
+        assert!(byte.contains("40KB"), "{byte}");
+        assert!(byte.contains("include_ignored=true"), "{byte}");
+
+        let timeout = grep_overflow_hint(&GrepOverflow {
+            matches: 0,
+            max: 200,
+            lines: &[],
+            mode: OutputMode::Content,
+            timed_out: true,
+            byte_overflow: false,
+            include_ignored: false,
+            has_context: false,
+        });
+        assert!(timeout.contains("timed out"), "{timeout}");
+        assert!(timeout.contains("code_explore"), "{timeout}");
     }
 
     #[tokio::test]
@@ -1694,55 +2145,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn directional_context_after_and_before() {
-        let d = tempfile::tempdir().unwrap();
-        std::fs::write(
-            d.path().join("code.rs"),
-            "line 1\nline 2\nTARGET\nline 4\nline 5\nline 6\n",
-        )
-        .unwrap();
-
-        // Test after_context (-A 2): should show TARGET and lines 4, 5, but NOT line 2
-        let r_after = GrepTool
-            .execute(r#"{"pattern":"TARGET","-A":2}"#, &ctx(d.path()))
-            .await;
-        assert!(!r_after.is_error, "{}", r_after.content);
-        assert!(
-            r_after.content.contains("code.rs:3:TARGET"),
-            "{}",
-            r_after.content
-        );
-        assert!(
-            r_after.content.contains("code.rs-4-line 4"),
-            "{}",
-            r_after.content
-        );
-        assert!(
-            r_after.content.contains("code.rs-5-line 5"),
-            "{}",
-            r_after.content
-        );
-        assert!(!r_after.content.contains("line 2"), "{}", r_after.content);
-
-        // Test before_context (-B 1): should show line 2 and TARGET, but NOT line 4
-        let r_before = GrepTool
-            .execute(r#"{"pattern":"TARGET","-B":1}"#, &ctx(d.path()))
-            .await;
-        assert!(!r_before.is_error, "{}", r_before.content);
-        assert!(
-            r_before.content.contains("code.rs-2-line 2"),
-            "{}",
-            r_before.content
-        );
-        assert!(
-            r_before.content.contains("code.rs:3:TARGET"),
-            "{}",
-            r_before.content
-        );
-        assert!(!r_before.content.contains("line 4"), "{}", r_before.content);
-    }
-
-    #[tokio::test]
     async fn output_mode_files_with_matches() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.rs"), "NEEDLE once\nNEEDLE twice\n").unwrap();
@@ -1854,12 +2256,8 @@ mod tests {
         assert!(r_c.content.contains("main.c"), "{}", r_c.content);
         assert!(!r_c.content.contains("Program.cs"), "{}", r_c.content);
 
-        // semantic alias after_context
         let r_alias = GrepTool
-            .execute(
-                r#"{"pattern":"COMMON_MARKER","type":"js","after_context":1}"#,
-                &ctx(d.path()),
-            )
+            .execute(r#"{"pattern":"COMMON_MARKER","type":"js"}"#, &ctx(d.path()))
             .await;
         assert!(r_alias.content.contains("index.js"), "{}", r_alias.content);
     }

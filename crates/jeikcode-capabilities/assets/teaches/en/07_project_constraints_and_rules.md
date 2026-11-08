@@ -38,8 +38,8 @@ The system supports 3 specialized domain knowledge files within the project, che
 | **Prompt Wrap** | `<workspace>/.jeikcode/user-wrap.md` or `<workspace>/user-wrap.md` |
 | **Project MCP** | `<workspace>/.mcp.json` |
 | **Project Thesaurus** | `<workspace>/.jeikcode/thesaurus/*.txt` |
-| **Index Ignore** | `<workspace>/.codegraphignore` (Ignored when building code graph, even if tracked in git; noise rules also apply to glob/grep) |
-| **Credential Ignore (Graph Only)** | `<workspace>/.codegraphignore.graph` (`.env`, secrets, SSH keys hidden **only from graph**; explicit glob/grep can still locate them) |
+| **Index/Search Ignore** | `<workspace>/.codegraphignore` (Noise rules for code graph and the default glob/grep filter; `include_ignored=true` opens them) |
+| **Sensitive Credential Rules (Graph + Default Search Exclusion)** | `<workspace>/.codegraphignore.graph` (`.env`, secrets, SSH keys are hidden from graph indexing and excluded from glob/grep by default; `include_sensitive=true` enables approved search) |
 
 ---
 

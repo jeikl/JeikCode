@@ -35,6 +35,14 @@ Short commands undergo health checks at every `silent_kill_secs`: pager/REPL/ful
 - Use `"$TMPDIR"` (or `"$TMP"` / `"$TEMP"`) instead of hardcoded `/tmp`, and `"$DESKTOP"` instead of assuming `~/Desktop`: both work identically inside the shell and as **arguments passed to native Windows programs** (python / node / curl). `"$TMPDIR_WIN"` / `"$DESKTOP_WIN"` are aliases for nested non-bash shell scenarios.
 - Undefined environment variables are **preserved verbatim** (never silently stripped); a typo in a variable name stays relative within the workspace and is exposed in error diagnostics rather than escaping to the filesystem drive root.
 
+### 1.3 grep / glob Search Visibility
+
+- Default search covers source, docs, tests, and ordinary config; build artifacts/caches/dependencies are ignored.
+- `glob` includes log paths by default (paths only); `grep` skips log contents by default.
+- `include_ignored=true` opens build artifacts/caches/dependencies; for grep it also opens log contents.
+- `include_sensitive=true` opens sensitive credential paths; Build/AcceptEdits/Plan prompt, Auto continues.
+- `read` does not apply the ignore filter to an explicit path; sensitive paths go through `SensitivePathGate`.
+
 ---
 
 ## 2. In-Process Short Timeout Budgets (`[tools.timeouts]`)

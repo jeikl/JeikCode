@@ -1139,9 +1139,9 @@ fn load_codegraph_ignore(root: &Path) -> ignore::gitignore::Gitignore {
     let cfg = crate::paths::config_dir();
     for p in [
         // `.codegraphignore` = noise rules shared with glob/grep search;
-        // `.codegraphignore.graph` = GRAPH-ONLY sensitive rules (`.env*`, keys, SSH) —
-        // search must still find what the user explicitly asks for, so those rules are
-        // never registered with the search walker. Two scopes, two files, no duplication.
+        // `.codegraphignore.graph` = sensitive rules (`.env*`, keys, SSH), applied to
+        // code graph indexing and as the default glob/grep exclusion. `include_ignored`
+        // never exposes them; `include_sensitive` is approval-gated.
         root.join(".codegraphignore"),
         root.join(".codegraignore"),
         root.join(".codegraphignore.graph"),
@@ -1164,8 +1164,8 @@ fn load_codegraph_ignore(root: &Path) -> ignore::gitignore::Gitignore {
     })
 }
 
-/// The GRAPH-ONLY sensitive list must keep credentials out of indexing while the SHARED
-/// noise list stays search-visible (see `assets/.codegraphignore.graph`).
+/// The sensitive list must keep credentials out of indexing and default search while the
+/// shared noise list stays search-visible (see `assets/.codegraphignore.graph`).
 #[cfg(test)]
 mod graph_ignore_scope_tests {
     use super::load_codegraph_ignore;

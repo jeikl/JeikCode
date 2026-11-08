@@ -1,9 +1,17 @@
-//! `glob` — find files by glob pattern under a base directory, gitignore-aware.
-//! Read-only ⇒ always `Safe`. Standard ripgrep / grok-build glob semantics:
+//! `glob` — find files by glob pattern under a base directory, codegraphignore-aware.
+//! `.gitignore` / `.ignore` are intentionally NOT applied: VCS ignore rules describe
+//! what should be committed, not what the user may ask us to find. The curated
+//! `.codegraphignore` / `.codegraignore` rules are the search-visibility authority;
+//! `include_ignored=true` bypasses the non-sensitive noise/log layers. Sensitive
+//! paths from `.codegraphignore.graph` are excluded by default; `include_sensitive=true`
+//! is approval-gated (Build prompts, Auto continues). Read-only ⇒ always `Safe`.
+//! Standard ripgrep / grok-build glob semantics:
 //! - Patterns without `/` (e.g. `*.sh`, `*release*`) match against filename and recursively penetrate subdirectories.
 //! - Patterns with `/` (e.g. `scripts/*.sh`, `**/*.rs`) match against the relative path.
 //! - A leading `./` is stripped, so `./*.rs` is the same pattern as `*.rs`.
-//! Build/VCS/cache dirs are skipped; results sorted by modification time, capped at 300 by default (raise `limit`).
+//! Build/VCS/cache dirs are skipped by default; log paths are included by default
+//! for discovery. Results are sorted by modification time, capped at 300 by default
+//! (raise `limit`).
 
 use super::{err, for_each_project_entry, is_absolute_path, not_found_hint, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
@@ -33,6 +41,22 @@ struct Args {
     /// Default false = files only. Set true to also return matching directories.
     #[serde(default)]
     include_dirs: bool,
+    /// Bypass `.codegraphignore` / `.codegraignore` and show files normally
+    /// filtered from search. `.gitignore` is never applied to search.
+    #[serde(
+        default,
+        alias = "no_ignore",
+        alias = "show_filtered",
+        alias = "include_filtered"
+    )]
+    include_ignored: bool,
+    /// Include sensitive credential paths. Approval-gated outside Auto mode.
+    #[serde(
+        default,
+        alias = "show_sensitive",
+        alias = "include_filtered_sensitive"
+    )]
+    include_sensitive: bool,
 }
 
 #[async_trait]
@@ -41,7 +65,7 @@ impl Tool for GlobTool {
         "glob"
     }
     fn description(&self) -> &str {
-        "Find files matching a glob pattern under a base directory."
+        "Find files matching a glob pattern under a base directory. Defaults exclude build/cache/dependency paths; logs are included. Sensitive paths require include_sensitive=true (approval)."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -59,6 +83,16 @@ impl Tool for GlobTool {
                     "type": "boolean",
                     "default": false,
                     "description": "Whether to include matching directory paths (default false)."
+                },
+                "include_ignored": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include non-sensitive paths filtered from search: build artifacts, caches, dependencies, and logs (default false)."
+                },
+                "include_sensitive": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include sensitive credential paths (default false). Requires approval outside Auto mode."
                 }
             },
             "required": ["pattern"]
@@ -121,15 +155,28 @@ impl Tool for GlobTool {
 
         let wd = ctx.working_dir.clone();
         let base2 = base.clone();
+        let hint_base = base.clone();
+        let hint_matcher = matcher.clone();
+        let hint_has_separator = has_separator;
         let pattern = a.pattern.clone();
         let include_dirs = a.include_dirs;
+        let include_ignored = a.include_ignored;
+        let include_sensitive = a.include_sensitive;
         let case_sensitive = a.case_sensitive;
         let match_pattern_clone = match_pattern.clone();
         let search_secs = super::tool_timeouts().search_secs;
         let res = tokio::task::spawn_blocking(move || {
             let deadline = Instant::now() + Duration::from_secs(search_secs);
-            let (mut hits, mut timed_out) =
-                run_glob_walk(&base2, &wd, &matcher, has_separator, include_dirs, deadline);
+            let (mut hits, mut timed_out) = run_glob_walk(
+                &base2,
+                &wd,
+                &matcher,
+                has_separator,
+                include_dirs,
+                include_ignored,
+                include_sensitive,
+                deadline,
+            );
 
             // 零额外交互静默自愈：若首轮搜索 0 匹配且检测到反斜杠转义通配符/标点（例如 `\*.rs`、`foo\.rs` 等），
             // 剥离防卫性转义后重新构建 matcher 重试一次，救活大模型常见模式
@@ -154,6 +201,8 @@ impl Tool for GlobTool {
                             &retry_matcher,
                             has_sep,
                             include_dirs,
+                            include_ignored,
+                            include_sensitive,
                             deadline,
                         );
                         if !retry_hits.is_empty() {
@@ -180,6 +229,36 @@ impl Tool for GlobTool {
                         "\n[Search timed out after {search_secs}s; narrow the pattern/path]"
                     ));
                 }
+                let hint =
+                    super::search_visibility_hint(&hint_base, a.include_sensitive, true, |path| {
+                        if hint_has_separator {
+                            let rel = path.strip_prefix(&hint_base).unwrap_or(path);
+                            hint_matcher.is_match(rel)
+                        } else {
+                            hint_matcher.is_match(path.file_name().unwrap_or_default())
+                        }
+                    });
+                let examples = |paths: &[std::path::PathBuf]| {
+                    paths
+                        .iter()
+                        .take(3)
+                        .map(|p| crate::pathnorm::to_display(p))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if !hint.sensitive.is_empty() {
+                    msg.push_str(&format!(
+                        "\n[Sensitive path hint: {} credential file(s) under this path are excluded from search (e.g. {}). Use `read` with explicit approval, or retry with include_sensitive=true (approval required outside Auto mode).]",
+                        hint.sensitive.len(),
+                        examples(&hint.sensitive)
+                    ));
+                } else if !a.include_ignored && !hint.noise.is_empty() {
+                    msg.push_str(&format!(
+                        "\n[Search ignore hint: {} file(s) under this path are excluded by `.codegraphignore` (e.g. {}). If the target is one of them, retry with include_ignored=true.]",
+                        hint.noise.len(),
+                        examples(&hint.noise)
+                    ));
+                }
                 ok(msg)
             }
             Ok((mut hits, timed_out)) => {
@@ -188,7 +267,6 @@ impl Tool for GlobTool {
                     .unwrap_or(DEFAULT_MAX_RESULTS)
                     .clamp(1, MAX_RESULTS_CAP);
                 let total = hits.len();
-                let extra = total.saturating_sub(cap);
                 if total > cap {
                     hits.truncate(cap);
                 }
@@ -197,21 +275,59 @@ impl Tool for GlobTool {
                     "{total} {noun} found (sorted by modification time, most recent first):\n{}",
                     hits.join("\n")
                 );
-                if extra > 0 {
-                    out.push_str(&format!(
-                        "\n[{extra} more {noun} not shown; raise `limit` or narrow the pattern/path]"
-                    ));
-                }
-                if timed_out {
-                    out.push_str(&format!(
-                        "\n[Search timed out after {search_secs}s; showing matches collected so far]"
-                    ));
+                let hint = glob_overflow_hint(
+                    total,
+                    cap,
+                    timed_out,
+                    a.include_ignored,
+                    &a.pattern,
+                    search_secs,
+                );
+                if !hint.is_empty() {
+                    out.push_str("\n\n");
+                    out.push_str(&hint);
                 }
                 ok(out)
             }
             Err(_) => err("glob: search task failed".to_string()),
         }
     }
+}
+
+/// Shape-aware guidance when the path list fills the display window.
+fn glob_overflow_hint(
+    total: usize,
+    cap: usize,
+    timed_out: bool,
+    include_ignored: bool,
+    pattern: &str,
+    search_secs: u64,
+) -> String {
+    if timed_out {
+        return format!(
+            "[Search timed out after {search_secs}s. Next: narrow pattern/path{}; avoid `**/*` at the repo root; search a subdirectory first.]",
+            if include_ignored {
+                ", set include_ignored=false"
+            } else {
+                ""
+            }
+        );
+    }
+    if total <= cap {
+        return String::new();
+    }
+    let mut hint = format!(
+        "[Output window full: {total} paths (limit {cap}). Next: narrow pattern/path (e.g. pattern=\"src/**/*.ts\" or path=\"src\"), keep include_dirs=false, or raise limit only if the full list is truly needed. Prefer glob to locate, then grep one path.]"
+    );
+    if include_ignored {
+        hint.push_str(
+            " include_ignored=true expanded the scan to logs/build artifacts; narrow path/glob (e.g. path=\"logs\") first.",
+        );
+    }
+    if pattern.contains("**/*") || pattern == "**" || pattern == "*" {
+        hint.push_str(" Avoid broad patterns at the repo root; start from a subdirectory.");
+    }
+    hint
 }
 
 /// 执行单次文件系统遍历并搜集命中项
@@ -221,56 +337,65 @@ fn run_glob_walk(
     matcher: &globset::GlobMatcher,
     has_separator: bool,
     include_dirs: bool,
+    include_ignored: bool,
+    include_sensitive: bool,
     deadline: Instant,
 ) -> (Vec<(String, std::time::SystemTime)>, bool) {
     let mut timed_out = false;
     let mut hits: Vec<(String, std::time::SystemTime)> = Vec::new();
-    // hidden=false: glob historically searches hidden files unless gitignored.
-    // `.jeikcode_store` is still visited even after it is gitignored.
-    for_each_project_entry(base, false, |entry| {
-        if Instant::now() >= deadline {
-            timed_out = true;
-            return false;
-        }
-        let path = entry.path();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
-        if path == base {
-            return true; // never list the search root itself
-        }
-        if is_file {
-            // keep
-        } else if include_dirs && is_dir {
-            // keep
-        } else {
-            return true;
-        }
-        // Match standard glob semantics (ripgrep / grok-build aligned):
-        // If pattern contains a path separator (e.g. "src/*.rs", "**/*.sh"), match the relative path.
-        // If pattern does not contain any path separator (e.g. "*.sh", "*release*", "Cargo.toml"),
-        // match against the file basename directly, enabling recursive auto-penetration across all subdirectories.
-        let matched = if has_separator {
-            let rel = path.strip_prefix(base).unwrap_or(path);
-            matcher.is_match(rel)
-        } else {
-            matcher.is_match(entry.file_name())
-        };
-
-        if matched {
-            // Display relative to the working dir for usable paths.
-            let mut shown = crate::pathnorm::to_display(path.strip_prefix(wd).unwrap_or(path));
-            if is_dir && !shown.ends_with('/') {
-                shown.push('/');
+    // hidden=false: glob searches hidden files by default. `.gitignore` is not
+    // applied to search; `.jeikcode_store` is always visited.
+    for_each_project_entry(
+        base,
+        false,
+        include_ignored,
+        true,
+        include_sensitive,
+        |entry| {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                return false;
             }
-            let mtime = entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            hits.push((shown, mtime));
-        }
-        true
-    });
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+            if path == base {
+                return true; // never list the search root itself
+            }
+            if is_file {
+                // keep
+            } else if include_dirs && is_dir {
+                // keep
+            } else {
+                return true;
+            }
+            // Match standard glob semantics (ripgrep / grok-build aligned):
+            // If pattern contains a path separator (e.g. "src/*.rs", "**/*.sh"), match the relative path.
+            // If pattern does not contain any path separator (e.g. "*.sh", "*release*", "Cargo.toml"),
+            // match against the file basename directly, enabling recursive auto-penetration across all subdirectories.
+            let matched = if has_separator {
+                let rel = path.strip_prefix(base).unwrap_or(path);
+                matcher.is_match(rel)
+            } else {
+                matcher.is_match(entry.file_name())
+            };
+
+            if matched {
+                // Display relative to the working dir for usable paths.
+                let mut shown = crate::pathnorm::to_display(path.strip_prefix(wd).unwrap_or(path));
+                if is_dir && !shown.ends_with('/') {
+                    shown.push('/');
+                }
+                let mtime = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                hits.push((shown, mtime));
+            }
+            true
+        },
+    );
     (hits, timed_out)
 }
 
@@ -665,7 +790,7 @@ mod tests {
         let sub = work.path().join("src").join("components");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("Chat.tsx"), "export const Chat = 1;\n").unwrap();
-        std::fs::write(work.path().join(".env.local"), "SECRET=123\n").unwrap();
+        std::fs::write(work.path().join(".hidden-notes"), "note\n").unwrap();
 
         // 1. Windows backslash matching
         let r1 = GlobTool
@@ -683,34 +808,33 @@ mod tests {
 
         // 3. Hidden file matching
         let r3 = GlobTool
-            .execute(r#"{"pattern":".env*"}"#, &ctx(work.path()))
+            .execute(r#"{"pattern":".hidden*"}"#, &ctx(work.path()))
             .await;
         assert!(!r3.is_error, "r3 failed: {}", r3.content);
-        assert!(r3.content.contains(".env.local"));
+        assert!(r3.content.contains(".hidden-notes"));
     }
 
-    /// The SHIPPED ignore list must not hide `.env*` from search.
+    /// The SHIPPED noise list must not hide non-secret `.env` templates from search.
     ///
-    /// Regression lock for the reported flake: the asset briefly carried `.env` / `.env.*`,
-    /// which (a) silently hid `.env.local` from `glob` / `grep` — and because an earlier
-    /// test seeds the list into `~/.jeikcode/.codegraphignore`, it failed ONLY in the full
-    /// suite while passing in isolation — and (b) made `grep` on `.env` lie.
+    /// Real `.env` / `.env.local` files are hard-excluded by `.codegraphignore.graph`
+    /// (credentials never enter grep/glob results); the committed template variants
+    /// carry dummy values and must remain visible.
     #[tokio::test]
-    async fn shipped_ignore_does_not_hide_env_files_from_glob() {
+    async fn shipped_ignore_does_not_hide_env_templates_from_glob() {
         let work = tempfile::tempdir().unwrap();
         std::fs::write(
             work.path().join(".codegraphignore"),
             include_str!("../../assets/.codegraphignore"),
         )
         .unwrap();
-        std::fs::write(work.path().join(".env.local"), "SECRET=1\n").unwrap();
+        std::fs::write(work.path().join(".env.example"), "SECRET=1\n").unwrap();
         let r = GlobTool
             .execute(r#"{"pattern":".env*"}"#, &ctx(work.path()))
             .await;
         assert!(!r.is_error, "failed: {}", r.content);
         assert!(
-            r.content.contains(".env.local"),
-            "the shipped ignore list must NOT hide .env files from glob: {}",
+            r.content.contains(".env.example"),
+            "the shipped noise list must NOT hide env templates from glob: {}",
             r.content
         );
     }
@@ -865,10 +989,102 @@ mod tests {
             r.content
         );
         assert!(
-            !r.content.contains("secret.txt"),
-            "other gitignored files stay hidden: {}",
+            r.content.contains("secret.txt"),
+            ".gitignore must not hide a searchable file: {}",
             r.content
         );
+    }
+
+    #[tokio::test]
+    async fn codegraphignore_filters_and_include_ignored_bypasses_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".codegraphignore"), "noise.txt\n").unwrap();
+        std::fs::write(d.path().join("noise.txt"), "").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "").unwrap();
+
+        let default = GlobTool.execute(r#"{"pattern":"*"}"#, &ctx(d.path())).await;
+        assert!(default.content.contains("keep.rs"), "{}", default.content);
+        assert!(
+            !default.content.contains("noise.txt"),
+            "codegraphignore must filter noise by default: {}",
+            default.content
+        );
+
+        let unfiltered = GlobTool
+            .execute(r#"{"pattern":"*","include_ignored":true}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            unfiltered.content.contains("noise.txt"),
+            "include_ignored must bypass codegraphignore: {}",
+            unfiltered.content
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_lists_log_paths_by_default() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("logs")).unwrap();
+        std::fs::write(d.path().join("logs/app.log"), "").unwrap();
+        let r = GlobTool
+            .execute(r#"{"pattern":"**/*.log"}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            r.content.contains("logs/app.log"),
+            "glob must list log paths by default: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_hides_sensitive_by_default_and_include_sensitive_opens() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".codegraphignore.graph"), ".env\n.env.*\n").unwrap();
+        std::fs::write(d.path().join(".env.local"), "").unwrap();
+
+        let default = GlobTool
+            .execute(r#"{"pattern":".env*"}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            default.content.contains("No files matching"),
+            "glob must hide sensitive paths by default: {}",
+            default.content
+        );
+        assert!(
+            default.content.contains("Sensitive path hint"),
+            "glob must explain the sensitive exclusion: {}",
+            default.content
+        );
+
+        let opened = GlobTool
+            .execute(
+                r#"{"pattern":".env*","include_sensitive":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            opened.content.contains(".env.local"),
+            "include_sensitive must open sensitive paths: {}",
+            opened.content
+        );
+        assert!(
+            !opened.content.contains("Sensitive path hint"),
+            "include_sensitive result must not report the path as excluded: {}",
+            opened.content
+        );
+    }
+
+    #[test]
+    fn glob_overflow_hint_shapes() {
+        let full = glob_overflow_hint(400, 300, false, false, "**/*", 20);
+        assert!(full.contains("Output window full"), "{full}");
+        assert!(full.contains("narrow"), "{full}");
+        assert!(full.contains("Avoid broad patterns"), "{full}");
+
+        let ignored = glob_overflow_hint(400, 300, false, true, "src/**/*.rs", 20);
+        assert!(ignored.contains("include_ignored=true"), "{ignored}");
+
+        let timeout = glob_overflow_hint(0, 300, true, false, "*", 20);
+        assert!(timeout.contains("timed out"), "{timeout}");
     }
 
     #[test]
