@@ -5992,6 +5992,7 @@ export function Chat({
           message_id: item.messageId,
           part_id: item.partId,
           part_rev: item.partRev,
+          seq: item.recordSeq,
         } as any);
       }
       return;
@@ -6016,6 +6017,7 @@ export function Chat({
           message_id: ids?.messageId,
           part_id: ids?.partId,
           part_rev: ids?.partRev,
+          seq: ids?.seq,
         } as any);
         return;
       }
@@ -6026,6 +6028,7 @@ export function Chat({
         messageId: ids?.messageId,
         partId: ids?.partId,
         partRev: ids?.partRev,
+        recordSeq: ids?.seq,
       });
       return;
     }
@@ -6035,6 +6038,7 @@ export function Chat({
       messageId: ids?.messageId,
       partId: ids?.partId,
       partRev: ids?.partRev,
+      recordSeq: ids?.seq,
     });
     if (textRafRef.current == null) {
       textRafRef.current = window.requestAnimationFrame(() => {
@@ -8432,8 +8436,8 @@ export function Chat({
     if (activeIdRef.current) artifactOpenBySessionRef.current.delete(activeIdRef.current);
   }
 
-  function addToolToLastAssistant(tool: ToolRow, messageId?: string) {
-    setMessages({ type: 'tool_start', tool, messageId });
+  function addToolToLastAssistant(tool: ToolRow, messageId?: string, recordSeq?: number) {
+    setMessages({ type: 'tool_start', tool, messageId, recordSeq });
   }
 
   /**
@@ -8529,6 +8533,7 @@ export function Chat({
         messageId: event.message_id,
         partId: event.part_id,
         partRev: event.part_rev,
+        recordSeq: (event as { seq?: number }).seq,
       }));
       return;
     }
@@ -8577,6 +8582,7 @@ export function Chat({
         messageId: event.message_id,
         partId: event.part_id,
         partRev: event.part_rev,
+        recordSeq: (event as { seq?: number }).seq,
       }));
       return;
     }
@@ -8707,6 +8713,7 @@ export function Chat({
             ...(subtasks ? { subtasks } : {}),
           },
           messageId: event.message_id,
+          recordSeq: (event as { seq?: number }).seq,
         });
         break;
       }
@@ -9168,7 +9175,12 @@ export function Chat({
         appendToLastAssistant(
           event.content,
           { requireReplayDedup },
-          { messageId: event.message_id, partId: event.part_id, partRev: event.part_rev },
+          {
+            messageId: event.message_id,
+            partId: event.part_id,
+            partRev: event.part_rev,
+            seq: (event as { seq?: number }).seq,
+          },
           opts?.targetSid,
         );
         const textDelta = estimateTextTokens(event.content);
@@ -9191,6 +9203,7 @@ export function Chat({
           messageId: event.message_id,
           partId: event.part_id,
           partRev: event.part_rev,
+          recordSeq: (event as { seq?: number }).seq,
         });
         const rDelta = estimateTextTokens(event.content);
         if (rDelta > 0) {
@@ -9214,7 +9227,7 @@ export function Chat({
           args: argsStr,
           status: 'pending',
           ...(subtasks ? { subtasks } : {}),
-        }, event.message_id);
+        }, event.message_id, (event as { seq?: number }).seq);
         if (isTodoTool(event.name)) {
           const replayTodoFrame = (event as { replay?: boolean }).replay === true;
           if (replayTodoFrame && activeIdRef.current && todoBoardEmptyRef.current.has(activeIdRef.current)) {

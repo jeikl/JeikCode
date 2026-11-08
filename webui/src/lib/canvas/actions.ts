@@ -14,12 +14,14 @@ import {
   assistantRowOwner,
   bindUserMessageIdentity,
   identifiedAssistantIndex,
+  insertAssistantRowInCausalOrder,
   mergeOlderMessages,
   paintAssistantNotice,
   paintAssistantReasoning,
   paintAssistantText,
   paintUserMessage,
   sameTurnAssistantIndex,
+  stampAssistantRowSeq,
   stampUserClientInputId,
   stampUserSourceIndex,
   visibleToolChunk,
@@ -99,7 +101,7 @@ export type CanvasEventAction =
       text: string;
       ts?: number;
     }
-  | { type: 'tool_start'; tool: ToolRow; messageId?: string }
+  | { type: 'tool_start'; tool: ToolRow; messageId?: string; recordSeq?: number }
   | {
       type: 'tool_update';
       id: string;
@@ -197,26 +199,6 @@ export function clearPendingInput<
   return changed ? next : rows;
 }
 
-function stampNewAssistantSeq<T extends CanvasRowLike & ProjectionMessage>(
-  before: number,
-  rows: T[],
-  seq: number | undefined,
-): T[] {
-  if (seq == null || rows.length <= before) return rows;
-  const index = rows.length - 1;
-  const row = rows[index] as T & { seq?: number };
-  if (row.role !== 'assistant' || typeof row.seq === 'number') return rows;
-  let maxExisting = -1;
-  for (let i = 0; i < index; i += 1) {
-    const existing = rows[i]?.seq;
-    if (typeof existing === 'number' && existing > maxExisting) maxExisting = existing;
-  }
-  if (seq <= maxExisting) return rows;
-  const next = rows.slice();
-  next[index] = { ...row, seq } as T;
-  return next;
-}
-
 /** Update an existing tool row by stable call id. */
 function updateToolRow<T extends CanvasRowLike & ProjectionMessage>(
   rows: T[],
@@ -247,12 +229,18 @@ function upsertToolRow<T extends CanvasRowLike & ProjectionMessage>(
   rows: T[],
   tool: ToolRow,
   messageId?: string,
+  recordSeq?: number,
 ): T[] {
+  const newToolRow = () => ({
+    role: 'assistant',
+    ...(messageId ? { id: messageId } : {}),
+    parts: [{ kind: 'tool', tool }],
+  } as unknown as T);
   if (rows.length === 0) {
     // A tool-only round may emit `tool_start` before any text/placeholder.
     // Create the owning assistant row instead of dropping the tool card.
     return withAssistantIdentity(
-      [{ role: 'assistant', parts: [{ kind: 'tool', tool }] } as unknown as T],
+      insertAssistantRowInCausalOrder(rows, newToolRow(), recordSeq),
       messageId,
     );
   }
@@ -263,7 +251,7 @@ function upsertToolRow<T extends CanvasRowLike & ProjectionMessage>(
     const next = rows.slice();
     const row = rows[owner]!;
     next[owner] = { ...row, parts: upsertToolPart(row.parts ?? [], tool) };
-    return next;
+    return stampAssistantRowSeq(next, owner, recordSeq);
   }
   const ownerIdx = sameTurnAssistantIndex(rows);
   const tail = ownerIdx >= 0 ? rows[ownerIdx] : undefined;
@@ -274,17 +262,23 @@ function upsertToolRow<T extends CanvasRowLike & ProjectionMessage>(
   // 重连后就会出现「工具挂在错误的气泡里 / 一行多个 owner」。
   const tailOwner = tail ? assistantRowOwner(tail as unknown as { id?: string; parts?: MsgPart[] }) : undefined;
   const crossOwner = !!messageId && !!tailOwner && tailOwner !== messageId;
-  let next: T[];
   if (tail && !lastSettled && !crossOwner) {
-    next = rows.slice();
-    next[ownerIdx] = { ...tail, parts: upsertToolPart(tail.parts ?? [], tool) };
-  } else {
-    next = [
-      ...rows,
-      { role: 'assistant', parts: [{ kind: 'tool', tool }] } as unknown as T,
-    ];
+    const next = rows.slice();
+    const merged = { ...tail, parts: upsertToolPart(tail.parts ?? [], tool) } as T & { id?: string };
+    // The receiving row may be an id-less placeholder created before the first
+    // frame. Stamp the round id here: `withAssistantIdentity` only looks at the
+    // LAST assistant row, and a causally-inserted earlier row is not last.
+    if (messageId && !merged.id) merged.id = messageId;
+    next[ownerIdx] = merged;
+    return withAssistantIdentity(
+      stampAssistantRowSeq(next, ownerIdx, recordSeq),
+      messageId,
+    );
   }
-  return withAssistantIdentity(next, messageId);
+  return withAssistantIdentity(
+    insertAssistantRowInCausalOrder(rows, newToolRow(), recordSeq),
+    messageId,
+  );
 }
 
 function updateToolOutputRow<T extends CanvasRowLike & ProjectionMessage>(
@@ -394,22 +388,30 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
           action.messageId,
           action.partId,
           action.partRev,
+          action.recordSeq,
         ),
         action.messageId,
         action.partId,
       );
-      next = stampNewAssistantSeq(rows.length, next, action.recordSeq);
       break;
     case 'text_batch': {
       let acc = rows;
       for (const item of action.items) {
         acc = withAssistantIdentity(
-          paintAssistantText(acc, item.content, false, item.messageId, item.partId, item.partRev),
+          paintAssistantText(
+            acc,
+            item.content,
+            false,
+            item.messageId,
+            item.partId,
+            item.partRev,
+            item.recordSeq ?? action.items[0]?.recordSeq,
+          ),
           item.messageId,
           item.partId,
         );
       }
-      next = stampNewAssistantSeq(rows.length, acc, action.items[0]?.recordSeq);
+      next = acc;
       break;
     }
     case 'reasoning':
@@ -421,11 +423,11 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
           action.messageId,
           action.partId,
           action.partRev,
+          action.recordSeq,
         ),
         action.messageId,
         action.partId,
       );
-      next = stampNewAssistantSeq(rows.length, next, action.recordSeq);
       break;
     case 'notice':
       next = paintAssistantNotice(rows, action.text, action.targetId, action.id);
@@ -478,7 +480,7 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
       break;
     }
     case 'tool_start':
-      next = upsertToolRow(rows, action.tool, action.messageId);
+      next = upsertToolRow(rows, action.tool, action.messageId, action.recordSeq);
       break;
     case 'tool_update':
       next = updateToolRow(rows, action.id, action.update, action.derive);
