@@ -10467,7 +10467,6 @@ export function Chat({
     // does not append a second user bubble.
     pendingSelfEchoRef.current.push({ id: requestId, text });
     let boundSessionId = sessionId ?? activeIdRef.current;
-    let acceptedWithoutSession = false;
     let keepStopAlias = false;
     let deliveryOutcome: 'ok' | 'busy' | 'error' = 'ok';
 
@@ -10555,10 +10554,10 @@ export function Chat({
         onSessionId(effectiveSid, { claimView: stillViewingTurn });
         onTurnRunningChange?.(effectiveSid, true);
       }
-      if (!sessionId || acceptedWithoutSession) {
-        acceptedWithoutSession = false;
-        if (boundSessionId) onAccepted?.(boundSessionId);
-      }
+      // Every successfully accepted prompt belongs in this session's history,
+      // not only a new session's first send. The recorder resolves a session-
+      // scoped bucket, so existing sessions and newly assigned ids both work.
+      if (boundSessionId) onAccepted?.(boundSessionId);
       // 单事件总线架构：提问由后端承认（202 Accepted）并自动发布至广播总线，
       // 前端统一由 watchChatSession 接收全量实时事件与回放，彻底杜绝双流竞态。
       const currentProjectHash =

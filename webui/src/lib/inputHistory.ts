@@ -69,8 +69,20 @@ export class InputHistory {
   }
 }
 
+/**
+ * Input-history bucket key.
+ *
+ * A persisted session id is globally unique and remains stable while a brand-
+ * new session's first prompt is accepted before its project metadata arrives.
+ * Keying accepted history by session id alone keeps that first prompt in the
+ * same bucket the bound session resolves to. The project only scopes the
+ * unsaved composer (no session id yet), where it prevents recall from leaking
+ * across projects.
+ */
 export function inputHistoryKey(project: string, session: string | null | undefined): string {
-  return JSON.stringify([project, session ?? null]);
+  return session
+    ? JSON.stringify(['session', session])
+    : JSON.stringify(['draft', project]);
 }
 
 /**

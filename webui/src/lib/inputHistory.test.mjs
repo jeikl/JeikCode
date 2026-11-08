@@ -69,15 +69,36 @@ test('history is capped at 100 inputs', () => {
   for (let i = 0; i < 150; i++) value = h.navigate('up', value);
   assert.equal(value, '20');
 });
-test('projects and sessions are isolated and revisits reset navigation', () => {
+test('projects scope the unsaved composer; session ids scope accepted history', () => {
   const h = new InputHistory();
-  const a = key('project', 'one'), b = key('project', 'two'), c = key('other', 'one');
-  h.switchContext(a); h.record(a, 'a'); h.navigate('up', 'old draft');
-  h.switchContext(b); assert.equal(h.navigate('up', ''), null); h.record(b, 'b');
-  h.switchContext(c); assert.equal(h.navigate('up', ''), null);
-  h.switchContext(a); assert.equal(h.navigate('down', 'new draft'), null);
+  const draftA = key('project', null), draftB = key('other', null);
+  const sessionA = key('project', 'one'), sessionB = key('project', 'two');
+  assert.notEqual(draftA, draftB);
+  assert.notEqual(sessionA, sessionB);
+  h.switchContext(draftA); h.record(draftA, 'draft a'); h.navigate('up', 'old draft');
+  h.switchContext(draftB); assert.equal(h.navigate('up', ''), null);
+  h.switchContext(sessionA); h.record(sessionA, 'a'); h.navigate('up', 'old draft');
+  h.switchContext(sessionB); assert.equal(h.navigate('up', ''), null); h.record(sessionB, 'b');
+  h.switchContext(sessionA); assert.equal(h.navigate('down', 'new draft'), null);
   assert.equal(h.navigate('up', 'new draft'), 'a');
   assert.equal(h.navigate('down', 'a'), 'new draft');
+  h.switchContext(draftA); assert.equal(h.navigate('up', 'x'), 'draft a');
+});
+
+test('the first accepted prompt survives the new-session project metadata switch', () => {
+  const h = new InputHistory();
+  const unsaved = key('C:\\Users\\Administrator', null);
+  const bound = key('db0549519e2043fa', 'b256b317-5eda-4bfb-b4b7-edbfe78175f7');
+  // The send path records under the assigned session id while the component
+  // still sees sessionId=null and the draft project key.
+  h.switchContext(unsaved);
+  h.record(bound, 'history-context-test');
+  // Once the session id and project hash arrive, lookup must hit the same bucket.
+  h.switchContext(bound);
+  assert.equal(h.navigate('up', ''), 'history-context-test');
+  // The unsaved bucket must not inherit the accepted session's history.
+  h.switchContext(unsaved);
+  assert.equal(h.navigate('up', ''), null);
 });
 test('late acceptance records only its captured context', () => {
   const h = setup(); h.switchContext('b'); h.record('a', 'late');
@@ -133,7 +154,10 @@ test('actual submit recorder uses assigned session without reading changed input
   h.switchContext(key('project', 'assigned'));
   assert.equal(h.navigate('up', ''), ' original\n ');
 });
-test('context keys cannot collide at delimiters', () => assert.notEqual(key('a::b', 'c'), key('a', 'b::c')));
+test('context keys cannot collide at delimiters', () => {
+  assert.notEqual(key('a::b', 'c'), key('a', 'b::c'));
+  assert.notEqual(key('a::b', null), key('a', 'b::c'));
+});
 test('Up/Down recall only while the composer is empty', () => {
   assert.equal(can(event('ArrowUp', '', 0)), true);
   assert.equal(can(event('ArrowDown', '', 0)), true);
@@ -194,6 +218,10 @@ test('successful submit wiring excludes validation and failed transports', async
   const stream = api.slice(api.indexOf('export async function streamChat('));
   assert.ok(stream.indexOf('if (!resp.ok)') < stream.indexOf('onAccepted?.();'));
   assert.match(chat, /const ack = await postChatPrompt\([\s\S]*?onAccepted\?\.\(boundSessionId\);/);
+  // Accepted prompts must be recorded for existing sessions too; the old
+  // `!sessionId` gate meant history only ever saw a new session's first send.
+  assert.doesNotMatch(chat, /acceptedWithoutSession/);
+  assert.match(chat, /if \(boundSessionId\) onAccepted\?\.\(boundSessionId\);/);
   assert.ok(chat.indexOf('if (slashOpen)', chat.indexOf('function handleKeyDown')) < chat.indexOf('if (canNavigateInputHistory'));
   assert.doesNotMatch(source, /localStorage|sessionStorage/);
 });
