@@ -50,6 +50,8 @@ export function createTimelineFollow(
   let disconnect: (() => void) | null = null;
   let lastTop = 0;
   let lastHeight = 0;
+  /** Scrollport height at the last observed scroll/write. */
+  let lastClientHeight = 0;
   let writtenTop: number | null = null;
   let touchY: number | null = null;
   let state: FollowState = 'initial';
@@ -137,6 +139,7 @@ export function createTimelineFollow(
     const height = element.scrollHeight;
     const viewport = element.clientHeight;
     const top = element.scrollTop;
+    lastClientHeight = viewport;
     const target = Math.max(0, height - viewport);
     if (target - top <= 0.5) {
       lastTop = top;
@@ -155,6 +158,7 @@ export function createTimelineFollow(
     writtenTop = element.scrollTop;
     lastTop = element.scrollTop;
     lastHeight = element.scrollHeight;
+    lastClientHeight = element.clientHeight;
     if (!instant && element.scrollTop < element.scrollHeight - viewport - 0.5) schedule();
   };
 
@@ -181,11 +185,17 @@ export function createTimelineFollow(
       visible = true;
       lastTop = element.scrollTop;
       lastHeight = element.scrollHeight;
+      lastClientHeight = element.clientHeight;
       writtenTop = null;
       return;
     }
     const top = element.scrollTop;
     const height = element.scrollHeight;
+    const viewport = element.clientHeight;
+    // A growing scrollport clamps a bottom-pinned scroll position *down*; the
+    // resulting upward delta is layout, not a reader. (Keyboard close, panel
+    // toggle, or a composer collapse that escaped the measurement pin.)
+    const viewportGrew = viewport > lastClientHeight + 0.5;
     // A queued event from our own write, or fractional values under page zoom,
     // must not be mistaken for reader movement.
     const ownWrite = writtenTop !== null && Math.abs(top - writtenTop) < 1.5;
@@ -198,6 +208,9 @@ export function createTimelineFollow(
           // not the reader leaving. Keep following the live snapshot.
         } else if (shrank && !gesture) {
           // Layout clamp (window resize, panel toggle, markdown reflow).
+        } else if (viewportGrew && !gesture && atBottom()) {
+          // Scrollport growth clamped the previous bottom to the new bottom:
+          // the reader never moved relative to the tail.
         } else {
           release();
         }
@@ -209,6 +222,7 @@ export function createTimelineFollow(
     writtenTop = null;
     lastTop = top;
     lastHeight = height;
+    lastClientHeight = viewport;
   };
 
   type Consume = 'none' | 'edge' | 'inside';
@@ -375,6 +389,7 @@ export function createTimelineFollow(
     }
     lastTop = element.scrollTop;
     lastHeight = element.scrollHeight;
+    lastClientHeight = element.clientHeight;
     writtenTop = null;
   };
 
@@ -408,6 +423,7 @@ export function createTimelineFollow(
     visible = next.clientHeight > 0;
     lastTop = next.scrollTop;
     lastHeight = next.scrollHeight;
+    lastClientHeight = next.clientHeight;
     next.addEventListener('scroll', scroll);
     next.addEventListener('wheel', wheel, { passive: true });
     next.addEventListener('pointerdown', pointer, { passive: true });
@@ -489,6 +505,7 @@ export function createTimelineFollow(
     }
     // An explicit jump overrides any unreported reader movement.
     lastTop = element.scrollTop;
+    lastClientHeight = element.clientHeight;
     writtenTop = null;
     const target = Math.max(0, element.scrollHeight - element.clientHeight);
     const distance = target - element.scrollTop;
@@ -552,6 +569,7 @@ export function createTimelineFollow(
       if (element) {
         lastTop = element.scrollTop;
         lastHeight = element.scrollHeight;
+        lastClientHeight = element.clientHeight;
       }
       touchY = null;
       gestureUntil = 0;

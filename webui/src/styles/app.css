@@ -13750,12 +13750,16 @@ body {
 
 .inline-bubble-textarea {
   width: 100%;
-  /* A fixed editing viewport: auto-growing moved the toolbar and the scroll
-     thumb on every keystroke, which made the whole bubble jump. */
-  height: 120px;
-  min-height: 120px;
-  max-height: 120px;
+  /* A constant editing viewport: auto-growing moved the toolbar and the scroll
+     thumb on every keystroke, which made the whole bubble jump. The range is
+     responsive (more room for long edits) but must not change while typing.
+     Overscroll containment keeps the textarea's own scrollbar from chaining to
+     the transcript when the caret reaches the top/bottom edge. */
+  height: clamp(120px, 30vh, 300px);
+  min-height: clamp(120px, 30vh, 300px);
+  max-height: clamp(120px, 30vh, 300px);
   overflow-y: auto;
+  overscroll-behavior: contain;
   scrollbar-gutter: stable;
   background: transparent;
   color: var(--app-primary-foreground, #f3f4f6);

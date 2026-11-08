@@ -11,6 +11,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { InputHistory, canNavigateInputHistory, inputHistoryKey } from '../lib/inputHistory';
 import { resolveComposerEnterAction, resolveComposerEscapeAction, isMobileComposer, tailQueuedCard } from '../lib/composerShortcuts';
 import { createTimelineFollow } from '../lib/timelineFollow';
+import { collapseComposerTextarea, resizeComposerTextarea } from '../lib/composerLayout';
 
 /** First paint / page size for long transcripts. Older messages load on demand.
  *  Hard cap: a tail must not grow past this when the cut falls mid-turn.
@@ -2126,6 +2127,13 @@ export function Chat({
     timelineFollowRef.current = createTimelineFollow(atBottomRef, setShowJumpBtn);
   }
   const timelineFollow = timelineFollowRef.current;
+  // 输入框自适应高度期间绝不能改变消息视口：浏览器会把 scrollTop 夹到新的
+  // 底部并发出 scroll 事件，既丢跟随又会把阅读位置顶上去。统一走 composerLayout
+  // 的视口冻结版本，见该文件头部对失效链路的说明。
+  const resizeComposer = (ta: HTMLTextAreaElement | null, maxHeight?: number) =>
+    resizeComposerTextarea(ta, scrollRef.current, maxHeight);
+  const collapseComposer = (ta: HTMLTextAreaElement | null) =>
+    collapseComposerTextarea(ta, scrollRef.current);
   const attachTimeline = useCallback((node: HTMLDivElement | null) => {
     scrollRef.current = node;
     timelineFollow.attach(node);
@@ -2148,17 +2156,13 @@ export function Chat({
     const ta = textareaRef.current;
     if (!pending || !ta || pending.context !== historyContext || pending.value !== input) return;
     ta.setSelectionRange(pending.position, pending.position);
-    ta.style.height = 'auto';
-    ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
+    resizeComposer(ta);
   }, [input, historyContext]);
 
   // 首次挂载时如果恢复了草稿，自适应调整 textarea 高度
   useEffect(() => {
     const ta = textareaRef.current;
-    if (ta && input) {
-      ta.style.height = 'auto';
-      ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
-    }
+    if (ta && input) resizeComposer(ta);
   }, []);
 
   // 实时持久化当前活动会话的输入框草稿（文字与图片附件），确保刷新或重启页面后不丢失
@@ -4262,13 +4266,10 @@ export function Chat({
       setInput(nextDraft?.text ?? '');
       setPendingAttach(nextDraft?.images ? imagesToPending(nextDraft.images) : []);
       if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
+        // 切会话先折叠回单行；草稿文本在下一帧按新内容重新测量。
+        collapseComposer(textareaRef.current);
         if (nextDraft?.text) {
-          window.requestAnimationFrame(() => {
-            if (textareaRef.current) {
-              textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`;
-            }
-          });
+          window.requestAnimationFrame(() => resizeComposer(textareaRef.current));
         }
       }
 
@@ -8118,8 +8119,7 @@ export function Chat({
           if (!ta) return;
           ta.focus();
           ta.setSelectionRange(1, 1);
-          ta.style.height = 'auto';
-          ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+          resizeComposer(ta);
         });
       },
       notice: (text) => pushCommandNotice(text),
@@ -10648,7 +10648,7 @@ export function Chat({
         setPendingAttach([]);
         clearComposerDraft(activeIdRef.current || sessionId);
         clearComposerDraft(null);
-        if (textareaRef.current) textareaRef.current.style.height = 'auto';
+        collapseComposer(textareaRef.current);
         setSlashOpen(false);
         setHistoryHint(null);
         // 命令执行后仍然回到主输入框，保证连续输入不中断；
@@ -10685,7 +10685,7 @@ export function Chat({
       setPendingAttach([]);
       clearComposerDraft(activeIdRef.current || sessionId);
       clearComposerDraft(null);
-      if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      collapseComposer(textareaRef.current);
       // 立即发送（非排队）时把焦点还给输入框；排队/转向路径保持既有卡片焦点设计。
       if (!busy && !isCompacting) focusComposerSoon();
       setUploading(true);
@@ -10716,7 +10716,7 @@ export function Chat({
       setPendingAttach([]);
       clearComposerDraft(activeIdRef.current || sessionId);
       clearComposerDraft(null);
-      if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      collapseComposer(textareaRef.current);
       // 立即发送（非排队）时把焦点还给输入框；排队/转向路径保持既有卡片焦点设计。
       if (!busy && !isCompacting) focusComposerSoon();
     }
@@ -10854,8 +10854,7 @@ export function Chat({
     setTimeout(() => {
       if (textareaRef.current) {
         textareaRef.current.focus();
-        textareaRef.current.style.height = 'auto';
-        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 240)}px`;
+        resizeComposer(textareaRef.current, 240);
       }
     }, 0);
   }
@@ -10921,8 +10920,7 @@ export function Chat({
     setTimeout(() => {
       if (textareaRef.current) {
         textareaRef.current.focus();
-        textareaRef.current.style.height = 'auto';
-        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 240)}px`;
+        resizeComposer(textareaRef.current, 240);
       }
     }, 0);
   }
@@ -12476,8 +12474,7 @@ export function Chat({
     setTimeout(() => {
       if (textareaRef.current) {
         textareaRef.current.focus();
-        textareaRef.current.style.height = 'auto';
-        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 240)}px`;
+        resizeComposer(textareaRef.current, 240);
       }
     }, 0);
   }
@@ -12497,8 +12494,7 @@ export function Chat({
       ta.focus();
       const newPos = slashIdx + name.length + 2;
       ta.setSelectionRange(newPos, newPos);
-      ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+      resizeComposer(ta);
     });
   }
 
@@ -12518,8 +12514,7 @@ export function Chat({
     requestAnimationFrame(() => {
       ta.focus();
       ta.setSelectionRange(next.cursor, next.cursor);
-      ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+      resizeComposer(ta);
     });
   }
 
@@ -12554,8 +12549,7 @@ export function Chat({
     inputHistoryRef.current.edit(val);
     pendingHistoryCaretRef.current = null;
     setInput(val);
-    ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+    resizeComposer(ta);
 
     const pos = ta.selectionStart ?? val.length;
     const before = val.slice(0, pos);
@@ -12619,8 +12613,7 @@ export function Chat({
       el.focus();
       const pos = replaceSkill ? text.length : (ta?.selectionStart ?? el.value.length) + text.length;
       el.setSelectionRange(pos, pos);
-      el.style.height = 'auto';
-      el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+      resizeComposer(el);
     });
   }
 
@@ -13319,8 +13312,7 @@ export function Chat({
       ta.focus();
       const pos = text.length;
       ta.setSelectionRange(pos, pos);
-      ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+      resizeComposer(ta);
     });
   }
 

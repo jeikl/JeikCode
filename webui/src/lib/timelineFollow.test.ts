@@ -536,6 +536,26 @@ test('layout clamp while following is not reader intent', () => {
   } finally { s.cleanup(); }
 });
 
+test('scrollport growth clamping the bottom is layout, not reader intent', () => {
+  const s = setup();
+  try {
+    s.attach(); s.flush();
+    s.follow.jump(); s.flush();
+    // Keyboard close / panel toggle grows the viewport: the browser clamps the
+    // old bottom (800) to the new one (740) and emits an upward scroll event.
+    s.element.clientHeight = 260;
+    s.element.top = 740;
+    s.element.emit('scroll');
+    assert.equal(s.following.current, true);
+    s.follow.changed(); s.flush();
+    assert.equal(s.element.scrollTop, 740);
+    // A genuine reader move during the same growth still releases.
+    s.element.top = 640;
+    s.element.emit('scroll');
+    assert.equal(s.following.current, false);
+  } finally { s.cleanup(); }
+});
+
 test('initial follow survives position loss but a real gesture still releases', () => {
   const s = setup();
   try {
