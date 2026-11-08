@@ -42,13 +42,13 @@ use base64::Engine;
 use jeikcode_kernel::message::ImageContent;
 
 use crate::commands::{parse_bash_command, parse_slash_line, CommandRegistry};
-use crate::custom_commands::ArgsRequirement;
 use crate::input::history::History;
 use crate::input::key_action::{classify, is_ctrl_letter, Action};
 use crate::input::InputEvent;
 use crate::render::{Renderer, UiLine};
 use crate::state::{UiPhase, UiState};
 use crate::think::{reasoning_summary, ThinkStripper};
+use jeikcode_capabilities::commands::ArgsRequirement;
 
 fn runtime_mode(mode: crate::state::AgentMode) -> jeikcode_coding::RuntimeMode {
     match mode {
@@ -3767,12 +3767,12 @@ pub struct LoopCtx {
     /// `<project>/.jeikcode/commands/`. Queried by the slash-command
     /// dispatcher as a fallback when the entered name doesn't match a
     /// built-in command.
-    pub custom_commands: crate::custom_commands::CustomCommandRegistry,
+    pub custom_commands: jeikcode_capabilities::commands::UserCommandRegistry,
     /// Loaded skills (`.claude/skills/*/SKILL.md`, etc.). Same `Arc`
     /// the agent loop holds, so `reload(...)` there is visible here
     /// without extra plumbing. Used by the slash-command palette to
-    /// surface user-invocable skills, and by the dispatcher to expand
-    /// `/skill_name [args]` into a SendMessage.
+    /// surface user-invocable skills, and by the dispatcher to build a
+    /// `use_skill(<name>)` request for `/skill_name [args]`.
     pub skill_registry:
         std::sync::Arc<std::sync::RwLock<jeikcode_capabilities::skills::SkillRegistry>>,
     /// Snapshot of the terminal's rendering capabilities. Probed once at
@@ -5378,8 +5378,8 @@ mod buffer_tests {
 #[cfg(test)]
 mod menu_tests {
     use super::*;
-    use crate::custom_commands::CustomCommand;
-    use crate::custom_commands::CustomCommandRegistry;
+    use jeikcode_capabilities::commands::UserCommand;
+    use jeikcode_capabilities::commands::UserCommandRegistry;
 
     #[test]
     fn pending_transition_routes_enter_through_common_commit_gate() {
@@ -5433,14 +5433,14 @@ mod menu_tests {
     #[test]
     fn non_slash_input_returns_no_menu() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         assert!(build_menu_items("hello world", 0, &reg, &custom, None, None).is_none());
     }
 
     #[test]
     fn slash_prefix_returns_all_commands() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let items =
             build_menu_items("/", 0, &reg, &custom, None, None).expect("menu should show for '/'");
         assert!(!items.is_empty(), "builtin registry should have commands");
@@ -5449,7 +5449,7 @@ mod menu_tests {
     #[test]
     fn slash_with_filter_narrows_list() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let all = build_menu_items("/", 0, &reg, &custom, None, None).unwrap();
         let filtered = build_menu_items("/he", 0, &reg, &custom, None, None).unwrap_or_default();
         assert!(
@@ -5471,7 +5471,7 @@ mod menu_tests {
         // Once the user types args, menu goes away so arrow keys don't
         // start navigating a stale palette.
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         assert!(build_menu_items("/cd ", 0, &reg, &custom, None, None).is_none());
         assert!(build_menu_items("/cd /tmp", 0, &reg, &custom, None, None).is_none());
     }
@@ -5479,14 +5479,14 @@ mod menu_tests {
     #[test]
     fn slash_with_no_matches_returns_none() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         assert!(build_menu_items("/zzznomatch", 0, &reg, &custom, None, None).is_none());
     }
 
     #[test]
     fn at_directory_completion_can_build_child_menu() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let index = file_index::FileIndex::from_entries(
             std::path::PathBuf::from("/tmp"),
             vec![
@@ -5602,9 +5602,8 @@ mod menu_tests {
         jeikcode_capabilities::skills::Skill {
             name: name.to_string(),
             description: desc.to_string(),
-            template: "do thing".to_string(),
+            content: "do thing".to_string(),
             user_invocable,
-            allowed_tools: vec![],
             skill_dir: std::path::PathBuf::new(),
             source_path: std::path::PathBuf::new(),
         }
@@ -5616,7 +5615,7 @@ mod menu_tests {
         // bare-name prefix must NOT surface skills. They live behind
         // the `/skills` gateway so the top palette stays uncluttered.
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
         skills.register(skill_fixture("skills:brainstorming", "Brainstorm", true));
         skills.register(skill_fixture("skills:web-access", "Web", true));
@@ -5650,7 +5649,7 @@ mod menu_tests {
         // switches to second-level: bare skill names, ready to commit
         // as `/skills <name>`.
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
         skills.register(skill_fixture("skills:brainstorming", "Brainstorm", true));
         skills.register(skill_fixture("skills:web-access", "Web", true));
@@ -5672,7 +5671,7 @@ mod menu_tests {
         // /skills bra narrows to brainstorming. /skills web narrows
         // to web-access. /skills zz returns no menu at all.
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
         skills.register(skill_fixture("skills:brainstorming", "Brainstorm", true));
         skills.register(skill_fixture("skills:web-access", "Web", true));
@@ -5696,7 +5695,7 @@ mod menu_tests {
         // /skills brainstorming why X — user is typing skill args now,
         // menu should disappear so arrow keys don't navigate stale entries.
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
         skills.register(skill_fixture("skills:brainstorming", "Brainstorm", true));
         let lock = std::sync::RwLock::new(skills);
@@ -5717,7 +5716,7 @@ mod menu_tests {
         // user_invocable=false skills must not surface in the sub-menu
         // either — they're LLM-only via the use_skill tool.
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
         skills.register(skill_fixture("skills:visible", "shown", true));
         skills.register(skill_fixture("skills:hidden", "hidden", false));
@@ -5735,7 +5734,7 @@ mod menu_tests {
     #[test]
     fn skills_sub_mode_multi_fragment_filters_then_closes_on_complete_skill() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
         skills.register(skill_fixture("skills:jeikcode-smoke-test", "smoke", true));
         skills.register(skill_fixture(
@@ -5781,7 +5780,7 @@ mod menu_tests {
         // `/effort` at the top level surfaces the gateway entry, not the
         // individual high/max/off choices (those live behind `/effort `).
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let items = build_menu_items("/effort", 0, &reg, &custom, None, None)
             .expect("/effort gateway must appear");
         assert!(items.iter().any(|(n, _)| n == "effort"));
@@ -5793,7 +5792,7 @@ mod menu_tests {
     #[test]
     fn effort_sub_mode_lists_and_filters_choices() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         // `/effort ` (trailing space) → all three choices.
         let all = build_menu_items("/effort ", 0, &reg, &custom, None, None)
             .expect("/effort sub-mode must list choices");
@@ -5817,7 +5816,7 @@ mod menu_tests {
     fn no_skill_registry_is_no_op() {
         // Ensures the legacy call path (None) keeps working.
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let with_none = build_menu_items("/", 0, &reg, &custom, None, None).unwrap();
         let empty_skills =
             std::sync::RwLock::new(jeikcode_capabilities::skills::SkillRegistry::new());
@@ -5880,7 +5879,7 @@ mod menu_tests {
     #[test]
     fn dollar_trigger_lists_all_user_invocable_skills() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
         skills.register(skill_fixture("skills:brainstorming", "Brainstorm", true));
         skills.register(skill_fixture("skills:web-access", "Web", true));
@@ -5900,7 +5899,7 @@ mod menu_tests {
     #[test]
     fn dollar_trigger_filters_and_parity_with_skills_submode() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
         skills.register(skill_fixture("skills:brainstorming", "Brainstorm", true));
         skills.register(skill_fixture("skills:web-access", "Web", true));
@@ -5921,7 +5920,7 @@ mod menu_tests {
     #[test]
     fn dollar_trigger_only_at_start_and_closes_on_space() {
         let reg = CommandRegistry::builtin();
-        let custom = CustomCommandRegistry::empty();
+        let custom = UserCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
         skills.register(skill_fixture("skills:brainstorming", "Brainstorm", true));
         let lock = std::sync::RwLock::new(skills);
@@ -6675,8 +6674,8 @@ mod menu_tests {
     #[test]
     fn custom_command_required_triggers_needs_args() {
         let reg = CommandRegistry::builtin();
-        let mut custom = CustomCommandRegistry::empty();
-        custom.register(CustomCommand {
+        let mut custom = UserCommandRegistry::empty();
+        custom.register(UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::Required,
@@ -6698,8 +6697,8 @@ mod menu_tests {
     #[test]
     fn custom_command_optional_triggers_needs_args() {
         let reg = CommandRegistry::builtin();
-        let mut custom = CustomCommandRegistry::empty();
-        custom.register(CustomCommand {
+        let mut custom = UserCommandRegistry::empty();
+        custom.register(UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::Optional,
@@ -6721,8 +6720,8 @@ mod menu_tests {
     #[test]
     fn custom_command_none_executes_immediately() {
         let reg = CommandRegistry::builtin();
-        let mut custom = CustomCommandRegistry::empty();
-        custom.register(CustomCommand {
+        let mut custom = UserCommandRegistry::empty();
+        custom.register(UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::None,
@@ -11704,7 +11703,7 @@ fn build_menu_items(
     buf: &str,
     cursor: usize,
     commands: &CommandRegistry,
-    custom: &crate::custom_commands::CustomCommandRegistry,
+    custom: &jeikcode_capabilities::commands::UserCommandRegistry,
     skill_registry: Option<&std::sync::RwLock<jeikcode_capabilities::skills::SkillRegistry>>,
     file_index: Option<&file_index::FileIndex>,
 ) -> Option<Vec<(String, String)>> {
@@ -13567,7 +13566,8 @@ pub(crate) fn reload_plugins(ctx: &mut LoopCtx) -> (usize, Vec<String>) {
         warnings = reload_skill_registry(&mut guard, &ctx.working_dir);
         loaded = guard.all().count();
     }
-    ctx.custom_commands = crate::custom_commands::CustomCommandRegistry::load(&ctx.working_dir);
+    ctx.custom_commands =
+        jeikcode_capabilities::commands::UserCommandRegistry::load(&ctx.working_dir);
     // Hook executor lives on the agent loop. Send a one-shot rebuild signal
     // so plugin-contributed hooks (especially UserPromptSubmit) fire on the
     // next user message rather than waiting for /cd or restart.
@@ -16504,7 +16504,7 @@ pub(super) fn handle_plugin_job_event(
             // If `/guide <topic>` was waiting for this install, auto-invoke
             // the "ask" skill with the stashed topic.
             if let Some(topic) = ctx.pending_guide_topic.take() {
-                if let Some(rendered) = commands::expand_skill(ctx, "ask", &topic) {
+                if let Some(rendered) = commands::skill_invocation(ctx, "ask", &topic) {
                     renderer.render(UiLine::CommandOutput(
                         crate::i18n::t(crate::i18n::Msg::CmdGuideAutoInvoke { topic: &topic })
                             .into_owned(),
@@ -16579,7 +16579,7 @@ pub(super) fn handle_plugin_job_event(
             // the UI registry and runtime capability graph.
             let _ = reload_plugins(ctx);
             if let Some(topic) = ctx.pending_guide_topic.take() {
-                if let Some(rendered) = commands::expand_skill(ctx, "ask", &topic) {
+                if let Some(rendered) = commands::skill_invocation(ctx, "ask", &topic) {
                     renderer.render(UiLine::CommandOutput(
                         crate::i18n::t(crate::i18n::Msg::CmdGuideAutoInvoke { topic: &topic })
                             .into_owned(),

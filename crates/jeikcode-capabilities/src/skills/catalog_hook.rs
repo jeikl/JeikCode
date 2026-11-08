@@ -1,8 +1,8 @@
 //! `SkillCatalogHook` — injects the `=== AVAILABLE SKILLS ===` catalog as an
 //! independent System block (Block 3, order 30) at session start.
 //!
-//! Why this exists: the v2 coding path registered the `use_skill` / `list_skills`
-//! tools but NEVER told the model which skills are installed — so a skill that
+//! Why this exists: the v2 coding path registered the `use_skill` tool but NEVER
+//! told the model which skills are installed — so a skill that
 //! should trigger on a description match (brainstorming before creative work, …)
 //! was effectively invisible and "basically never fired". The catalog is what the
 //! daemon path already injected inline; this hook brings the coding path to parity

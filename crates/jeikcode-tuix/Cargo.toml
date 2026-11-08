@@ -89,5 +89,6 @@ jeikcode-kernel = { path = "../jeikcode-kernel", features = ["test-support"] }
 ctor = "0.2"
 tempfile = "3"
 vte = "0.15.0"
-# Serialize env-var-mutating custom_commands tests (moved from jeikcode-core).
+# Serialize env-var-mutating tests (background runtime; former custom_commands
+# tests now live in jeikcode-capabilities).
 serial_test = "3"

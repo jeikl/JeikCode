@@ -1,11 +1,11 @@
-//! Skills capability (L1): a markdown/frontmatter skill loader + the `use_skill` /
-//! `list_skills` tools. A *skill* is a reusable prompt/workflow template (Claude-Code
-//! compatible: flat `*.md` commands or `*/SKILL.md` directories with frontmatter).
+//! Skills capability (L1): a `*/SKILL.md` loader + the `use_skill` tool. A *skill* is a
+//! reusable instruction guide (Claude-Code / Agent-Skills compatible). Its body is
+//! returned verbatim — user-invoked command templates (`commands/*.md`) own
+//! `$ARGUMENTS` / `$N` / shell expansion (see `crate::commands::template`).
 //!
-//! NEUTRAL boundary: this crate loads + expands skills from directories the CALLER
-//! supplies; the standard `~/.claude/skills` etc. precedence is a driver concern (use
-//! [`standard_skill_dirs`] or pass your own). Skill CONTENT is user-authored and trusted
-//! — `expand` runs a skill's `` !`cmd` `` blocks through a shell by design.
+//! NEUTRAL boundary: this crate loads skills from directories the CALLER supplies; the
+//! standard `~/.claude/skills` etc. precedence is a driver concern (use
+//! [`standard_skill_dirs`] or pass your own). Skill CONTENT is user-authored and trusted.
 //!
 //! Behind the opt-in `skills` cargo feature (no extra dependencies).
 
@@ -23,7 +23,7 @@ pub use catalog_hook::SkillCatalogHook;
 pub use registry::{runtime_skill_dirs, standard_skill_dirs, SkillRegistry};
 pub use render::{render_skill_catalog, CatalogEntry};
 pub use skill::Skill;
-pub use use_skill::{ListSkillsTool, UseSkillTool};
+pub use use_skill::UseSkillTool;
 
 /// Names of the skill tools — pass to [`ToolRegistry::mount`](jeikcode_kernel::tool::ToolRegistry::mount).
 pub fn skill_tool_names() -> &'static [&'static str] {

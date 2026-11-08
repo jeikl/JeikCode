@@ -1,9 +1,10 @@
-import type { SkillInfo } from '../../api';
+import type { CommandInfo, SkillInfo } from '../../api';
 import { useT } from '../../settings';
 import { FRONTEND_COMMANDS, buildSlashMenuItems } from '../../lib/slashCommands';
 
 export function SlashMenu({
   skills,
+  userCommands,
   query,
   skillsOnly,
   index,
@@ -11,6 +12,7 @@ export function SlashMenu({
   onSelect,
 }: {
   skills: SkillInfo[];
+  userCommands: CommandInfo[];
   query: string;
   skillsOnly: boolean;
   index: number;
@@ -21,6 +23,7 @@ export function SlashMenu({
   const items = buildSlashMenuItems(
     FRONTEND_COMMANDS,
     skills,
+    userCommands,
     query,
     t as (k: string) => string,
     skillsOnly,

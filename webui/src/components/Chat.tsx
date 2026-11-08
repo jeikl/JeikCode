@@ -77,7 +77,7 @@ const STEER_NATURAL_DRAIN_GRACE_MS = 1500;
  * （subscribe_live_with_replay），把已画完的正文/思考再落一遍。
  */
 const WATCH_REATTACH_AFTER_HIDDEN_MS = 60000;
-import { postChatPrompt, stopChat, postChatSteer, admitChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatRuntime, getChatPending, watchChatSession, SSEEvent, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, ApprovalMode, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, claimChatQueue, releaseChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, admitChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatRuntime, getChatPending, watchChatSession, SSEEvent, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, ApprovalMode, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, getCommands, CommandInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, claimChatQueue, releaseChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
 import { pullSession } from '../lib/sessionPull';
 import { InlineBubbleEditor } from './InlineBubbleEditor';
 import {
@@ -2056,7 +2056,9 @@ export function Chat({
     onConfirm: () => {},
   });
   const [slashSkills, setSlashSkills] = useState<SkillInfo[] | null>(null);
+  const [slashUserCommands, setSlashUserCommands] = useState<CommandInfo[] | null>(null);
   const [slashLoading, setSlashLoading] = useState(false);
+  const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashQuery, setSlashQuery] = useState('');
   const [slashIndex, setSlashIndex] = useState(0);
@@ -8068,6 +8070,9 @@ export function Chat({
       // reloadConfig: POST /config/reload（服务端同时重挂 MCP / skills）。
       reloadConfig: async () => {
         await postConfigReload();
+        // Commands/skills may have changed on disk; refetch on the next palette open.
+        setSlashSkills(null);
+        setSlashUserCommands(null);
         pushCommandNotice(t('cmd.reload.done'));
       },
       mcpCommand: async (arg) => {
@@ -12116,7 +12121,7 @@ export function Chat({
 
     // 斜杠菜单导航（使用与渲染层一致的合并列表：本地命令 + 远程技能）
     if (slashOpen) {
-      const mergedItems = buildSlashMenuItems(FRONTEND_COMMANDS, slashSkills ?? [], slashQuery, t as (k: string) => string, slashSkillsOnly);
+      const mergedItems = buildSlashMenuItems(FRONTEND_COMMANDS, slashSkills ?? [], slashUserCommands ?? [], slashQuery, t as (k: string) => string, slashSkillsOnly);
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setSlashIndex((i) => Math.min(i + 1, mergedItems.length - 1));
@@ -12568,6 +12573,13 @@ export function Chat({
             .catch(() => setSlashSkills([]))
             .finally(() => setSlashLoading(false));
         }
+        if (slashUserCommands === null && !slashCommandsLoading) {
+          setSlashCommandsLoading(true);
+          getCommands()
+            .then(setSlashUserCommands)
+            .catch(() => setSlashUserCommands([]))
+            .finally(() => setSlashCommandsLoading(false));
+        }
         setAtOpen(false);
         setSlashQuery(query);
         setSlashIndex(0);
@@ -12986,6 +12998,7 @@ export function Chat({
       {slashOpen && (
         <SlashMenu
           skills={slashSkills ?? []}
+          userCommands={slashUserCommands ?? []}
           query={slashQuery}
           skillsOnly={slashSkillsOnly}
           index={slashIndex}

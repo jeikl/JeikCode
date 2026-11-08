@@ -615,7 +615,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::SkillUnknown { name } =>
             format!("Unknown skill: {} (try /skills to list)", name).into(),
         Msg::SkillsLoaded { names } =>
-            format!("  Loaded skills: {}\n", names).into(),
+            format!("  Requested skill load: {}\n", names).into(),
 
         // ── /mcp ──
         Msg::McpReloading { count } =>

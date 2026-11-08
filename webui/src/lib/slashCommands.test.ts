@@ -114,7 +114,7 @@ import { buildSlashMenuItems } from './slashCommands.ts';
 
 test('menu lists matching commands before skills', () => {
   const skills = [{ name: 'summarize', description: 'sum' }, { name: 'plan-trip', description: 'trip' }];
-  const items = buildSlashMenuItems(FRONTEND_COMMANDS, skills, 'pl', (k) => k);
+  const items = buildSlashMenuItems(FRONTEND_COMMANDS, skills, [], 'pl', (k) => k);
   // 'pl' 命中命令 plan 与 skill plan-trip；命令在前
   assert.equal(items[0].kind, 'command');
   assert.equal(items[0].name, 'plan');
@@ -123,17 +123,31 @@ test('menu lists matching commands before skills', () => {
 
 test('empty query returns all commands then all skills', () => {
   const skills = [{ name: 's1' }];
-  const items = buildSlashMenuItems(FRONTEND_COMMANDS, skills, '', (k) => k);
+  const items = buildSlashMenuItems(FRONTEND_COMMANDS, skills, [], '', (k) => k);
   assert.equal(items.filter((i) => i.kind === 'command').length, FRONTEND_COMMANDS.length);
   assert.equal(items[items.length - 1].kind, 'skill');
 });
 
 test('skills are sorted alphabetically by name (commands keep FRONTEND_COMMANDS order)', () => {
   const skills = [{ name: 'zebra', description: 'z' }, { name: 'apple', description: 'a' }];
-  const items = buildSlashMenuItems(FRONTEND_COMMANDS, skills, '', (k) => k);
+  const items = buildSlashMenuItems(FRONTEND_COMMANDS, skills, [], '', (k) => k);
   const skillItems = items.filter((i) => i.kind === 'skill');
   assert.equal(skillItems[0].name, 'apple');
   assert.equal(skillItems[1].name, 'zebra');
+});
+
+test('user commands appear after built-ins and shadow same-named skills', () => {
+  const userCommands = [{ name: 'deploy', description: 'ship it' }];
+  const skills = [{ name: 'deploy', description: 'shadowed skill' }];
+  const items = buildSlashMenuItems(FRONTEND_COMMANDS, skills, userCommands, 'dep', (k) => k);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, 'command');
+  assert.equal(items[0].name, 'deploy');
+});
+
+test('skillsOnly drops user commands', () => {
+  const items = buildSlashMenuItems(FRONTEND_COMMANDS, [], [{ name: 'deploy' }], '', (k) => k, true);
+  assert.equal(items.length, 0);
 });
 
 test('/undo /remember /forget /memory dispatch to execServerCommand', async () => {

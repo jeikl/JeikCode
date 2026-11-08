@@ -2,7 +2,7 @@
 //! directories (the standard `~/.claude/skills` etc. precedence is a driver concern —
 //! see [`standard_skill_dirs`]). Ported from production `skill.rs` `SkillRegistry`.
 
-use super::skill::{parse_skill_dir, parse_skill_file, Skill};
+use super::skill::{is_skill_md_name, parse_skill_dir, Skill};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,8 +22,8 @@ impl SkillRegistry {
     }
 
     /// Load from `dirs` in LOW→HIGH priority order (a later dir's same-named skill wins).
-    /// Each dir is scanned for flat `*.md` files AND `*/SKILL.md` subdirectories; parse
-    /// failures are skipped.
+    /// Each dir is scanned for `*/SKILL.md` subdirectories (case-insensitive); parse
+    /// failures are skipped. Flat `*.md` files are commands, not skills.
     pub fn load(dirs: &[PathBuf]) -> Self {
         let mut reg = Self::new();
         for dir in dirs {
@@ -37,12 +37,12 @@ impl SkillRegistry {
         self.scan_skill_dir(dir, namespace, 0);
     }
 
-    /// Scan `dir` for skills, recursing into grouping subdirectories. A subdir holding a
-    /// `SKILL.md` is a skill (NOT descended into — its own files are skill resources); a
-    /// subdir without one is a grouping directory whose nested skills are discovered
-    /// recursively, so `skills/GROUP/SUB/SKILL.md` is still found. Flat `*.md`
-    /// slash-commands are TOP-LEVEL only (depth 0) — a skill's own `*.md` are resources,
-    /// not separate commands. `depth` is bounded to guard against symlink cycles.
+    /// Scan `dir` for skills, recursing into grouping subdirectories. A subdir holding
+    /// `SKILL.md` / `skill.md` (any ASCII case) is a skill (NOT descended into — its own
+    /// files are skill resources); a subdir without one is a grouping directory whose
+    /// nested skills are discovered recursively, so `skills/GROUP/SUB/SKILL.md` is still
+    /// found. Flat `*.md` files are never skills — user-invocable commands live in
+    /// `crate::commands`. `depth` is bounded to guard against symlink cycles.
     fn scan_skill_dir(&mut self, dir: &Path, namespace: Option<&str>, depth: usize) {
         const MAX_DEPTH: usize = 8;
         if depth > MAX_DEPTH {
@@ -54,21 +54,33 @@ impl SkillRegistry {
         let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
         entries.sort();
         for p in entries {
-            if p.is_file() {
-                if depth == 0 && p.extension().and_then(|e| e.to_str()) == Some("md") {
-                    if let Ok(s) = parse_skill_file(&p, namespace) {
-                        self.skills.insert(s.name.clone(), Arc::new(s));
-                    }
-                }
-            } else if p.is_dir() {
-                let skill_md = p.join("SKILL.md");
-                if skill_md.is_file() {
-                    if let Ok(s) = parse_skill_dir(&p, &skill_md, namespace) {
-                        self.skills.insert(s.name.clone(), Arc::new(s));
-                    }
-                } else {
-                    self.scan_skill_dir(&p, namespace, depth + 1);
-                }
+            if p.is_dir() {
+                self.load_child(&p, namespace, depth + 1);
+            }
+        }
+    }
+
+    /// Read `dir` once: a skill entry file makes it a skill; otherwise it is a
+    /// grouping directory whose nested skill dirs are scanned recursively.
+    fn load_child(&mut self, dir: &Path, namespace: Option<&str>, depth: usize) {
+        const MAX_DEPTH: usize = 8;
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        if let Some(skill_md) = find_skill_md(&entries) {
+            if let Ok(s) = parse_skill_dir(dir, &skill_md, namespace) {
+                self.skills.insert(s.name.clone(), Arc::new(s));
+            }
+            return;
+        }
+        for p in entries {
+            if p.is_dir() {
+                self.load_child(&p, namespace, depth + 1);
             }
         }
     }
@@ -198,9 +210,6 @@ impl SkillRegistry {
                 name: s.name.clone(),
                 hint: None, // capabilities skills carry no argument hint
                 description: s.description.clone(),
-                // Directory skills get a location so the catalog itself answers
-                // "where is this skill?" without a use_skill round-trip.
-                location: s.is_directory_skill().then(|| s.display_location()),
                 source_rank: super::render::source_rank(&s.source_path),
             })
             .collect();
@@ -214,23 +223,39 @@ impl Default for SkillRegistry {
     }
 }
 
+/// Locate the skill entry file in `dir`, case-insensitively. Prefers the canonical
+/// uppercase spelling when a case-sensitive filesystem holds both variants.
+fn find_skill_md(entries: &[PathBuf]) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = entries
+        .iter()
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(is_skill_md_name)
+        })
+        .cloned()
+        .collect();
+    candidates.sort();
+    candidates
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some("SKILL.md"))
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
+}
+
 /// The standard skill directories (LOW→HIGH priority), Claude-Code-compatible. A driver
 /// may pass this to [`SkillRegistry::load`] or supply its own. `home` = user home dir;
-/// `project` = the workspace root.
+/// `project` = the workspace root. `commands/*.md` are deliberately absent — they are
+/// user-invoked command templates, not model-visible skills.
 pub fn standard_skill_dirs(home: &Path, project: &Path) -> Vec<PathBuf> {
     vec![
-        home.join(".claude/commands"),
-        home.join(".agents/commands"),
-        home.join(".jeikcode/commands"),
         home.join(".claude/skills"),
         // Cross-agent shared conventions (`.agents/skills`, opencode et al.).
         // Placed before `.jeikcode` so jeikcode-native skills win a same-name collision.
         home.join(".agents/skills"),
         home.join(".skills"),
         home.join(".jeikcode/skills"),
-        project.join(".claude/commands"),
-        project.join(".agents/commands"),
-        project.join(".jeikcode/commands"),
         project.join(".claude/skills"),
         project.join(".agents/skills"),
         project.join(".skills"),
@@ -241,9 +266,9 @@ pub fn standard_skill_dirs(home: &Path, project: &Path) -> Vec<PathBuf> {
 
 /// The standard skill directories with the user-level `.jeikcode` root resolved
 /// from `JEIKCODE_HOME` when it is set. `JEIKCODE_HOME` is the config root (the
-/// equivalent of `~/.jeikcode`), so EVERY user-level `~/.jeikcode/*` entry
-/// (`skills` AND `commands`) is rebased onto it; other products' dirs (`.claude`,
-/// `.agents`) and all project-relative dirs stay put. An empty `JEIKCODE_HOME` is
+/// equivalent of `~/.jeikcode`), so every user-level `~/.jeikcode/skills` entry is
+/// rebased onto it; other products' dirs (`.claude`, `.agents`) and all
+/// project-relative dirs stay put. An empty `JEIKCODE_HOME` is
 /// treated as unset — mirroring [`jeikcode_config`]'s `Config::config_dir` — so a
 /// stray `JEIKCODE_HOME=` never rebases skills onto a bogus relative `skills` path.
 pub fn runtime_skill_dirs(home: &Path, project: &Path) -> Vec<PathBuf> {
@@ -268,7 +293,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn runtime_dirs_redirect_every_user_jeikcode_dir_and_leave_others() {
+    fn runtime_dirs_redirect_user_jeikcode_skills_and_leave_others() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let config_root = tempfile::tempdir().unwrap();
@@ -276,12 +301,12 @@ mod tests {
         let _home = jeikcode_config::test_util::IsolatedHome::at(config_root.path());
         let dirs = runtime_skill_dirs(home.path(), project.path());
 
-        // BOTH user-level `.jeikcode/*` dirs (skills AND commands) move under JEIKCODE_HOME.
+        // The user-level `.jeikcode/skills` entry moves under JEIKCODE_HOME.
         assert!(dirs.contains(&config_root.path().join("skills")));
-        assert!(dirs.contains(&config_root.path().join("commands")));
+        // Commands are not skills; they must not be scanned here at all.
+        assert!(!dirs.iter().any(|d| d.ends_with("commands")));
         // The stale real-home `.jeikcode/*` entries are gone.
         assert!(!dirs.contains(&home.path().join(".jeikcode/skills")));
-        assert!(!dirs.contains(&home.path().join(".jeikcode/commands")));
         // Other products' dirs (`.claude`, `.agents`) stay at real home; project dirs unchanged.
         assert!(dirs.contains(&home.path().join(".claude/skills")));
         assert!(dirs.contains(&home.path().join(".agents/skills")));
@@ -308,11 +333,8 @@ mod tests {
     }
 
     #[test]
-    fn loads_flat_and_dir_skills_with_precedence() {
+    fn loads_directory_skills_with_precedence() {
         let d = tempfile::tempdir().unwrap();
-        // flat command
-        std::fs::write(d.path().join("greet.md"), "Hello $ARGUMENTS\n").unwrap();
-        // dir-style skill
         std::fs::create_dir_all(d.path().join("review")).unwrap();
         std::fs::write(
             d.path().join("review/SKILL.md"),
@@ -321,10 +343,33 @@ mod tests {
         .unwrap();
 
         let reg = SkillRegistry::load(&[d.path().to_path_buf()]);
-        assert_eq!(reg.len(), 2);
-        assert!(reg.get("greet").is_some());
+        assert_eq!(reg.len(), 1);
         let review = reg.get("review").unwrap();
         assert_eq!(review.description, "review code");
+    }
+
+    #[test]
+    fn flat_md_files_are_not_skills() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("greet.md"), "Hello $ARGUMENTS\n").unwrap();
+        let reg = SkillRegistry::load(&[d.path().to_path_buf()]);
+        assert!(reg.is_empty(), "flat .md files are commands, not skills");
+    }
+
+    #[test]
+    fn skill_md_name_is_case_insensitive() {
+        let d = tempfile::tempdir().unwrap();
+        for (dir, file) in [("lower", "skill.md"), ("mixed", "Skill.MD")] {
+            std::fs::create_dir_all(d.path().join(dir)).unwrap();
+            std::fs::write(
+                d.path().join(dir).join(file),
+                "---\ndescription: x\n---\nbody\n",
+            )
+            .unwrap();
+        }
+        let reg = SkillRegistry::load(&[d.path().to_path_buf()]);
+        assert!(reg.get("lower").is_some(), "skill.md must load");
+        assert!(reg.get("mixed").is_some(), "Skill.MD must load");
     }
 
     /// A namespaced file skill (`skills:jeikcode-smoke-test`) must resolve by
@@ -364,8 +409,7 @@ mod tests {
         reg.register(Skill {
             name: "skills:dup".into(),
             description: "a".into(),
-            template: "A".into(),
-            allowed_tools: Vec::new(),
+            content: "A".into(),
             user_invocable: true,
             skill_dir: PathBuf::from("a"),
             source_path: PathBuf::from("a"),
@@ -373,8 +417,7 @@ mod tests {
         reg.register(Skill {
             name: "plugin:dup".into(),
             description: "b".into(),
-            template: "B".into(),
-            allowed_tools: Vec::new(),
+            content: "B".into(),
             user_invocable: true,
             skill_dir: PathBuf::from("b"),
             source_path: PathBuf::from("b"),
@@ -395,8 +438,7 @@ mod tests {
         reg.register(Skill {
             name: "skills:review".into(),
             description: "visible".into(),
-            template: "V".into(),
-            allowed_tools: Vec::new(),
+            content: "V".into(),
             user_invocable: true,
             skill_dir: PathBuf::from("v"),
             source_path: PathBuf::from("v"),
@@ -404,8 +446,7 @@ mod tests {
         reg.register(Skill {
             name: "plugin:review".into(),
             description: "hidden".into(),
-            template: "H".into(),
-            allowed_tools: Vec::new(),
+            content: "H".into(),
             user_invocable: false,
             skill_dir: PathBuf::from("h"),
             source_path: PathBuf::from("h"),
@@ -421,11 +462,17 @@ mod tests {
     fn later_dir_overrides_same_name() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        std::fs::write(a.path().join("x.md"), "from A\n").unwrap();
-        std::fs::write(b.path().join("x.md"), "from B\n").unwrap();
+        for (root, body) in [(&a, "from A"), (&b, "from B")] {
+            std::fs::create_dir_all(root.path().join("x")).unwrap();
+            std::fs::write(
+                root.path().join("x/SKILL.md"),
+                format!("---\ndescription: x\n---\n{body}\n"),
+            )
+            .unwrap();
+        }
         let reg = SkillRegistry::load(&[a.path().to_path_buf(), b.path().to_path_buf()]);
         assert!(
-            reg.get("x").unwrap().template.contains("from B"),
+            reg.get("x").unwrap().content.contains("from B"),
             "later dir wins"
         );
     }
@@ -439,8 +486,14 @@ mod tests {
     #[test]
     fn retain_enabled_drops_only_disabled_names() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::write(d.path().join("alpha.md"), "A\n").unwrap();
-        std::fs::write(d.path().join("beta.md"), "B\n").unwrap();
+        for (name, body) in [("alpha", "A"), ("beta", "B")] {
+            std::fs::create_dir_all(d.path().join(name)).unwrap();
+            std::fs::write(
+                d.path().join(name).join("SKILL.md"),
+                format!("---\ndescription: {name}\n---\n{body}\n"),
+            )
+            .unwrap();
+        }
         let mut reg = SkillRegistry::load(&[d.path().to_path_buf()]);
         assert_eq!(reg.len(), 2);
         // "skills:alpha" in disabled must drop bare "alpha" in registry
@@ -478,6 +531,10 @@ mod tests {
         assert!(
             dirs.contains(&project.join(".skills")),
             "project-level .skills"
+        );
+        assert!(
+            !dirs.iter().any(|d| d.ends_with("commands")),
+            "commands are not skills"
         );
         // Precedence (last-wins): .claude < .agents < .jeikcode at each level, so a
         // user's jeikcode-native skill still overrides a same-named shared one.

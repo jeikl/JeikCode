@@ -36,7 +36,8 @@ provider 的构建不会编译 MCP/skills 的传递依赖：
 - `codeintel`：代码智能（`code_explore`）。
 
 - `notify`：桌面 / 终端通知（turn-finished + approval-needed），读取 `jeikcode-config` 的 `NotificationConfig`。
-- `skills`：markdown/frontmatter skill 加载器 + `use_skill` / `list_skills` 工具。
+- `skills`：`*/SKILL.md` 加载器 + `use_skill` 工具（技能正文原样返回）。
+- `commands`：`commands/*.md` 斜杠命令加载器 + `$ARGUMENTS` / `$N` / shell 模板渲染（与 skills 独立）。
 - `cc-hooks`：CC 兼容外部 hooks（`hooks.json`），在 kernel seam 上运行用户命令。
 - `mcp`：MCP 客户端（stdio/HTTP/OAuth），把外部 server 工具暴露为内核 Tools。
 - `session`：会话持久化 + 跨会话 recall（两层级 on-disk store + Snapshot/Transcript 钩子）。

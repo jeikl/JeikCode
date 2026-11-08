@@ -11,7 +11,6 @@ fn _isolate_jeikcode_home() {
 }
 
 pub mod commands;
-pub mod custom_commands;
 pub mod event_loop;
 pub mod git;
 pub(crate) mod git_diff;
@@ -657,7 +656,7 @@ pub async fn run(
     };
 
     let capability_scan_start = std::time::Instant::now();
-    let custom_commands = crate::custom_commands::CustomCommandRegistry::load(&working_dir);
+    let custom_commands = jeikcode_capabilities::commands::UserCommandRegistry::load(&working_dir);
     // Same Arc the agent loop holds — reload() calls there propagate
     // here automatically, so the slash menu reflects newly-installed
     // skills without re-plumbing.

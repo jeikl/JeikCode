@@ -160,11 +160,11 @@ struct ReviewArgs {
     /// on after a finished first pass.
     #[arg(long)]
     no_coverage: bool,
-    /// Load skill tools (`use_skill` / `list_skills`) from this directory. Repeatable
-    /// (LOW→HIGH priority; later dirs override earlier on name collision). Each dir is
-    /// scanned for `SKILL.md` (directory skill with bundled `scripts/` / `references/`)
-    /// or single `<name>.md` files. Omit ⇒ NO skill tools mounted (bare-CLI behavior);
-    /// only some deployments / repos opt into skills.
+    /// Load the `use_skill` tool from this directory. Repeatable (LOW→HIGH priority;
+    /// later dirs override earlier on name collision). Each dir is scanned for
+    /// `*/SKILL.md` or `*/skill.md` (case-insensitive; directory skill with bundled
+    /// `scripts/` / `references/`). Flat `*.md` files are commands, not skills. Omit ⇒
+    /// NO skill tool mounted (bare-CLI behavior); only some deployments / repos opt in.
     #[arg(long = "skill-dir", value_name = "DIR")]
     skill_dirs: Vec<PathBuf>,
 }

@@ -18,7 +18,9 @@ JeikCode scans and loads skills in the following order:
 1. **Workspace Project-Level**: `<workspace>/.skills/<skill-name>/SKILL.md` (highest priority, version-controlled with the repository);
 2. **Global User-Level**: `~/.jeikcode/skills/<skill-name>/SKILL.md` (shared across all projects).
 
-Project-level skills override global skills with matching names.
+Project-level skills override global skills with matching names. The entry file may be named `SKILL.md` or `skill.md` (case-insensitive).
+
+Custom slash commands are separate: `commands/*.md` under `~/.jeikcode/commands/`, `<workspace>/.jeikcode/commands/`, `.claude/commands/`, or `.agents/commands/`. They are user-invoked templates, not model-visible skills.
 
 ---
 
@@ -28,13 +30,14 @@ In the browser WebUI, discovering and using skills is seamless:
 
 - **Sidebar Skills Panel**: Click the **Skills** icon in the sidebar to browse all loaded skills and view their purpose;
 - **Quick Attachment Menu (`+` Button)**: Click the `+` button beside the input box and choose "Insert Skill" to automatically format and insert `/<skill-name>` into your prompt;
-- **Terminal Inspection**: In the TUI terminal, type `/skills` to list all currently loaded capabilities.
+- **Terminal Inspection**: In the TUI terminal, type `/skills` to list all currently loaded capabilities;
+- **Custom Slash Commands**: commands from the standard `commands/` directories appear in the slash menu; selecting one inserts `/name ` and the daemon expands it before sending.
 
 ---
 
 ## 4. `SKILL.md` Standard Format & Guidelines
 
-Each skill is a self-contained directory whose entrypoint must be named `SKILL.md`, containing YAML frontmatter metadata at the top:
+Each skill is a self-contained directory whose entrypoint must be named `SKILL.md` (or `skill.md`, case-insensitive), containing YAML frontmatter metadata at the top:
 
 ```markdown
 ---
@@ -73,7 +76,8 @@ To prevent a single `SKILL.md` file from overwhelming the model context window d
 
 ---
 
-## 6. Dynamic Arguments & Instant Reload
+## 6. Verbatim Skills, Command Templates & Instant Reload
 
-- **Parameter Interpolation**: Use `$ARGUMENTS` or `$0` inside the skill template to receive user-supplied arguments;
+- **Skills are verbatim**: `SKILL.md` is a guide, not a template. `$ARGUMENTS`, `$N`, `${SKILL_DIR}` and `` !`cmd` `` are returned as written when the model loads it via `use_skill`;
+- **Command templates**: custom slash commands (`commands/*.md`) are the template layer. `$ARGUMENTS` / `${ARGUMENTS}`, `$1` / `${1}` (1-based), and `` !`cmd` `` are expanded before the message is sent;
 - **Instant Hot-Reload on Save**: After creating or updating `SKILL.md`, click the **Refresh button** in the WebUI sidebar or execute `/reload` in the terminal. The runtime reloads immediately, and the skill becomes active in your next turn without restarting.

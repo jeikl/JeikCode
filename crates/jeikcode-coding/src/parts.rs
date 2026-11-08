@@ -521,7 +521,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     let skills = Arc::new(skills);
     // Render the catalog BEFORE the registry is moved into the tools; injected as a
     // leading system message by SkillCatalogHook below (without it the model never
-    // learns which skills exist — only the use_skill/list_skills tools were mounted).
+    // learns which skills exist — only the use_skill tool was mounted).
     let skill_catalog = skills.render_catalog();
     register_skill_tools(&mut registry, skills);
     names.extend(

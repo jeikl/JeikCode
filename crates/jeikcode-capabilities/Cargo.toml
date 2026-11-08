@@ -178,8 +178,11 @@ notify = ["dep:jeikcode-config"]
 # Pulls the config leaf (i18n + Config) + the light serde/anyhow/sha2/chrono/thiserror/fs2
 # stack. Opt-in (NOT default) — only CLI/TUI hosts that run `jeikcode setup` enable it.
 setup = ["dep:jeikcode-config", "dep:anyhow", "dep:sha2", "dep:chrono", "chrono/serde", "dep:fs2", "dep:thiserror", "dep:sysinfo", "dep:zstd", "dep:tar"]
-# Skills: markdown/frontmatter skill loader + use_skill / list_skills tools. No new deps.
+# Skills: */SKILL.md loader + use_skill tool. No new deps beyond the config leaf.
 skills = ["dep:jeikcode-config"]
+# User-invoked slash commands: commands/*.md loader + $ARGUMENTS/$N/shell renderer.
+# Separate from `skills`: a SKILL.md body is never expanded.
+commands = ["dep:jeikcode-config"]
 # CC-compatible external hooks: run the user's hooks.json commands on the kernel
 # seams (LifecycleHooks + ToolMiddleware). Spawns subprocesses, so it pulls the
 # process/io tokio features; `dirs` resolves $JEIKCODE_HOME. Opt-in (NOT default).
@@ -217,13 +220,14 @@ memory = []
 offline = ["dep:jeikcode-config"]
 # The plugin subsystem (loader / installer / marketplace / manifest / trust store),
 # ported from core::plugin as a v2 migration target. Synchronous (shells out to `git`
-# via std::process — no async runtime). Opt-in (NOT default). Enables `skills` so the
-# loader can build a SkillRegistry, plus the auth/config leaves and fs/home helpers.
+# via std::process — no async runtime). Opt-in (NOT default). Enables `skills` and
+# `commands` so the loader can build both registries, plus the auth/config leaves
+# and fs/home helpers.
 plugin = [
     "dep:anyhow", "dep:sha2", "dep:url", "dep:toml",
     "dep:chrono",
     "dep:jeikcode-auth", "dep:jeikcode-config",
-    "skills",
+    "skills", "commands",
 ]
 
 [target.'cfg(unix)'.dependencies]

@@ -26,7 +26,6 @@ use super::{
     request_context_stats_render, save_and_reload, save_language_and_reload, LoopCtx,
     PersistedConfigReload,
 };
-use crate::custom_commands::ArgsRequirement;
 use crate::i18n::{t, Msg};
 use crate::modals::{
     DiffViewer, DirPicker, FileViewer, LanguagePicker, Modal, ModelPicker, ProxyPicker,
@@ -35,6 +34,7 @@ use crate::render::{Renderer, UiLine};
 use crate::session::{Session, SessionId};
 use crate::state::{AgentMode, UiState};
 use anyhow::Result;
+use jeikcode_capabilities::commands::ArgsRequirement;
 use jeikcode_capabilities::memory::MemoryStore;
 use jeikcode_config::config::Config;
 
@@ -3863,12 +3863,9 @@ fn execute_slash_command_impl(
                 }
                 renderer.flush();
             } else {
-                // 贪婪多 skill 解析：前缀是一串已知 skill 名，其余是任务描述，
-                // 任务描述会传给每个 skill（保留 $ARGUMENTS 占位符语义）。单个
-                // skill（无第二个 skill 词）解析结果与旧 splitn(2) 一致，零回归。
-                // Returns the skill's canonical identity (`s.name`, the unique
-                // normalized registry key) so `split_skill_names` dedups by
-                // identity — two spellings of the same skill inject it once.
+                // 贪婪多 skill 解析：前缀是一串已知 skill 名，其余是任务描述。
+                // `resolve` 返回规范身份（`s.name`，含 plugin 命名空间），既用于
+                // 去重，也直接写进 `use_skill(<canonical>)`，避免裸名歧义。
                 let resolve = |name: &str| {
                     ctx.skill_registry.read().ok().and_then(|r| {
                         r.get(name)
@@ -3885,33 +3882,28 @@ fn execute_slash_command_impl(
                     ));
                     renderer.flush();
                 } else {
-                    // 按顺序展开每个 skill；expand_skill 可能因竞态返回 None。
-                    let blocks: Vec<String> = skills
+                    // 不在本地展开技能正文：把本次输入改写为
+                    // `use_skill(<canonical>)` + 用户真实请求，由模型走统一工具路径
+                    // 读取 raw SKILL.md。第二个及以后的 skill 名若打错字会静默
+                    // 落进任务描述，回显让用户一眼看出"只加载了 N 个"。
+                    let names = skills
                         .iter()
-                        .filter_map(|name| expand_skill(ctx, name.as_str(), &skill_args))
+                        .map(|(display, _)| display.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    renderer.render(UiLine::CommandOutput(
+                        t(Msg::SkillsLoaded {
+                            names: names.as_str(),
+                        })
+                        .into_owned(),
+                    ));
+                    renderer.flush();
+                    let canonical: Vec<String> = skills
+                        .iter()
+                        .map(|(_, canonical)| canonical.clone())
                         .collect();
-                    if blocks.is_empty() {
-                        renderer.render(UiLine::Error(
-                            t(Msg::SkillUnknown {
-                                name: skills[0].as_str(),
-                            })
-                            .into_owned(),
-                        ));
-                        renderer.flush();
-                    } else {
-                        // 回显已加载 skill：第二个及以后的 skill 名若打错字会静默
-                        // 落进任务描述，这行让用户一眼看出"只加载了 N 个"。
-                        let names = skills.join(" · ");
-                        renderer.render(UiLine::CommandOutput(
-                            t(Msg::SkillsLoaded {
-                                names: names.as_str(),
-                            })
-                            .into_owned(),
-                        ));
-                        renderer.flush();
-                        let rendered = blocks.join("\n\n---\n\n");
-                        submit_agent_turn(ctx, state, rendered);
-                    }
+                    let rendered = skill_invocation_prompt(&canonical, &skill_args);
+                    submit_agent_turn(ctx, state, rendered);
                 }
             }
         }
@@ -3949,9 +3941,9 @@ fn execute_slash_command_impl(
         }
         other => {
             // Before reporting "unknown", check user-defined custom commands,
-            // then user-invocable skills (loaded from .claude/skills,
-            // .jeikcode/skills, etc.). Both expand to a prompt and dispatch
-            // as a regular user message.
+            // then user-invocable skills. Commands expand their template; skills
+            // become a `use_skill(...)` request. Both dispatch as a regular user
+            // message.
             match decide_custom_command(&ctx.custom_commands, other, arg) {
                 CustomDispatch::Reject => {
                     render_custom_command_error(renderer, &CustomDispatch::Reject, other);
@@ -3960,7 +3952,7 @@ fn execute_slash_command_impl(
                     submit_agent_turn(ctx, state, rendered);
                 }
                 CustomDispatch::NotFound => {
-                    if let Some(rendered) = expand_skill(ctx, other, arg) {
+                    if let Some(rendered) = skill_invocation(ctx, other, arg) {
                         submit_agent_turn(ctx, state, rendered);
                     } else {
                         // Unknown command — emit failure telemetry
@@ -3996,14 +3988,16 @@ fn execute_slash_command_impl(
 }
 
 /// 贪婪切分 `/skills` 参数：从左到右扫 whitespace 分词，`resolve(token)` 返回该
-/// token 对应 skill 的**规范身份**（`Some(canonical)`）时收入列表，否则停止。去重
-/// 按规范身份而非原始拼写——两个拼写不同但解析到同一 skill 的 token（大小写、后缀
-/// 简写等）只注入一次。列表里存用户原始拼写（回显更友好），展开时 `expand_skill`
-/// 会再归一化。遇到第一个非 skill 的 token，它及其之后的内容（按原串偏移，保留原
-/// 空白）作为任务描述返回。单个 skill（后面无第二个 skill 词）等价于旧 `splitn(2)`。
-fn split_skill_names(arg: &str, resolve: impl Fn(&str) -> Option<String>) -> (Vec<String>, String) {
-    let mut skills: Vec<String> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
+/// token 对应 skill 的**规范身份**（`Some(canonical)`）时收入列表，否则停止。每个
+/// 条目同时保留用户拼写（回显用）与规范身份（`use_skill(...)` 用，含 plugin 命名
+/// 空间）；去重按规范身份。遇到第一个非 skill 的 token，它及其之后的内容（按原串
+/// 偏移，保留原空白）作为任务描述返回。单个 skill（后面无第二个 skill 词）等价于
+/// 旧 `splitn(2)`。
+fn split_skill_names(
+    arg: &str,
+    resolve: impl Fn(&str) -> Option<String>,
+) -> (Vec<(String, String)>, String) {
+    let mut skills: Vec<(String, String)> = Vec::new();
     let mut rest = arg.trim_start();
     loop {
         let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
@@ -4014,9 +4008,8 @@ fn split_skill_names(arg: &str, resolve: impl Fn(&str) -> Option<String>) -> (Ve
         let Some(canonical) = resolve(token) else {
             break;
         };
-        if !seen.iter().any(|c| c == &canonical) {
-            seen.push(canonical);
-            skills.push(token.to_string());
+        if !skills.iter().any(|(_, seen)| seen == &canonical) {
+            skills.push((token.to_string(), canonical));
         }
         rest = rest[token_end..].trim_start();
     }
@@ -4088,7 +4081,7 @@ pub(super) fn render_custom_command_error(
 /// - otherwise resolved command → `Submit(render(arg))`
 /// - no match → `NotFound`
 pub(super) fn decide_custom_command(
-    registry: &crate::custom_commands::CustomCommandRegistry,
+    registry: &jeikcode_capabilities::commands::UserCommandRegistry,
     name: &str,
     arg: &str,
 ) -> CustomDispatch {
@@ -4104,16 +4097,34 @@ pub(super) fn decide_custom_command(
     }
 }
 
-/// Look up a user-invocable skill by name and expand it with the current
-/// session id. Returns the rendered prompt to send as a user message, or
-/// `None` if no matching skill exists.
-pub(super) fn expand_skill(ctx: &LoopCtx, name: &str, arg: &str) -> Option<String> {
-    let reg = ctx.skill_registry.read().ok()?;
-    let skill = reg.get(name)?;
-    if !skill.user_invocable {
-        return None;
+/// Ask the model to load a user-invocable skill through the `use_skill` tool,
+/// then handle the real request. Skills are never expanded locally — the tool
+/// path returns the raw SKILL.md body.
+pub(super) fn skill_invocation(ctx: &LoopCtx, name: &str, task: &str) -> Option<String> {
+    let canonical = ctx
+        .skill_registry
+        .read()
+        .ok()?
+        .get(name)
+        .filter(|skill| skill.user_invocable)
+        .map(|skill| skill.name.clone())?;
+    Some(skill_invocation_prompt(&[canonical], task))
+}
+
+/// Build `use_skill(<canonical>)\n\n{task}`. Multiple skills are listed one per
+/// line before the blank line so the model can load each in order.
+fn skill_invocation_prompt(skills: &[String], task: &str) -> String {
+    let mut out = skills
+        .iter()
+        .map(|name| format!("use_skill({name})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let task = task.trim();
+    if !task.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(task);
     }
-    Some(skill.expand_for_injection(arg, ctx.current_session.id.as_str()))
+    out
 }
 
 /// Handle `/plugin` subcommands: marketplace add/remove/update/list,
@@ -7386,8 +7397,8 @@ mod todo_command_tests {
     use super::{
         decide_custom_command, format_todo_command, render_custom_command_error, CustomDispatch,
     };
-    use crate::custom_commands::ArgsRequirement;
     use crate::render::{Renderer, UiLine};
+    use jeikcode_capabilities::commands::ArgsRequirement;
     use jeikcode_config::i18n::{t, Msg};
     use jeikcode_kernel::message::{Message, Role};
     use jeikcode_kernel::tool::ToolCall;
@@ -7430,8 +7441,8 @@ mod todo_command_tests {
 
     #[test]
     fn custom_required_args_render_and_metadata() {
-        let mut custom = crate::custom_commands::CustomCommandRegistry::empty();
-        custom.register(crate::custom_commands::CustomCommand {
+        let mut custom = jeikcode_capabilities::commands::UserCommandRegistry::empty();
+        custom.register(jeikcode_capabilities::commands::UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::Required,
@@ -7451,8 +7462,8 @@ mod todo_command_tests {
 
     #[test]
     fn dispatch_custom_optional_empty_arg_submits() {
-        let mut custom = crate::custom_commands::CustomCommandRegistry::empty();
-        custom.register(crate::custom_commands::CustomCommand {
+        let mut custom = jeikcode_capabilities::commands::UserCommandRegistry::empty();
+        custom.register(jeikcode_capabilities::commands::UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::Optional,
@@ -7468,8 +7479,8 @@ mod todo_command_tests {
 
     #[test]
     fn dispatch_custom_none_empty_arg_submits() {
-        let mut custom = crate::custom_commands::CustomCommandRegistry::empty();
-        custom.register(crate::custom_commands::CustomCommand {
+        let mut custom = jeikcode_capabilities::commands::UserCommandRegistry::empty();
+        custom.register(jeikcode_capabilities::commands::UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::None,
@@ -7486,7 +7497,7 @@ mod todo_command_tests {
     // ── dispatch decision: `Required` + empty arg ⇒ Reject ──────────────
     //
     // Regression guard for the `other` arm of `execute_slash_command_impl`.
-    // The prior tests above only covered `CustomCommandRegistry::render`'s
+    // The prior tests above only covered `UserCommandRegistry::render`'s
     // template substitution and the `args_requirement` metadata; none
     // exercised the dispatcher's reject-vs-submit boundary. If a future
     // refactor drops the `CmdCustomArgRequired` arm or flips the rule so
@@ -7498,8 +7509,8 @@ mod todo_command_tests {
         // Trigger: user typed `/myreview` (Required) and pressed Enter
         // with no argument. Expected: render CmdCustomArgRequired, do
         // NOT submit an agent turn.
-        let mut custom = crate::custom_commands::CustomCommandRegistry::empty();
-        custom.register(crate::custom_commands::CustomCommand {
+        let mut custom = jeikcode_capabilities::commands::UserCommandRegistry::empty();
+        custom.register(jeikcode_capabilities::commands::UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::Required,
@@ -7521,8 +7532,8 @@ mod todo_command_tests {
         // space/tab arg should also reject — otherwise the user could
         // bypass validation by typing `/myreview ` (trailing space gets
         // injected by the needs_args menu auto-complete path).
-        let mut custom = crate::custom_commands::CustomCommandRegistry::empty();
-        custom.register(crate::custom_commands::CustomCommand {
+        let mut custom = jeikcode_capabilities::commands::UserCommandRegistry::empty();
+        custom.register(jeikcode_capabilities::commands::UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::Required,
@@ -7568,8 +7579,8 @@ mod todo_command_tests {
         // rendered template, never Reject. Guards against an overly-broad
         // rejection rule (e.g. someone drops the `arg.trim().is_empty()`
         // half of the condition).
-        let mut custom = crate::custom_commands::CustomCommandRegistry::empty();
-        custom.register(crate::custom_commands::CustomCommand {
+        let mut custom = jeikcode_capabilities::commands::UserCommandRegistry::empty();
+        custom.register(jeikcode_capabilities::commands::UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::Required,
@@ -7590,8 +7601,8 @@ mod todo_command_tests {
         // reject rule is scoped to Required only). Locks the boundary so
         // a regression that rejects all empty-arg dispatches is caught.
         for requirement in [ArgsRequirement::Optional, ArgsRequirement::None] {
-            let mut custom = crate::custom_commands::CustomCommandRegistry::empty();
-            custom.register(crate::custom_commands::CustomCommand {
+            let mut custom = jeikcode_capabilities::commands::UserCommandRegistry::empty();
+            custom.register(jeikcode_capabilities::commands::UserCommand {
                 name: "myreview".into(),
                 description: "".into(),
                 args_requirement: requirement.clone(),
@@ -7618,7 +7629,7 @@ mod todo_command_tests {
         // A name that matches neither a custom command nor (in the pure
         // decision layer) a skill falls through to NotFound, which the
         // dispatcher translates into the unknown-command telemetry arm.
-        let custom = crate::custom_commands::CustomCommandRegistry::empty();
+        let custom = jeikcode_capabilities::commands::UserCommandRegistry::empty();
         let decision = decide_custom_command(&custom, "does_not_exist", "");
         assert!(
             matches!(decision, CustomDispatch::NotFound),
@@ -7748,8 +7759,8 @@ mod todo_command_tests {
         // This is the closest unit-testable seam to the real dispatcher; the
         // full LoopCtx is intentionally avoided (it'd require constructing an
         // AgentClient + Telemetry + a dozen channels just to reach one arm).
-        let mut custom = crate::custom_commands::CustomCommandRegistry::empty();
-        custom.register(crate::custom_commands::CustomCommand {
+        let mut custom = jeikcode_capabilities::commands::UserCommandRegistry::empty();
+        custom.register(jeikcode_capabilities::commands::UserCommand {
             name: "myreview".into(),
             description: "".into(),
             args_requirement: ArgsRequirement::Required,
@@ -7909,7 +7920,7 @@ mod mcp_subcommand_tests {
 
 #[cfg(test)]
 mod split_skill_names_tests {
-    use super::split_skill_names;
+    use super::{skill_invocation_prompt, split_skill_names};
 
     /// 测试用假解析器：返回 skill 的规范身份（小写）。镜像真实 `SkillRegistry::get`
     /// 的大小写不敏感解析——`resolve("BrainStorming")` 与 `resolve("brainstorming")`
@@ -7923,24 +7934,37 @@ mod split_skill_names_tests {
         .then_some(canonical)
     }
 
+    fn pairs(skills: &[(String, String)]) -> Vec<(&str, &str)> {
+        skills
+            .iter()
+            .map(|(display, canonical)| (display.as_str(), canonical.as_str()))
+            .collect()
+    }
+
     #[test]
     fn multiple_skills_then_task() {
         let (skills, task) = split_skill_names("adapt-agent skill-creator 路径在哪", resolve);
-        assert_eq!(skills, vec!["adapt-agent", "skill-creator"]);
+        assert_eq!(
+            pairs(&skills),
+            vec![
+                ("adapt-agent", "adapt-agent"),
+                ("skill-creator", "skill-creator")
+            ]
+        );
         assert_eq!(task, "路径在哪");
     }
 
     #[test]
     fn single_skill_with_task_unchanged() {
         let (skills, task) = split_skill_names("brainstorming 做个登录页", resolve);
-        assert_eq!(skills, vec!["brainstorming"]);
+        assert_eq!(pairs(&skills), vec![("brainstorming", "brainstorming")]);
         assert_eq!(task, "做个登录页");
     }
 
     #[test]
     fn single_skill_no_task_unchanged() {
         let (skills, task) = split_skill_names("brainstorming", resolve);
-        assert_eq!(skills, vec!["brainstorming"]);
+        assert_eq!(pairs(&skills), vec![("brainstorming", "brainstorming")]);
         assert_eq!(task, "");
     }
 
@@ -7954,31 +7978,43 @@ mod split_skill_names_tests {
     #[test]
     fn typo_second_skill_falls_into_task() {
         let (skills, task) = split_skill_names("adapt-agent skil-creator 路径在哪", resolve);
-        assert_eq!(skills, vec!["adapt-agent"]);
+        assert_eq!(pairs(&skills), vec![("adapt-agent", "adapt-agent")]);
         assert_eq!(task, "skil-creator 路径在哪");
     }
 
     #[test]
     fn duplicate_skill_deduped() {
         let (skills, task) = split_skill_names("a a 任务", resolve);
-        assert_eq!(skills, vec!["a"]);
+        assert_eq!(pairs(&skills), vec![("a", "a")]);
         assert_eq!(task, "任务");
     }
 
     #[test]
     fn task_whitespace_preserved_verbatim() {
         let (skills, task) = split_skill_names("brainstorming line1\n  line2", resolve);
-        assert_eq!(skills, vec!["brainstorming"]);
+        assert_eq!(pairs(&skills), vec![("brainstorming", "brainstorming")]);
         assert_eq!(task, "line1\n  line2");
+    }
+
+    #[test]
+    fn skill_invocation_prompt_is_use_skill_plus_task() {
+        assert_eq!(
+            skill_invocation_prompt(&["skills:foo".into()], "修复登录"),
+            "use_skill(skills:foo)\n\n修复登录"
+        );
+        assert_eq!(
+            skill_invocation_prompt(&["a".into(), "b".into()], ""),
+            "use_skill(a)\nuse_skill(b)"
+        );
     }
 
     #[test]
     fn variant_spellings_of_same_skill_dedup_to_one() {
         // Different case both resolve to canonical "brainstorming" → one skill,
-        // NOT two (which would inject the same skill body twice). The first
-        // spelling the user typed is kept for display.
+        // NOT two (which would emit two `use_skill(...)` calls). The canonical
+        // identity is what goes into the tool invocation.
         let (skills, task) = split_skill_names("BrainStorming brainstorming 任务", resolve);
-        assert_eq!(skills, vec!["BrainStorming"]);
+        assert_eq!(pairs(&skills), vec![("BrainStorming", "brainstorming")]);
         assert_eq!(task, "任务");
     }
 }

@@ -1,23 +1,15 @@
-//! A loaded skill: a markdown template with optional YAML-ish frontmatter, plus the
-//! argument/variable substitution engine. Ported from production `skill.rs`.
-//!
-//! `expand` runs any `` !`command` `` blocks through a shell — skills are TRUSTED,
-//! user-authored content (the same trust as a slash command the user installed), so this
-//! is by design, not arbitrary remote code.
+//! A loaded skill: a markdown guide with optional YAML-ish frontmatter. Content is
+//! returned verbatim; argument/variable substitution belongs to user-invoked command
+//! templates (`crate::commands::template`), never to skills.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Skill {
     pub name: String,
     pub description: String,
-    /// The template body (everything after the frontmatter block).
-    pub template: String,
-    /// Tools the specialization MAY auto-approve while this skill is active (metadata;
-    /// the L1 capability does not enforce it — that's an L2 approval-policy concern).
-    pub allowed_tools: Vec<String>,
+    /// The guide body (everything after the frontmatter block), returned verbatim.
+    pub content: String,
     /// If false (`user-invocable: false` in frontmatter), hidden from the `/` menu;
     /// the model can still auto-invoke it. Absent → true.
     pub user_invocable: bool,
@@ -27,283 +19,48 @@ pub struct Skill {
 }
 
 impl Skill {
-    /// Substitute arguments + variables into the template:
-    /// `$ARGUMENTS[N]` / `$N` (positional), `$ARGUMENTS` (all; appended if absent),
-    /// `${CLAUDE_SESSION_ID}`, `${CLAUDE_SKILL_DIR}`, and `` !`cmd` `` (shell pre-exec).
-    pub fn expand(&self, arguments: &str, session_id: &str) -> String {
-        let positional: Vec<&str> = arguments.split_whitespace().collect();
-        let skill_dir = self.skill_dir.to_string_lossy();
-
-        // SINGLE left-to-right pass: each substitution's value is emitted literally and
-        // never re-scanned — so an argument that itself contains `$1` is NOT re-expanded.
-        let t = self.template.as_str();
-        let mut result = String::with_capacity(t.len());
-        let mut i = 0;
-        while i < t.len() {
-            let rest = &t[i..];
-            if let Some((value, len)) =
-                match_substitution(rest, &positional, arguments, session_id, skill_dir.as_ref())
-            {
-                result.push_str(value);
-                i += len;
-            } else {
-                let ch = rest.chars().next().unwrap();
-                result.push(ch);
-                i += ch.len_utf8();
-            }
-        }
-        // A template with no `$ARGUMENTS` token at all still gets the full args appended.
-        if !self.template.contains("$ARGUMENTS") && !arguments.trim().is_empty() {
-            result = format!("{}\n\nARGUMENTS: {}", result.trim_end(), arguments);
-        }
-        expand_shell_injections(&result)
-    }
-
-    /// Expand for model/tool injection. Aligns with Grok's skill envelope + OpenCode's
-    /// base-dir/file-list pattern so every load path (use_skill, slash menu) returns a
-    /// consistent, path-bearing payload:
+    /// Render the minimal path-bearing payload around `body`:
     ///
     /// ```text
-    /// <skill name="…" description="…" path="…">
-    /// <system-reminder>…base dir…</system-reminder>   <!-- dir-style only -->
-    /// {body with $ARGUMENTS / ${SKILL_DIR} expanded}
-    /// <skill_files>…sampled absolute paths…</skill_files>  <!-- when present -->
-    /// </skill>
+    /// Skill Path: {absolute skill directory}
+    /// Skill Guide: {absolute guide .md path}
+    /// <Skill Guide>
+    /// {body}
+    /// </Skill Guide>
     /// ```
-    pub fn expand_for_injection(&self, arguments: &str, session_id: &str) -> String {
-        let body = self.expand(arguments, session_id);
-        let path = display_skill_dir(&self.skill_dir.to_string_lossy(), cfg!(windows));
-        let desc = xml_attr_escape(&self.description);
-        let name = xml_attr_escape(&self.name);
-        let mut out = format!("<skill name=\"{name}\" description=\"{desc}\" path=\"{path}\">\n");
-        if let Some(note) = self.bundled_resource_note() {
-            out.push_str(&note);
-            out.push_str("\n\n");
+    fn render_injection(&self, body: &str) -> String {
+        let path = display_skill_path(&self.skill_dir.to_string_lossy(), cfg!(windows));
+        let guide = display_skill_path(&self.source_path.to_string_lossy(), cfg!(windows));
+        let mut out = format!("Skill Path: {path}\nSkill Guide: {guide}\n<Skill Guide>\n{body}");
+        if !out.ends_with('\n') {
+            out.push('\n');
         }
-        out.push_str(&body);
-        if let Some(files) = self.list_bundled_files(20) {
-            out.push_str("\n\n<skill_files>\n");
-            for f in &files {
-                out.push_str(&format!("<file>{f}</file>\n"));
-            }
-            out.push_str("</skill_files>");
-        }
-        out.push_str("\n</skill>");
+        out.push_str("</Skill Guide>");
         out
     }
 
-    /// Absolute skill directory for catalog / diagnostics (forward-slash on Windows).
-    pub fn display_location(&self) -> String {
-        display_skill_dir(&self.skill_dir.to_string_lossy(), cfg!(windows))
-    }
-
-    /// True when this is a directory-style skill (`…/SKILL.md`) that owns a dedicated folder.
-    pub fn is_directory_skill(&self) -> bool {
-        self.source_path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md")
-    }
-
-    /// A `<system-reminder>` naming the skill's install directory, emitted only for
-    /// directory-style skills (source file literally `SKILL.md`) — those own a dedicated
-    /// folder that can bundle `scripts/`/`references/`. Single-file `.md` skills share a
-    /// skills folder, so the note would point at the wrong (shared) directory.
-    fn bundled_resource_note(&self) -> Option<String> {
-        if !self.is_directory_skill() {
-            return None;
-        }
-        let dir = self.display_location();
-        Some(format!(
-            "<system-reminder>\n\
-             Base directory for this skill: {dir}\n\
-             Relative paths in this skill (e.g. scripts/, references/, templates) are \
-             relative to this base directory — NOT the current working directory. \
-             `${{SKILL_DIR}}` / `${{CLAUDE_SKILL_DIR}}` / `{{SKILL_DIR}}` in the body are \
-             already expanded to this path when present. Prefer absolute paths under the \
-             base directory when invoking bundled scripts. Do not search the project cwd \
-             for these files.\n\
-             </system-reminder>"
-        ))
-    }
-
-    /// Sample absolute paths of bundled resources under the skill directory (scripts,
-    /// references, assets). Skips SKILL.md itself. Caps at `limit` (OpenCode samples 10;
-    /// we allow up to 20). Flat single-file skills return None.
-    fn list_bundled_files(&self, limit: usize) -> Option<Vec<String>> {
-        if !self.is_directory_skill() || limit == 0 {
-            return None;
-        }
-        let mut out = Vec::new();
-        collect_skill_files(&self.skill_dir, &self.skill_dir, &mut out, limit, 0);
-        if out.is_empty() {
-            None
-        } else {
-            Some(out)
-        }
+    /// Raw guide for the `use_skill` tool: the SKILL.md body verbatim, with no
+    /// argument, variable, or shell substitution.
+    pub fn raw_for_injection(&self) -> String {
+        self.render_injection(&self.content)
     }
 }
 
-/// Escape XML attribute values for the skill envelope (name/description/path).
-fn xml_attr_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+/// `SKILL.md` in any ASCII case (`skill.md`, `Skill.md`, …).
+pub(crate) fn is_skill_md_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("skill.md")
 }
 
-/// Depth-bounded walk collecting non-SKILL.md files as absolute display paths.
-fn collect_skill_files(root: &Path, dir: &Path, out: &mut Vec<String>, limit: usize, depth: usize) {
-    const MAX_DEPTH: usize = 4;
-    if out.len() >= limit || depth > MAX_DEPTH {
-        return;
-    }
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-    entries.sort();
-    for p in entries {
-        if out.len() >= limit {
-            break;
-        }
-        if p.is_dir() {
-            collect_skill_files(root, &p, out, limit, depth + 1);
-        } else if p.is_file() {
-            if p.file_name().and_then(|n| n.to_str()) == Some("SKILL.md") {
-                continue;
-            }
-            out.push(display_skill_dir(&p.to_string_lossy(), cfg!(windows)));
-        }
-    }
-}
-
-/// Format a skill directory for the base-dir note (see `bundled_resource_note`). On
-/// Windows, convert `\` → `/` so the path works uniformly across read/Python/Git
-/// Bash (a raw backslash path breaks when bash treats `\U`/`\s` as escapes). Windows
-/// separators are always `\` and filenames can't contain `\`, so the replace is lossless.
-/// On Unix, `\` is a legal filename char, so leave it. Note-text only — never used for IO.
-fn display_skill_dir(raw: &str, is_windows: bool) -> String {
+/// Format a skill path for model-facing output. On Windows, convert `\` → `/` so the
+/// path works uniformly across read/Python/Git Bash (a raw backslash path breaks when
+/// bash treats `\U`/`\s` as escapes). Windows separators are always `\` and filenames
+/// can't contain `\`, so the replace is lossless. On Unix, `\` is a legal filename char,
+/// so leave it. Display-only — never used for IO.
+fn display_skill_path(raw: &str, is_windows: bool) -> String {
     if is_windows {
         raw.replace('\\', "/")
     } else {
         raw.to_string()
-    }
-}
-
-/// Match a substitution token at the START of `rest`; returns `(replacement, consumed)`.
-/// Longest-token-first; only DEFINED positional indices substitute (others stay literal,
-/// matching production). `$N` consumes a maximal digit run (so `$10` ≠ `$1` + `0`).
-fn match_substitution<'a>(
-    rest: &str,
-    positional: &[&'a str],
-    arguments: &'a str,
-    session_id: &'a str,
-    skill_dir: &'a str,
-) -> Option<(&'a str, usize)> {
-    if let Some(after) = rest.strip_prefix("$ARGUMENTS[") {
-        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-        if !digits.is_empty() && after[digits.len()..].starts_with(']') {
-            if let Ok(n) = digits.parse::<usize>() {
-                if n < positional.len() {
-                    return Some((positional[n], "$ARGUMENTS[".len() + digits.len() + 1));
-                }
-            }
-        }
-        return None; // malformed / out-of-range → literal
-    }
-    if rest.starts_with("${CLAUDE_SESSION_ID}") {
-        return Some((session_id, "${CLAUDE_SESSION_ID}".len()));
-    }
-    // Grok-native SESSION_ID alias.
-    if rest.starts_with("${SESSION_ID}") {
-        return Some((session_id, "${SESSION_ID}".len()));
-    }
-    if rest.starts_with("${CLAUDE_SKILL_DIR}") {
-        return Some((skill_dir, "${CLAUDE_SKILL_DIR}".len()));
-    }
-    // Grok-native SKILL_DIR (preferred) + bare `{SKILL_DIR}` used in many community skills.
-    if rest.starts_with("${SKILL_DIR}") {
-        return Some((skill_dir, "${SKILL_DIR}".len()));
-    }
-    if rest.starts_with("{SKILL_DIR}") {
-        return Some((skill_dir, "{SKILL_DIR}".len()));
-    }
-    if rest.starts_with("$ARGUMENTS") {
-        return Some((arguments, "$ARGUMENTS".len()));
-    }
-    if let Some(after) = rest.strip_prefix('$') {
-        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-        if !digits.is_empty() {
-            if let Ok(n) = digits.parse::<usize>() {
-                if n < positional.len() {
-                    return Some((positional[n], 1 + digits.len()));
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Replace each `` !`cmd` `` with the command's trimmed stdout (sh -c). Stops on an
-/// unclosed backtick.
-fn expand_shell_injections(template: &str) -> String {
-    let mut result = template.to_string();
-    loop {
-        let Some(start) = result.find("!`") else {
-            break;
-        };
-        let search_from = start + 2;
-        let Some(rel_end) = result[search_from..].find('`') else {
-            break; // unclosed — leave as-is
-        };
-        let end = search_from + rel_end;
-        let cmd = result[search_from..end].to_string();
-        let output = run_shell_command(&cmd);
-        result = format!("{}{}{}", &result[..start], output, &result[end + 1..]);
-    }
-    result
-}
-
-fn run_shell_command(cmd: &str) -> String {
-    let secs = jeikcode_config::config::ToolTimeoutsConfig::load_effective().skill_cmd_secs;
-    let mut command = Command::new("sh");
-    command
-        .arg("-c")
-        .arg(cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    crate::process_utils::apply_utf8_locale_env_sync(&mut command);
-    crate::process_utils::suppress_console_window_sync(&mut command);
-    let child = match command.spawn() {
-        Ok(c) => c,
-        Err(e) => return format!("[error: {e}]"),
-    };
-    let pid = child.id();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(Duration::from_secs(secs)) {
-        Ok(Ok(out)) => {
-            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                if !stderr.trim().is_empty() {
-                    s.push('\n');
-                    s.push_str(stderr.trim());
-                }
-            }
-            s.trim_end().to_string()
-        }
-        Ok(Err(e)) => format!("[error: {e}]"),
-        Err(_) => {
-            #[cfg(windows)]
-            crate::process_utils::taskkill_tree(pid);
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
-            format!("[timed out after {secs}s]")
-        }
     }
 }
 
@@ -312,7 +69,6 @@ fn run_shell_command(cmd: &str) -> String {
 struct Frontmatter {
     name: Option<String>,
     description: String,
-    allowed_tools: Vec<String>,
     /// If false (`user-invocable: false`), hidden from the `/` menu — the model can
     /// still auto-invoke. Absent → true.
     user_invocable: bool,
@@ -323,7 +79,6 @@ impl Default for Frontmatter {
         Self {
             name: None,
             description: String::new(),
-            allowed_tools: Vec::new(),
             user_invocable: true,
         }
     }
@@ -446,14 +201,6 @@ fn parse_frontmatter(content: &str) -> (Frontmatter, String) {
                 };
                 i += 1;
             }
-        } else if let Some(v) = key_line.strip_prefix("allowed-tools:") {
-            // AgentSkills spec is space-delimited; also accept commas (Claude Code compat).
-            fm.allowed_tools = v
-                .split([' ', ','])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            i += 1;
         } else if let Some(v) = key_line.strip_prefix("user-invocable:") {
             // Mirror core: only the literal `false` hides it; anything else stays true.
             fm.user_invocable = v.trim() != "false";
@@ -537,23 +284,8 @@ fn make_name(base: &str, namespace: Option<&str>) -> String {
     }
 }
 
-/// Parse a flat `name.md` skill (name = file stem unless overridden in frontmatter).
-pub(crate) fn parse_skill_file(path: &Path, namespace: Option<&str>) -> Result<Skill, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("invalid file name")?;
-    build_skill(
-        &content,
-        stem,
-        path.parent().unwrap_or(Path::new(".")),
-        path,
-        namespace,
-    )
-}
-
 /// Parse a directory-style `<dir>/SKILL.md` (name = directory name unless overridden).
+/// The file name is matched case-insensitively by the registry.
 pub(crate) fn parse_skill_dir(
     skill_dir: &Path,
     skill_md: &Path,
@@ -574,20 +306,19 @@ fn build_skill(
     source: &Path,
     namespace: Option<&str>,
 ) -> Result<Skill, String> {
-    let (fm, template) = parse_frontmatter(content);
+    let (fm, body) = parse_frontmatter(content);
     let base = fm.name.as_deref().unwrap_or(default_name);
     validate_skill_name(base)?;
     let name = make_name(base, namespace);
     let description = if fm.description.is_empty() {
-        first_paragraph(&template)
+        first_paragraph(&body)
     } else {
         fm.description
     };
     Ok(Skill {
         name,
         description,
-        template,
-        allowed_tools: fm.allowed_tools,
+        content: body,
         user_invocable: fm.user_invocable,
         skill_dir: skill_dir.to_path_buf(),
         source_path: source.to_path_buf(),
@@ -598,12 +329,11 @@ fn build_skill(
 mod tests {
     use super::*;
 
-    fn skill(template: &str) -> Skill {
+    fn skill(content: &str) -> Skill {
         Skill {
             name: "t".into(),
             description: String::new(),
-            template: template.into(),
-            allowed_tools: vec![],
+            content: content.into(),
             user_invocable: true,
             skill_dir: PathBuf::from("/sk"),
             source_path: PathBuf::from("/sk/SKILL.md"),
@@ -621,66 +351,12 @@ mod tests {
     }
 
     #[test]
-    fn expand_arguments_full_and_positional() {
-        // $ARGUMENTS = all args; positional $N / $ARGUMENTS[N] are 0-based ($0 = first).
-        // A template WITHOUT $ARGUMENTS still gets the full args appended (production behavior).
-        assert_eq!(
-            skill("do $ARGUMENTS now").expand("a b c", ""),
-            "do a b c now"
-        );
-        assert_eq!(
-            skill("first=$0 second=$1")
-                .expand("a b", "")
-                .lines()
-                .next()
-                .unwrap(),
-            "first=a second=b"
-        );
-        assert_eq!(skill("idx=$ARGUMENTS[1]").expand("a b", ""), "idx=b");
-    }
-
-    #[test]
-    fn dollar_n_boundary() {
-        // $1 (0-based → second arg) must not match inside $10 (eleventh arg).
-        let out = skill("$1 and $10").expand("X Y Z Q R S T U V W K", "");
-        assert!(out.starts_with("Y and K"), "{out}");
-    }
-
-    #[test]
-    fn appends_args_when_no_arguments_token() {
-        let out = skill("plain template").expand("hello world", "");
-        assert!(out.contains("plain template"));
-        assert!(out.contains("ARGUMENTS: hello world"), "{out}");
-    }
-
-    #[test]
-    fn variable_substitution() {
-        let out = skill("dir=${CLAUDE_SKILL_DIR} sid=${CLAUDE_SESSION_ID}").expand("", "sess-1");
-        assert_eq!(out, "dir=/sk sid=sess-1");
-    }
-
-    #[test]
-    fn shell_injection_runs() {
-        // Windows CI may lack `sh`; accept either success or a clear spawn error.
-        let out = skill("value=!`echo hi`").expand("", "");
-        assert!(
-            out == "value=hi"
-                || out.contains("value=[error:")
-                || out.contains("value=hi\r")
-                || out.starts_with("value=hi"),
-            "shell injection should expand or report spawn error, got {out:?}"
-        );
-    }
-
-    #[test]
     fn frontmatter_parse() {
-        let (fm, body) = parse_frontmatter("---\nname: my-skill\ndescription: \"does X\"\nallowed-tools: read, run_command\n---\nbody here\n");
+        let (fm, body) = parse_frontmatter(
+            "---\nname: my-skill\ndescription: \"does X\"\nallowed-tools: read, run_command\n---\nbody here\n",
+        );
         assert_eq!(fm.name.as_deref(), Some("my-skill"));
         assert_eq!(fm.description, "does X");
-        assert_eq!(
-            fm.allowed_tools,
-            vec!["read".to_string(), "run_command".to_string()]
-        );
         assert_eq!(body.trim(), "body here");
     }
 
@@ -714,14 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_dir_aliases_expand() {
-        let s = skill("dir=${SKILL_DIR}|${CLAUDE_SKILL_DIR}|{SKILL_DIR}");
-        let out = s.expand("", "");
-        assert_eq!(out, "dir=/sk|/sk|/sk");
-    }
-
-    #[test]
-    fn expand_for_injection_includes_path_envelope_and_files() {
+    fn raw_injection_renders_paths_and_guide_content_only() {
         let dir = tempfile::tempdir().unwrap();
         // Directory name must be a valid skill name (tempdir basenames often start with `.`).
         let skill_dir = dir.path().join("demo-skill");
@@ -733,13 +402,44 @@ mod tests {
         .unwrap();
         std::fs::write(skill_dir.join("scripts/db_executor.py"), "print(1)\n").unwrap();
         let skill = parse_skill_dir(&skill_dir, &skill_dir.join("SKILL.md"), None).unwrap();
-        let out = skill.expand_for_injection("", "");
-        assert!(out.contains("<skill name="), "{out}");
-        assert!(out.contains("path=\""), "must carry path attr: {out}");
-        assert!(out.contains("Base directory for this skill:"), "{out}");
-        assert!(out.contains("<skill_files>"), "{out}");
-        assert!(out.contains("db_executor.py"), "{out}");
-        assert!(out.contains("Do X"), "{out}");
+        let out = skill.raw_for_injection();
+        let display = |p: &Path| {
+            let raw = p.to_string_lossy();
+            if cfg!(windows) {
+                raw.replace('\\', "/")
+            } else {
+                raw.into_owned()
+            }
+        };
+        assert!(
+            out.starts_with(&format!("Skill Path: {}\n", display(&skill_dir))),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "Skill Guide: {}\n",
+                display(&skill_dir.join("SKILL.md"))
+            )),
+            "{out}"
+        );
+        assert!(out.contains("<Skill Guide>\nDo X\n</Skill Guide>"), "{out}");
+        // 不再注入 frontmatter 元数据、基目录提示或打包资源清单。
+        assert!(!out.contains("description="), "{out}");
+        assert!(!out.contains("Base directory"), "{out}");
+        assert!(!out.contains("<skill_files>"), "{out}");
+        assert!(!out.contains("db_executor.py"), "{out}");
+    }
+
+    #[test]
+    fn raw_injection_keeps_guide_body_verbatim() {
+        let s = skill("Run ${SKILL_DIR}/x.py $ARGUMENTS !`echo hi`");
+        let out = s.raw_for_injection();
+        assert!(
+            out.contains(
+                "<Skill Guide>\nRun ${SKILL_DIR}/x.py $ARGUMENTS !`echo hi`\n</Skill Guide>"
+            ),
+            "{out}"
+        );
     }
 
     #[test]
@@ -750,32 +450,11 @@ mod tests {
     }
 
     #[test]
-    fn argument_containing_dollar_token_is_not_re_expanded() {
-        // arg0 is the literal "$1"; the single pass must NOT re-expand it into arg1.
-        let out = skill("a=$0 b=$1").expand("$1 V", "");
-        assert!(out.starts_with("a=$1 b=V"), "{out}");
-    }
-
-    #[test]
-    fn out_of_range_positional_stays_literal() {
-        let out = skill("x=$5").expand("a b", "");
-        assert!(out.starts_with("x=$5"), "undefined $5 stays literal: {out}");
-    }
-
-    #[test]
-    fn frontmatter_single_quotes_and_space_tools() {
+    fn frontmatter_single_quotes() {
         let (fm, _) = parse_frontmatter(
             "---\nname: 'my-skill'\nallowed-tools: read run_command grep\n---\nbody\n",
         );
         assert_eq!(fm.name.as_deref(), Some("my-skill"));
-        assert_eq!(
-            fm.allowed_tools,
-            vec![
-                "read".to_string(),
-                "run_command".to_string(),
-                "grep".to_string()
-            ]
-        );
     }
 
     #[test]

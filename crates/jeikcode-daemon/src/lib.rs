@@ -14498,6 +14498,14 @@ async fn chat_stream(
         req.working_dir = Some(project.working_dir.clone());
     }
 
+    // Expand user-invoked command templates (`/name args`) before the message is
+    // persisted or sent to the model. Skills are never expanded here.
+    if let Some(dir) = req.working_dir.as_deref() {
+        if let Some(rendered) = render_user_command(dir, &req.message) {
+            req.message = rendered;
+        }
+    }
+
     // 客户端关联键 = 落盘消息 id（新契约下两者同值），先捕获再借用。
     // API / 旧客户端可能没有 request_id：仍必须为这一轮铸造唯一身份，
     // 否则 user 回声、展示行、大纲三处无 id，WebUI 观看时会重复或丢提问。
@@ -21149,7 +21157,7 @@ async fn get_tunnel_status(
 }
 
 // ============================================================================
-// GET /skills — 列出 user-invocable 技能（webui 技能选择器）
+// GET /skills + /commands — user-invocable capabilities for the WebUI
 // ============================================================================
 
 /// Skill info for API response.
@@ -21180,6 +21188,74 @@ async fn get_skills(State(state): State<AppState>) -> impl IntoResponse {
         })
         .collect();
     Json(skills)
+}
+
+/// User-command info for API response.
+#[derive(serde::Serialize)]
+pub struct CommandInfo {
+    pub name: String,
+    pub description: String,
+    pub args_requirement: String,
+}
+
+/// GET /commands - List user-invoked slash-command templates for the current project.
+async fn get_commands(State(state): State<AppState>) -> impl IntoResponse {
+    let working_dir = { state.project.read().await.working_dir.clone() };
+    let registry = jeikcode_capabilities::commands::UserCommandRegistry::load(&working_dir);
+    let commands: Vec<CommandInfo> = registry
+        .list()
+        .into_iter()
+        .map(|command| CommandInfo {
+            // Use the registry key (`plugin:name` when namespaced) so the WebUI
+            // inserts an unambiguous slash command.
+            name: command.key(),
+            description: command.description.clone(),
+            args_requirement: match command.args_requirement {
+                jeikcode_capabilities::commands::ArgsRequirement::Required => "required",
+                jeikcode_capabilities::commands::ArgsRequirement::Optional => "optional",
+                jeikcode_capabilities::commands::ArgsRequirement::None => "none",
+            }
+            .to_string(),
+        })
+        .collect();
+    Json(commands)
+}
+
+/// Expand `/name args` from the standard command dirs. Returns `None` when the
+/// text is not a known user command (built-ins/unknown slash text pass through).
+fn render_user_command(working_dir: &std::path::Path, text: &str) -> Option<String> {
+    let rest = text.trim_start().strip_prefix('/')?;
+    let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name = &rest[..name_end];
+    if name.is_empty() {
+        return None;
+    }
+    let args = rest[name_end..].trim_start();
+    let registry = jeikcode_capabilities::commands::UserCommandRegistry::load(working_dir);
+    registry.render_invocation_in(name, args, Some(working_dir))
+}
+
+#[cfg(test)]
+mod user_command_tests {
+    use super::render_user_command;
+
+    #[test]
+    fn renders_configured_command_with_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd_dir = dir.path().join(".jeikcode/commands");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+        std::fs::write(
+            cmd_dir.join("review.md"),
+            "---\nname: review\ndescription: review\nargs: optional\n---\nReview $ARGUMENTS",
+        )
+        .unwrap();
+        assert_eq!(
+            render_user_command(dir.path(), "/review src/lib.rs").as_deref(),
+            Some("Review src/lib.rs")
+        );
+        assert_eq!(render_user_command(dir.path(), "/unknown x"), None);
+        assert_eq!(render_user_command(dir.path(), "plain text"), None);
+    }
 }
 
 // ============================================================================
@@ -22055,9 +22131,11 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             "/live/reasoning_effort",
             post(live_api::live_reasoning_effort),
         )
-        // Skills API
+        // Skills + user commands API
         .route("/skills", get(get_skills))
         .route("/api/skills", get(get_skills))
+        .route("/commands", get(get_commands))
+        .route("/api/commands", get(get_commands))
         // Filesystem API
         .route("/fs/list", get(fs_tree))
         .route("/fs/mkdir", post(fs_mkdir))

@@ -588,7 +588,7 @@ pub(super) fn vi(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::SkillUnknown { name } =>
             format!("Kỹ năng không xác định: {} (dùng /skills để liệt kê)", name).into(),
         Msg::SkillsLoaded { names } =>
-            format!("  Kỹ năng đã tải: {}\n", names).into(),
+            format!("  Đã yêu cầu tải kỹ năng: {}\n", names).into(),
 
         Msg::McpReloading { count } =>
             format!("  Đang tải lại máy chủ MCP... (đã cấu hình {})\n", count).into(),

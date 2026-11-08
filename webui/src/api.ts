@@ -2085,6 +2085,21 @@ export async function getSkills(): Promise<SkillInfo[]> {
   return resp.json();
 }
 
+// --- User-invoked slash commands (custom `commands/*.md`) ---
+
+export type CommandArgsRequirement = 'required' | 'optional' | 'none';
+
+export interface CommandInfo {
+  name: string;
+  description: string;
+  args_requirement: CommandArgsRequirement;
+}
+
+export async function getCommands(): Promise<CommandInfo[]> {
+  const resp = await apiFetch('/commands', { headers: authHeaders() });
+  return resp.json();
+}
+
 // --- Unified capabilities (MCP servers + skills, GLOBAL + PROJECT scopes) ---
 
 export type CapKind = 'mcp' | 'skill';

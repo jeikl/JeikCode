@@ -183,10 +183,16 @@ pub mod tools;
 #[cfg(feature = "codeintel")]
 pub mod codeintel;
 
-/// Skills capability: a markdown/frontmatter skill loader + `use_skill` / `list_skills`
-/// tools (Claude-Code-compatible). Opt-in `skills` feature. See [`skills`].
+/// Skills capability: a `*/SKILL.md` loader + the `use_skill` tool
+/// (Claude-Code-compatible). Opt-in `skills` feature. See [`skills`].
 #[cfg(feature = "skills")]
 pub mod skills;
+
+/// User-invoked slash commands (`commands/*.md`): discovery + `$ARGUMENTS` / `$N`
+/// / `` !`cmd` `` template rendering. Separate from skills: a `SKILL.md` body is
+/// always returned verbatim. Opt-in `commands` feature.
+#[cfg(feature = "commands")]
+pub mod commands;
 
 /// MCP (Model Context Protocol) capability: connect external MCP servers over
 /// stdio / HTTP(SSE) (with OAuth), discover their tools, and surface them as kernel

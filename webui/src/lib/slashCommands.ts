@@ -219,9 +219,16 @@ function bareSkillName(name: string): string {
   return idx >= 0 ? name.slice(idx + 1) : name;
 }
 
+export interface UserCommandInfo {
+  name: string;
+  description?: string;
+  args_requirement?: 'required' | 'optional' | 'none';
+}
+
 export function buildSlashMenuItems(
   commands: SlashCommandDef[],
   skills: { name: string; description?: string }[],
+  userCommands: UserCommandInfo[],
   query: string,
   t: (key: string) => string,
   // `skillsOnly` renders a pure skills browser (the /skills command): commands are
@@ -230,16 +237,30 @@ export function buildSlashMenuItems(
   skillsOnly = false,
 ): SlashMenuItem[] {
   const q = query.toLowerCase();
+  const builtinNames = new Set(commands.flatMap((c) => [c.name, ...(c.aliases ?? [])]));
   const cmdItems: SlashMenuItem[] = skillsOnly
     ? []
     : commands
         .filter((c) => c.name.toLowerCase().includes(q))
         .map((c) => ({ name: c.name, description: t(c.descKey), kind: 'command' as const }));
+  // User commands are rendered by the daemon (the WebUI sends `/name args` as a
+  // normal prompt). A built-in command with the same name wins because the WebUI
+  // intercepts it before the daemon sees the text.
+  const userCmdItems: SlashMenuItem[] = skillsOnly
+    ? []
+    : userCommands
+        .filter((c) => !builtinNames.has(c.name))
+        .filter((c) => c.name.toLowerCase().includes(q))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((c) => ({ name: c.name, description: c.description ?? '', kind: 'command' as const }));
+  const userCommandNames = new Set(userCmdItems.map((c) => c.name));
   // Display + submit the BARE skill name (no `skills:`/`plugin:` prefix) — the same
-  // unqualified form the sidebar and TUI skills menus use.
+  // unqualified form the sidebar and TUI skills menus use. A same-named user
+  // command wins (matching the TUI's command-before-skill dispatch order).
   const skillItems: SlashMenuItem[] = skills
     .map((s) => ({ name: bareSkillName(s.name), description: s.description ?? '', kind: 'skill' as const }))
+    .filter((s) => !userCommandNames.has(s.name))
     .filter((s) => s.name.toLowerCase().includes(q))
     .sort((a, b) => a.name.localeCompare(b.name));
-  return [...cmdItems, ...skillItems];
+  return [...cmdItems, ...userCmdItems, ...skillItems];
 }
