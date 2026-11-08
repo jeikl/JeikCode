@@ -12,8 +12,10 @@ use anyhow::{Context, Result};
 
 pub mod gateway_crypto;
 pub mod oauth;
+pub mod openai_oauth;
 
 pub use oauth::*;
+pub use openai_oauth::*;
 
 /// User-Agent for this crate's OAuth HTTP requests. Kept identical to
 /// `jeikcode_core::JEIKCODE_USER_AGENT` (both derive from the unified workspace

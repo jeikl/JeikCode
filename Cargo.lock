@@ -1936,6 +1936,7 @@ name = "jeikcode-auth"
 version = "7.3.2-beta.1"
 dependencies = [
  "anyhow",
+ "base64",
  "fs2",
  "jeikcode-config",
  "jeikcode-telemetry",
@@ -1943,6 +1944,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "toml 0.8.23",

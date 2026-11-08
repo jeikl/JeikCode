@@ -23,6 +23,7 @@ mod anthropic;
 mod gemini;
 mod ollama;
 mod openai_compat;
+mod openai_oauth_signer;
 mod pricing_catalog;
 mod reasoning;
 mod responses;
@@ -63,6 +64,7 @@ pub use openai_compat::{
     effort_control_applicable, model_suggests_vision, reason_effort_applicable,
     resolve_wire_effort, OpenAiCompatConfig, OpenAiCompatProvider,
 };
+pub use openai_oauth_signer::OpenAiOAuthSigner;
 pub use pricing_catalog::{
     ensure_models_dev_catalog, resolve_models_dev_pricing, spawn_models_dev_catalog_refresh,
     CatalogPricing,

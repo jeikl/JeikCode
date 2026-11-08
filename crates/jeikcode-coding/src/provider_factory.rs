@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use jeikcode_capabilities::provider::{
     AnthropicConfig, AnthropicProvider, ApplyTimeouts, GeminiConfig, GeminiProvider, OllamaConfig,
-    OllamaProvider, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningPolicy, RequestSigner,
-    ResponsesConfig, ResponsesProvider,
+    OllamaProvider, OpenAiCompatConfig, OpenAiCompatProvider, OpenAiOAuthSigner, ReasoningPolicy,
+    RequestSigner, ResponsesConfig, ResponsesProvider,
 };
 use jeikcode_kernel::provider::LlmProvider;
 
@@ -86,7 +86,7 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
             .clone()
             .unwrap_or_else(|| self.default_user_agent.clone());
         let provider: Arc<dyn LlmProvider> = match cfg.provider_type.as_str() {
-            "responses" | "openai-responses" => {
+            "responses" | "openai-responses" | "codex" | "chatgpt-codex" => {
                 let mut rc = ResponsesConfig::new(&cfg.api_key, &cfg.base_url, &cfg.model);
                 rc.context_window = cfg.context_window;
                 rc.apply_timeouts(&cfg.timeouts);
@@ -111,6 +111,13 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 rc.skip_tls_verify = cfg.skip_tls_verify;
                 if let Some(authenticator) = &self.authenticator {
                     rc.request_signer = authenticator.request_signer(&cfg.base_url)?;
+                }
+                if rc.request_signer.is_none()
+                    && (cfg.provider_type == "codex"
+                        || cfg.provider_type == "chatgpt-codex"
+                        || cfg.base_url.contains("chatgpt.com"))
+                {
+                    rc.request_signer = Some(Arc::new(OpenAiOAuthSigner::new()));
                 }
                 Arc::new(
                     ResponsesProvider::new(rc)
