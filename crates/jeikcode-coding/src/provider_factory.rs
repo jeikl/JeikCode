@@ -115,6 +115,15 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 if rc.request_signer.is_none()
                     && (cfg.provider_type == "codex"
                         || cfg.provider_type == "chatgpt-codex"
+                        || cfg.provider_name.starts_with("chatgpt-codex")
+                        || jeikcode_config::config::provider_preset::canonical_preset_id(
+                            &cfg.provider_name,
+                        ) == "chatgpt-codex"
+                        || jeikcode_config::config::provider_preset::preset(&cfg.provider_name)
+                            .is_some_and(|p| {
+                                p.auth_kind
+                                    == jeikcode_config::config::provider_preset::AuthKind::OAuth
+                            })
                         || cfg.base_url.contains("chatgpt.com"))
                 {
                     rc.request_signer = Some(Arc::new(OpenAiOAuthSigner::new()));
@@ -418,5 +427,18 @@ mod tests {
         assert_eq!(default_max_tokens(2_000_000), 65_536);
         assert_eq!(default_max_tokens(200_000), 65_536);
         assert_eq!(default_max_tokens(32_000), 32_000);
+    }
+
+    #[test]
+    fn chatgpt_codex_provider_builds_and_routes_to_responses() {
+        let factory = DefaultCodingProviderFactory::new("fallback-agent");
+        let mut cfg = config("responses");
+        cfg.provider_name = "chatgpt-codex".to_string();
+        cfg.base_url = "https://custom-proxy.internal/codex".to_string();
+        assert!(factory.build(&cfg, None).is_ok());
+
+        let mut codex_type_cfg = config("codex");
+        codex_type_cfg.provider_name = "custom".to_string();
+        assert!(factory.build(&codex_type_cfg, None).is_ok());
     }
 }

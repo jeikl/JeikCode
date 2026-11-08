@@ -36,8 +36,7 @@ impl ProviderType {
     }
 }
 
-/// How an account authenticates against a preset. `OAuth` is reserved for future
-/// adapters (e.g. GitHub Copilot, deferred); no current preset uses it.
+/// How an account authenticates against a preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthKind {
     ApiKey,
@@ -127,7 +126,7 @@ pub const CHATGPT_CODEX: ProviderPreset = ProviderPreset {
     id: "chatgpt-codex",
     display_name: "ChatGPT Plus/Pro (Codex)",
     provider_type: ProviderType::Responses,
-    default_base_url: Some("https://chatgpt.com/backend-api/codex/responses"),
+    default_base_url: Some("https://chatgpt.com/backend-api/codex"),
     auth_kind: AuthKind::OAuth,
     api_key_env: None,
     model_source: ModelSource::Manual,
@@ -410,8 +409,9 @@ mod tests {
         assert_eq!(p.provider_type, ProviderType::Responses);
         assert_eq!(
             p.default_base_url,
-            Some("https://chatgpt.com/backend-api/codex/responses")
+            Some("https://chatgpt.com/backend-api/codex")
         );
+        assert!(!p.default_base_url.unwrap().ends_with("/responses"));
     }
 
     #[test]
@@ -458,5 +458,19 @@ mod tests {
         );
         assert_eq!(preset_or_compatible("claude").id, "anthropic");
         assert_eq!(preset_or_compatible("google-gemini").id, "gemini");
+    }
+
+    #[test]
+    fn chatgpt_codex_preset_configuration() {
+        let p = preset("chatgpt-codex").expect("chatgpt-codex preset must be registered");
+        assert_eq!(p.id, "chatgpt-codex");
+        assert_eq!(p.provider_type, ProviderType::Responses);
+        assert_eq!(p.auth_kind, AuthKind::OAuth);
+        assert_eq!(
+            p.default_base_url,
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+        // Must NOT end with /responses because ResponsesProvider::new appends /responses
+        assert!(!p.default_base_url.unwrap().ends_with("/responses"));
     }
 }

@@ -58,7 +58,7 @@ function normalizeProviderType(type: string | undefined): string {
   if (t === 'claude') return 'anthropic';
   if (t === 'openai-compatible') return 'openai';
   if (t === 'anthropic-compatible') return 'anthropic';
-  if (t === 'responses-compatible' || t === 'openai-responses') return 'responses';
+  if (t === 'responses-compatible' || t === 'openai-responses' || t === 'chatgpt-codex' || t === 'codex') return 'responses';
   if (t === 'gemini-compatible' || t === 'google-gemini') return 'gemini';
   return t;
 }
