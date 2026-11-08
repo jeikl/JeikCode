@@ -276,7 +276,7 @@ fn looks_like_single_action(v: &serde_json::Value) -> bool {
 fn unknown_or_uninferable_action(v: &serde_json::Value) -> String {
     if let Some(other) = explicit_action(v) {
         return format!(
-            "`action` must be `delete` or `clear` (got `{other}`). Every other op is inferred from the fields: {{content}} adds, {{content,position}} inserts, {{id,status|content}} updates."
+            "`action` must be one of add|insert|update|delete|remove|clear|list (got `{other}`). It may also be omitted: {{content}} adds, {{content,position}} inserts, {{id,status|content}} updates."
         );
     }
     let unknown = unknown_action_keys(v);
@@ -315,6 +315,14 @@ fn validate_actions_mix(arr: &[serde_json::Value]) -> Result<(), String> {
     for (i, item) in arr.iter().enumerate() {
         match action_kind(item) {
             Some(k) => {
+                // 明确写了 clear 却带着任务文本：这是「把 clear 当成 add/update 用」的
+                // 典型误填（strict-fill 模型会把 action 填成枚举里的破坏性值）。
+                // 宁可整批拒绝、保持清单不变，也不能静默清空后丢掉这些任务。
+                if k == "clear" && item_has_content(item) {
+                    return Err(format!(
+                        "todowrite: actions[{i}] sets `action`=\"clear\" but also carries non-empty `content`. A clear item never keeps task text; omit `action` to add/update, or send {{\"action\":\"clear\"}} as its own item. The list was NOT changed."
+                    ));
+                }
                 kinds.insert(k);
             }
             None => {
@@ -1544,8 +1552,8 @@ impl Tool for TodoTool {
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["delete", "clear"],
-                                "description": "For destructive ops only: `clear` wipes the list (runs first); `delete` needs `id`."
+                                "enum": ["add", "insert", "update", "delete", "remove", "clear", "list"],
+                                "description": "Operation. Optional: omit it and the fields decide ({content}→add, {content,position}→insert, {id,status|content}→update, {id}→delete). When present it must agree with the fields; `clear` takes no task text."
                             },
                             "id": {
                                 "type": "integer",
@@ -3147,24 +3155,87 @@ mod tests {
         assert!(d.contains("task"), "covers task: {d}");
     }
 
-    /// Advertised surface: one array, two explicit verbs, everything else inferred.
+    /// Advertised surface: one array, every verb expressible, inference still allowed.
+    ///
+    /// The full enum is load-bearing: some models (e.g. Responses-API GPT models) fill
+    /// EVERY declared property. If `action` only offered destructive verbs, such a model
+    /// would be forced to label its intended adds as `clear`.
     #[test]
-    fn schema_advertises_only_destructive_verbs() {
+    fn schema_advertises_every_verb_for_strict_fill_models() {
         let t = TodoTool::new();
         let s = t.parameters_schema();
         let items = &s["properties"]["actions"]["items"]["properties"];
         assert_eq!(s["required"], serde_json::json!(["actions"]));
         assert_eq!(s["properties"]["actions"]["minItems"].as_u64(), Some(1));
-        assert_eq!(
-            items["action"]["enum"],
-            serde_json::json!(["delete", "clear"])
-        );
+        let verbs = items["action"]["enum"].as_array().unwrap();
+        for verb in [
+            "add", "insert", "update", "delete", "remove", "clear", "list",
+        ] {
+            assert!(
+                verbs.iter().any(|v| v == verb),
+                "action enum must advertise `{verb}`: {verbs:?}"
+            );
+        }
         assert_eq!(
             items["status"]["enum"],
             serde_json::json!(["pending", "in_progress", "completed"])
         );
         assert_eq!(items["id"]["minimum"].as_u64(), Some(1));
         assert_eq!(items["position"]["minimum"].as_u64(), Some(1));
+    }
+
+    /// Regression: a strict-fill model materialises EVERY declared property, so its
+    /// intended adds used to arrive as `action:"clear"` + `content`. That must never
+    /// be interpreted as a wipe: reject the batch and keep the existing list intact.
+    #[tokio::test]
+    async fn clear_with_task_content_is_rejected_before_any_mutation() {
+        let t = TodoTool::new();
+        let seeded = t
+            .execute(
+                r#"{"todos":[{"content":"keep a","status":"pending"},{"content":"keep b","status":"in_progress"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!seeded.is_error, "{}", seeded.content);
+
+        let weird = t
+            .execute(
+                r#"{"actions":[
+                    {"action":"clear","content":"","id":1,"position":1,"status":"pending"},
+                    {"action":"clear","content":"new task 1","id":1,"position":1,"status":"in_progress"},
+                    {"action":"clear","content":"new task 2","id":2,"position":2,"status":"pending"}
+                ]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(weird.is_error, "{}", weird.content);
+        assert!(weird.content.contains("actions[1]"), "{}", weird.content);
+        assert!(weird.content.contains("NOT changed"), "{}", weird.content);
+
+        let after = t.execute(r#"{"action":"list"}"#, &ctx()).await;
+        assert!(!after.is_error, "{}", after.content);
+        assert!(after.content.contains("1. keep a"), "{}", after.content);
+        assert!(after.content.contains("2. keep b"), "{}", after.content);
+        assert!(!after.content.contains("new task"), "{}", after.content);
+    }
+
+    /// With every verb advertised, a strict-fill payload that picks `add` recovers
+    /// cleanly even though it also carries the irrelevant defaults `id`/`position`.
+    #[tokio::test]
+    async fn strict_fill_with_explicit_add_ignores_irrelevant_defaults() {
+        let t = TodoTool::new();
+        let res = t
+            .execute(
+                r#"{"actions":[
+                    {"action":"add","content":"first","id":1,"position":1,"status":"pending"},
+                    {"action":"add","content":"second","id":2,"position":2,"status":"in_progress"}
+                ]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!res.is_error, "{}", res.content);
+        assert!(res.content.contains("1. first"), "{}", res.content);
+        assert!(res.content.contains("2. second"), "{}", res.content);
     }
 
     #[tokio::test]

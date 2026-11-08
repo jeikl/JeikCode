@@ -8032,24 +8032,23 @@ async fn get_session_detail(
                 (turns, message_count, offset, messages, pinned_user_index)
             };
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
-            let (todos, todos_revision) =
-                if let Some(board) = jeikcode_capabilities::tools::read_todo_board(&id) {
-                    if jeikcode_capabilities::tools::list_fully_completed(&board.items)
-                        && !turn_running
-                    {
-                        let closed =
-                            jeikcode_capabilities::tools::close_todo_board_if_complete(&id);
-                        (
-                            Vec::new(),
-                            closed.map(|board| board.revision).unwrap_or(board.revision),
-                        )
-                    } else {
-                        let revision = board.revision;
-                        (board.items, revision)
-                    }
+            let (todos, todos_revision) = if let Some(board) =
+                jeikcode_capabilities::tools::read_todo_board(&id)
+            {
+                if jeikcode_capabilities::tools::list_fully_completed(&board.items) && !turn_running
+                {
+                    let closed = jeikcode_capabilities::tools::close_todo_board_if_complete(&id);
+                    (
+                        Vec::new(),
+                        closed.map(|board| board.revision).unwrap_or(board.revision),
+                    )
                 } else {
-                    (Vec::new(), 0)
-                };
+                    let revision = board.revision;
+                    (board.items, revision)
+                }
+            } else {
+                (Vec::new(), 0)
+            };
             let cursor = SessionCursor {
                 oldest_seq: messages.iter().find_map(|message| message.seq),
                 total: message_count,
@@ -15874,9 +15873,38 @@ static QUEUE_CLAIM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 
 const MAX_QUEUE_CLAIMS: usize = 512;
 
-/// Persisted queue document. Older daemons wrote a bare array; both shapes are
-/// accepted on read, but every new write carries a revision so a stale
-/// whole-list writer can be rejected instead of silently overwriting.
+fn decode_queue_file(content: &str) -> Option<(Vec<QueuedMessageItem>, u64)> {
+    serde_json::from_str::<QueueFile>(content)
+        .map(|file| (file.items, file.revision))
+        .or_else(|_| {
+            serde_json::from_str::<Vec<QueuedMessageItem>>(content).map(|items| (items, 0u64))
+        })
+        .ok()
+}
+
+/// Must be called while holding `QUEUE_CLAIM_LOCK`, so the first read cannot
+/// race a claim or whole-list update for this session.
+async fn ensure_session_queue_loaded(session_id: &str) {
+    let map = get_session_queues_map().await;
+    if map.read().await.contains_key(session_id) {
+        return;
+    }
+
+    let loaded = if let Some(path) = session_queue_file_path(session_id) {
+        match tokio::fs::read_to_string(path).await {
+            Ok(content) => decode_queue_file(&content),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let (items, revision) = loaded.unwrap_or_default();
+    map.write().await.insert(session_id.to_string(), items);
+    set_queue_revision(session_id, revision).await;
+}
+
+/// Queue content whether the snapshot is the current versioned document or a
+/// legacy bare array. Kept pure so cold-start compatibility is testable.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct QueueFile {
     #[serde(default)]
@@ -15885,9 +15913,8 @@ struct QueueFile {
     items: Vec<QueuedMessageItem>,
 }
 
-static SESSION_QUEUE_REVISIONS: tokio::sync::OnceCell<
-    tokio::sync::RwLock<HashMap<String, u64>>,
-> = tokio::sync::OnceCell::const_new();
+static SESSION_QUEUE_REVISIONS: tokio::sync::OnceCell<tokio::sync::RwLock<HashMap<String, u64>>> =
+    tokio::sync::OnceCell::const_new();
 
 async fn get_session_queue_revisions_map() -> &'static tokio::sync::RwLock<HashMap<String, u64>> {
     SESSION_QUEUE_REVISIONS
@@ -16141,34 +16168,12 @@ async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
     if sid.is_empty() {
         return Json(serde_json::json!({ "revision": 0, "items": [] }));
     }
+    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    ensure_session_queue_loaded(sid).await;
     let claims = load_effective_queue_claims(sid).await;
     let map = get_session_queues_map().await;
-    let mut items = {
-        let reader = map.read().await;
-        reader.get(sid).cloned()
-    };
-    if items.is_none() {
-        if let Some(path) = session_queue_file_path(sid) {
-            if path.exists() {
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    // New shape first; fall back to the legacy bare array.
-                    let loaded = serde_json::from_str::<QueueFile>(&content)
-                        .map(|file| (file.items, file.revision))
-                        .or_else(|_| {
-                            serde_json::from_str::<Vec<QueuedMessageItem>>(&content)
-                                .map(|items| (items, 0u64))
-                        });
-                    if let Ok((loaded, revision)) = loaded {
-                        set_queue_revision(sid, revision).await;
-                        let mut writer = map.write().await;
-                        writer.insert(sid.to_string(), loaded.clone());
-                        items = Some(loaded);
-                    }
-                }
-            }
-        }
-    }
-    let items = drop_claimed_queue_items(items.unwrap_or_default(), &claims);
+    let items = map.read().await.get(sid).cloned().unwrap_or_default();
+    let items = drop_claimed_queue_items(items, &claims);
     let revision = queue_revision(sid).await;
     Json(serde_json::json!({ "revision": revision, "items": items }))
 }
@@ -16183,9 +16188,7 @@ async fn persist_session_queue(session_id: &str) {
         .unwrap_or_default();
     let revision = queue_revision(session_id).await;
     if let Some(path) = session_queue_file_path(session_id) {
-        if items.is_empty() {
-            let _ = tokio::fs::remove_file(path).await;
-        } else if let Ok(json_str) = serde_json::to_string_pretty(&QueueFile { revision, items }) {
+        if let Ok(json_str) = serde_json::to_string_pretty(&QueueFile { revision, items }) {
             let _ = tokio::fs::write(path, json_str).await;
         }
     }
@@ -16227,6 +16230,7 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
         // Serialize with claim/release: a stale whole-list write must not
         // resurrect a card another tab already claimed.
         let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+        ensure_session_queue_loaded(&sid).await;
         // CAS: a stale tab's whole-list write is rejected instead of overwriting
         // a newer queue. The caller re-pulls and merges.
         let current = queue_revision(&sid).await;
@@ -16258,7 +16262,11 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
             }
             changed
         };
-        let revision = bump_queue_revision(&sid).await;
+        let revision = if changed {
+            bump_queue_revision(&sid).await
+        } else {
+            current
+        };
         if changed {
             persist_session_queue(&sid).await;
             // 广播放在锁外：对端收到信号会再拉 `/chat/queue`，绝不能在持锁期间等它。
@@ -16267,8 +16275,7 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
                 session_id: sid.clone(),
             });
         }
-        return Json(serde_json::json!({ "success": true, "revision": revision }))
-            .into_response();
+        return Json(serde_json::json!({ "success": true, "revision": revision })).into_response();
     }
     Json(serde_json::json!({ "success": true, "revision": 0 })).into_response()
 }
@@ -16287,16 +16294,14 @@ async fn claim_chat_queue(Json(req): Json<ChatQueueClaimRequest>) -> impl IntoRe
             .into_response();
     }
     let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    ensure_session_queue_loaded(&sid).await;
     let mut claims = load_queue_claims(&sid).await;
     let map = get_session_queues_map().await;
-    let mut queue_changed = false;
     let claimed;
     {
         let mut writer = map.write().await;
         let mut items = writer.remove(&sid).unwrap_or_default();
-        let before = items.len();
         claimed = claim_queue_item(&mut items, &mut claims, &cid, req.item.is_some());
-        queue_changed = items.len() != before;
         if !items.is_empty() {
             writer.insert(sid.clone(), items);
         }
@@ -16306,9 +16311,7 @@ async fn claim_chat_queue(Json(req): Json<ChatQueueClaimRequest>) -> impl IntoRe
     }
     save_queue_claims(&sid, &claims).await;
     let revision = bump_queue_revision(&sid).await;
-    if queue_changed {
-        persist_session_queue(&sid).await;
-    }
+    persist_session_queue(&sid).await;
     // Broadcast even for a local-only claim: other tabs must drop their stale
     // copy even though the server queue never contained it.
     publish_global(GlobalWireEvent::QueueUpdated {
@@ -16355,8 +16358,8 @@ async fn release_chat_queue(Json(req): Json<ChatQueueReleaseRequest>) -> impl In
         }
     }
     let revision = bump_queue_revision(&sid).await;
+    persist_session_queue(&sid).await;
     if added {
-        persist_session_queue(&sid).await;
         publish_global(GlobalWireEvent::QueueUpdated {
             session_id: sid.clone(),
         });
@@ -16379,6 +16382,22 @@ mod chat_queue_tests {
             created_at: None,
             force_send: None,
         }
+    }
+
+    #[test]
+    fn queue_file_decoder_restores_revision_and_reads_legacy_arrays() {
+        let versioned = serde_json::json!({
+            "revision": 17,
+            "items": [serde_json::to_value(item("kept", "steer")).unwrap()],
+        });
+        let (items, revision) = decode_queue_file(&versioned.to_string()).unwrap();
+        assert_eq!(revision, 17);
+        assert_eq!(items, vec![item("kept", "steer")]);
+
+        let legacy = serde_json::to_string(&vec![item("legacy", "queue")]).unwrap();
+        let (items, revision) = decode_queue_file(&legacy).unwrap();
+        assert_eq!(revision, 0);
+        assert_eq!(items, vec![item("legacy", "queue")]);
     }
 
     /// 广播 → 对端拉取 → 原样回写：内容没变就绝不能再广播，否则回声不止。

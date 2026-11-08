@@ -556,6 +556,12 @@ export function reduceLiveTodo(
   };
 }
 
+export function liveTodoPanelItems(
+  items: TodoItem[] | null | undefined,
+): TodoItem[] | null {
+  return Array.isArray(items) && items.length > 0 ? items : null;
+}
+
 /**
  * Turn reply has stopped (not an in-flight SSE delta).
  * A fully checked list leaves the live document and is archived once.

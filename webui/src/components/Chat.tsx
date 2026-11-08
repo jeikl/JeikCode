@@ -235,6 +235,7 @@ import {
 import {
   foldTodoToolCall,
   isTodoTool,
+  liveTodoPanelItems,
   parseTodosFromOutput,
   placeArchivedTodos,
   reduceLiveTodo,
@@ -5626,6 +5627,7 @@ export function Chat({
     let sessionTodoList: TodoItem[] = [];
     // 未完成清单跨大轮保留。只有全部完成时才贴到当前最后一条助手消息，然后清空，下一轮从空清单开始。
     const closeCompletedTurnTodos = () => {
+      if (opts?.running) return;
       const list = sessionTodoList;
       const isAllDone = list.length > 0 && list.every((t) => t.status === 'completed');
       if (!isAllDone) return;
@@ -6740,10 +6742,14 @@ export function Chat({
         const s = steeredInputs[i];
         const clean = s.text.trim();
         const cid = clientInputIds?.[i];
-        // 优先按 client_input_id 精确剔除（Phase 4），文本匹配仅作兜底。
-        // 多卡/重复文本/纯图片时不再"任选一张"错配。
+        // Prefer stable identity. Text is only a fallback when exactly one card matches.
         let matchIdx = cid ? nextQueued.findIndex((q) => q.clientInputId === cid) : -1;
-        if (matchIdx < 0) matchIdx = nextQueued.findIndex((q) => q.text.trim() === clean);
+        if (matchIdx < 0) {
+          const textMatches = nextQueued
+            .map((q, index) => ({ q, index }))
+            .filter(({ q }) => q.text.trim() === clean);
+          if (textMatches.length === 1) matchIdx = textMatches[0]!.index;
+        }
         if (matchIdx >= 0) {
           matchedQueuedItems.push(nextQueued[matchIdx]);
           nextQueued.splice(matchIdx, 1);
@@ -13142,14 +13148,12 @@ export function Chat({
     );
   }
 
-  // A fully completed plan belongs to the finished turn and is archived onto the
-  // assistant. Keeping it sticky resurrects the old checklist above the NEXT
-  // loop (the "上一轮 todolist 贴画" symptom). The live document stays intact so
-  // commitActiveTodosIntoLastAssistant can still archive it at the terminal.
-  const stickyTodoPanel =
-    activeTodos && activeTodos.length > 0 && activeTodos.some((item) => item.status !== 'completed')
-      ? <SessionTodoPanel items={activeTodos} />
-      : null;
+  // The live document is cleared by terminal settlement. Do not hide a fully
+  // completed list earlier: the model may still be running and can update it.
+  const panelItems = liveTodoPanelItems(activeTodos);
+  const stickyTodoPanel = panelItems
+    ? <SessionTodoPanel items={panelItems} />
+    : null;
 
   // 「向上展开」只有在真能翻页时才渲染：可见性与动作共用 `canLoadOlder`，
   // 绝不再出现「到顶了还显示还有 N 条、点下去没反应」的幽灵卡片。

@@ -4481,7 +4481,7 @@ body {
   color: color-mix(in srgb, #a78bfa 55%, var(--app-msg-time-color, #c8cbcf));
 }
 
-::root[data-theme='light'] .compaction-marker-text {
+:root[data-theme='light'] .compaction-marker-text {
   color: color-mix(in srgb, #7c3aed 60%, var(--app-msg-time-color, #475569));
 }
 

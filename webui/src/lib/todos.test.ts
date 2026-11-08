@@ -5,6 +5,7 @@ import {
   applyTodoAction,
   foldTodoToolCall,
   isTodoTool,
+  liveTodoPanelItems,
   parseTodoPlan,
   parseTodosFromOutput,
   placeArchivedTodos,
@@ -18,6 +19,13 @@ import {
   todoCallIdsFromMessages,
   todoCounts,
 } from './todos.ts';
+
+test('live todo panel keeps a completed list visible until terminal settlement clears it', () => {
+  const completed = [{ content: 'last task', status: 'completed' as const }];
+  assert.deepEqual(liveTodoPanelItems(completed), completed);
+  assert.equal(liveTodoPanelItems([]), null);
+  assert.equal(liveTodoPanelItems(null), null);
+});
 
 test('parseTodoPlan accepts full list shape', () => {
   const items = parseTodoPlan(
