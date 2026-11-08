@@ -531,30 +531,132 @@ test('回放帧按 part 身份收敛：画布已领先时不得把中段再追�
   assert.equal((grown[0]?.parts[0] as { text: string }).text, '请求A请求B请求C请求D');
 });
 
-test('新部件写入即盖身份戳，后续重放才能按 part 定向收敛', () => {
+test('hydrated streaming partial stays one row when the replay catches up', () => {
+  // The session detail now projects the live partial BEFORE pending steers so a
+  // mid-turn refresh keeps aq1, as1, steer1. The watch replay then re-delivers the
+  // same assistant identity; it must merge, not create a second text part.
+  const partial = 'working on the first round';
+  const canvas = [{
+    role: 'assistant',
+    id: 'm-as1',
+    parts: [{ kind: 'text' as const, text: partial }],
+  }];
+  const grown = paintAssistantText(
+    canvas as never,
+    `${partial} and more`,
+    true,
+    'm-as1',
+    'm-as1:2:text',
+    2,
+  ) as typeof canvas;
+  const textParts = grown[0].parts.filter((part) => part.kind === 'text');
+  assert.equal(textParts.length, 1, 'partial and replay must converge on one part');
+  assert.equal(textParts[0].text, `${partial} and more`);
+  assert.equal(
+    paintAssistantText(grown as never, `${partial} and more`, true, 'm-as1', 'm-as1:2:text', 2),
+    grown,
+    'replaying the same accumulated part is idempotent',
+  );
+});
+
+test('回放同一 message 的后续段收敛到规范块，不在工具后另起显示块', () => {
   const canvas = [
     {
       role: 'assistant',
       id: 'm-1',
       parts: [
         { kind: 'text' as const, text: '正文 1', id: 'm-1:2:text' },
-        // A tool is a hard barrier: the next prose run is a genuinely new part.
         { kind: 'tool' as const, tool: { id: 't1', name: 'read', args: '{}', status: 'done' as const } },
       ],
     },
   ];
+  // part_seq 只在规范块内部排序，不是显示块身份：正文 2 仍属于 m-1 的唯一正文块。
   const next = paintAssistantText(canvas, '正文 2', true, 'm-1', 'm-1:4:text');
-  assert.equal(next[0]?.parts.length, 3);
-  assert.equal((next[0]?.parts[2] as { id?: string }).id, 'm-1:4:text');
-  // 同一帧再次回放：命中 part → 幂等丢弃
+  assert.equal(next[0]?.parts.length, 2, 'no second prose block after the tool card');
+  const textPart = next[0]?.parts[0] as { text: string; ids?: string[] };
+  assert.equal(textPart.text, '正文 1正文 2');
+  assert.deepEqual(textPart.ids, ['m-1:4:text']);
+  // 同一帧再次回放：内容已包含 → 幂等丢弃
   assert.equal(paintAssistantText(next, '正文 2', true, 'm-1', 'm-1:4:text'), next);
-  // 思考同理：建部件时盖章，重放时幂等
+  // 这一行还没有思考块：首个思考段仍按线序落到工具之后，并随后按身份收敛。
   const withThinking = paintAssistantReasoning(next, '第二轮思考', true, 'm-1', 'm-1:5:reasoning');
-  assert.equal((withThinking[0]?.parts[3] as { id?: string }).id, 'm-1:5:reasoning');
+  assert.equal((withThinking[0]?.parts[2] as { id?: string }).id, 'm-1:5:reasoning');
   assert.equal(
     paintAssistantReasoning(withThinking, '第二轮思考', true, 'm-1', 'm-1:5:reasoning'),
     withThinking,
   );
+});
+
+test('hydrated snapshot + replayed part suffixes never paint a second block after tools', () => {
+  const reasoningHead = '思'.repeat(120);
+  const reasoningTail = '尾段思考';
+  const reasoningFull = reasoningHead + reasoningTail;
+  const textHead = '收到';
+  const textTail = '，合并任务已完成。现在开始排查。';
+  const textFull = textHead + textTail;
+  const hydrated = [
+    {
+      role: 'assistant',
+      id: 'm-hydrated',
+      parts: [
+        { kind: 'reasoning' as const, text: reasoningFull, id: 'm-hydrated:1:reasoning' },
+        { kind: 'text' as const, text: textFull, id: 'm-hydrated:2:text' },
+        { kind: 'tool' as const, tool: { id: 't1', name: 'read', args: '{}', status: 'done' as const } },
+        { kind: 'tool' as const, tool: { id: 't2', name: 'bash', args: '{}', status: 'done' as const } },
+      ],
+    },
+  ];
+  // The persisted snapshot already merged the whole round. Replay still sends
+  // the earlier part prefixes and the same message's later :3/:4 suffixes.
+  let msgs = paintAssistantReasoning(
+    hydrated as never,
+    reasoningHead,
+    true,
+    'm-hydrated',
+    'm-hydrated:1:reasoning',
+    1,
+  ) as typeof hydrated;
+  msgs = paintAssistantText(msgs as never, textHead, true, 'm-hydrated', 'm-hydrated:2:text', 1) as typeof hydrated;
+  msgs = paintAssistantReasoning(msgs as never, reasoningTail, true, 'm-hydrated', 'm-hydrated:3:reasoning', 1) as typeof hydrated;
+  msgs = paintAssistantText(msgs as never, textTail, true, 'm-hydrated', 'm-hydrated:4:text', 4) as typeof hydrated;
+
+  const parts = msgs[0].parts as Array<{ kind: string; text?: string; id?: string; ids?: string[] }>;
+  const reasoning = parts.filter((p) => p.kind === 'reasoning');
+  const text = parts.filter((p) => p.kind === 'text');
+  assert.equal(reasoning.length, 1, 'one canonical reasoning block per message');
+  assert.equal(text.length, 1, 'one canonical text block per message');
+  assert.equal(reasoning[0]?.text, reasoningFull);
+  assert.equal(text[0]?.text, textFull);
+  assert.deepEqual(parts.map((p) => p.kind), ['reasoning', 'text', 'tool', 'tool']);
+
+  const again = paintAssistantText(
+    paintAssistantReasoning(msgs as never, reasoningTail, true, 'm-hydrated', 'm-hydrated:3:reasoning', 1) as never,
+    textTail,
+    true,
+    'm-hydrated',
+    'm-hydrated:4:text',
+    4,
+  );
+  assert.equal((again[0]?.parts as unknown[]).length, 4, 'replayed suffixes stay idempotent');
+});
+
+test('不同 message_id 的轮次仍以工具为界各自成行', () => {
+  let msgs: any[] = [];
+  msgs = withAssistantIdentity(
+    paintAssistantReasoning(msgs, '工具前思考', true, 'm-2', 'm-2:1:reasoning'),
+    'm-2',
+    'm-2:1:reasoning',
+  );
+  msgs = msgs.map((m) => m.role === 'assistant'
+    ? { ...m, parts: [...m.parts, { kind: 'tool', tool: { id: 't1', name: 'read', args: '{}', status: 'done' } }] }
+    : m);
+  msgs = withAssistantIdentity(
+    paintAssistantReasoning(msgs, '工具后思考', true, 'm-3', 'm-3:1:reasoning'),
+    'm-3',
+    'm-3:1:reasoning',
+  );
+  assert.equal(msgs.length, 2, 'a new message_id must open a new assistant row');
+  assert.deepEqual(msgs.map((m: any) => m.id), ['m-2', 'm-3']);
 });
 
 test('replay of interleaved reasoning/text reuses the coalesced part aliases', () => {
@@ -582,17 +684,18 @@ test('replay of interleaved reasoning/text reuses the coalesced part aliases', (
   assert.equal(parts[1].text, '正文一正文二');
 });
 
-test('tool boundary still separates reasoning parts even with aliases', () => {
+test('same message replay converges across a tool boundary', () => {
   let msgs: any[] = [];
-  msgs = paintAssistantReasoning(msgs, '工具前思考', true, 'm-2', 'm-2:1:reasoning');
+  msgs = paintAssistantReasoning(msgs, '工具前思考甲', true, 'm-2', 'm-2:1:reasoning');
   msgs = msgs.map((m) => m.role === 'assistant'
     ? { ...m, parts: [...m.parts, { kind: 'tool', tool: { id: 't1', name: 'read', args: '{}', status: 'done' } }] }
     : m);
-  msgs = paintAssistantReasoning(msgs, '工具后思考', true, 'm-2', 'm-2:2:reasoning');
+  msgs = paintAssistantReasoning(msgs, '工具后思考乙', true, 'm-2', 'm-2:2:reasoning');
   const reasoning = msgs[0].parts.filter((p: any) => p.kind === 'reasoning');
-  assert.equal(reasoning.length, 2, 'tool is a hard barrier');
-  assert.equal(reasoning[0].text, '工具前思考');
-  assert.equal(reasoning[1].text, '工具后思考');
+  // part_seq 只区分块内 segment：同一个 message_id 仍只有一个规范思考块。
+  assert.equal(reasoning.length, 1);
+  assert.equal(reasoning[0].text, '工具前思考甲工具后思考乙');
+  assert.deepEqual(reasoning[0].ids, ['m-2:2:reasoning']);
 });
 
 test('直播流式输出中的重复 URL、重复前缀与重复代码块内容绝不被吞字', () => {

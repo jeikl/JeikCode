@@ -89,7 +89,7 @@ import {
   type TokenUsage,
 } from '../lib/tokenEstimate';
 import { formatMsgTime, formatMsgTimeFull, precedingUserTs } from '../lib/messageTime';
-import { anchorForSteer, steerInsertPosition } from '../lib/steerAnchor';
+import { anchorForSteer, decideSteerPaint } from '../lib/steerAnchor';
 import { imagesToPending, pendingImageData, sameImageSet } from '../lib/imageIdentity';
 import { collectImageSrcs } from '../lib/imageGallery';
 import { formatArgs } from '../lib/toolArgs';
@@ -366,6 +366,7 @@ import {
   isTransientAdvisoryText,
   stampUserClientInputId,
   stampUserSourceIndex,
+  steerInsertAfterAnchor,
   visibleToolChunk,
   withAssistantIdentity,
   type TurnUserAnchor,
@@ -1053,6 +1054,10 @@ export function Chat({
    *  仅对这些由本标签页发起且在途的卡片做防闪烁保留；其它端撤回（Esc/取消）或已消费的卡片
    *  一旦从服务端队列消失，收到 `queue_updated` 时必须立即从本端同步移除。 */
   const localUnsyncedQueueIdsRef = useRef<Set<string>>(new Set());
+  // Per-session steer submission chain. A second card clicked while the first
+  // POST is in flight must not race its `/chat/steer/admit`; server-side
+  // admission order is the queue/click order the kernel folds.
+  const steerSubmitChainRef = useRef<Map<string, Promise<void>>>(new Map());
   /** One deterministic replay of a server-owned `steering` card per page. */
   const steerReplayAttemptedRef = useRef<Set<string>>(new Set());
   function queueCardSyncKey(item: { id: number | string; clientInputId?: string }): string {
@@ -1344,6 +1349,19 @@ export function Chat({
   // 模型会对同一条指令回答两次（表现为结算后最新回答重复一份）。
   const foldedSteersBySessionRef = useRef(
     new Map<string, Array<{ text: string; images?: ImageData[]; clientInputId?: string }>>(),
+  );
+  // Steered inputs whose authoritative anchor assistant row was not yet on the
+  // canvas/cache when the `steered` frame arrived. The queue card is consumed at
+  // fold time; dropping the bubble here is the "q3 disappears until display
+  // flush" bug. Keep the batch and retry as soon as the anchor row exists.
+  const deferredSteersBySessionRef = useRef(
+    new Map<string, Array<{
+      key: string;
+      inputs: Array<{ text: string; images?: ImageData[]; message_id?: string; created_at?: number }>;
+      clientInputIds?: Array<string | null>;
+      timestamps?: Array<number | null | undefined>;
+      anchor: TurnUserAnchor;
+    }>>(),
   );
   function setPendingSteers(
     update: PendingLiveSteer[] | ((current: PendingLiveSteer[]) => PendingLiveSteer[]),
@@ -2733,6 +2751,8 @@ export function Chat({
         }
         if (activeIdRef.current !== params.loadId) {
           applyEventToSessionCache(params.loadId, frame);
+          // Background cache retry: the anchor assistant row may have just landed.
+          retryDeferredSteers(params.loadId);
           continue;
         }
         if (frame.type === 'text' || frame.type === 'reasoning') {
@@ -6813,7 +6833,7 @@ export function Chat({
     clientInputIds?: Array<string | null>,
     targetSessionId?: string,
     timestamps?: Array<number | null | undefined>,
-    opts?: { replay?: boolean; anchor?: TurnUserAnchor; skipQueued?: boolean; seq?: number },
+    opts?: { replay?: boolean; anchor?: TurnUserAnchor; skipQueued?: boolean; skipLedger?: boolean; seq?: number },
   ) {
     const steeredInputs = (inputs ?? []).map((input) => ({
       text: stripSteerEnvelopeForDisplay(input.text || ''),
@@ -6889,8 +6909,17 @@ export function Chat({
       // 回放 / 跨流广播补回的转向：只在「锚点之后没有任何助手内容」时才插回中间。
       // 锚点自身不可靠（它只是上一条真正上屏的帧），一旦后面还跟着同一批工具卡 /
       // 同一轮回答，插进去就会把 `Read / Read` 劈成两段——两台端因此渲染出不同顺序。
-      // 定位不到或会劈开助手段时一律追加到尾部：晚一位可以接受，插中间是可见错误。
-      let insertion = steerInsertPosition(next, opts?.anchor, opts?.replay === true);
+      // 老协议定位不到时追加到尾部：晚一位可以接受，插中间是可见错误。
+      //
+      // 服务端权威锚点（`anchor_message_id`）是身份契约：锚点不在当前窗口里，说明
+      // 这条转向属于已加载切片之上。绝不能把它追加到尾部（这正是 B 端刷新/中途
+      // 进入后“转向气泡掉到用户消息下面、回合结束才恢复”的根因）；队列卡照常消费，
+      // 画布位置留给磁盘转录/服务端大纲，绝不做位置兜底。
+      const decision = decideSteerPaint(next, opts?.anchor, opts?.replay === true);
+      let insertion = decision.at;
+      // One deferred batch per steered event, not one entry per input: retrying
+      // the whole batch keeps click order and lets already-painted rows no-op.
+      let deferredBatchQueued = false;
       for (let i = 0; i < steeredInputs.length; i++) {
         const s = steeredInputs[i];
         let cleanText = s.text.trim();
@@ -6949,6 +6978,35 @@ export function Chat({
               steerId,
               sid,
             );
+          }
+          continue;
+        }
+
+        if (decision.defer) {
+          // Anchor row is outside this window. The steer is already folded and its
+          // queue card was consumed above; do not paint a tail copy or a tail
+          // outline. Remember the batch and retry when the anchor row appears.
+          if (!deferredBatchQueued && sid && opts?.anchor) {
+            const key = steeredInputs
+              .map((input, idx) => `${input.messageId ?? clientInputIds?.[idx] ?? input.text}`)
+              .join('\u0001');
+            const deferred = deferredSteersBySessionRef.current.get(sid) ?? [];
+            if (!deferred.some((entry) => entry.key === key)) {
+              deferred.push({
+                key,
+                inputs: steeredInputs.map((input, idx) => ({
+                  text: input.text,
+                  images: input.images.length > 0 ? input.images : matchedQueuedItems[idx]?.images,
+                  message_id: input.messageId,
+                  created_at: timestamps?.[idx] ?? matchedQueuedItems[idx]?.createdAt,
+                })),
+                clientInputIds,
+                timestamps,
+                anchor: opts.anchor,
+              });
+              deferredSteersBySessionRef.current.set(sid, deferred);
+            }
+            deferredBatchQueued = true;
           }
           continue;
         }
@@ -7050,17 +7108,20 @@ export function Chat({
     // 4. 消费 pendingSteers
     if (sid) {
       // 账本：内核已回执 fold 的转向（即使画布上暂时看不到它，也绝不能再投递一次）。
-      const ledger = foldedSteersBySessionRef.current.get(sid) ?? [];
-      for (let i = 0; i < steeredInputs.length; i++) {
-        ledger.push({
-          text: steeredInputs[i].text,
-          images: steeredInputs[i].images.length > 0
-            ? steeredInputs[i].images
-            : matchedQueuedItems[i]?.images,
-          clientInputId: clientInputIds?.[i] ?? steeredInputs[i].messageId ?? undefined,
-        });
+      // A deferred retry must not append the same identities a second time.
+      if (!opts?.skipLedger) {
+        const ledger = foldedSteersBySessionRef.current.get(sid) ?? [];
+        for (let i = 0; i < steeredInputs.length; i++) {
+          ledger.push({
+            text: steeredInputs[i].text,
+            images: steeredInputs[i].images.length > 0
+              ? steeredInputs[i].images
+              : matchedQueuedItems[i]?.images,
+            clientInputId: clientInputIds?.[i] ?? steeredInputs[i].messageId ?? undefined,
+          });
+        }
+        foldedSteersBySessionRef.current.set(sid, ledger);
       }
-      foldedSteersBySessionRef.current.set(sid, ledger);
       const effectiveClientIds = steeredInputs.map(
         (s, idx) => clientInputIds?.[idx] ?? s.messageId ?? null,
       );
@@ -7081,6 +7142,46 @@ export function Chat({
       setPendingSteers((pending) => acknowledgeLiveSteers(pending, steeredInputs, effectiveClientIds));
     }
   }
+
+  /** Retry deferred steered inputs once their authoritative anchor assistant row
+   *  is present. The queue card was already consumed at fold time; this only
+   *  restores the user bubble at the correct causal position. */
+  function retryDeferredSteers(targetSessionId?: string) {
+    const sid = targetSessionId || activeIdRef.current;
+    if (!sid) return;
+    const pending = deferredSteersBySessionRef.current.get(sid);
+    if (!pending || pending.length === 0) return;
+    const current = activeIdRef.current === sid;
+    const rows = current ? messagesRef.current : (messageCacheRef.current.get(sid) ?? []);
+    const ready: typeof pending = [];
+    const remaining: typeof pending = [];
+    for (const entry of pending) {
+      const at = steerInsertAfterAnchor(
+        rows as Parameters<typeof steerInsertAfterAnchor>[0],
+        entry.anchor,
+      );
+      if (at >= 0) ready.push(entry);
+      else remaining.push(entry);
+    }
+    if (ready.length === 0) return;
+    if (remaining.length > 0) deferredSteersBySessionRef.current.set(sid, remaining);
+    else deferredSteersBySessionRef.current.delete(sid);
+    for (const entry of ready) {
+      foldSteeredInputs(entry.inputs, entry.clientInputIds, sid, entry.timestamps, {
+        replay: true,
+        anchor: entry.anchor,
+        skipQueued: true,
+        skipLedger: true,
+      });
+    }
+  }
+
+  // Foreground retry trigger: every canvas mutation (including the assistant
+  // row that finally carries the anchor) re-checks deferred steers.
+  useEffect(() => {
+    const sid = activeIdRef.current;
+    if (sid) retryDeferredSteers(sid);
+  }, [messages]);
 
   function cancelTurnNavScroll() {
     const cleanup = turnNavScrollCleanupRef.current;
@@ -9481,7 +9582,10 @@ export function Chat({
           if (drainSid) {
             window.setTimeout(() => resolveLingeringSteerCards(drainSid), STEER_NATURAL_DRAIN_GRACE_MS);
           }
-          if (event.session_id) foldedSteersBySessionRef.current.delete(event.session_id);
+          if (event.session_id) {
+            foldedSteersBySessionRef.current.delete(event.session_id);
+            deferredSteersBySessionRef.current.delete(event.session_id);
+          }
         }
 
         closeOpenArtifactFence();
@@ -9615,7 +9719,10 @@ export function Chat({
         }
         setBusyAndClock(false);
         markTurnTerminal(activeIdRef.current ?? sessionId);
-        if (activeIdRef.current) foldedSteersBySessionRef.current.delete(activeIdRef.current);
+        if (activeIdRef.current) {
+          foldedSteersBySessionRef.current.delete(activeIdRef.current);
+          deferredSteersBySessionRef.current.delete(activeIdRef.current);
+        }
         // Recover the previous tail after the failed turn settles. The timer
         // re-checks busy/local-turn, so it cannot clobber a surviving new turn.
         {
@@ -10825,6 +10932,13 @@ export function Chat({
    * The daemon does not cancel the in-flight model call or tool batch; the kernel
    * folds the text (plus a short course-correction note) in at the next step.
    */
+  function serializeSteerSubmission(sid: string, task: () => Promise<void>): Promise<void> {
+    const previous = steerSubmitChainRef.current.get(sid) ?? Promise.resolve();
+    const next = previous.then(task, task);
+    steerSubmitChainRef.current.set(sid, next.then(() => undefined, () => undefined));
+    return next;
+  }
+
   async function handleSteerQueuedMessage(
     q: QueuedMessage,
     opts?: { silentFailure?: boolean },
@@ -10888,26 +11002,28 @@ export function Chat({
       // Persist the intent first so a reload cannot strand a click that never
       // reached the daemon. A failed queue write still allows the POST below,
       // whose server fallback also records the steering card.
-      await admitChatSteer(
-        targetSid,
-        q.text,
-        q.images,
-        clientInputId,
-        q.createdAt ?? Date.now(),
-        q.approvalMode,
-      );
-      // Admission made the server queue authoritative; never echo this card
-      // back through /chat/queue from the generic unsynced reconciler.
-      localUnsyncedQueueIdsRef.current.delete(clientInputId);
-      localUnsyncedQueueIdsRef.current.delete(String(q.id));
-      await postChatSteer(
-        targetSid,
-        q.text,
-        q.images,
-        clientInputId,
-        q.createdAt ?? Date.now(),
-        q.approvalMode,
-      );
+      await serializeSteerSubmission(targetSid, async () => {
+        await admitChatSteer(
+          targetSid,
+          q.text,
+          q.images,
+          clientInputId,
+          q.createdAt ?? Date.now(),
+          q.approvalMode,
+        );
+        // Admission made the server queue authoritative; never echo this card
+        // back through /chat/queue from the generic unsynced reconciler.
+        localUnsyncedQueueIdsRef.current.delete(clientInputId);
+        localUnsyncedQueueIdsRef.current.delete(String(q.id));
+        await postChatSteer(
+          targetSid,
+          q.text,
+          q.images,
+          clientInputId,
+          q.createdAt ?? Date.now(),
+          q.approvalMode,
+        );
+      });
       // 成功投递后，卡片保留并更新为 'steer' 状态（展示「转向已排队 · 等待当前步骤完成」与取消按钮）！
       // 状态转换只做本地展示；服务端 /chat/steer 已原子更新队列，避免并发整表写回。
       updateTargetQueued((item) => ({ ...item, kind: 'steer' as const }), { localOnly: true });
@@ -11472,6 +11588,31 @@ export function Chat({
    * un-folded steers are future context too: drop them from memory, localStorage
    * and the daemon queue so a later drain cannot resurrect a removed branch.
    */
+  /** A destructive rewind (edit+truncate / rollback / delete) invalidates every
+   *  local projection that can contain the removed future branch. The server\n   *  transcript is already correct (cold start proves it); never re-commit the
+   *  pre-rewind canvas under the new revision, because that marks the stale
+   *  cache as authoritative and makes `session_mutated` skip the disk sync. */
+  function invalidateRewindClientState(sid: string, hash?: string) {
+    messageCacheRef.current.delete(sid);
+    turnOutlineBySessionRef.current.delete(sid);
+    historyOffsetBySessionRef.current.delete(sid);
+    historyTotalBySessionRef.current.delete(sid);
+    hasOlderBySessionRef.current.delete(sid);
+    cacheRevisionBySessionRef.current.delete(sid);
+    clearStreamCursor(sid);
+    pendingSteersBySessionRef.current.delete(sid);
+    foldedSteersBySessionRef.current.delete(sid);
+    deferredSteersBySessionRef.current.delete(sid);
+    setStoredSteers(sid, []);
+    if (activeIdRef.current === sid) {
+      turnOutlineRef.current = [];
+      setTurnOutline([]);
+      setPendingSteers([]);
+      setQueued([]);
+    }
+    if (hash) void deleteSessionCache(hash, sid);
+  }
+
   function clearFutureInputsAfterRewrite(sid: string) {
     const queuedForSession = queuedBySessionRef.current.get(sid) ?? [];
     if (
@@ -11482,6 +11623,8 @@ export function Chat({
       if (activeIdRef.current === sid) setQueued([]);
     }
     pendingSteersBySessionRef.current.delete(sid);
+    foldedSteersBySessionRef.current.delete(sid);
+    deferredSteersBySessionRef.current.delete(sid);
     setStoredSteers(sid, []);
     if (activeIdRef.current === sid) setPendingSteers([]);
   }
@@ -11521,7 +11664,7 @@ export function Chat({
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
         try {
-          const result = await patchSessionMessage(effectiveHash, sid, targetIndex, {
+          await patchSessionMessage(effectiveHash, sid, targetIndex, {
             text: newText,
             images: newImages,
             expected_text: expectedText,
@@ -11546,8 +11689,6 @@ export function Chat({
             }),
           });
           setMessages({ type: 'truncate_match', match: targetMatches, inclusive: true });
-          const nextMessages = messagesRef.current;
-          messageCacheRef.current.set(sid, nextMessages);
           // Outline converges by identity: keep the edited turn and everything
           // before it, refresh its label, drop every later anchor.
           const editedLabel = compactTurnNavText(
@@ -11564,21 +11705,14 @@ export function Chat({
                 ? { ...turn, label: editedLabel }
                 : turn,
             );
+          // The server transcript is the only truth after a rewind. Drop the
+          // stale L1/L2 cache and revision gate so the `session_mutated` event
+          // still performs the cold-start disk sync (the异地冷启动 path).
+          invalidateRewindClientState(sid, effectiveHash);
           turnOutlineRef.current = nextOutline;
           turnOutlineBySessionRef.current.set(sid, nextOutline);
           setTurnOutline(nextOutline);
-          clearStreamCursor(sid);
           clearFutureInputsAfterRewrite(sid);
-          // 权威反向灌入缓存：同步覆盖 L1 内存和 L2 IndexedDB，并锁定 revision，
-          // 让随后到达的 session_mutated 成为幂等信号而不是再次全量重拉。
-          commitCanvasCache(effectiveHash, sid, {
-            messages: nextMessages,
-            todos: activeTodosRef.current,
-            turns: nextOutline,
-            tokenUsage: cachedTokenUsageFor(sid),
-            revision: result.revision,
-          });
-          cacheRevisionBySessionRef.current.set(sid, result.revision);
           setEditingSourceIndex(null);
           setBubbleEditDraft(null);
           clearBubbleEditDraft(sid);
@@ -11629,7 +11763,6 @@ export function Chat({
       confirmLabel: t('confirm.confirmBtn'),
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
-        let mutationRevision: number | undefined;
         try {
           const result = await truncateSession(effectiveHash, sid, {
             target_index: targetIndex,
@@ -11642,7 +11775,6 @@ export function Chat({
             showToast(t('chat.messageCompacted'), 'error');
             return;
           }
-          mutationRevision = result.revision;
         } catch (e) {
           showToast(
             mutationTargetCompacted(e)
@@ -11672,9 +11804,6 @@ export function Chat({
           }),
         });
         setMessages({ type: 'truncate_match', match: targetMatches, inclusive: true });
-        const truncated = messagesRef.current;
-        messageCacheRef.current.set(sid, truncated);
-        // 权威反向灌入缓存
         const editedLabel = compactTurnNavText(
           stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(newText)),
         );
@@ -11684,19 +11813,13 @@ export function Chat({
         const filteredTurns = baseOutline
           .filter((t) => t.index <= sourceIndex)
           .map((t) => (t.index === sourceIndex || (targetMsg?.id && t.id === targetMsg.id) ? { ...t, label: editedLabel } : t));
+        // The rollback is destructive: never re-commit the pre-rollback canvas
+        // under the new revision. A cold reader is correct; force this tab to
+        // reconcile with disk instead of marking the stale cache authoritative.
+        invalidateRewindClientState(sid, effectiveHash);
         turnOutlineRef.current = filteredTurns;
         turnOutlineBySessionRef.current.set(sid, filteredTurns);
         setTurnOutline(filteredTurns);
-        commitCanvasCache(effectiveHash, sid, {
-          messages: truncated,
-          todos: activeTodosRef.current,
-          turns: filteredTurns,
-          tokenUsage: cachedTokenUsageFor(sid),
-          ...(mutationRevision !== undefined ? { revision: mutationRevision } : {}),
-        });
-        if (mutationRevision !== undefined) {
-          cacheRevisionBySessionRef.current.set(sid, mutationRevision);
-        }
         setEditingSourceIndex(null);
         setBubbleEditDraft(null);
         clearBubbleEditDraft(sid);
@@ -11741,18 +11864,19 @@ export function Chat({
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
         let missing = false;
-        let mutationRevision: number | undefined;
         try {
-          const result = await deleteSessionMessage(effectiveHash, sid, targetIndex, {
-            delete_turn: true,
+          // Deleting a USER message is branch deletion: the prompt and every
+          // later turn are removed. Use the same truncate path as edit/rollback
+          // so snapshot, display, input log, partial and client cache converge.
+          const result = await truncateSession(effectiveHash, sid, {
+            target_index: targetIndex,
+            target_message_id: targetMsg?.id ?? messageId,
             expected_text: expected,
-            expected_message_id: targetMsg?.id ?? messageId,
             expected_role: 'user',
+            inclusive: false,
           });
           missing = result.notFound === true;
-          mutationRevision = result.revision;
           if (!missing) {
-            // 删除整轮 agent 消息：清单回退到这些动作发生之前（不是全清）。
             resyncTodosAfterMutation(sid);
           }
         } catch (err) {
@@ -11763,38 +11887,23 @@ export function Chat({
           showToast(t('chat.messageCompacted'), 'error');
           return;
         }
-        let nextMessages: Message[] = messagesRef.current;
         const targetMatches = (m: Message): boolean =>
           messageId
             ? m.id === messageId || m.clientInputId === messageId
             : m.sourceIndex === targetIndex;
-        const idx = messagesRef.current.findIndex(targetMatches);
-        if (idx !== -1) {
-          let end = idx + 1;
-          while (end < messagesRef.current.length && messagesRef.current[end]?.role !== 'user') {
-            end += 1;
-          }
-          const removed = new Set(messagesRef.current.slice(idx, end));
-          setMessages({ type: 'removeWhere', predicate: (row) => removed.has(row) });
-          nextMessages = messagesRef.current;
-          messageCacheRef.current.set(sid, nextMessages);
-        }
-        // 权威反向灌入缓存：同步覆盖 L1 内存和 L2 IndexedDB 与轮次导航！
-        const currentOutline = (turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(sid) ?? []))
-          .filter((t) => t.index !== sourceIndex);
+        const targetDisplayIndex = targetMsg?.sourceIndex ?? sourceIndex;
+        setMessages({ type: 'truncate_match', match: targetMatches, inclusive: false });
+        const baseOutline = turnOutlineRef.current.length > 0
+          ? turnOutlineRef.current
+          : (turnOutlineBySessionRef.current.get(sid) ?? []);
+        const currentOutline = baseOutline.filter((t) => t.index < targetDisplayIndex);
+        clearFutureInputsAfterRewrite(sid);
+        // A branch delete is destructive: drop stale cache/outline/revision and
+        // let the session_mutated disk sync reconstruct the survivor prefix.
+        invalidateRewindClientState(sid, effectiveHash);
         turnOutlineRef.current = currentOutline;
         turnOutlineBySessionRef.current.set(sid, currentOutline);
         setTurnOutline(currentOutline);
-        commitCanvasCache(effectiveHash, sid, {
-          messages: nextMessages,
-          todos: activeTodosRef.current,
-          turns: currentOutline,
-          tokenUsage: cachedTokenUsageFor(sid),
-          ...(mutationRevision !== undefined ? { revision: mutationRevision } : {}),
-        });
-        if (mutationRevision !== undefined) {
-          cacheRevisionBySessionRef.current.set(sid, mutationRevision);
-        }
         if (editingSourceIndex === sourceIndex) {
           setEditingSourceIndex(null);
           setBubbleEditDraft(null);
@@ -11945,7 +12054,6 @@ export function Chat({
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
         let missing = false;
-        let mutationRevision: number | undefined;
         try {
           const result = await deleteSessionMessage(effectiveHash, sid, resolvedIndex, {
             delete_turn: false,
@@ -11954,7 +12062,6 @@ export function Chat({
             expected_role: 'assistant',
           });
           missing = result.notFound === true;
-          mutationRevision = result.revision;
           if (!missing) {
             // 删除 agent 轮次消息：清单回退到这些动作发生之前（不是全清）。
             resyncTodosAfterMutation(sid);
@@ -11967,25 +12074,27 @@ export function Chat({
           showToast(t('chat.messageCompacted'), 'error');
           return;
         }
-        let nextMessages: Message[] = messagesRef.current;
+        const rows = messagesRef.current;
         const targetMatches = (m: Message): boolean =>
           (!!targetMsg?.id && m.id === targetMsg.id) ||
           (targetMsg?.sourceIndex != null && m.sourceIndex === targetMsg.sourceIndex);
-        setMessages({ type: 'removeWhere', predicate: targetMatches });
-        nextMessages = messagesRef.current;
-        messageCacheRef.current.set(sid, nextMessages);
-        // 权威反向灌入缓存
-        const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(sid) ?? []);
-        commitCanvasCache(effectiveHash, sid, {
-          messages: nextMessages,
-          todos: activeTodosRef.current,
-          turns: currentOutline,
-          tokenUsage: cachedTokenUsageFor(sid),
-          ...(mutationRevision !== undefined ? { revision: mutationRevision } : {}),
-        });
-        if (mutationRevision !== undefined) {
-          cacheRevisionBySessionRef.current.set(sid, mutationRevision);
+        const targetIdx = rows.findIndex(targetMatches);
+        if (targetIdx >= 0) {
+          // The server deletes the whole assistant/tool run between this user
+          // prompt and the next user prompt. Mirror exactly that range.
+          let start = targetIdx;
+          while (start > 0 && rows[start - 1]?.role !== 'user') start -= 1;
+          let end = targetIdx + 1;
+          while (end < rows.length && rows[end]?.role !== 'user') end += 1;
+          setMessages({ type: 'replace', rows: [...rows.slice(0, start), ...rows.slice(end)] });
         }
+        // Deleting a model run keeps every user prompt/outline title. Invalidate
+        // the stale cache/revision so the mutation handler pulls the survivor
+        // from disk instead of re-committing the pre-delete canvas.
+        messageCacheRef.current.delete(sid);
+        cacheRevisionBySessionRef.current.delete(sid);
+        clearStreamCursor(sid);
+        if (effectiveHash) void deleteSessionCache(effectiveHash, sid);
       },
     });
   }

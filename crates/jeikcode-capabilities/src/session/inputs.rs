@@ -8,7 +8,7 @@
 //! - `id` = the client correlation id (`/chat` request_id / `/chat/steer`
 //!   client_input_id) which is also the persisted user message id;
 //! - `seq` = a session-scoped monotonic admission order;
-//! - `status` = admitted → submitted → promoted | rejected | cancelled.
+//! - `status` = admitted → submitted → promoted | rejected | cancelled | rewound.
 //!
 //! The log is intentionally small: only user inputs, not assistant/tool rows.
 //! It is keyed by session id under the global config dir, so it works before a
@@ -37,7 +37,9 @@ pub struct SessionInput {
     /// `prompt` | `steer` | `queue`.
     #[serde(default)]
     pub delivery: String,
-    /// `admitted` | `submitted` | `promoted` | `rejected` | `cancelled`.
+    /// `admitted` | `submitted` | `promoted` | `rejected` | `cancelled` | `rewound`.
+    /// `rewound` means an edit/rollback removed the future branch this input
+    /// belonged to: the row must never be projected into the live transcript.
     #[serde(default)]
     pub status: String,
     #[serde(default)]
@@ -477,6 +479,141 @@ pub fn mark_cancelled_global(
     mark_cancelled(&global_root(), session_id, client_input_id, text)
 }
 
+/// An edit/rollback removed everything after `target_id` from the model
+/// context. Input rows for that removed future branch must never be projected
+/// by the display/detail read again (otherwise they reappear as orphan user
+/// rows at the bottom after Stop). The target row itself survives: it is the
+/// edited prompt/steer.
+///
+/// Ordering uses the client timestamp, not `seq`: `seq` is the latest
+/// STATUS-upsert order, so a target promoted after an older input would
+/// otherwise cut in the wrong place. `target_created_at` is the persisted
+/// message sidecar and covers a target already missing from this log.
+pub fn mark_rewound_after(
+    root: &Path,
+    session_id: &str,
+    target_id: Option<&str>,
+    target_created_at: Option<u64>,
+    include_target: bool,
+) -> std::io::Result<usize> {
+    let _guard = lock();
+    with_file_lock(root, session_id, || {
+        let path = path_for(root, session_id);
+        let mut rows = read_file(&path);
+        let target = target_id.and_then(|id| {
+            rows.iter()
+                .find(|row| row.id == id || row.message_id.as_deref() == Some(id))
+                .cloned()
+        });
+        let cutoff = target
+            .as_ref()
+            .map(|row| row.created_at)
+            .filter(|created| *created > 0)
+            .or(target_created_at.filter(|created| *created > 0));
+        let Some(cutoff) = cutoff else {
+            return Ok(0);
+        };
+        let target_id = target.as_ref().map(|row| row.id.as_str());
+        let mut next = rows.iter().map(|row| row.seq).max().unwrap_or(0);
+        let mut out: Vec<SessionInput> = Vec::new();
+        for row in &mut rows {
+            if !include_target && Some(row.id.as_str()) == target_id {
+                continue;
+            }
+            if include_target {
+                if row.created_at < cutoff {
+                    continue;
+                }
+            } else if row.created_at <= cutoff {
+                continue;
+            }
+            if !matches!(row.status.as_str(), "admitted" | "submitted" | "promoted") {
+                continue;
+            }
+            next = next.saturating_add(1);
+            row.seq = next;
+            row.status = "rewound".into();
+            out.push(row.clone());
+        }
+        if out.is_empty() {
+            return Ok(0);
+        }
+        for row in &out {
+            append_row(&path, row)?;
+        }
+        remember_seq(root, session_id, &path, next.saturating_add(1));
+        maybe_compact_locked(root, session_id)?;
+        Ok(out.len())
+    })
+}
+
+pub fn mark_rewound_after_global(
+    session_id: &str,
+    target_id: Option<&str>,
+    target_created_at: Option<u64>,
+    include_target: bool,
+) -> std::io::Result<usize> {
+    mark_rewound_after(
+        &global_root(),
+        session_id,
+        target_id,
+        target_created_at,
+        include_target,
+    )
+}
+
+/// Identity-based rewind cleanup: after the surviving snapshot is written, any
+/// input row that has no represented user message in that snapshot belongs to a
+/// removed branch and must never be projected again. Timestamps are NOT part of
+/// this rule: a rewind may target a row created later than an older stale steer,
+/// and a second rewind must still clean the first branch.
+pub fn mark_rewound_not_in(
+    root: &Path,
+    session_id: &str,
+    surviving_message_ids: &std::collections::HashSet<String>,
+) -> std::io::Result<usize> {
+    let _guard = lock();
+    with_file_lock(root, session_id, || {
+        let path = path_for(root, session_id);
+        let mut rows = read_file(&path);
+        let mut next = rows.iter().map(|row| row.seq).max().unwrap_or(0);
+        let mut out: Vec<SessionInput> = Vec::new();
+        for row in &mut rows {
+            if !matches!(row.status.as_str(), "admitted" | "submitted" | "promoted") {
+                continue;
+            }
+            let represented = surviving_message_ids.contains(&row.id)
+                || row
+                    .message_id
+                    .as_deref()
+                    .is_some_and(|id| surviving_message_ids.contains(id));
+            if represented {
+                continue;
+            }
+            next = next.saturating_add(1);
+            row.seq = next;
+            row.status = "rewound".into();
+            out.push(row.clone());
+        }
+        if out.is_empty() {
+            return Ok(0);
+        }
+        for row in &out {
+            append_row(&path, row)?;
+        }
+        remember_seq(root, session_id, &path, next.saturating_add(1));
+        maybe_compact_locked(root, session_id)?;
+        Ok(out.len())
+    })
+}
+
+pub fn mark_rewound_not_in_global(
+    session_id: &str,
+    surviving_message_ids: &std::collections::HashSet<String>,
+) -> std::io::Result<usize> {
+    mark_rewound_not_in(&global_root(), session_id, surviving_message_ids)
+}
+
 /// Cursor for `after_seq` clients: the highest admission sequence present.
 pub fn cursor(root: &Path, session_id: &str) -> u64 {
     list(root, session_id)
@@ -623,6 +760,80 @@ mod tests {
             message_id: None,
             operation_id: Some("op-1".into()),
         }
+    }
+
+    #[test]
+    fn rewind_marks_only_the_removed_future_inputs() {
+        let root = std::env::temp_dir().join(format!("jeik-inputs-rewind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = "s-rewind";
+        for (id, created_at) in [("q1", 1u64), ("s2", 2), ("s4", 4), ("s5", 5)] {
+            let mut row = input(session, id, id);
+            row.created_at = created_at;
+            row.status = "promoted".into();
+            append(&root, &mut row).unwrap();
+        }
+
+        let marked = mark_rewound_after(&root, session, Some("s2"), Some(2), false).unwrap();
+        assert_eq!(marked, 2, "only s4/s5 belong to the removed future branch");
+        let rows = list(&root, session);
+        let status = |id: &str| {
+            rows.iter()
+                .find(|row| row.id == id)
+                .map(|row| row.status.as_str())
+                .unwrap_or("")
+        };
+        assert_eq!(status("q1"), "promoted");
+        assert_eq!(status("s2"), "promoted", "edit keeps the target row");
+        assert_eq!(status("s4"), "rewound");
+        assert_eq!(status("s5"), "rewound");
+
+        // A rollback (inclusive=false) removes the target prompt too.
+        let marked = mark_rewound_after(&root, session, Some("s2"), Some(2), true).unwrap();
+        assert_eq!(marked, 1);
+        let rows = list(&root, session);
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "s2")
+                .map(|row| row.status.as_str()),
+            Some("rewound"),
+        );
+
+        clear(&root, session);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rewind_cleanup_is_identity_based_not_timestamp_based() {
+        let root =
+            std::env::temp_dir().join(format!("jeik-inputs-rewind-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = "s-rewind-id";
+        for (id, created_at) in [("q1", 1u64), ("s2", 10), ("s4", 4), ("s5", 5)] {
+            let mut row = input(session, id, id);
+            row.created_at = created_at;
+            row.status = "promoted".into();
+            append(&root, &mut row).unwrap();
+        }
+        // A later rewind target (s2, created_at=10) must still clean s4/s5
+        // (created_at=4/5) because they are not in the surviving snapshot.
+        let surviving: std::collections::HashSet<String> =
+            ["q1".to_string(), "s2".to_string()].into_iter().collect();
+        let marked = mark_rewound_not_in(&root, session, &surviving).unwrap();
+        assert_eq!(marked, 2);
+        let rows = list(&root, session);
+        let status = |id: &str| {
+            rows.iter()
+                .find(|row| row.id == id)
+                .map(|row| row.status.as_str())
+                .unwrap_or("")
+        };
+        assert_eq!(status("q1"), "promoted");
+        assert_eq!(status("s2"), "promoted");
+        assert_eq!(status("s4"), "rewound");
+        assert_eq!(status("s5"), "rewound");
+        clear(&root, session);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

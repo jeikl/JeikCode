@@ -42,3 +42,18 @@ export function steerInsertPosition(
   }
   return at;
 }
+
+/**
+ * 画布落笔决策。`steerInsertPosition` 的 -1 同时表示「定位不到」与「应追加到尾部」；
+ * 但对服务端权威锚点两者必须分开：锚点不在当前窗口里时，这条转向属于已加载切片
+ * 之上，绝不能追加到尾部，否则刷新/中途进入后会掉到用户消息下面，直到回合结束
+ * 磁盘转录重排才恢复。此时只消费队列卡，画布位置交给磁盘/服务端大纲。
+ */
+export function decideSteerPaint(
+  rows: ReadonlyArray<{ role: string }>,
+  anchor: TurnUserAnchor | undefined,
+  replay: boolean,
+): { at: number; defer: boolean } {
+  const at = steerInsertPosition(rows, anchor, replay);
+  return { at, defer: at < 0 && anchor?.authoritative === true };
+}

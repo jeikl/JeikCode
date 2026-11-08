@@ -28,7 +28,12 @@ import { readStreamCursor } from './streamCursor.ts';
 /// v12: 移除空 assistant 占位与画布清洗；旧缓存可能含这些瞬态行，整体作废。
 /// v13: 废弃旧版带临时序号伪造的画布。
 /// v14: 彻底废弃被因果断层（a e f）污染的历史缓存；反写强制落盘权威切片 offset 与 total。
-export const CACHE_SCHEMA = 14;
+/// v15: 废弃被「快照已合并正文 + 回放 part_seq 后缀」重复污染的画布；规范块判据改为
+///      同一 message_id + kind 只允许一个显示块（见 `resolveDeltaPartIndex`）。
+/// v16: 废弃在「display 只有首问 / streaming partial 未投影」时把 promoted/pending
+///      steer 提前缓存在 assistant 之前的画布；服务端已改为先投影 inflight tail
+///      与当前 streaming partial，再投影 pending/promoted steer。
+export const CACHE_SCHEMA = 16;
 
 /** @deprecated 使用 [`CACHE_SCHEMA`]；保留别名仅为兼容既有导入。 */
 export const CACHE_DISPLAY_VERSION = CACHE_SCHEMA;

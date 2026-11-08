@@ -355,7 +355,10 @@ export function withAssistantIdentity<T extends ProjectionMessage>(
     changed = true;
   }
   let parts = message.parts;
-  if (partId && parts.length > 0) {
+  // 身份只属于实际承载它的那个部件。规范块可能不在行尾（后面还有工具卡），
+  // 若整行已认识该 part_id 就绝不能把它再盖到最后一个部件上。
+  const partKnown = !!partId && parts.some((part) => partKnownIds(part).includes(partId));
+  if (partId && !partKnown && parts.length > 0) {
     const pi = parts.length - 1;
     const p = parts[pi];
     if (p && (p.kind === 'text' || p.kind === 'reasoning')) {
@@ -874,10 +877,21 @@ function currentSegmentStart(parts: MsgPart[]): number {
  * 前面那个部件 → 每次都开一个新部件，于是正文/思考被重复画一遍。
  * 段边界只用于「开新部件」的启发式，不能用来限制身份匹配。
  *
+ * 线协议身份契约：`part_id = {message_id}:{part_seq}:{kind}`。
+ * `part_seq` 只标识**同一条消息内部的流式段**，不是显示块身份；持久化快照对一条消息
+ * 只投影一个 reasoning 块和一个 text 块（seq 分别为 1 / 2）。因此回放同一 message_id
+ * 的后续段时必须落回该消息已经存在的规范块，绝不能在工具 barrier 之后另开一块——
+ * 否则快照里的完整正文/思考会被再追加一遍（刷新后“后缀重放”的直接根因）。
+ *
  * 优先级：全行 part_id 精确命中 → 全行同段序同类（磁盘投影与线协议编号可能不同）
- * → 当前段内唯一的同类未盖戳部件。
+ * → 回放时全行同 message_id 同类（规范块）→ 当前段内唯一的同类未盖戳部件。
  */
-function resolveDeltaPartIndex(parts: MsgPart[], kind: 'text' | 'reasoning', partId?: string): number {
+function resolveDeltaPartIndex(
+  parts: MsgPart[],
+  kind: 'text' | 'reasoning',
+  partId?: string,
+  replay = false,
+): number {
   // 1. 身份优先：part_id 在整行内唯一，跨工具边界也必须能找到原部件。
   if (partId) {
     const exact = parts.findIndex((part) => part.kind === kind && partMatchesPartId(part, partId));
@@ -897,6 +911,15 @@ function resolveDeltaPartIndex(parts: MsgPart[], kind: 'text' | 'reasoning', par
         });
       });
       if (bySeq >= 0) return bySeq;
+      if (replay) {
+        // 回放携带累积正文：同一条消息的同一 kind 只有一个规范显示块。
+        // 快照投影只认识该消息的首个 wire part，后续 part_seq 的帧必须回到它。
+        const byOwner = parts.findIndex((part) => {
+          if (part.kind !== kind) return false;
+          return partKnownIds(part).some((known) => parsePartId(known)?.owner === want.owner);
+        });
+        if (byOwner >= 0) return byOwner;
+      }
     }
   }
 
@@ -1004,7 +1027,7 @@ function applyPartRevision(
   partId: string | undefined,
   rev: number,
 ): MsgPart[] | null {
-  const index = resolveDeltaPartIndex(parts, kind, partId);
+  const index = resolveDeltaPartIndex(parts, kind, partId, replay);
   if (index < 0) {
     return [
       ...parts,
@@ -1038,6 +1061,19 @@ function applyPartRevision(
       if (text === (segment.text || '') && nextRev === (segment.rev ?? 0)) return null;
       nextSegments = segments.slice();
       nextSegments[segIndex] = { ...segment, text, rev: nextRev };
+    } else if (replay && (previous.text || '').includes(content)) {
+      // 同一 message_id 的规范块已经把这段累积正文包含在内（快照先落、
+      // 回放后到）：只补身份/修订号，绝不再追加一份 segment。
+      const nextRev = Math.max(previous.rev ?? 0, rev);
+      if (nextRev === (previous.rev ?? 0) && (!partId || partMatchesPartId(previous, partId))) {
+        return null;
+      }
+      next[index] = {
+        ...previous,
+        ...mergePartIdentity(previous, { id: partId }),
+        rev: nextRev,
+      } as MsgPart;
+      return next;
     } else {
       nextSegments = [...segments, { ...(partId ? { id: partId } : {}), text: content, rev }];
     }
@@ -1098,7 +1134,7 @@ function mergeTextIntoParts(parts: MsgPart[], content: string, replay: boolean, 
   // 每一帧都是真实 LLM 实时增量 token，由后端 SSE 游标（AtomicU64 seq）保证单调性与不重发。
   // 绝对严禁执行任何子串包含去重（includes），直接就地追加！
   if (!replay) {
-    const index = resolveDeltaPartIndex(parts, 'text', partId);
+    const index = resolveDeltaPartIndex(parts, 'text', partId, replay);
     if (index >= 0) {
       const next = parts.slice();
       const p = next[index] as { kind: 'text'; text: string; id?: string; ids?: string[]; segments?: PartSegment[] };
@@ -1148,7 +1184,7 @@ function mergeTextIntoParts(parts: MsgPart[], content: string, replay: boolean, 
   const replaced = replaceTruncatedParts(parts, 'text', content, partId);
   if (replaced) return replaced;
 
-  const index = resolveDeltaPartIndex(parts, 'text', partId);
+  const index = resolveDeltaPartIndex(parts, 'text', partId, replay);
   if (index >= 0) {
     const previous = parts[index] as { kind: 'text'; text: string; id?: string; ids?: string[] };
     const existing = previous.text || '';
@@ -1244,7 +1280,7 @@ function mergeReasoningIntoParts(parts: MsgPart[], content: string, replay: bool
     return applyPartRevision(parts, 'reasoning', content, replay, partId, partRev);
   }
 
-  const existingIdx = resolveDeltaPartIndex(parts, 'reasoning', partId);
+  const existingIdx = resolveDeltaPartIndex(parts, 'reasoning', partId, replay);
 
   // 1. 直播流式输出（replay === false）：
   // 思考增量直接并入当前思考部件，绝不能对思考文本做子串去重！

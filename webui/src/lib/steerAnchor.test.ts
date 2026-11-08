@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { steerInsertPosition } from './steerAnchor.ts';
+import { decideSteerPaint, steerInsertPosition } from './steerAnchor.ts';
 import { normalizeCanvas } from './canvas/canvasStore.ts';
 import { projectCanvas } from './canvas/project.ts';
 
@@ -49,6 +49,33 @@ test('权威服务端锚点允许在其后已有行时按真实 fold 位置插�
     2,
     'server anchor is valid for live events too',
   );
+});
+
+test('权威锚点不在当前窗口时必须延迟落笔，绝不追加到尾部', () => {
+  // B 端刷新/中途进入只加载了尾窗，锚点（较早的助手行）不在窗口内：这条转向
+  // 属于切片之上，画布不能画；队列卡由调用方消费，位置交给磁盘/服务端大纲。
+  const rows = [user('q'), assistant('a2')];
+  assert.deepEqual(
+    decideSteerPaint(rows, { messageId: 'above-fold', authoritative: true }, true),
+    { at: -1, defer: true },
+  );
+  // 权威锚点在窗口内：按真实 fold 位置插入。
+  assert.deepEqual(
+    decideSteerPaint(rows, { messageId: 'a2', authoritative: true }, true),
+    { at: 2, defer: false },
+  );
+  // 老协议/无锚点仍保持尾部追加语义，不受新契约影响。
+  assert.equal(decideSteerPaint(rows, { messageId: 'missing' }, true).defer, false);
+  assert.equal(decideSteerPaint(rows, undefined, true).defer, false);
+});
+
+test('deferred steer becomes paint-ready once the anchor assistant row arrives', () => {
+  const anchor = { messageId: 'as2', authoritative: true as const };
+  assert.deepEqual(decideSteerPaint([user('q')], anchor, true), { at: -1, defer: true });
+  assert.deepEqual(decideSteerPaint([user('q'), assistant('as2')], anchor, true), {
+    at: 2,
+    defer: false,
+  });
 });
 
 test('锚点后面还跟着同一批工具卡时，绝不插到中间（否则 Read/Read 被劈开）', () => {

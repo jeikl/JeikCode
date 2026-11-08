@@ -625,7 +625,7 @@ fn read_display_tail_view(
     let offset = if start == 0 { 0 } else { prefix_len + start };
     let mut messages = if start == 0 { prefix } else { Vec::new() };
     messages.extend(window);
-    append_pending_inputs(
+    append_streaming_before_pending(
         &mut messages,
         &mut turns,
         &session.meta.id,
@@ -634,7 +634,6 @@ fn read_display_tail_view(
         offset,
     );
     annotate_client_input_ids(&mut messages, &session.meta.id);
-    append_interrupted_partial(&mut messages, &session.meta.id, turn_running);
     attach_display_images(
         &mut messages,
         std::path::Path::new(&session.meta.working_dir),
@@ -2406,7 +2405,7 @@ fn append_snapshot_tail(
 /// Show an interrupted per-token checkpoint on a cold read. The next `/chat`
 /// overlays the same content into the model context and clears the sidecar; this
 /// projection only makes the recovered text visible before the retry.
-fn append_interrupted_partial(messages: &mut Vec<MessageInfo>, session_id: &str, running: bool) {
+fn append_interrupted_partial(messages: &mut Vec<MessageInfo>, session_id: &str) {
     fn already_present(
         messages: &[MessageInfo],
         partial: &jeikcode_capabilities::session::PartialStream,
@@ -2463,9 +2462,9 @@ fn append_interrupted_partial(messages: &mut Vec<MessageInfo>, session_id: &str,
             append_one(messages, archived);
         }
     }
-    if running {
-        return;
-    }
+    // Always project the live checkpoint too. It is the assistant row currently
+    // being streamed; pending steers (projected by the caller afterwards) must
+    // be ordered after it. The watcher/replay dedupes the same identity/text.
     if let Some(partial) = jeikcode_capabilities::session::partial::load_global(session_id) {
         append_one(messages, partial);
     }
@@ -2537,6 +2536,30 @@ pub(crate) fn overlay_partial_stream(
 /// and rail. This is the durable gap between POST acceptance and the kernel's
 /// persisted message; it is scoped to the current operation so stale rows from
 /// an older turn can never reappear.
+fn append_streaming_before_pending(
+    messages: &mut Vec<MessageInfo>,
+    turns: &mut Vec<SessionTurnOutline>,
+    session_id: &str,
+    operation_id: Option<&str>,
+    working_dir: &std::path::Path,
+    absolute_index_base: usize,
+) {
+    // The live partial is the current round's assistant row. Project it BEFORE
+    // pending inputs: a queued steer belongs to the next round boundary, so a
+    // mid-turn refresh must render aq1, as1, steer1 — not aq1, steer1, as1.
+    // With no partial, pending steers stay after the last user row and the
+    // provider merges that same-round user run at the wire.
+    append_interrupted_partial(messages, session_id);
+    append_pending_inputs(
+        messages,
+        turns,
+        session_id,
+        operation_id,
+        working_dir,
+        absolute_index_base,
+    );
+}
+
 fn append_pending_inputs(
     messages: &mut Vec<MessageInfo>,
     turns: &mut Vec<SessionTurnOutline>,
@@ -5028,6 +5051,89 @@ mod folded_steer_outline_tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(turns.len(), 1);
         jeikcode_capabilities::session::inputs::clear_global(&session_id);
+    }
+
+    #[test]
+    fn streaming_assistant_is_projected_before_a_pending_steer() {
+        let session_id = format!("streaming-before-pending-{}", std::process::id());
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+        jeikcode_capabilities::session::partial::clear_global(&session_id);
+        jeikcode_capabilities::session::partial::clear_archived_global(&session_id);
+
+        let mut q1 = jeikcode_kernel::message::Message::user("123");
+        q1.id = Some("q-1".into());
+        let mut messages = vec![MessageInfo::from_kernel_in(&q1, None)];
+        let mut turns = Vec::new();
+
+        let live = jeikcode_capabilities::session::PartialStream {
+            session_id: session_id.clone(),
+            message_id: Some("m-as1".into()),
+            text: "working on the first round".into(),
+            updated_at: 1_700_000_000_500,
+            ..Default::default()
+        };
+        jeikcode_capabilities::session::partial::save_global(&live).unwrap();
+
+        let mut steer = jeikcode_capabilities::session::SessionInput {
+            id: "steer-1".into(),
+            seq: 0,
+            session_id: session_id.clone(),
+            delivery: "steer".into(),
+            // The kernel has already folded it at the next round boundary; this
+            // is the promoted row projected before display.jsonl flushes.
+            status: "promoted".into(),
+            text: "456".into(),
+            images: Vec::new(),
+            created_at: 1_700_000_000_600,
+            message_id: Some("steer-1".into()),
+            operation_id: Some("op-1".into()),
+        };
+        jeikcode_capabilities::session::inputs::append_global(&mut steer).unwrap();
+
+        append_streaming_before_pending(
+            &mut messages,
+            &mut turns,
+            &session_id,
+            Some("op-1"),
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].id.as_deref(), Some("q-1"));
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].id.as_deref(), Some("m-as1"));
+        assert!(messages[1].content.contains("working on the first round"));
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(messages[2].id.as_deref(), Some("steer-1"));
+        assert!(messages[2].content.contains("456"));
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].index, 2);
+
+        // No live partial: the pending steer groups with the same-round user run
+        // (aq1, steer1); the provider merges adjacent user parts on the wire.
+        jeikcode_capabilities::session::partial::clear_global(&session_id);
+        let mut no_partial = vec![MessageInfo::from_kernel_in(&q1, None)];
+        let mut no_partial_turns = Vec::new();
+        append_streaming_before_pending(
+            &mut no_partial,
+            &mut no_partial_turns,
+            &session_id,
+            Some("op-1"),
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert_eq!(
+            no_partial
+                .iter()
+                .map(|message| (message.role.as_str(), message.id.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("user", Some("q-1")), ("user", Some("steer-1"))]
+        );
+
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+        jeikcode_capabilities::session::partial::clear_global(&session_id);
+        jeikcode_capabilities::session::partial::clear_archived_global(&session_id);
     }
 
     #[test]
@@ -8141,9 +8247,7 @@ async fn get_session_detail(
                         snapshot_last_turn,
                     );
                 }
-                // Durable admitted inputs (prompt/steer) that the kernel has
-                // not folded/persisted yet: show them now, scoped to this turn.
-                append_pending_inputs(
+                append_streaming_before_pending(
                     &mut full_messages,
                     &mut turns,
                     &session.meta.id,
@@ -8152,7 +8256,6 @@ async fn get_session_detail(
                     0,
                 );
                 annotate_client_input_ids(&mut full_messages, &session.meta.id);
-                append_interrupted_partial(&mut full_messages, &session.meta.id, turn_running);
                 attach_display_images(
                     &mut full_messages,
                     std::path::Path::new(&session.meta.working_dir),
@@ -8233,7 +8336,7 @@ async fn get_session_detail(
                     );
                 }
                 let mut turns = session_user_outline(&messages);
-                append_pending_inputs(
+                append_streaming_before_pending(
                     &mut messages,
                     &mut turns,
                     &id,
@@ -8242,7 +8345,6 @@ async fn get_session_detail(
                     0,
                 );
                 annotate_client_input_ids(&mut messages, &id);
-                append_interrupted_partial(&mut messages, &id, turn_running);
                 repair_display_clock(&mut messages);
                 let (message_count, offset, messages, pinned_user_index) =
                     if let Some(after_seq) = query.after_seq {
@@ -10574,7 +10676,6 @@ async fn patch_session_message(
             .id
             .clone()
             .or_else(|| req.expected_message_id.clone());
-
         snapshot.messages[real_index].text = req.text.clone();
         if let Some(imgs) = req.images.as_ref() {
             snapshot.messages[real_index].images = imgs
@@ -10615,6 +10716,23 @@ async fn patch_session_message(
                 .into_response();
         }
         manager.clear_inflight_snapshot(&id);
+        if truncate_after {
+            // Identity, not timestamp: any durable input whose user row is not
+            // in the surviving snapshot belongs to a removed branch. This also
+            // cleans a stale branch left by an EARLIER rewind whose rows can be
+            // older than the current target.
+            let surviving_ids: std::collections::HashSet<String> = snapshot
+                .messages
+                .iter()
+                .filter_map(|message| message.id.clone())
+                .collect();
+            let _ = jeikcode_capabilities::session::inputs::mark_rewound_not_in_global(
+                &id,
+                &surviving_ids,
+            );
+            jeikcode_capabilities::session::partial::clear_global(&id);
+            jeikcode_capabilities::session::partial::clear_archived_global(&id);
+        }
         let _ = manager.write_meta(&meta);
         if let Some(surviving) = derived_turns.as_ref() {
             prune_derived_turns(&manager, &id, surviving);
@@ -10835,6 +10953,20 @@ async fn delete_session_message(
                 .into_response();
         }
         manager.clear_inflight_snapshot(&id);
+        // Deleting a user turn removes its input identity; deleting a model run
+        // keeps the user prompt. In both cases only inputs represented in the
+        // surviving snapshot may remain projectable.
+        let surviving_ids: std::collections::HashSet<String> = snapshot
+            .messages
+            .iter()
+            .filter_map(|message| message.id.clone())
+            .collect();
+        let _ = jeikcode_capabilities::session::inputs::mark_rewound_not_in_global(
+            &id,
+            &surviving_ids,
+        );
+        jeikcode_capabilities::session::partial::clear_global(&id);
+        jeikcode_capabilities::session::partial::clear_archived_global(&id);
         let _ = manager.write_meta(&meta);
         if let Some(surviving) = derived_turns.as_ref() {
             prune_derived_turns(&manager, &id, surviving);
@@ -11004,6 +11136,20 @@ async fn truncate_session(
                 .into_response();
         }
         manager.clear_inflight_snapshot(&id);
+        // Identity-based cleanup: the target survives or disappears according
+        // to `inclusive`; either way, only rows represented in the surviving
+        // snapshot may remain projectable.
+        let surviving_ids: std::collections::HashSet<String> = snapshot
+            .messages
+            .iter()
+            .filter_map(|message| message.id.clone())
+            .collect();
+        let _ = jeikcode_capabilities::session::inputs::mark_rewound_not_in_global(
+            &id,
+            &surviving_ids,
+        );
+        jeikcode_capabilities::session::partial::clear_global(&id);
+        jeikcode_capabilities::session::partial::clear_archived_global(&id);
         let _ = manager.write_meta(&meta);
         if let Some(surviving) = derived_turns.as_ref() {
             prune_derived_turns(&manager, &id, surviving);

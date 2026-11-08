@@ -1522,16 +1522,20 @@ impl SessionManager {
         matches!(self.load_inflight_snapshot(id), Ok(Some(_)))
     }
 
-    /// Overlay a prefix-extending inflight checkpoint onto a catalog/display load.
+    /// Overlay an inflight checkpoint that extends the canonical conversation
+    /// onto a catalog/display load.
     ///
-    /// Canonical on-disk aggregate is unchanged. Used when a turn is parked
-    /// (approval card) or has not yet reached `turn_complete` (error diagnostic
-    /// is committed through that path; this covers the in-progress round).
+    /// The display view may carry extra leading sacred-floor context (system /
+    /// synthetic instruction blocks) that the staged first-user canonical snapshot
+    /// does not; [`snapshot_extends_display_prefix`] accepts that shape. Canonical
+    /// on-disk aggregate is unchanged. Used when a turn is parked (approval card)
+    /// or has not yet reached `turn_complete` (error diagnostic is committed
+    /// through that path; this covers the in-progress round).
     pub fn overlay_inflight_for_display(&self, id: &str, loaded: &mut LoadedSession) {
         let Ok(Some(checkpoint)) = self.load_inflight_snapshot(id) else {
             return;
         };
-        if !snapshot_extends_prefix(&loaded.snapshot, &checkpoint.snapshot) {
+        if !snapshot_extends_display_prefix(&loaded.snapshot, &checkpoint.snapshot) {
             return;
         }
         if checkpoint.snapshot.messages.len() > loaded.snapshot.messages.len() {
@@ -4323,6 +4327,65 @@ fn ensure_meta_id(expected: &str, meta: &SessionMeta) -> SessionResult<()> {
 fn snapshot_extends_prefix(prefix: &SessionSnapshot, full: &SessionSnapshot) -> bool {
     let n = prefix.messages.len();
     full.messages.len() >= n && full.messages[..n] == prefix.messages[..]
+}
+
+/// Display-only extension check for the inflight checkpoint.
+///
+/// A fresh session's canonical snapshot is seeded with ONLY the raw first user
+/// message (`publish_staged_session_with_first_input`). The inflight checkpoint
+/// carries the full runtime conversation: the sacred-floor system blocks and the
+/// synthetic instruction blocks precede that same user message. The strict
+/// [`snapshot_extends_prefix`] test therefore rejects a perfectly valid inflight
+/// tail, and a mid-turn refresh falls back to the stale display slice (only the
+/// first user row) just as a promoted steer is projected after it.
+///
+/// For display we accept an extension only when EVERY canonical message carries
+/// an authoritative `Message.id` and the same id appears in the inflight in order.
+/// Text is never used to pair messages: id-less/legacy rows fail closed, and the
+/// strict [`snapshot_extends_prefix`] check remains their only path. Canonical
+/// storage and the resume/replay path keep the strict prefix rule.
+fn snapshot_extends_display_prefix(
+    canonical: &SessionSnapshot,
+    inflight: &SessionSnapshot,
+) -> bool {
+    if snapshot_extends_prefix(canonical, inflight) {
+        return true;
+    }
+    if canonical.messages.is_empty() {
+        return !inflight.messages.is_empty();
+    }
+    if inflight.messages.len() <= canonical.messages.len() {
+        return false;
+    }
+    let mut cursor = 0usize;
+    for want in &canonical.messages {
+        // No authoritative identity => never guess by text.
+        if want.id.is_none() {
+            return false;
+        }
+        let mut found = false;
+        while cursor < inflight.messages.len() {
+            let candidate = &inflight.messages[cursor];
+            cursor += 1;
+            if same_display_message(want, candidate) {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+/// Authoritative display identity: same kernel message id (and role as a
+/// consistency guard). Missing ids never match — no text fallback by design.
+fn same_display_message(a: &Message, b: &Message) -> bool {
+    match (a.id.as_deref(), b.id.as_deref()) {
+        (Some(left), Some(right)) => left == right && a.role == b.role,
+        _ => false,
+    }
 }
 
 fn validate_snapshot(snapshot: &SessionSnapshot) -> SessionResult<()> {
@@ -8224,6 +8287,92 @@ mod tests {
             !mgr.has_inflight_snapshot(id),
             "diverging checkpoints are cleared on resume"
         );
+    }
+
+    #[test]
+    fn overlay_inflight_accepts_staged_first_user_with_leading_sacred_floor_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        let id = "staged-first-user-inflight";
+        let lease = mgr.acquire_lease(id).unwrap();
+
+        // A fresh session's canonical snapshot is seeded with only the raw first
+        // user row; the instruction blocks and persona are not in it.
+        let mut first = Message::user("first question");
+        first.id = Some("u-first".into());
+        let canonical = SessionSnapshot::new(vec![first.clone()]);
+        let mut meta = SessionMeta::new(id, "/project", 1);
+        meta.owner = StorageOwner::Native;
+        mgr.commit_native_import(
+            &lease,
+            Some(&canonical),
+            Some(&PresentationFile::default()),
+            &meta,
+        )
+        .unwrap();
+
+        // The inflight conversation carries the sacred-floor context before the
+        // same user row, then the assistant/steer tail.
+        let mut inflight_messages = vec![
+            Message::system("persona"),
+            Message::synthetic_user("<project_instructions>...</project_instructions>"),
+            first.clone(),
+        ];
+        let mut assistant = Message::assistant("working", Vec::new());
+        assistant.id = Some("m-1".into());
+        inflight_messages.push(assistant);
+        let mut steer = Message::user("steer after the first answer");
+        steer.id = Some("u-steer".into());
+        inflight_messages.push(steer);
+        let inflight = SessionSnapshot::new(inflight_messages);
+        mgr.save_inflight_snapshot(id, &inflight, false).unwrap();
+
+        let mut displayed = mgr.load_native_session(id).unwrap();
+        assert_eq!(displayed.snapshot, canonical);
+        mgr.overlay_inflight_for_display(id, &mut displayed);
+        assert_eq!(displayed.snapshot, inflight);
+
+        // Resume/replay keeps the strict prefix rule; only display widens it.
+        let (resumed, _) = mgr.load_native_session_for_resume(&lease).unwrap();
+        assert_eq!(resumed.snapshot, canonical);
+    }
+
+    #[test]
+    fn display_prefix_never_pairs_messages_by_text() {
+        let mut canonical_user = Message::user("same text");
+        canonical_user.id = Some("u-1".into());
+        let canonical = SessionSnapshot::new(vec![canonical_user.clone()]);
+
+        // Same text, different authoritative id: must NOT be treated as the same row.
+        let mut other_user = Message::user("same text");
+        other_user.id = Some("u-2".into());
+        let inflight = SessionSnapshot::new(vec![
+            Message::system("persona"),
+            other_user,
+            Message::assistant("answer", Vec::new()),
+        ]);
+        assert!(!snapshot_extends_display_prefix(&canonical, &inflight));
+
+        // Id-less canonical rows fail closed even when an identical text row follows
+        // extra leading context; the strict prefix check is their only path.
+        let idless = SessionSnapshot::new(vec![Message::user("same text")]);
+        let inflight_with_twin = SessionSnapshot::new(vec![
+            Message::system("persona"),
+            Message::user("same text"),
+            Message::assistant("answer", Vec::new()),
+        ]);
+        assert!(!snapshot_extends_display_prefix(
+            &idless,
+            &inflight_with_twin
+        ));
+
+        // The same authoritative id with leading sacred-floor context is accepted.
+        let accepted = SessionSnapshot::new(vec![
+            Message::system("persona"),
+            canonical_user,
+            Message::assistant("answer", Vec::new()),
+        ]);
+        assert!(snapshot_extends_display_prefix(&canonical, &accepted));
     }
 
     #[test]

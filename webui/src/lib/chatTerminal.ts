@@ -175,6 +175,25 @@ export function tailRowCovered<T extends TailMessage>(row: T, coverage: TailCove
  * 里的多个 steer 只有最后一个能留下，更早的会被整段丢掉。
  * 返回 -1 表示画布与磁盘没有交集（旧 daemon 无 id / 纯直播行）。
  */
+function firstCoveredGap(canvas: TailMessage[], coverage: TailCoverage): number {
+  // Only inspect the shared window's interior. Canvas rows BEFORE the first
+  // disk-covered row are the earlier head (the disk window starts later) and
+  // are deliberately preserved by earlierCanvasHead — they are not a gap.
+  const firstCovered = canvas.findIndex((row) => !!row && tailRowCovered(row, coverage));
+  if (firstCovered < 0) return -1;
+  let coveredAfter = false;
+  for (let i = canvas.length - 1; i >= firstCovered; i -= 1) {
+    const row = canvas[i];
+    if (!row) continue;
+    if (tailRowCovered(row, coverage)) {
+      coveredAfter = true;
+      continue;
+    }
+    if (coveredAfter) return i;
+  }
+  return -1;
+}
+
 function unpersistedTailStart(canvas: TailMessage[], coverage: TailCoverage): number {
   if (coverage.ids.size === 0 && coverage.keys.size === 0) return -1;
   for (let i = canvas.length - 1; i >= 0; i--) {
@@ -209,11 +228,22 @@ export function mergeDiskWithUnpersistedTail<T extends TailMessage>(
   // A new loop may already contain reasoning/tools before its final text. The
   // old turn's terminal reconcile must not mistake that for a settled turn and
   // replace the canvas (steer bubble + new loop) with the stale disk tail.
+  const coverage = tailCoverage(disk);
+  // A disk tail that contains a LATER row but skips an intermediate canvas row
+  // is not a causal superset. Example: the live turn has
+  //   q2, as2, q3, as3
+  // while the daemon detail raced ahead with
+  //   q2, as3-partial, q3
+  // Adopting the disk and appending the missing as2 at the end is exactly the
+  // "old answer above, steer card moved" bug. Keep the canvas order for an
+  // interleaved gap; the watch replay/display flush will converge identities.
+  const gap = firstCoveredGap(canvas, coverage);
+  if (gap >= 0) return canvas;
+
   const openTail =
     transcriptHasOpenUserTurn(canvas) || transcriptHasInFlightAssistant(canvas);
   if (!openTail && opts?.diskCoversTail !== false) return disk;
 
-  const coverage = tailCoverage(disk);
   const byIdentity = unpersistedTailStart(canvas, coverage);
   // 画布里早于磁盘窗口的行必须保留：断网期间跑完多个回合、重连只拿到最新窗口时，
   // 直接返回 disk 会把旧历史（甚至 c 的提问）整段抖掉，看起来就是 c 直接接最新一轮。

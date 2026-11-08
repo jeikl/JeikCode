@@ -154,6 +154,25 @@ test('agent stop 终态对账回归矩阵：历史回答绝不被灌到对话底
   assert.equal(steerOut[steerOut.length - 1], 'steer1');
 });
 
+test('磁盘 detail 跳过中间 assistant 行时，不能把旧的流式回答搬到 steer 后面', () => {
+  const u = (id: string, src: number) => ({
+    role: 'user', id, sourceIndex: src, parts: [{ kind: 'text' as const, text: id }],
+  });
+  const a = (id: string, src: number) => ({
+    role: 'assistant', id, sourceIndex: src, parts: [{ kind: 'text' as const, text: id }],
+  });
+  // Live canvas: q2 -> as2 -> q3(steer) -> as3.
+  // Stale server detail: q2 -> as3(partial) -> q3 — it has the later rows but
+  // skipped the already-completed as2. Adopting the disk would move as2 after
+  // the steer (the observed "old answer above / card moved" refresh bug).
+  const canvas = [u('q2', 0), a('as2', 1), u('q3', 2), a('as3', 3)];
+  const disk = [u('q2', 0), a('as3', 3), u('q3', 2)];
+  assert.deepEqual(
+    mergeAuthoritativeTail(disk as any, canvas as any, 0).map((row: any) => row.id),
+    ['q2', 'as2', 'q3', 'as3'],
+  );
+});
+
 test('unknown explicit stop reasons fail closed instead of being reported as success', () => {
   assert.deepEqual(classifyChatDone({ stopReason: 'future_terminal' }), {
     kind: 'incomplete',
@@ -240,14 +259,13 @@ test('before/after：旧 adopt 路径会丢当前提问并留下错位回答，�
     { role: 'user', id: 'q1', sourceIndex: 2, parts: [{ kind: 'text' as const, text: '当前提问' }] },
     { role: 'assistant', id: 'a1', parts: [{ kind: 'text' as const, text: '当前已结算回答' }] },
   ];
-  // 旧实现：splice 丢掉窗口外的 q1 后，merge 默认 diskCoversTail=true，直接采用旧磁盘。
+  // 旧实现会把窗口外的 q1 丢掉；interleaved-gap guard 现在也保护这条路径，
+  // 与新 helper 一样保留完整当前轮。
   const oldMerged = mergeDiskWithUnpersistedTail(
     spliceAuthoritativeDiskTail(canvas, disk, 2),
     canvas,
   );
-  // 复现旧路径：q1 被窗口判断丢弃，a1 被当作 overlay 留在尾部，
-  // 于是上一轮内容和一条失去提问的回答混在尾部。
-  assert.deepEqual(oldMerged.map((m) => m.id), ['q0', 'a0', 'a1']);
+  assert.deepEqual(oldMerged.map((m) => m.id), ['q0', 'a0', 'q1', 'a1']);
 
   const fixed = mergeAuthoritativeTail(disk, canvas, 2);
   assert.deepEqual(fixed.map((m) => m.id), ['q0', 'a0', 'q1', 'a1']);

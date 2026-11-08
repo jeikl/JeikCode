@@ -2527,6 +2527,13 @@ impl RunningAgent {
         // to once per turn (robust to the empty-retry / provider-retry `round -= 1`
         // decrements that reset `round` to 1) AND tells the empty-exhaustion
         // terminal not to repeat the same size-blame.
+        // The turn's INITIAL user prompt is one complete user block. A steer that
+        // arrives after the turn starts is the NEXT user block, even if it lands
+        // before the first provider request opens. Only start folding steers once
+        // the first assistant/tool round has been committed; otherwise q2+q3 would
+        // be merged into the prompt's first request and the model would answer
+        // both in one round (the observed q2 -> q3 -> assistant bug).
+        let mut initial_prompt_round = true;
         let mut over_window_warned = false;
         // Whether the mid-turn AUTO compaction pass has run this turn. Mainstream
         // agents check the context threshold before every model call; we do the
@@ -2633,13 +2640,33 @@ impl RunningAgent {
                 }
             }
             let start = self.clock.now_millis();
-            // STEER: fold any prompts the user submitted mid-turn into THIS turn before
-            // building the next request. Real user messages (count toward prompt/undo),
-            // appended append-only (prefix-cache safe).
-            let steered: Vec<SteerInput> = {
+            // STEER: fold prompts the user submitted mid-turn into THIS turn before
+            // building the next request. The initial prompt round is exempt: a steer
+            // arriving while its first request is opening belongs to the NEXT round.
+            let mut steered: Vec<SteerInput> = if initial_prompt_round {
+                Vec::new()
+            } else {
                 let mut b = steer.lock().unwrap_or_else(|e| e.into_inner());
                 b.drain(..).collect()
             };
+            if !steered.is_empty() {
+                // Daemon -> coding runtime -> kernel is asynchronous; a second
+                // steer clicked a few ms later can still be in flight at this
+                // boundary. Re-drain a very short quiescent window so the batch
+                // keeps the user's click order instead of splitting one round.
+                // Steer-free rounds pay no extra latency.
+                for _ in 0..2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    let more: Vec<SteerInput> = {
+                        let mut b = steer.lock().unwrap_or_else(|e| e.into_inner());
+                        b.drain(..).collect()
+                    };
+                    if more.is_empty() {
+                        break;
+                    }
+                    steered.extend(more);
+                }
+            }
             if !steered.is_empty() {
                 // A real user steer changes the intent of the currently-running
                 // turn. Evidence collected before that intervention must not be
@@ -3773,6 +3800,9 @@ impl RunningAgent {
             );
             assistant_msg.id = Some(assistant_message_id.clone());
             convo.push(assistant_msg);
+            // The initial prompt has now produced its first assistant/tool round.
+            // From the next boundary on, parked steers fold normally.
+            initial_prompt_round = false;
             self.hooks.on_turn_progress(convo).await;
             if pending_calls.is_empty() {
                 // Exact-loop evidence is consecutive across tool rounds only. A
@@ -6211,6 +6241,85 @@ mod steer_buffer_tests {
             }
         }
         assert_eq!(turn_started, 1, "steer must NOT open a second turn");
+    }
+
+    struct BlockingTurnStart {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::hook::LifecycleHooks for BlockingTurnStart {
+        async fn turn_start(&self, _convo: &mut Conversation) {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    /// The initial prompt is one complete user block. A steer that arrives while
+    /// the turn is still in `turn_start` (before the first drain/request) must NOT
+    /// be merged into the prompt's first request; it belongs to the next round.
+    #[tokio::test]
+    async fn initial_prompt_round_defers_early_steer_to_next_round() {
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::TextDelta("first".into()),
+                StreamEvent::Done { truncated: false },
+            ],
+            vec![
+                StreamEvent::TextDelta("second".into()),
+                StreamEvent::Done { truncated: false },
+            ],
+        ]));
+        let received = provider.received.clone();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hook: Arc<dyn crate::hook::LifecycleHooks> = Arc::new(BlockingTurnStart {
+            started: started.clone(),
+            release: release.clone(),
+        });
+        let mut handle = Agent::builder()
+            .provider(provider)
+            .tools(ToolRegistry::new().mount(&[]))
+            .hook(hook)
+            .build()
+            .spawn();
+        handle
+            .commands
+            .send(AgentCommand::SendMessage {
+                text: "q2".into(),
+                images: vec![],
+            })
+            .unwrap();
+        started.notified().await;
+        // The turn future is parked inside turn_start; the command select is free
+        // to route this into the per-turn steer buffer before the first drain.
+        handle
+            .commands
+            .send(AgentCommand::SendMessage {
+                text: "q3-steer".into(),
+                images: vec![],
+            })
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        release.notify_one();
+        while let Some(ev) = handle.events.recv().await {
+            if matches!(ev, AgentEvent::TurnComplete { .. }) {
+                break;
+            }
+        }
+        let log = received.lock().unwrap();
+        assert_eq!(log.len(), 2, "first round + next steered round");
+        let first: Vec<&str> = log[0].iter().map(|(_, text)| text.as_str()).collect();
+        assert!(first.contains(&"q2"));
+        assert!(
+            !first.contains(&"q3-steer"),
+            "the initial prompt round must not merge an early steer: {first:?}"
+        );
+        let second: Vec<&str> = log[1].iter().map(|(_, text)| text.as_str()).collect();
+        assert!(second.contains(&"q2"));
+        assert!(second.contains(&"first"));
+        assert!(second.contains(&"q3-steer"));
     }
 
     /// Full end-to-end steer test: steered prompt is folded into the same turn's
