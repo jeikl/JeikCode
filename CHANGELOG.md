@@ -21,6 +21,64 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.0-beta.0 (2026-11-08)
+
+- **[Turn Steering & Session Rewind] Atomically admit steering cards and eliminate ghost entries on rewind**:
+  - Steering intents now transition through a reliable server-backed state machine, ensuring cards survive page reloads and never submit duplicate turns.
+  - Rewinding or deleting session history truncates discarded branch turns cleanly, preventing deleted steers and tool bubbles from resurrecting as orphan rows.
+  - Streaming interruptions and torn temporary files are safely recovered across session reconnects.
+
+- **[History Deduplication] Eliminate duplicate user prompts in stored session history**:
+  - Resolved an issue where admitted user prompts were double-written during runtime initialization, causing redundant user bubbles and double token costs.
+  - User prompts now maintain strict single-row idempotency across retries, resume replays, and steer submissions.
+
+- **[State & Cache Arbitration] Versioned arbitration across todos, queues, and canvas cache**:
+  - Implemented monotonic revision guards across the task board, queued message list, and client canvas cache.
+  - Stale responses or out-of-order network frames are safely rejected, preventing background sessions or older tabs from overwriting active state.
+  - Completed task items remain cleanly visible until terminal turn completion.
+
+- **[Provider Schema Alignment] Align tool schemas with OpenCode standards**:
+  - Unified tool schema projection across Gemini, Responses, Chat Completions, and Anthropic protocols.
+  - Addressed a schema normalization behavior in Responses API that converted optional arguments into mandatory properties.
+
+- **[UI & Interaction Polish] Sidebar session folding, context-menu batch operations, and ESC undo**:
+  - Project groups in the sidebar now fold sessions cleanly with an intuitive "Show more / Show less" toggle.
+  - Added right-click context menus with multi-select support (Ctrl/Cmd+click and Shift+click) for batch session deletion.
+  - Introduced an "ESC undoes the last message" preference in Settings under "Behavior & Shortcuts".
+  - Automatically restores keyboard focus to the composer after sending messages or executing slash commands.
+
+- **[System Prompts] Modernized persona environment facts and governance rules**:
+  - Upgraded system initialization prompts to version 2.2.0 with clarified four-tier precedence hierarchy and explicit anti-probing configuration boundaries.
+
+---
+
+- **[转向与回溯治理] 原子化转向状态机并彻底杜绝回溯时的幽灵卡片**：
+  - 转向意图采用服务端持久化状态机调度，支持刷新与网络重连无损对账，杜绝重复提交。
+  - 编辑回溯或删除历史时采用基于身份的分支截断事务，清理未幸存的输入记录，被删掉的转向卡与工具输出不再作为孤儿卡片复活到底部。
+  - 会话异常中断或临时检查点撕裂时可平滑恢复，半截回答保持可见直至切片落盘。
+
+- **[历史去重] 彻底消灭会话历史中的重复用户提问**：
+  - 根除了提问受理后快照预写导致的重复入库问题，消灭了双重用户气泡与双倍 Token 开销。
+  - 真实用户提问在历史记录中严格保持单行幂等，即使经历网络重试、重放或转向重投也绝不再复制。
+
+- **[版本仲裁机制] 待办清单、消息队列与画布缓存全链路单调版本防护**：
+  - 为待办任务板、排队消息队列与本地画布缓存引入单调递增版本（revision）CAS 仲裁机制。
+  - 客户端自动拒绝低于已知版本的陈旧快照，彻底防止旧标签页或后台晚到响应覆盖当前最新状态。
+  - 已完成的清单面板完整保留至回合终态结算，不再提前消失。
+
+- **[模型协议适配] 四大协议工具 Schema 对齐 OpenCode 标准**：
+  - 统一了 Gemini、Responses、Chat Completions 与 Anthropic 四大协议的工具 Schema 投影规范。
+  - 修复了 Responses API 在省略 strict 标志时自动将可选参数提升为必选、导致模型强行填充全字段的问题。
+
+- **[交互体验优化] 侧边栏折叠、右键批量操作与 ESC 撤销**：
+  - 侧边栏项目分组恢复 5 条会话折叠并提供优雅的「展开更多 / 收起」切换，运行中会话始终置顶可见。
+  - 新增会话右键菜单，支持 Ctrl/Cmd+左键切换多选与 Shift+左键连续范围选中进行批量删除。
+  - 设置页更名为「行为与快捷键」，新增可按需开启的「ESC 撤销上一条消息」快捷键偏好。
+  - 主聊天框在立即发送、附件上传与斜杠命令执行后自动回焦，提升键盘流操作体验。
+
+- **[系统提示词现代化] 规范化运行环境事实与规则层级契约**：
+  - 将系统提示词升级至 2.2.0 版本，明确防主动探索边界，并规范化四层规则优先级契约。
+
 ## v7.3.2-beta.1 (2026-10-30)
 
 - **[Turn Outline & Navigation] In-flight questions and outline titles no longer disappear**:
