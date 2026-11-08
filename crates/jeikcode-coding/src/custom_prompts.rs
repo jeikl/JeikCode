@@ -962,10 +962,7 @@ doing_tasks:
             assert!(prefix.contains("## MCP SERVER INSTRUCTIONS:"), "{prefix}");
         }
         let env_facts = render_init_environment_from(&init, None).expect("init environment facts");
-        assert!(
-            env_facts.contains("Operating environment facts:"),
-            "{env_facts}"
-        );
+        assert!(env_facts.contains("## Runtime Environment"), "{env_facts}");
         assert!(env_facts.contains("Platform:"), "{env_facts}");
         assert!(env_facts.contains("Git branch:"), "{env_facts}");
         assert!(env_facts.contains("</environment>"), "{env_facts}");
