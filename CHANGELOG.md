@@ -31,6 +31,11 @@
   - Truncated results return shape-aware guidance (`files_with_matches`, `count`, narrower path/glob, or a focused `read` window) instead of only a raw truncation notice.
   - Removed `before_context` / `after_context`; `context` now controls both sides.
 
+- **[EDIT Tool] Public `path` with legacy `file_path` compatibility**:
+  - The edit schema exposes only `path`; `file_path`, `filePath`, `target_file`, and `filename` remain internal serde aliases.
+  - Argument normalization no longer rewrites path field names; it only repairs hunk shapes, so model calling habits are not polluted.
+  - Edit coalescing, recovery parsing, approval target extraction, and worker scope checks recognize the same aliases.
+
 ---
 
 - **[工具搜索与审批] grep / glob 双开关搜索可见性**：
@@ -40,6 +45,11 @@
   - `read` 通过 `SensitivePathGate` 复用同一套 `.codegraphignore.graph` 敏感规则（Build 弹审核，Auto 自动继续）。
   - 结果被截断时返回按形状区分的引导（`files_with_matches`、`count`、缩小 path/glob，或使用聚焦的 `read` 窗口），不再只给裸截断提示。
   - 删除 `before_context` / `after_context`，统一由 `context` 控制前后文。
+
+- **[EDIT 工具] 对外 `path`，内部兼容 `file_path`**：
+  - edit schema 只暴露 `path`；`file_path`、`filePath`、`target_file`、`filename` 仅作为内部 serde 别名。
+  - 参数归一化不再改写路径字段名，只修复 hunk 形状，避免污染模型调用习惯。
+  - edit 合并、恢复解析、审批目标提取与子代理作用域检查识别同一组别名。
 
 ## v7.5.0-beta.0 (2026-11-08)
 

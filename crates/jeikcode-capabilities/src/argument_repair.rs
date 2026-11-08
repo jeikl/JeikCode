@@ -651,7 +651,7 @@ fn pre_escape_windows_paths_in_json(s: &str) -> String {
     // drive-label + newline like `print('C:\ndone')` became literal `\n`).
     // `file_path`/`path` are the file-targeting keys where a lone-backslash drive
     // path is genuinely ambiguous and worth disambiguating.
-    const PATH_KEYS: &[&str] = &["file_path", "path"];
+    const PATH_KEYS: &[&str] = &["path", "file_path", "target_file", "filePath", "filename"];
 
     let chars: Vec<char> = s.chars().collect();
     let n = chars.len();
@@ -1571,21 +1571,27 @@ fn extract_simple_string_field(raw: &str, key: &str) -> Option<String> {
 /// Models often generate old_string/new_string with unescaped quotes/newlines.
 /// This parser uses the known field order to extract content by position.
 pub fn extract_edit_file_args(raw: &str) -> Option<serde_json::Value> {
-    let file_path = extract_simple_string_field(raw, "file_path")
-        .or_else(|| extract_simple_string_field(raw, "path"))?;
+    // Preserve whichever path field the model used; Args accepts every alias.
+    let (path_key, file_path) = ["path", "file_path", "target_file", "filePath", "filename"]
+        .iter()
+        .find_map(|key| {
+            extract_simple_string_field(raw, key).map(|value| ((*key).to_string(), value))
+        })?;
     let hunks = extract_edit_hunks_from_text(raw);
     if hunks.is_empty() {
         // Truncated or missing hunks: never salvage a cut-off new_string.
         return None;
     }
-    let first = &hunks[0];
-    Some(serde_json::json!({
-        "file_path": file_path,
-        "edits": hunks,
-        "old_string": first["old_string"],
-        "new_string": first["new_string"],
-        "replace_all": first["replace_all"],
-    }))
+    let first_old = hunks[0]["old_string"].clone();
+    let first_new = hunks[0]["new_string"].clone();
+    let first_replace = hunks[0]["replace_all"].clone();
+    let mut out = serde_json::Map::new();
+    out.insert(path_key, serde_json::Value::String(file_path));
+    out.insert("edits".into(), serde_json::Value::Array(hunks));
+    out.insert("old_string".into(), first_old);
+    out.insert("new_string".into(), first_new);
+    out.insert("replace_all".into(), first_replace);
+    Some(serde_json::Value::Object(out))
 }
 
 /// Absorb common model/provider shape mistakes for `edit_file` without changing
@@ -1855,14 +1861,9 @@ pub(crate) fn normalize_edit_file_args(args: &str) -> String {
         return args.to_string();
     }
 
-    if !obj.contains_key("file_path") {
-        for alias in ["path", "target_file", "filePath", "filename"] {
-            if let Some(v) = obj.remove(alias) {
-                obj.insert("file_path".into(), v);
-                break;
-            }
-        }
-    }
+    // Path aliases are accepted by the tool's serde Args. Do NOT rewrite the
+    // incoming parameter name here: rewriting would retrain models to call
+    // `file_path` even though the public schema exposes `path`.
 
     let mut hunks: Vec<serde_json::Value> = Vec::new();
     if let Some(edits) = obj.get("edits").cloned() {
@@ -1897,7 +1898,9 @@ pub(crate) fn normalize_edit_file_args(args: &str) -> String {
 pub(crate) fn edit_file_coalesce_key(args: &str) -> Option<String> {
     let normalized = normalize_edit_file_args(args);
     let v: serde_json::Value = serde_json::from_str(&normalized).ok()?;
-    let path = v.get("file_path").and_then(|x| x.as_str())?;
+    let path = ["path", "file_path", "target_file", "filePath", "filename"]
+        .iter()
+        .find_map(|key| v.get(*key).and_then(|x| x.as_str()))?;
     let path = path.trim();
     if path.is_empty() {
         return None;
@@ -1913,16 +1916,20 @@ pub(crate) fn merge_edit_file_args(args_list: &[&str]) -> Option<String> {
     if args_list.len() < 2 {
         return None;
     }
-    let mut file_path = None::<String>;
+    let mut path_field = None::<(String, String)>;
     let mut hunks = Vec::new();
     for args in args_list {
         let normalized = normalize_edit_file_args(args);
         let v: serde_json::Value = serde_json::from_str(&normalized).ok()?;
         let obj = v.as_object()?;
-        if file_path.is_none() {
-            let p = obj.get("file_path").and_then(|x| x.as_str()).unwrap_or("");
-            if !p.is_empty() {
-                file_path = Some(p.to_string());
+        if path_field.is_none() {
+            for key in ["path", "file_path", "target_file", "filePath", "filename"] {
+                if let Some(p) = obj.get(key).and_then(|x| x.as_str()) {
+                    if !p.is_empty() {
+                        path_field = Some((key.to_string(), p.to_string()));
+                        break;
+                    }
+                }
             }
         }
         let before = hunks.len();
@@ -1934,14 +1941,11 @@ pub(crate) fn merge_edit_file_args(args_list: &[&str]) -> Option<String> {
             return None;
         }
     }
-    let file_path = file_path?;
-    Some(
-        serde_json::json!({
-            "file_path": file_path,
-            "edits": hunks,
-        })
-        .to_string(),
-    )
+    let (path_key, path_value) = path_field?;
+    let mut out = serde_json::Map::new();
+    out.insert(path_key, serde_json::Value::String(path_value));
+    out.insert("edits".into(), serde_json::Value::Array(hunks));
+    Some(serde_json::Value::Object(out).to_string())
 }
 
 fn canonicalize_edit_path_key(path: &str) -> String {
@@ -3701,7 +3705,7 @@ mod hardening_tests {
         // Exact shape from a high-capability model: outer JSON is valid, `edits` is a
         // truncated stringified array, and the real hunk sits in `new_string` as an object.
         let args = serde_json::json!({
-            "file_path": "crates/jeikcode-capabilities/src/tools/mod.rs",
+            "path": "crates/jeikcode-capabilities/src/tools/mod.rs",
             "edits": r#"[{"old_string":"            \"todowrite\","#,
             "new_string": {
                 "old_string": "            \"todowrite\",",
@@ -3717,7 +3721,7 @@ mod hardening_tests {
     #[test]
     fn normalize_wraps_single_hunk_object_and_numeric_key_map() {
         let single = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": {"old_string": "foo", "new_string": "bar"}
         })
         .to_string();
@@ -3735,37 +3739,46 @@ mod hardening_tests {
         .to_string();
         let v: serde_json::Value =
             serde_json::from_str(&normalize_edit_file_args(&numbered)).unwrap();
-        assert_eq!(v["file_path"], "a.rs");
+        assert_eq!(v["path"], "a.rs");
         assert_eq!(v["edits"].as_array().unwrap().len(), 2);
     }
 
     #[test]
     fn merge_edit_file_args_concatenates_single_hunk_calls() {
         let a = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": [{"old_string": "aaa", "new_string": "AAA"}]
         })
         .to_string();
         let b = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": [{"old_string": "bbb", "new_string": "BBB"}]
         })
         .to_string();
         let merged = merge_edit_file_args(&[a.as_str(), b.as_str()]).expect("merge");
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["path"], "a.rs");
         assert_eq!(v["edits"].as_array().unwrap().len(), 2);
         assert_eq!(v["edits"][0]["old_string"], "aaa");
         assert_eq!(v["edits"][1]["old_string"], "bbb");
     }
 
     #[test]
+    fn normalize_edit_file_args_preserves_legacy_file_path() {
+        let input = r#"{"file_path":"a.rs","edits":[{"old_string":"a","new_string":"b"}]}"#;
+        let v: serde_json::Value = serde_json::from_str(&normalize_edit_file_args(input)).unwrap();
+        assert_eq!(v["file_path"], "a.rs");
+        assert!(v.get("path").is_none());
+    }
+
+    #[test]
     fn merge_edit_file_args_aborts_when_one_call_has_no_hunk() {
         let a = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": [{"old_string": "aaa", "new_string": "AAA"}]
         })
         .to_string();
-        let bad = r#"{"file_path":"a.rs","edits":"[{\"old_string\":\"cut"}"#;
+        let bad = r#"{"path":"a.rs","edits":"[{\"old_string\":\"cut"}"#;
         assert!(merge_edit_file_args(&[a.as_str(), bad]).is_none());
     }
 }

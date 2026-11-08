@@ -35,7 +35,12 @@ pub struct EditFileTool;
 
 #[derive(Deserialize)]
 struct Args {
-    #[serde(alias = "file_path", alias = "target_file", alias = "filePath")]
+    #[serde(
+        alias = "file_path",
+        alias = "target_file",
+        alias = "filePath",
+        alias = "filename"
+    )]
     path: String,
     #[serde(
         default,
@@ -3192,6 +3197,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_legacy_file_path_alias() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("alias.txt"), "alpha\n").unwrap();
+        let r = EditFileTool
+            .execute(
+                r#"{"file_path":"alias.txt","old_string":"alpha","new_string":"beta"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("alias.txt")).unwrap(),
+            "beta\n"
+        );
+    }
+
+    #[tokio::test]
     async fn gbk_file_edits_in_place_and_stays_gbk() {
         // A GBK/GB18030-encoded file (common on Chinese Windows) must be editable
         // directly — matched in UTF-8 space, then written back in its ORIGINAL encoding,
@@ -3203,7 +3225,7 @@ mod tests {
 
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"notes.txt","old_string":"第二行","new_string":"改过的第二行"}"#,
+                r#"{"path":"notes.txt","old_string":"第二行","new_string":"改过的第二行"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3232,7 +3254,7 @@ mod tests {
 
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"weird.txt","old_string":"plain","new_string":"changed"}"#,
+                r#"{"path":"weird.txt","old_string":"plain","new_string":"changed"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3251,7 +3273,7 @@ mod tests {
         std::fs::write(d.path().join("a.rs"), "fn main() {\n    let x = 1;\n}\n").unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.rs","old_string":"let x = 1;","new_string":"let x = 2;"}"#,
+                r#"{"path":"a.rs","old_string":"let x = 1;","new_string":"let x = 2;"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3272,7 +3294,7 @@ mod tests {
         .unwrap();
         let ok = EditFileTool
             .execute(
-                r#"{"file_path":"a.rs","edits":[{"old_string":"fn a() { 1 }","new_string":"fn a() { 10 }"},{"old_string":"fn c() { 3 }","new_string":"fn c() { 30 }"}]}"#,
+                r#"{"path":"a.rs","edits":[{"old_string":"fn a() { 1 }","new_string":"fn a() { 10 }"},{"old_string":"fn c() { 3 }","new_string":"fn c() { 30 }"}]}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3282,7 +3304,7 @@ mod tests {
 
         let fail = EditFileTool
             .execute(
-                r#"{"file_path":"a.rs","edits":[{"old_string":"fn a() { 10 }","new_string":"fn a() { 11 }"},{"old_string":"missing","new_string":"x"}]}"#,
+                r#"{"path":"a.rs","edits":[{"old_string":"fn a() { 10 }","new_string":"fn a() { 11 }"},{"old_string":"missing","new_string":"x"}]}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3301,7 +3323,7 @@ mod tests {
         )
         .unwrap();
         let args = serde_json::json!({
-            "file_path": "Coupon.java",
+            "path": "Coupon.java",
             "old_string": "    /**\n     * 创建时间\n     */\n    private LocalDateTime createTime;",
             "new_string": "    /**\n     * 创建时间\n     */\n    private LocalDateTime createTime;\n\n    /** 过期提前预警天数 */\n    private Integer expireWarningDays;"
         });
@@ -3326,7 +3348,7 @@ mod tests {
         )
         .unwrap();
         let args = serde_json::json!({
-            "file_path": "Coupon.java",
+            "path": "Coupon.java",
             "old_string": "    /**\n     * 创建时间\n     */\n    @TableField(\"create_time\")\n    private LocalDateTime createTime;\n}",
             "new_string": "    /**\n     * 过期提前预警天数 (默认为3天)\n     */\n    @TableField(\"expire_warning_days\")\n    private Integer expireWarningDays;\n}"
         });
@@ -3398,7 +3420,7 @@ mod tests {
         std::fs::write(d.path().join("a.txt"), "dup\ndup\n").unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.txt","old_string":"dup","new_string":"x"}"#,
+                r#"{"path":"a.txt","old_string":"dup","new_string":"x"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3419,7 +3441,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\nfn b() { 2 }\n").unwrap();
         let args = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": [
                 {"old_string": "fn a() { 1 }", "new_string": "fn a() { 1 }"},
                 {"old_string": "fn b() { 2 }", "new_string": "fn b() { 20 }"}
@@ -3445,7 +3467,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").unwrap();
         let args = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": [
                 {"old_string": "fn a() { 1 }", "new_string": "fn a() { 1 }"}
             ]
@@ -3470,7 +3492,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.rs"), "dup\nkeep\ndup\n").unwrap();
         let args = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": [
                 {"old_string": "dup", "new_string": "second", "occurrence": 2}
             ]
@@ -3491,7 +3513,7 @@ mod tests {
         std::fs::write(d.path().join("a.txt"), "dup\ndup\ndup\n").unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.txt","old_string":"dup","new_string":"x","replace_all":true}"#,
+                r#"{"path":"a.txt","old_string":"dup","new_string":"x","replace_all":true}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3510,7 +3532,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "dup\ndup\n").unwrap();
         let args = serde_json::json!({
-            "file_path": "a.txt",
+            "path": "a.txt",
             "replace_all": true,
             "edits": [{"old_string": "dup", "new_string": "x"}]
         });
@@ -3532,7 +3554,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "dup\ndup\n").unwrap();
         let args = serde_json::json!({
-            "file_path": "a.txt",
+            "path": "a.txt",
             "edits": [{"old_string": "dup", "new_string": "x", "replace_all": true}]
         });
         let r = EditFileTool
@@ -3572,7 +3594,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "dup\ndup\ndup\n").unwrap();
         let args = serde_json::json!({
-            "file_path": "a.txt",
+            "path": "a.txt",
             "edits": [{"old_string": "dup", "new_string": "x", "replace_all": true, "occurrence": 2}]
         });
         let r = EditFileTool
@@ -3592,7 +3614,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "hello\n").unwrap();
         let args = serde_json::json!({
-            "file_path": "a.txt",
+            "path": "a.txt",
             "edits": [
                 {"old_string": "hello", "new_string": "world"},
                 {"new_string": "新增"}
@@ -3615,7 +3637,7 @@ mod tests {
         std::fs::write(d.path().join("a.txt"), "hello\n").unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.txt","old_string":"absent","new_string":"x"}"#,
+                r#"{"path":"a.txt","old_string":"absent","new_string":"x"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3646,7 +3668,7 @@ mod tests {
         .unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"router.js","old_string":"  path: '/help',\n  next: 1,","new_string":"  path: '/proxyCase',\n  next: 1,"}"#,
+                r#"{"path":"router.js","old_string":"  path: '/help',\n  next: 1,","new_string":"  path: '/proxyCase',\n  next: 1,"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3671,7 +3693,7 @@ mod tests {
         std::fs::write(d.path().join("m.txt"), "head\r\nalpha\nbeta\n").unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"m.txt","old_string":"alpha\nbeta","new_string":"alpha\nBETA"}"#,
+                r#"{"path":"m.txt","old_string":"alpha\nbeta","new_string":"alpha\nBETA"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3692,7 +3714,7 @@ mod tests {
         std::fs::write(d.path().join("c.txt"), "a\r\nb\r\n").unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"c.txt","old_string":"a\nb","new_string":"a\r\nb"}"#,
+                r#"{"path":"c.txt","old_string":"a\nb","new_string":"a\r\nb"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3710,7 +3732,7 @@ mod tests {
         std::fs::write(d.path().join("a.txt"), "abc").unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.txt","old_string":"","new_string":"X","replace_all":true}"#,
+                r#"{"path":"a.txt","old_string":"","new_string":"X","replace_all":true}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3732,7 +3754,7 @@ mod tests {
         std::fs::write(d.path().join("a.rs"), "let x = 1;\nlet y = 2;\n").unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.rs","old_string":"let x = 1;\nlet y = 2;","new_string":"let x = 9;\nlet y = 2;"}"#,
+                r#"{"path":"a.rs","old_string":"let x = 1;\nlet y = 2;","new_string":"let x = 9;\nlet y = 2;"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3758,7 +3780,7 @@ mod tests {
         .unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"f.rs","old_string":"    let x = 1;\n    let y = 2;","new_string":"    let x = 9;\n    let y = 2;"}"#,
+                r#"{"path":"f.rs","old_string":"    let x = 1;\n    let y = 2;","new_string":"    let x = 9;\n    let y = 2;"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3793,7 +3815,7 @@ mod tests {
         // Model copied LF text (read strips \r) with SPACE indentation.
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"f.rs","old_string":"    let x = 1;\n    let y = 2;","new_string":"    let x = 9;\n    let y = 2;"}"#,
+                r#"{"path":"f.rs","old_string":"    let x = 1;\n    let y = 2;","new_string":"    let x = 9;\n    let y = 2;"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3812,7 +3834,7 @@ mod tests {
         std::fs::write(d.path().join("a.txt"), "\tx\n").unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.txt","old_string":"  x","new_string":"  y"}"#,
+                r#"{"path":"a.txt","old_string":"  x","new_string":"  y"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3848,7 +3870,7 @@ mod tests {
         .unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"f.rs","old_string":"    let a = 1;\n    let b = 20;\n    let c = 3;","new_string":"    let a = 1;\n    let b = 99;\n    let c = 3;"}"#,
+                r#"{"path":"f.rs","old_string":"    let a = 1;\n    let b = 20;\n    let c = 3;","new_string":"    let a = 1;\n    let b = 99;\n    let c = 3;"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3875,7 +3897,7 @@ mod tests {
         let r = EditFileTool
             .execute(
                 // first/last match, but all 3 interior lines are wrong → 2/5 < half → reject.
-                r#"{"file_path":"a.txt","old_string":"start marker\nWRONG a\nWRONG b\nWRONG c\nend marker","new_string":"start marker\nX\nend marker"}"#,
+                r#"{"path":"a.txt","old_string":"start marker\nWRONG a\nWRONG b\nWRONG c\nend marker","new_string":"start marker\nX\nend marker"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3902,7 +3924,7 @@ mod tests {
         let r = EditFileTool
             .execute(
                 // first/last match; BOTH interior lines wrong → matched 2/4 → reject.
-                r#"{"file_path":"a.txt","old_string":"region top\nWRONG one\nWRONG two\nregion bottom","new_string":"region top\nX\nregion bottom"}"#,
+                r#"{"path":"a.txt","old_string":"region top\nWRONG one\nWRONG two\nregion bottom","new_string":"region top\nX\nregion bottom"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3932,7 +3954,7 @@ mod tests {
         let r = EditFileTool
             .execute(
                 // Model copied with spaces; new_string's 2nd line is OUTDENTED to column 0.
-                r#"{"file_path":"f.rs","old_string":"    let a = 1;\n    let b = 2;","new_string":"    let a = 1;\ndone();"}"#,
+                r#"{"path":"f.rs","old_string":"    let a = 1;\n    let b = 2;","new_string":"    let a = 1;\ndone();"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3957,7 +3979,7 @@ mod tests {
         std::fs::write(d.path().join("a.txt"), original).unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.txt","old_string":"open block\n  drifted\nclose block","new_string":"open block\n  changed\nclose block"}"#,
+                r#"{"path":"a.txt","old_string":"open block\n  drifted\nclose block","new_string":"open block\n  changed\nclose block"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -3980,7 +4002,7 @@ mod tests {
         std::fs::write(d.path().join("a.rs"), original).unwrap();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.rs","old_string":"{\n    bar();\n}","new_string":"{\n    baz();\n}"}"#,
+                r#"{"path":"a.rs","old_string":"{\n    bar();\n}","new_string":"{\n    baz();\n}"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -4007,7 +4029,7 @@ mod tests {
         // fuzzy path fires.
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"f.py","old_string":"    x = 1\n    y = 2","new_string":"    x = 99\n    y = 2"}"#,
+                r#"{"path":"f.py","old_string":"    x = 1\n    y = 2","new_string":"    x = 99\n    y = 2"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -4032,7 +4054,7 @@ mod tests {
         let r = EditFileTool
             .execute(
                 &format!(
-                    r#"{{"file_path":"calc.rs","old_string":{},"new_string":{}}}"#,
+                    r#"{{"path":"calc.rs","old_string":{},"new_string":{}}}"#,
                     serde_json::to_string(old_str).unwrap(),
                     serde_json::to_string(new_str).unwrap()
                 ),
@@ -4062,7 +4084,7 @@ mod tests {
         let r = EditFileTool
             .execute(
                 &format!(
-                    r#"{{"file_path":"main.rs","old_string":{},"new_string":{}}}"#,
+                    r#"{{"path":"main.rs","old_string":{},"new_string":{}}}"#,
                     serde_json::to_string(old_str).unwrap(),
                     serde_json::to_string(new_str).unwrap()
                 ),
@@ -4086,7 +4108,7 @@ mod tests {
 
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"act.rs","old_string":"let state = get_state();\nstate.validate_and_rollback();","new_string":"let state = get_state();"}"#,
+                r#"{"path":"act.rs","old_string":"let state = get_state();\nstate.validate_and_rollback();","new_string":"let state = get_state();"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -4111,7 +4133,7 @@ mod tests {
         std::fs::write(d.path().join("code.rs"), "fn foo() {\n    bar();\n}\n").unwrap();
         // Model accidentally copied read output prefix "1→" and "2→"
         let args = serde_json::json!({
-            "file_path": "code.rs",
+            "path": "code.rs",
             "edits": [
                 {
                     "old_string": "1→fn foo() {\n2→    bar();",
@@ -4127,6 +4149,17 @@ mod tests {
             std::fs::read_to_string(d.path().join("code.rs")).unwrap(),
             "fn foo() {\n    baz();\n}\n"
         );
+    }
+
+    #[test]
+    fn schema_advertises_path_only() {
+        let schema = EditFileTool.parameters_schema();
+        assert!(schema["properties"].get("path").is_some());
+        assert!(
+            schema["properties"].get("file_path").is_none(),
+            "legacy file_path must stay internal-only"
+        );
+        assert_eq!(schema["required"], serde_json::json!(["path", "edits"]));
     }
 
     #[test]
@@ -4147,7 +4180,7 @@ mod tests {
         std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\nfn b() { 2 }\n").unwrap();
         let inner = r#"[{"old_string":"fn a() { 1 }","new_string":"fn a() { 10 }"}]"#;
         let args = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": inner
         })
         .to_string();
@@ -4171,7 +4204,7 @@ mod tests {
         // inner JSON snippet — the common provider/model double-encoding miss.
         let inner = "[{ \"old_string\": \"let x = 1;\nlet y = 2;\", \"new_string\": \"let x = 9;\nlet y = 2;\" }]";
         let args = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": inner
         })
         .to_string();
@@ -4193,7 +4226,7 @@ mod tests {
         std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").unwrap();
         let inner = r#"[{"old_string":"fn a() { 1 }","new_string":"fn a() { 10 }""#;
         let args = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": inner
         })
         .to_string();
@@ -4215,7 +4248,7 @@ mod tests {
         std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").unwrap();
         let inner = r#"[{"old_string":"fn a() { 1 }","new_string":"fn a() { 10"#;
         let args = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": inner
         })
         .to_string();
@@ -4268,7 +4301,7 @@ fn b() { 2 }
                 r#"[{{"old_string":"fn a() {{ 1 }}","new_string":"fn a() {{ 10 }}"}},{}"#,
                 tail
             );
-            let args = serde_json::json!({"file_path":"a.rs", "edits":inner}).to_string();
+            let args = serde_json::json!({"path":"a.rs", "edits":inner}).to_string();
             let r = EditFileTool.execute(&args, &ctx(d.path())).await;
             assert!(r.is_error, "partial request must fail: {}", r.content);
             assert_eq!(
@@ -4297,7 +4330,7 @@ fn b() { 2 }
             serde_json::json!([{"old_string":"a", "new_string":"changed"}, {"old_string":"b"}]),
         ] {
             for sibling in [false, true] {
-                let mut value = serde_json::json!({"file_path":"a.rs", "edits":edits});
+                let mut value = serde_json::json!({"path":"a.rs", "edits":edits});
                 if sibling {
                     value["hunk"] = serde_json::json!({"old_string":"a", "new_string":"changed"});
                 }
@@ -4322,12 +4355,12 @@ fn b() { 2 }
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").unwrap();
         let inner = serde_json::json!({
-            "file_path": "ignored.rs",
+            "path": "ignored.rs",
             "edits": [{"old_string":"fn a() { 1 }","new_string":"fn a() { 10 }"}]
         })
         .to_string();
         let args = serde_json::json!({
-            "file_path": "a.rs",
+            "path": "a.rs",
             "edits": inner
         })
         .to_string();
@@ -4352,7 +4385,7 @@ fn b() { 2 }
         )
         .unwrap();
         let args = serde_json::json!({
-            "file_path": "mod.rs",
+            "path": "mod.rs",
             "edits": r#"[{"old_string":"            \"todowrite\","#,
             "new_string": {
                 "old_string": "            \"todowrite\",",
@@ -4393,7 +4426,7 @@ fn b() { 2 }
 
         let hunk1_new = "# block-a\na1\na2\na3\na4\na5\n";
         let args = serde_json::json!({
-            "file_path": "config.yaml",
+            "path": "config.yaml",
             "edits": [
                 {
                     "old_string": "# block-a\na1\na2",
@@ -4429,7 +4462,7 @@ fn b() { 2 }
         let new_str = "    let value = 456;\n    let next = value + 1;";
 
         let args = serde_json::json!({
-            "file_path": "example.rs",
+            "path": "example.rs",
             "old_string": old_str,
             "new_string": new_str
         });
@@ -4479,7 +4512,7 @@ fn b() { 2 }
         std::fs::write(d.path().join("hello.rs"), content).unwrap();
 
         let args = serde_json::json!({
-            "file_path": "hello.rs",
+            "path": "hello.rs",
             "old_string": "    println!(\"world\");",
             "new_string": "    println!(\"jeikcode\");"
         });
@@ -4527,7 +4560,7 @@ fn b() { 2 }
         // Pass in the order [Hunk B, Hunk A] which would fail without topological sorting
         // because B modifies step2, breaking A's read context.
         let args = serde_json::json!({
-            "file_path": "proc.rs",
+            "path": "proc.rs",
             "edits": [hunk_b, hunk_a]
         });
 
@@ -4560,7 +4593,7 @@ fn b() { 2 }
 
         // Turn 1: Modify alpha
         let args1 = serde_json::json!({
-            "file_path": "calc.rs",
+            "path": "calc.rs",
             "old_string": "fn alpha() { 1 }",
             "new_string": "fn alpha() { 100 }"
         });
@@ -4571,7 +4604,7 @@ fn b() { 2 }
 
         // Turn 2: Modify beta
         let args2 = serde_json::json!({
-            "file_path": "calc.rs",
+            "path": "calc.rs",
             "old_string": "fn beta() { 2 }",
             "new_string": "fn beta() { 200 }"
         });
@@ -4583,7 +4616,7 @@ fn b() { 2 }
         // Turn 3: Model has attention time-travel and emits edit based on Turn 0 (before beta was modified):
         // old_string includes the old `beta` as context
         let args3 = serde_json::json!({
-            "file_path": "calc.rs",
+            "path": "calc.rs",
             "old_string": "fn beta() { 2 }\nfn gamma() { 3 }",
             "new_string": "fn beta() { 2 }\nfn gamma() { 999 }"
         });
@@ -4630,7 +4663,7 @@ fn b() { 2 }
         .join("\n");
 
         let args = serde_json::json!({
-            "file_path": "scenario1.txt",
+            "path": "scenario1.txt",
             "edits": [
                 {
                     "old_string": "AAA_top = 1",
@@ -4675,7 +4708,7 @@ fn b() { 2 }
         // Pass [hunk_write_line1, hunk_read1_write2]: naive execution would overwrite line 1 first,
         // causing hunk_read1_write2 to fail matching.
         let args = serde_json::json!({
-            "file_path": "scenario2.txt",
+            "path": "scenario2.txt",
             "edits": [hunk_write_line1, hunk_read1_write2]
         });
 
@@ -4710,7 +4743,7 @@ fn b() { 2 }
         std::fs::write(d.path().join("hunk_index.txt"), &initial).unwrap();
 
         let args = serde_json::json!({
-            "file_path": "hunk_index.txt",
+            "path": "hunk_index.txt",
             "edits": [
                 {
                     "old_string": "AAA_TYPO = 1",
@@ -4757,7 +4790,7 @@ fn b() { 2 }
 
         // Turn 1
         let args1 = serde_json::json!({
-            "file_path": "scenario3.txt",
+            "path": "scenario3.txt",
             "old_string": "AAA_port = 8080",
             "new_string": "BBB_port = 9000"
         });
@@ -4768,7 +4801,7 @@ fn b() { 2 }
 
         // Turn 2 (Stale context from V0)
         let args2 = serde_json::json!({
-            "file_path": "scenario3.txt",
+            "path": "scenario3.txt",
             "old_string": "AAA_port = 8080\nAAA_host = \"127.0.0.1\"\nAAA_timeout = 30",
             "new_string": "AAA_port = 8080\nAAA_host = \"127.0.0.1\"\nCCC_timeout = 60"
         });
@@ -4812,7 +4845,7 @@ fn b() { 2 }
 
         // Turn 1: Replace AAA with BBB
         let args1 = serde_json::json!({
-            "file_path": "scenario4.txt",
+            "path": "scenario4.txt",
             "old_string": "AAA_item = \"original\";",
             "new_string": "BBB_item = \"modified\";"
         });
@@ -4827,7 +4860,7 @@ fn b() { 2 }
 
         // Turn 2: Addition at previous site (append CCC)
         let args2 = serde_json::json!({
-            "file_path": "scenario4.txt",
+            "path": "scenario4.txt",
             "old_string": "BBB_item = \"modified\";",
             "new_string": "BBB_item = \"modified\";\nCCC_addition = \"appended\";"
         });
@@ -4842,7 +4875,7 @@ fn b() { 2 }
 
         // Turn 3: Deletion at previous site (delete BBB, leaving CCC)
         let args3 = serde_json::json!({
-            "file_path": "scenario4.txt",
+            "path": "scenario4.txt",
             "old_string": "BBB_item = \"modified\";\n",
             "new_string": ""
         });
@@ -4873,7 +4906,7 @@ fn b() { 2 }
 
         for (old_s, new_s) in steps {
             let args = serde_json::json!({
-                "file_path": "scenario5.txt",
+                "path": "scenario5.txt",
                 "old_string": old_s,
                 "new_string": new_s
             });
@@ -4904,7 +4937,7 @@ fn b() { 2 }
 
         // Turn 1
         let args1 = serde_json::json!({
-            "file_path": "scenario6.txt",
+            "path": "scenario6.txt",
             "old_string": "AAA_val = 10;",
             "new_string": "BBB_val = 20;"
         });
@@ -4915,7 +4948,7 @@ fn b() { 2 }
 
         // Turn 2: Conflicting modification on same line
         let args2 = serde_json::json!({
-            "file_path": "scenario6.txt",
+            "path": "scenario6.txt",
             "old_string": "AAA_val = 10;",
             "new_string": "CCC_val = 30;"
         });
@@ -4981,7 +5014,7 @@ fn b() { 2 }
         let r = EditFileTool
             .execute(
                 &serde_json::json!({
-                    "file_path": "ApiProxy.tsx",
+                    "path": "ApiProxy.tsx",
                     "old_string": old_str,
                     "new_string": new_str
                 })
@@ -5020,7 +5053,7 @@ fn b() { 2 }
         ctx.cancel.cancel();
         let r = EditFileTool
             .execute(
-                r#"{"file_path":"a.rs","old_string":"fn a() { 1 }","new_string":"fn a() { 2 }"}"#,
+                r#"{"path":"a.rs","old_string":"fn a() { 1 }","new_string":"fn a() { 2 }"}"#,
                 &ctx,
             )
             .await;
@@ -5077,7 +5110,7 @@ fn b() { 2 }
         let r = EditFileTool
             .execute(
                 &serde_json::json!({
-                    "file_path": "code.rs",
+                    "path": "code.rs",
                     "edits": [
                         { "old_string": "fn first() { 1 }", "new_string": "fn first() { 10 }" },
                         { "old_string": "fn non_existent()", "new_string": "fn replaced()" }
@@ -5226,7 +5259,7 @@ fn b() { 2 }
         let r = EditFileTool
             .execute(
                 &serde_json::json!({
-                    "file_path": "code.rs",
+                    "path": "code.rs",
                     "edits": [
                         { "old_string": "fn missing_1()", "new_string": "fn rep1()" },
                         { "old_string": "fn b() { 2 }", "new_string": "fn b() { 20 }" },
@@ -5629,7 +5662,7 @@ fn b() { 2 }
         let r = EditFileTool
             .execute(
                 &serde_json::json!({
-                    "file_path": "code.rs",
+                    "path": "code.rs",
                     "edits": [
                         { "old_string": "fn head() { 0 }", "new_string": "fn head() { 100 }" },
                         { "old_string": "match output { Ok(()) => () }", "new_string": "match output { Ok(()) => 1 }" },
@@ -5672,7 +5705,7 @@ fn b() { 2 }
         let r = EditFileTool
             .execute(
                 &serde_json::json!({
-                    "file_path": "code.rs",
+                    "path": "code.rs",
                     "edits": [
                         {
                             "old_string": "    init_stage();\n    process_data();",

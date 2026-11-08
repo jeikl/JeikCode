@@ -231,11 +231,7 @@ impl WorkerScopeGate {
             let raw = match serde_json::from_str::<serde_json::Value>(args_json)
                 .ok()
                 .as_ref()
-                .and_then(|v| {
-                    v.get("path")
-                        .or_else(|| v.get("file_path"))
-                        .and_then(|x| x.as_str())
-                })
+                .and_then(json_path_arg)
             {
                 Some(p) => p.to_string(),
                 // Fail closed: a write tool with no usable `path` or `file_path` must not slip past
@@ -831,6 +827,9 @@ fn summarize_tool_call(call: &ToolCall) -> String {
     const KEYS: &[&str] = &[
         "path",
         "file_path",
+        "target_file",
+        "filePath",
+        "filename",
         "pattern",
         "query",
         "command",
@@ -1118,14 +1117,18 @@ fn extract_mutation_path(tool: &str, args_json: &str) -> Option<String> {
                 serde_json::from_str::<serde_json::Value>(&super::repair::repair_json(args_json))
             })
             .ok()?;
-        let raw = val
-            .get("path")
-            .or_else(|| val.get("file_path"))
-            .and_then(|x| x.as_str())?;
+        let raw = json_path_arg(&val)?;
         normalize_receipt_path(raw)
     } else {
         None
     }
+}
+
+/// The public edit/write field is `path`; accept the same legacy aliases as the tools.
+fn json_path_arg(v: &serde_json::Value) -> Option<&str> {
+    ["path", "file_path", "target_file", "filePath", "filename"]
+        .iter()
+        .find_map(|key| v.get(*key).and_then(|x| x.as_str()))
 }
 
 fn normalize_receipt_path(raw: &str) -> Option<String> {

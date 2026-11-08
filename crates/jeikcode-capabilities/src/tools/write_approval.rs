@@ -72,12 +72,17 @@ fn write_targets(tool: &str, args: &str) -> Vec<String> {
     } else if super::is_file_mutation_tool(tool) {
         #[derive(Deserialize)]
         struct P {
-            #[serde(alias = "path")]
-            file_path: String,
+            #[serde(
+                alias = "file_path",
+                alias = "target_file",
+                alias = "filePath",
+                alias = "filename"
+            )]
+            path: String,
         }
         serde_json::from_str::<P>(args)
             .ok()
-            .map(|p| vec![p.file_path])
+            .map(|p| vec![p.path])
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -716,8 +721,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blank_file_path_does_not_auto_approve() {
-        // Issue 3: an empty file_path must not vacuously auto-approve via the in-workspace shortcut.
+    async fn blank_path_does_not_auto_approve() {
+        // Issue 3: an empty path must not vacuously auto-approve via the in-workspace shortcut.
         let ws = tempfile::tempdir().unwrap();
         let gate = WriteApprovalGate::pinned(ws.path().to_path_buf());
         let tool = write_tool();
