@@ -1210,7 +1210,20 @@ mod session_window_tests {
             origin: jeikcode_capabilities::session::SessionOrigin::Manual,
             todos: Vec::new(),
             todos_revision: 0,
+            daemon_instance_id: "test-instance".into(),
         };
+        let wire = serde_json::to_value(&detail).unwrap();
+        assert_eq!(
+            wire.get("todos"),
+            Some(&serde_json::json!([])),
+            "an empty checklist must stay on the wire; absence means 'unknown' to clients"
+        );
+        assert_eq!(wire.get("todos_revision"), Some(&serde_json::json!(0)));
+        assert_eq!(
+            wire.get("daemon_instance_id"),
+            Some(&serde_json::json!("test-instance")),
+            "clients need the daemon epoch to reset revision arbitration after a restart"
+        );
         let first = session_detail_response(&HeaderMap::new(), detail.clone());
         assert_eq!(first.status(), StatusCode::OK);
         let etag = first
@@ -3012,12 +3025,20 @@ pub struct SessionDetail {
     #[serde(default, skip_serializing_if = "is_manual_session_origin")]
     pub origin: jeikcode_capabilities::session::SessionOrigin,
     /// The session's single live checklist. Empty after a completed board is closed on stop.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Always serialized: an absent field would be indistinguishable from "this daemon
+    /// has no todo support", and clients would then keep a stale cached list instead of
+    /// applying the authoritative empty snapshot.
+    #[serde(default)]
     pub todos: Vec<jeikcode_capabilities::tools::TodoItem>,
     /// Monotonic version of `todos` (server-assigned). Clients must arbitrate
     /// snapshots by revision; a lower revision may never overwrite a higher one.
     #[serde(default)]
     pub todos_revision: u64,
+    /// Process-unique daemon instance. Todo revisions are only comparable within
+    /// one instance; a restart resets the per-session watermark, so clients must
+    /// start a new revision epoch instead of rejecting the fresh empty snapshot.
+    #[serde(default)]
+    pub daemon_instance_id: String,
 }
 
 fn is_manual_session_origin(origin: &jeikcode_capabilities::session::SessionOrigin) -> bool {
@@ -8032,14 +8053,60 @@ fn session_detail_response(headers: &HeaderMap, detail: SessionDetail) -> axum::
 }
 
 fn session_todo_snapshot(session_id: &str) -> (Vec<jeikcode_capabilities::tools::TodoItem>, u64) {
-    jeikcode_capabilities::tools::read_todo_board(session_id)
-        .map(|board| (board.items, board.revision))
-        .unwrap_or_default()
+    // The slot revision survives close/clear. Reading `board.revision` here would
+    // report 0 for every closed board and defeat client-side revision arbitration.
+    jeikcode_capabilities::tools::read_todo_snapshot(session_id)
 }
 
 #[cfg(test)]
 mod session_todo_snapshot_tests {
     use super::*;
+
+    #[test]
+    fn closing_or_clearing_reports_an_empty_snapshot_with_newer_revision() {
+        let session_id = format!("session-todo-close-{}", std::process::id());
+        jeikcode_capabilities::tools::purge_todo_board(&session_id);
+
+        let open = vec![jeikcode_capabilities::tools::TodoItem {
+            id: None,
+            content: "work".into(),
+            status: jeikcode_capabilities::tools::todo::TodoStatus::InProgress,
+        }];
+        let first = jeikcode_capabilities::tools::commit_todo_board(&session_id, &open);
+
+        // In-progress board cannot close yet.
+        assert!(jeikcode_capabilities::tools::close_todo_board_if_complete(&session_id).is_none());
+        assert_eq!(
+            session_todo_snapshot(&session_id),
+            (first.items.clone(), first.revision)
+        );
+
+        let done = vec![jeikcode_capabilities::tools::TodoItem {
+            id: None,
+            content: "work".into(),
+            status: jeikcode_capabilities::tools::todo::TodoStatus::Completed,
+        }];
+        let completed = jeikcode_capabilities::tools::commit_todo_board(&session_id, &done);
+        let closed = jeikcode_capabilities::tools::close_todo_board_if_complete(&session_id)
+            .expect("all-completed board must close");
+
+        // Empty snapshot must be strictly newer than the last non-empty one, or
+        // clients reject it and keep the stale list forever.
+        assert!(closed.revision > completed.revision);
+        assert_eq!(
+            session_todo_snapshot(&session_id),
+            (Vec::new(), closed.revision)
+        );
+
+        // Explicit /todo clear also keeps the watermark visible while empty.
+        jeikcode_capabilities::tools::commit_todo_board(&session_id, &open);
+        jeikcode_capabilities::tools::clear_todo_board(&session_id);
+        let (items, revision) = session_todo_snapshot(&session_id);
+        assert!(items.is_empty());
+        assert!(revision > closed.revision);
+
+        jeikcode_capabilities::tools::purge_todo_board(&session_id);
+    }
 
     #[test]
     fn completed_board_read_does_not_settle_or_close_it() {
@@ -8054,13 +8121,13 @@ mod session_todo_snapshot_tests {
 
         assert_eq!(
             session_todo_snapshot(&session_id),
-            (items.clone(), board.revision)
+            (board.items.clone(), board.revision)
         );
         assert_eq!(
             jeikcode_capabilities::tools::read_todo_board(&session_id)
                 .unwrap()
                 .items,
-            items
+            board.items
         );
         jeikcode_capabilities::tools::purge_todo_board(&session_id);
     }
@@ -8402,6 +8469,7 @@ async fn get_session_detail(
                 origin: session.meta.origin,
                 todos,
                 todos_revision,
+                daemon_instance_id: state.daemon_instance_id.to_string(),
             };
             session_detail_response(&headers, detail)
         }
@@ -8439,6 +8507,7 @@ async fn get_session_detail(
                 origin: jeikcode_capabilities::session::SessionOrigin::Manual,
                 todos: Vec::new(),
                 todos_revision: 0,
+                daemon_instance_id: state.daemon_instance_id.to_string(),
             };
             session_detail_response(&headers, detail)
         }

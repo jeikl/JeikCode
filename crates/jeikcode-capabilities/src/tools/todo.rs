@@ -1247,6 +1247,32 @@ pub fn todo_session_is_closed(session_id: &str) -> bool {
     guard.get(session_id).is_some_and(|slot| slot.closed)
 }
 
+/// Read the checklist items and the slot watermark atomically.
+///
+/// `read_todo_board` returns `None` for a closed board, so readers that must
+/// arbitrate snapshots (the session API) need the slot revision instead of
+/// `board.revision` — otherwise every closed board reports revision 0 and a
+/// client that has seen any revision can never accept the authoritative empty
+/// snapshot. Items and revision must come from one read lock: two separate reads
+/// could straddle a commit and pair new items with an old revision.
+pub fn read_todo_snapshot(session_id: &str) -> (Vec<TodoItem>, u64) {
+    let guard = todo_registry()
+        .read()
+        .unwrap_or_else(|err| err.into_inner());
+    guard
+        .get(session_id)
+        .map(|slot| {
+            (
+                slot.board
+                    .as_ref()
+                    .map(|board| board.items.clone())
+                    .unwrap_or_default(),
+                slot.revision,
+            )
+        })
+        .unwrap_or_default()
+}
+
 /// Install a board loaded from disk, unless this process already has a newer slot.
 pub fn restore_todo_board(session_id: &str, mut board: TodoBoard) {
     if session_id.is_empty() || board.items.is_empty() || list_fully_completed(&board.items) {
@@ -1411,8 +1437,13 @@ pub fn close_todo_board_if_complete(session_id: &str) -> Option<TodoBoard> {
     if !list_fully_completed(&board.items) {
         return None;
     }
-    let closed = slot.board.take()?;
+    let mut closed = slot.board.take()?;
     slot.closed = true;
+    // Closing is a document transition, not just an in-memory cleanup: the
+    // empty snapshot handed to clients must carry a strictly newer revision,
+    // or their revision gate would keep the old non-empty list forever.
+    slot.revision = slot.revision.saturating_add(1);
+    closed.revision = slot.revision;
     Some(closed)
 }
 

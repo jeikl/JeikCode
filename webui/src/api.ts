@@ -4,6 +4,7 @@ import type { Lang } from './i18n';
 import { stripExtendedPathPrefix } from './lib/displayPath.ts';
 import type { PermissionDecisionResult } from './lib/pendingPermission.ts';
 import type { ServerChatRuntime } from './lib/serverRuntime.ts';
+import { normalizeSessionTodoSnapshot } from './lib/todoWire.ts';
 
 // Serve / webui bootstrap: `/?token=<uuid>` is handed off via HttpOnly cookie
 // AND left visible on first paint so we can stash it for Authorization.
@@ -1476,6 +1477,8 @@ export interface SessionDetail {
   todos?: Array<{ id?: string; content: string; status: 'pending' | 'in_progress' | 'completed' }>;
   /** Monotonic server revision of `todos`; lower revisions must never overwrite higher ones. */
   todos_revision?: number;
+  /** Process-unique daemon instance. Todo revisions restart with the daemon. */
+  daemon_instance_id?: string;
 }
 
 /** Token footer snapshot from session turn_stats (GET /projects/:hash/sessions/:id).
@@ -2594,12 +2597,12 @@ export async function getSession(
   if (resp.status === 304 && cached) {
     sessionDetailEtagCache.delete(requestPath);
     sessionDetailEtagCache.set(requestPath, cached);
-    return cached.detail;
+    return normalizeSessionTodoSnapshot(cached.detail);
   }
   if (!resp.ok) {
     throw new Error(`getSession failed with status ${resp.status}`);
   }
-  const detail = (await resp.json()) as SessionDetail;
+  const detail = normalizeSessionTodoSnapshot((await resp.json()) as SessionDetail);
   const etag = resp.headers.get('ETag');
   if (cacheable && etag) {
     sessionDetailEtagCache.delete(requestPath);

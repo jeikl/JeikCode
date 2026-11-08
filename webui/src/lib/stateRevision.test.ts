@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { latestRevision, shouldApplyRevision } from './stateRevision.ts';
+import { arbitrateRevisionStamp, latestRevision, shouldApplyRevision } from './stateRevision.ts';
 
 test('a newer revision may replace the local document', () => {
   assert.equal(shouldApplyRevision(3, 4), true);
@@ -24,6 +24,26 @@ test('a missing or non-finite remote revision is rejected', () => {
   assert.equal(shouldApplyRevision(1, undefined), false);
   assert.equal(shouldApplyRevision(1, Number.NaN), false);
   assert.equal(shouldApplyRevision(1, Number.POSITIVE_INFINITY), false);
+});
+
+test('a daemon restart starts a new revision epoch and accepts the empty snapshot', () => {
+  const local = { instance: 'old-instance', revision: 12 };
+  const decision = arbitrateRevisionStamp(local, { instance: 'new-instance', revision: 1 });
+  assert.equal(decision.accept, true);
+  assert.deepEqual(decision.stamp, { instance: 'new-instance', revision: 1 });
+});
+
+test('the same instance still rejects a lower revision', () => {
+  const local = { instance: 'daemon-a', revision: 12 };
+  const decision = arbitrateRevisionStamp(local, { instance: 'daemon-a', revision: 1 });
+  assert.equal(decision.accept, false);
+  assert.deepEqual(decision.stamp, { instance: 'daemon-a', revision: 12 });
+});
+
+test('a legacy daemon without an instance still uses revision-only arbitration', () => {
+  const local = { revision: 12 };
+  assert.equal(arbitrateRevisionStamp(local, { revision: 11 }).accept, false);
+  assert.equal(arbitrateRevisionStamp(local, { revision: 12 }).accept, true);
 });
 
 test('out-of-order arrivals converge to the maximum revision', () => {

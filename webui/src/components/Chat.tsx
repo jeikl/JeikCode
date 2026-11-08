@@ -271,7 +271,7 @@ import {
   stashSessionQueued,
   restoreSessionQueued,
 } from '../lib/queuedDraft';
-import { shouldApplyRevision } from '../lib/stateRevision';
+import { arbitrateRevisionStamp, shouldApplyRevision, type RevisionStamp } from '../lib/stateRevision';
 import { bumpSessionSendNowEpoch, consumesProgrammaticStopMark, isCurrentSessionSendNowEpoch, isStaleProgrammaticStopFrame, isStaleTerminalForArmedTurn, isTurnHandoverProtected, runningTurnStopAliases, stopAliasAllowsNextTurn, type ProgrammaticStopMark } from '../lib/turnStop';
 import { loadAppliedTodoCallIds, saveAppliedTodoCallIds } from '../lib/todoAppliedIds';
 import {
@@ -1634,13 +1634,21 @@ export function Chat({
   const [activeTodos, setActiveTodos] = useState<TodoItem[] | null>(null);
   const activeTodosRef = useRef<TodoItem[] | null>(null);
   activeTodosRef.current = activeTodos;
-  /** Server-assigned monotonic todo revision per session. A lower snapshot never wins. */
-  const todoRevisionBySessionRef = useRef(new Map<string, number>());
+  /** Last applied server snapshot stamp per session (daemon instance + revision). */
+  const todoStampBySessionRef = useRef(new Map<string, RevisionStamp>());
   /** Last queue revision observed from `/chat/queue`; guards stale whole-list writes. */
   const queueRevisionBySessionRef = useRef(new Map<string, number>());
   const activeTodosBySessionRef = useRef<Map<string, TodoItem[]>>(new Map());
   // 每个会话一份实时清单。revision 是总线上最后一次 todo 调用，重放同一调用不会改文档。
   const todoLiveBySessionRef = useRef<Map<string, LiveTodoDocument>>(new Map());
+  /**
+   * 服务端最后一次权威快照是否为空（板已关闭/清空）。
+   *
+   * `/chat/watch` 会在重连时重放旧回合的 todo 工具帧；如果权威快照已经明确为空，
+   * 这些历史帧必须被丢弃，否则旧计划会从回放里复活。只有 replay=false 的实时帧
+   * （新一轮真正创建清单）才允许重新打开文档。
+   */
+  const todoBoardEmptyRef = useRef<Set<string>>(new Set());
   /**
    * 实时清单的本地版本号：每写入一次 +1。
    *
@@ -1743,7 +1751,13 @@ export function Chat({
     void pullSession({ projectHash: hash, sessionId, mode: 'snapshot', limit: 1 })
       .then((detail) => {
         const items = Array.isArray(detail?.todos) ? detail.todos : [];
-        applyAuthoritativeTodos(sessionId, items, undefined, detail?.todos_revision);
+        applyAuthoritativeTodos(
+          sessionId,
+          items,
+          undefined,
+          detail?.todos_revision,
+          detail?.daemon_instance_id,
+        );
       })
       .catch(() => {
         writeLiveTodo(sessionId, null);
@@ -1781,18 +1795,35 @@ export function Chat({
     items: TodoItem[] | null | undefined,
     requestEpoch?: number,
     revision?: number,
+    daemonInstanceId?: string,
   ): boolean {
     if (!sessionId) return false;
     if (requestEpoch !== undefined && todoLiveEpoch(sessionId) !== requestEpoch) return false;
     if (!Array.isArray(items)) return false;
     // 版本仲裁：服务端是唯一写入者，低 revision 的晚到快照绝不能回滚高版本。
-    if (typeof revision === 'number') {
-      const current = todoRevisionBySessionRef.current.get(sessionId) ?? 0;
-      if (!shouldApplyRevision(current, revision)) return false;
-      todoRevisionBySessionRef.current.set(sessionId, revision);
+    // revision 只在同一个 daemon 实例内单调；实例变化（daemon 重启）时开启新纪元，
+    // 否则重启后的权威空快照（revision 0/N）会被旧实例的高 revision 永久拒绝。
+    if (daemonInstanceId || typeof revision === 'number') {
+      const decision = arbitrateRevisionStamp(todoStampBySessionRef.current.get(sessionId), {
+        instance: daemonInstanceId,
+        revision,
+      });
+      if (!decision.accept) return false;
+      todoStampBySessionRef.current.set(sessionId, decision.stamp);
     }
     writeLiveTodo(sessionId, reduceLiveTodo(null, { type: 'hydrate', items }));
+    if (items.length === 0) todoBoardEmptyRef.current.add(sessionId);
+    else todoBoardEmptyRef.current.delete(sessionId);
     return true;
+  }
+  /** Record whether a LIVE todo frame left the board empty; replay must not reopen it. */
+  function noteLiveTodoDocument(
+    sessionId: string | null | undefined,
+    doc: LiveTodoDocument | null,
+  ) {
+    if (!sessionId) return;
+    if (doc && doc.items.length > 0) todoBoardEmptyRef.current.delete(sessionId);
+    else todoBoardEmptyRef.current.add(sessionId);
   }
   function liveTodoDoc(sessionId: string | null | undefined): LiveTodoDocument | null {
     if (sessionId) {
@@ -1805,8 +1836,14 @@ export function Chat({
     if (!items || items.length === 0) return null;
     return { items, revision: null, resultApplied: false };
   }
-  function writeLiveTodo(sessionId: string | null | undefined, doc: LiveTodoDocument | null) {
-    bumpTodoLiveEpoch(sessionId);
+  function writeLiveTodo(
+    sessionId: string | null | undefined,
+    doc: LiveTodoDocument | null,
+    opts?: { bumpEpoch?: boolean },
+  ) {
+    // 重放帧描述的是历史状态，不是“更新的一次写入”。若它也推进 epoch，
+    // 正在飞行中的权威快照（尤其是空板清空）会因 epoch 变化被丢弃，旧清单复活。
+    if (opts?.bumpEpoch !== false) bumpTodoLiveEpoch(sessionId);
     if (sessionId) {
       if (doc) todoLiveBySessionRef.current.set(sessionId, doc);
       else todoLiveBySessionRef.current.delete(sessionId);
@@ -2850,7 +2887,13 @@ export function Chat({
         ) {
           // 重连必须用服务端权威整表覆盖本地清单（含空表清空）。旧实现在“本地已有清单”时
           // 直接丢弃服务端结果，导致断网期间推进的 todo 永远追不回来。
-          applyAuthoritativeTodos(loadId, detail?.todos, todoEpochAtPull, detail?.todos_revision);
+          applyAuthoritativeTodos(
+            loadId,
+            detail?.todos,
+            todoEpochAtPull,
+            detail?.todos_revision,
+            detail?.daemon_instance_id,
+          );
           if (detail && Array.isArray(detail.messages) && detail.messages.length > 0 && messagesRef.current.length === 0) {
             const loaded = sessionMessagesToDisplay(detail.messages, detail.offset ?? 0, detail.pinned_user_index, { running: true });
             adoptAuthoritativeDiskTail(effectiveProjectHash, loadId, loaded, detail.offset ?? 0, detail, todoEpochAtPull);
@@ -3052,6 +3095,7 @@ export function Chat({
     meta: {
       todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>;
       todos_revision?: number;
+      daemon_instance_id?: string;
       turns?: SessionTurnOutline[];
       token_usage?: SessionTokenUsage | null;
       revision?: number;
@@ -3140,7 +3184,13 @@ export function Chat({
       // 服务端 board 是清单唯一真值（工具每次执行同步提交），不是滞后的磁盘快照：
       // 运行中同样整表覆盖，空表 = 权威清空（全部完成已关闭 / 已回溯）。
       // 响应期间若有实时帧推进了清单，epoch 已变化，本次响应直接丢弃。
-      applyAuthoritativeTodos(sid, meta.todos, todoEpochAtPull, meta.todos_revision);
+      applyAuthoritativeTodos(
+        sid,
+        meta.todos,
+        todoEpochAtPull,
+        meta.todos_revision,
+        meta.daemon_instance_id,
+      );
       pruneDeliveredQueuedCards(sid, clean);
     }
     return { messages: clean, keptUnpersistedTail: clean.length !== diskTail.length };
@@ -3283,7 +3333,13 @@ export function Chat({
     commitActiveTodosIntoLastAssistant();
     // 服务端 board 是唯一真值：整表覆盖（空表 = 权威清空）。部分完成（中途 Stop）会
     // 原样返回全量清单，不能被“全完成才保留”的展示过滤掉。
-    applyAuthoritativeTodos(id, detail.todos, todoEpochAtPull, detail.todos_revision);
+    applyAuthoritativeTodos(
+      id,
+      detail.todos,
+      todoEpochAtPull,
+      detail.todos_revision,
+      detail.daemon_instance_id,
+    );
     seedAppliedTodoIds(id, todoCallIdsFromMessages(messagesRef.current));
     return fresh.running;
   }
@@ -4708,21 +4764,19 @@ export function Chat({
             historyTotalBySessionRef.current.set(loadId, diskTotal);
             hasOlderBySessionRef.current.set(loadId, olderExists);
           }
-          // 缓存里的待办只是首屏垫底：只有缓存 revision 不低于已知服务端 revision 时才可用。
-          // 刷新后内存 epoch 归零，不能再用它判断新鲜度（否则旧 todo 会无条件回流）。
-          const knownTodoRevision = todoRevisionBySessionRef.current.get(loadId) ?? 0;
-          const cachedTodoRevision =
-            typeof idb.todoRevision === 'number' ? idb.todoRevision : 0;
-          if (shouldApplyRevision(knownTodoRevision, cachedTodoRevision)) {
+          // 缓存里的待办只能做「服务端快照尚未到达」的首屏垫底。
+          // 关键：绝不能把 cachedTodoRevision 写进 todoStampBySessionRef —— 那个 map
+          // 是**服务端快照**的仲裁水位。旧 daemon/旧缓存的高 revision 一旦占位，服务端
+          // 重启后（或关闭板后）的权威空快照 revision 更低，会被永久拒绝，旧清单就复活了。
+          const hasAuthoritativeTodoSnapshot =
+            todoStampBySessionRef.current.has(loadId) ||
+            todoLiveBySessionRef.current.has(loadId);
+          if (!hasAuthoritativeTodoSnapshot) {
             if (idb.todos && idb.todos.length > 0 && idb.todos.some((t: any) => t.status !== 'completed')) {
               applySessionStickyTodos(loadId, idb.todos);
             } else {
               applySessionStickyTodos(loadId, null);
             }
-            todoRevisionBySessionRef.current.set(
-              loadId,
-              Math.max(knownTodoRevision, cachedTodoRevision),
-            );
           }
           // Queue state is hydrated from localStorage and then reconciled with
           // `/chat/queue`; the canvas cache can predate a steer state transition.
@@ -5048,6 +5102,7 @@ export function Chat({
               sessionResult.value.todos,
               todoEpochAtLoad,
               sessionResult.value.todos_revision,
+              sessionResult.value.daemon_instance_id,
             );
             if (!turnStillRunning) {
               // 运行中决不能提前将 displayMessages 里的在途 todo 调用塞进 seedAppliedTodoIds，
@@ -7505,7 +7560,13 @@ export function Chat({
       }
       if (detail.todos !== undefined) {
         // 唤醒对账同样以服务端 board 为准（含空表清空）；即使没有新消息也要对齐。
-        applyAuthoritativeTodos(sid, detail.todos, todoEpochAtPull, detail.todos_revision);
+        applyAuthoritativeTodos(
+          sid,
+          detail.todos,
+          todoEpochAtPull,
+          detail.todos_revision,
+          detail.daemon_instance_id,
+        );
       }
       if (rows.length === 0) {
         // 没有新内容：total 一致就算成功（零渲染），否则降级。
@@ -7878,10 +7939,13 @@ export function Chat({
         noteCacheRevision(id, detail.revision);
         setHistoryHint(null);
         scheduleCanvasCacheSave();
-        writeLiveTodo(id, reduceLiveTodo(null, { type: 'hydrate', items: detail.todos ?? [] }));
-        if (typeof detail.todos_revision === 'number') {
-          todoRevisionBySessionRef.current.set(id, detail.todos_revision);
-        }
+        applyAuthoritativeTodos(
+          id,
+          detail.todos,
+          undefined,
+          detail.todos_revision,
+          detail.daemon_instance_id,
+        );
         seedAppliedTodoIds(id, todoCallIdsFromMessages(loaded));
       }
     } catch { /* refresh failure is non-fatal; the notice still gives feedback */ }
@@ -8579,15 +8643,26 @@ export function Chat({
       );
       return;
     }
-    if (event.type === 'tool_result' && isTodoTool(event.name)) {
+    // 服务端权威快照已明确“清单为空”时，回放旧 todo 帧绝不能把旧计划复活。
+    // 只有 replay=false 的实时帧可以重新打开清单。
+    const replayTodoFrame = (event as { replay?: boolean }).replay === true;
+    const suppressTodoReplay =
+      (event.type === 'tool_result' || event.type === 'tool_start') &&
+      isTodoTool(event.name) &&
+      replayTodoFrame &&
+      !!targetSid &&
+      todoBoardEmptyRef.current.has(targetSid);
+    if (!suppressTodoReplay && event.type === 'tool_result' && isTodoTool(event.name)) {
       const fromOutput = parseTodosFromOutput(event.output);
       if (fromOutput && fromOutput.length > 0) {
-        writeLiveTodo(
-          targetSid,
-          reduceLiveTodo(liveTodoDoc(targetSid), { type: 'result', callId: event.id, items: fromOutput }),
+        const doc = reduceLiveTodo(
+          liveTodoDoc(targetSid),
+          { type: 'result', callId: event.id, items: fromOutput },
         );
+        writeLiveTodo(targetSid, doc, { bumpEpoch: !replayTodoFrame });
+        if (!replayTodoFrame) noteLiveTodoDocument(targetSid, doc);
       }
-    } else if (event.type === 'tool_start' && isTodoTool(event.name)) {
+    } else if (!suppressTodoReplay && event.type === 'tool_start' && isTodoTool(event.name)) {
       const argsStr = formatArgs(event.arguments);
       if (argsStr) {
         const appliedIds = appliedTodoIdsFor(targetSid);
@@ -8603,10 +8678,12 @@ export function Chat({
         // 后台会话的折叠同样要落盘幂等键（跨会话重放也不能把清单打回旧状态）。
         persistAppliedTodoIds();
         if (nextTodos && nextTodos.length > 0) {
-          writeLiveTodo(
-            targetSid,
-            reduceLiveTodo(liveTodoDoc(targetSid), { type: 'preview', callId: event.id, items: nextTodos }),
+          const doc = reduceLiveTodo(
+            liveTodoDoc(targetSid),
+            { type: 'preview', callId: event.id, items: nextTodos },
           );
+          writeLiveTodo(targetSid, doc, { bumpEpoch: !replayTodoFrame });
+          if (!replayTodoFrame) noteLiveTodoDocument(targetSid, doc);
         }
       }
     }
@@ -8771,7 +8848,7 @@ export function Chat({
       commitCanvasCache(hash, target, {
         messages: payload.messages,
         todos: cacheTodos,
-        todoRevision: todoRevisionBySessionRef.current.get(target) ?? 0,
+        todoRevision: todoStampBySessionRef.current.get(target)?.revision ?? 0,
         queue: queuedBySessionRef.current.get(target) ?? null,
         queueRevision: queueRevisionBySessionRef.current.get(target) ?? 0,
         turns: outline,
@@ -9139,6 +9216,10 @@ export function Chat({
           ...(subtasks ? { subtasks } : {}),
         }, event.message_id);
         if (isTodoTool(event.name)) {
+          const replayTodoFrame = (event as { replay?: boolean }).replay === true;
+          if (replayTodoFrame && activeIdRef.current && todoBoardEmptyRef.current.has(activeIdRef.current)) {
+            break;
+          }
           const appliedIds = appliedTodoIdsFor(activeIdRef.current);
           setActiveTodos((cur) => {
             const next = foldLiveTodo({
@@ -9159,11 +9240,12 @@ export function Chat({
                 : { type: 'clear' },
             );
             if (sid) {
-              bumpTodoLiveEpoch(sid);
+              if (!replayTodoFrame) bumpTodoLiveEpoch(sid);
               if (doc) todoLiveBySessionRef.current.set(sid, doc);
               else todoLiveBySessionRef.current.delete(sid);
               if (doc) activeTodosBySessionRef.current.set(sid, doc.items);
               else activeTodosBySessionRef.current.delete(sid);
+              if (!replayTodoFrame) noteLiveTodoDocument(sid, doc);
             }
             activeTodosRef.current = doc?.items ?? null;
             return doc?.items ?? null;
@@ -9210,16 +9292,18 @@ export function Chat({
           durationMs: event.duration_ms,
         });
         if (isTodoTool(event.name)) {
+          const replayTodoFrame = (event as { replay?: boolean }).replay === true;
+          const todoSid = activeIdRef.current;
+          if (replayTodoFrame && todoSid && todoBoardEmptyRef.current.has(todoSid)) break;
           const authoritativeFromOutput = parseTodosFromOutput(event.output);
           if (authoritativeFromOutput && authoritativeFromOutput.length > 0) {
-            writeLiveTodo(
-              activeIdRef.current,
-              reduceLiveTodo(liveTodoDoc(activeIdRef.current), {
-                type: 'result',
-                callId: event.id,
-                items: authoritativeFromOutput,
-              }),
-            );
+            const doc = reduceLiveTodo(liveTodoDoc(todoSid), {
+              type: 'result',
+              callId: event.id,
+              items: authoritativeFromOutput,
+            });
+            writeLiveTodo(todoSid, doc, { bumpEpoch: !replayTodoFrame });
+            if (!replayTodoFrame) noteLiveTodoDocument(todoSid, doc);
           } else {
             // 兜底回退：若输出中没有标准清单格式，再使用本地折叠
             let foundToolPart: ToolRow | undefined;
@@ -9255,11 +9339,12 @@ export function Chat({
                     : { type: 'clear' },
                 );
                 if (sid) {
-                  bumpTodoLiveEpoch(sid);
+                  if (!replayTodoFrame) bumpTodoLiveEpoch(sid);
                   if (doc) todoLiveBySessionRef.current.set(sid, doc);
                   else todoLiveBySessionRef.current.delete(sid);
                   if (doc) activeTodosBySessionRef.current.set(sid, doc.items);
                   else activeTodosBySessionRef.current.delete(sid);
+                  if (!replayTodoFrame) noteLiveTodoDocument(sid, doc);
                 }
                 activeTodosRef.current = doc?.items ?? null;
                 return doc?.items ?? null;
