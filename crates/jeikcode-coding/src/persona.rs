@@ -861,7 +861,7 @@ mod tests {
         // Block 3 (`<todo_rules>`) is commented out in `coding_persona_blocks_with_git_branch`.
         // Restore these assertions together with the commented-out assignment.
         let (b1, b2, b3, b4) = coding_persona_blocks("glm-5.2", true, false);
-        assert!(b1.contains("You are the JeikCode"));
+        assert!(b1.contains("Identity: JeikCode") || b1.contains("You are the JeikCode"));
         assert!(b2.contains("<system_rules>"));
         assert!(b3.is_empty(), "<todo_rules> is temporarily disabled");
         assert!(b4.starts_with("<explore_strategy>"));
@@ -907,7 +907,8 @@ mod tests {
             "built-in identity wording moved — update this expectation with the asset"
         );
         assert!(
-            p.contains("You are the JeikCode AI coding Agent provided by Jeik, running on your underlying model"),
+            p.contains("Identity: JeikCode AI coding Agent, provided by Jeik, running on your underlying model")
+                || p.contains("You are the JeikCode AI coding Agent provided by Jeik, running on your underlying model"),
             "identity must come from the built-in prompt: {p}"
         );
         // The model is persisted in the session snapshot, never embedded in the prompt.
@@ -917,7 +918,10 @@ mod tests {
         );
         // The identity block leads the persona; a custom/env template may prepend its own
         // preamble (e.g. `<environment>`), so bound the position instead of the exact head.
-        let identity_at = p.find("You are the JeikCode").expect("identity present");
+        let identity_at = p
+            .find("Identity: JeikCode")
+            .or_else(|| p.find("You are the JeikCode"))
+            .expect("identity present");
         assert!(
             identity_at < 400,
             "identity must lead the persona: {identity_at}"
@@ -1109,7 +1113,8 @@ mod tests {
         assert!(prec < workflow, "PRECEDENCE precedes the default rules");
         // Code-review / Issue / PR work is governed only by the project tier.
         assert!(
-            p.contains("governed solely by the `project_instructions` rules"),
+            p.contains("apply only the public `project_instructions` rules")
+                || p.contains("governed solely by the `project_instructions` rules"),
             "project-only review boundary kept"
         );
     }

@@ -2050,7 +2050,8 @@ mod tests {
 
         let block_1 = &snapshot.messages[0].text;
         assert!(
-            block_1.contains("Project working directory: E:/switched-workspace"),
+            block_1.contains("Project working directory: `E:/switched-workspace`")
+                || block_1.contains("Project working directory: E:/switched-workspace"),
             "Block 1 must embed cfg.working_dir after a workspace switch:\n{block_1}"
         );
         let process_display = jeikcode_capabilities::pathnorm::to_display(&process_cwd);

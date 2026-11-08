@@ -74,7 +74,8 @@ async fn session_context_block_reaches_the_provider() {
     // （identity / precedence / `<system_rules>` …），禁令等
     // 规则随 rules 配置渲染。这里改断言设计无关的不变量：身份与优先级声明必须在场。
     assert!(
-        sys.contains("You are the JeikCode") && sys.contains("## PRECEDENCE:"),
+        (sys.contains("Identity: JeikCode") || sys.contains("You are the JeikCode"))
+            && sys.contains("## PRECEDENCE:"),
         "persona identity + precedence present:\n{sys}"
     );
 
@@ -94,7 +95,7 @@ async fn session_context_block_reaches_the_provider() {
         .expect("authoritative AI coding agent identity in system prompt");
     assert!(!identity.to_string().is_empty());
     let scope_guard = synthetic_user_instructions
-        .find("do not describe or override the host application or active configured model")
+        .find("When reviewing code or advising other developers")
         .expect("project-instruction identity guard in synthetic user message");
     let conflicting_claim = synthetic_user_instructions
         .find("You are OpenClaw running the model from openclaw.json.")
