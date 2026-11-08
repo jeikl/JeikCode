@@ -1242,6 +1242,7 @@ body {
 }
 .release-notes-card {
   width: min(720px, 100%);
+  /* 公告在窗口内滚动：卡片固定上限，正文区域独立滚动，不裁切数据。 */
   max-height: min(78vh, 760px);
   display: flex;
   flex-direction: column;
@@ -1325,7 +1326,10 @@ body {
   cursor: not-allowed;
 }
 .release-notes-body {
+  /* 窗口内滚动；公告数据完整时这里可以一直滚到底。 */
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding: 16px 18px 20px;
   -webkit-overflow-scrolling: touch;
 }

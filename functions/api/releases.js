@@ -52,6 +52,43 @@ function listedRelease(tag, publishedAt, body) {
   };
 }
 
+/**
+ * GitHub's public releases HTML page collapses long announcements and appends
+ * a "Read more" link, so scraping that page alone silently truncates the body
+ * (the page text literally ends with `...`). Detect it so the caller can
+ * enrich the body from Atom or the REST API.
+ */
+function bodyLooksTruncated(body) {
+  if (typeof body !== 'string' || !body) return false;
+  const text = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  return (text.endsWith('...') || text.endsWith('…')) && text.length >= 500;
+}
+
+/**
+ * Merge release lists by tag. A complete body always wins over a truncated
+ * one; HTML/Atom assets and timestamps fill gaps instead of being discarded.
+ */
+function mergeReleaseLists(primary, extra) {
+  const byTag = new Map(primary.map((rel) => [rel.tag_name, rel]));
+  for (const rel of extra) {
+    if (!rel || !rel.tag_name) continue;
+    const existing = byTag.get(rel.tag_name);
+    if (!existing) {
+      byTag.set(rel.tag_name, rel);
+      continue;
+    }
+    if ((!existing.body || bodyLooksTruncated(existing.body)) && rel.body && !bodyLooksTruncated(rel.body)) {
+      existing.body = rel.body;
+    }
+    if (!existing.published_at && rel.published_at) existing.published_at = rel.published_at;
+    if ((!existing.assets || existing.assets.length === 0) && rel.assets && rel.assets.length > 0) {
+      existing.assets = rel.assets;
+    }
+    existing.prerelease = existing.prerelease || rel.prerelease;
+  }
+  return [...byTag.values()];
+}
+
 function extractMarkdownBody(block) {
   const marker = 'class="markdown-body';
   const startAttr = block.indexOf(marker);
@@ -196,6 +233,34 @@ async function fetchAllGithubReleases() {
   return all;
 }
 
+/** Full REST row for one tag. Used only for bodies the HTML page truncated. */
+async function fetchGithubReleaseByTag(tag) {
+  const resp = await fetch(
+    `https://api.github.com/repos/jeikl/JeikCode/releases/tags/${encodeURIComponent(tag)}`,
+    {
+      headers: {
+        'User-Agent': 'JeikCode-Cloudflare-Relay',
+        Accept: 'application/vnd.github+json',
+      },
+    },
+  );
+  if (!resp.ok) return null;
+  const rel = await resp.json();
+  if (!rel || !rel.tag_name) return null;
+  return listedRelease(rel.tag_name, rel.published_at, rel.body);
+}
+
+/** Repair a handful of truncated bodies without downloading every page. */
+async function enrichTruncatedFromRest(releases) {
+  const tags = releases
+    .filter((rel) => bodyLooksTruncated(rel.body))
+    .slice(0, 5)
+    .map((rel) => rel.tag_name);
+  if (tags.length === 0) return releases;
+  const repaired = await Promise.all(tags.map((tag) => fetchGithubReleaseByTag(tag)));
+  return mergeReleaseLists(releases, repaired.filter(Boolean));
+}
+
 export async function onRequest(context) {
   const cacheUrl = new URL(context.request.url);
   const cacheKey = new Request(cacheUrl.toString(), context.request);
@@ -211,6 +276,15 @@ export async function onRequest(context) {
     releases = await fetchAllHtmlReleases();
   } catch (_) {}
 
+  // The public releases HTML collapses long bodies. Atom carries the complete
+  // content for the newest ten entries, so use it to repair those first.
+  if (releases.some((rel) => bodyLooksTruncated(rel.body))) {
+    try {
+      const atom = await fetchAtomReleases();
+      if (atom.length) releases = mergeReleaseLists(releases, atom);
+    } catch (_) {}
+  }
+
   if (!releases.length) {
     try {
       releases = await fetchAtomReleases();
@@ -222,6 +296,9 @@ export async function onRequest(context) {
       releases = await fetchAllGithubReleases();
     } catch (_) {}
   }
+
+  // Anything still truncated falls back to one targeted REST request per tag.
+  releases = await enrichTruncatedFromRest(releases);
 
   if (!releases.length) {
     return new Response(JSON.stringify({ error: 'Failed to fetch release information' }), {

@@ -607,13 +607,54 @@ fn notes_missing(body: &Option<String>) -> bool {
     body.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
 }
 
+/// Cheap HTML-to-text pass used only for truncation detection.
+fn plain_text_of_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_tag = false;
+    for ch in raw.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The edge cache renders GitHub Markdown to HTML and trims oversized
+/// announcements, leaving a literal `...`/`…` before the closing tag. Such a
+/// body must never be treated as complete: the update dialog would show a
+/// truncated changelog with no way to recover the rest.
+///
+/// Only long bodies are considered; a short note that intentionally ends in an
+/// ellipsis is still a complete note.
+fn notes_look_truncated(body: &Option<String>) -> bool {
+    let Some(raw) = body.as_deref() else {
+        return false;
+    };
+    let text = plain_text_of_html(raw);
+    let trimmed = text.trim_end();
+    let ends_with_ellipsis = trimmed.ends_with("...") || trimmed.ends_with('…');
+    ends_with_ellipsis && trimmed.chars().count() >= 500
+}
+
 fn merge_listed_releases(into: &mut Vec<ListedRelease>, extra: Vec<ListedRelease>) {
     for rel in extra {
         if rel.tag_name.trim().is_empty() {
             continue;
         }
         if let Some(existing) = into.iter_mut().find(|r| r.tag_name == rel.tag_name) {
-            if notes_missing(&existing.body) && !notes_missing(&rel.body) {
+            // Prefer a complete body over a missing or truncated edge body.
+            // The edge response is HTML and may be cut off; GitHub's REST
+            // response is the untruncated Markdown source.
+            if (notes_missing(&existing.body) || notes_look_truncated(&existing.body))
+                && !notes_missing(&rel.body)
+                && !notes_look_truncated(&rel.body)
+            {
                 existing.body = rel.body;
             }
             if existing.published_at.is_none() {
@@ -668,11 +709,44 @@ async fn fetch_release_pages(
     Ok(all)
 }
 
+/// Full GitHub release row for one tag. Used to repair announcements that the
+/// edge cache truncated instead of downloading every release page.
+pub async fn fetch_release_by_tag(tag: &str) -> Result<ListedRelease> {
+    if jeikcode_config::config::offline::is_offline_active() {
+        bail!("cannot fetch release notes in offline mode");
+    }
+    let client = apply_proxy_policy(reqwest::Client::builder())
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(JEIKCODE_USER_AGENT)
+        .build()?;
+    fetch_release_by_tag_with_client(&client, tag).await
+}
+
+async fn fetch_release_by_tag_with_client(
+    client: &reqwest::Client,
+    tag: &str,
+) -> Result<ListedRelease> {
+    let url = format!("https://api.github.com/repos/jeikl/JeikCode/releases/tags/{tag}");
+    let resp = client
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        bail!("release {tag} returned HTTP {}", resp.status());
+    }
+    resp.json::<ListedRelease>()
+        .await
+        .context("parsing release row")
+}
+
 /// Releases from the edge cache at `jeikcode.top/api/releases`.
 ///
-/// GitHub's REST API is used when the edge returns nothing, or when it
-/// returns tags whose announcement `body` is still empty. A payload that
-/// already includes notes does not call GitHub.
+/// GitHub's REST API is used when the edge returns nothing, when it returns
+/// tags whose announcement `body` is still empty, or when the edge truncated a
+/// long announcement. Truncated tags are repaired individually by tag so a
+/// long changelog does not force a full release-page download.
 pub async fn list_releases() -> Result<Vec<ListedRelease>> {
     if jeikcode_config::config::offline::is_offline_active() {
         return Ok(vec![]);
@@ -698,6 +772,22 @@ pub async fn list_releases() -> Result<Vec<ListedRelease>> {
         let gh = "https://api.github.com/repos/jeikl/JeikCode/releases?per_page=100";
         if let Ok(pages) = fetch_release_pages(&client, gh).await {
             merge_listed_releases(&mut all, pages);
+        }
+    } else {
+        // Targeted repair: the edge announcement for the newest release was
+        // truncated at ~10k chars (the body literally ends with `...`). Pull
+        // the complete body for those tags only; a failed repair keeps the
+        // truncated body so the dialog still opens with a scrollable note.
+        let truncated_tags: Vec<String> = all
+            .iter()
+            .filter(|r| notes_look_truncated(&r.body))
+            .take(5)
+            .map(|r| r.tag_name.clone())
+            .collect();
+        for tag in truncated_tags {
+            if let Ok(full) = fetch_release_by_tag_with_client(&client, &tag).await {
+                merge_listed_releases(&mut all, vec![full]);
+            }
         }
     }
     if all.is_empty() {
@@ -3231,6 +3321,79 @@ mod tests {
             published_at: None,
             assets: Vec::new(),
         }
+    }
+
+    fn release_with_body(tag: &str, body: Option<&str>) -> ListedRelease {
+        let mut rel = sample_release(tag, true);
+        rel.body = body.map(str::to_string);
+        rel
+    }
+
+    #[test]
+    fn notes_truncation_detection_matches_edge_cache_shapes() {
+        // The edge cache renders Markdown to HTML and appends an ellipsis
+        // inside the last paragraph when it trims a long announcement.
+        let edge_truncated = format!(
+            "<ul><li><p>{}**[System Prompts &amp; Local...</p></li></ul>",
+            "long paragraph ".repeat(60)
+        );
+        assert!(notes_look_truncated(&Some(edge_truncated)));
+        assert!(notes_look_truncated(&Some(format!(
+            "<p>{}…</p>",
+            "unicode ellipsis ".repeat(60)
+        ))));
+
+        // Complete bodies, short notes, and empty bodies are not truncated.
+        assert!(!notes_look_truncated(&None));
+        assert!(!notes_look_truncated(&Some(String::new())));
+        assert!(!notes_look_truncated(&Some(
+            "<p>short note...</p>".to_string()
+        )));
+        assert!(!notes_look_truncated(&Some(format!(
+            "<p>{}</p>",
+            "complete notes ".repeat(60)
+        ))));
+    }
+
+    #[test]
+    fn merge_replaces_truncated_edge_notes_with_the_full_github_body() {
+        let truncated = format!(
+            "<ul><li><p>{}**[System Prompts &amp; Local...</p></li></ul>",
+            "edge line ".repeat(80)
+        );
+        let full = format!("## Complete\n\n{}", "github line ".repeat(80));
+        let mut into = vec![release_with_body("v7.5.0-beta.0", Some(&truncated))];
+
+        merge_listed_releases(
+            &mut into,
+            vec![release_with_body("v7.5.0-beta.0", Some(&full))],
+        );
+
+        assert_eq!(
+            into[0].body.as_deref(),
+            Some(full.as_str()),
+            "截断的边缘公告必须被 GitHub 完整正文替换"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_complete_edge_notes_and_replaces_missing_ones() {
+        let complete = "<p>full edge notes</p>";
+        let mut into = vec![
+            release_with_body("v7.5.0-beta.0", Some(complete)),
+            release_with_body("v7.4.0", None),
+        ];
+
+        merge_listed_releases(
+            &mut into,
+            vec![
+                release_with_body("v7.5.0-beta.0", Some("github replacement")),
+                release_with_body("v7.4.0", Some("github notes")),
+            ],
+        );
+
+        assert_eq!(into[0].body.as_deref(), Some(complete));
+        assert_eq!(into[1].body.as_deref(), Some("github notes"));
     }
 
     #[test]
