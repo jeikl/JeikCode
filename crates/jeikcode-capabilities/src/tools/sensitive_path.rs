@@ -425,7 +425,20 @@ fn codegraph_sensitive_match(cwd: &Path, target: &Path) -> bool {
     let Ok(gi) = builder.build() else {
         return false;
     };
-    let rel = target.strip_prefix(cwd).unwrap_or(target);
+    // `target` is canonicalized by the caller, while `cwd` may still carry the
+    // non-canonical temp prefix (`/var` vs `/private/var`, Windows short paths).
+    // Never pass an absolute/out-of-root path to `ignore`: it panics instead of
+    // returning a miss.
+    let rel = target.strip_prefix(cwd).ok().or_else(|| {
+        let cwd_canon = std::fs::canonicalize(cwd).ok()?;
+        target.strip_prefix(cwd_canon).ok()
+    });
+    let Some(rel) = rel else {
+        return false;
+    };
+    if rel.as_os_str().is_empty() {
+        return false;
+    }
     gi.matched_path_or_any_parents(rel, target.is_dir())
         .is_ignore()
 }
@@ -693,10 +706,20 @@ mod tests {
         let mut call = ToolCall {
             id: "1".into(),
             name: "read_file".into(),
-            arguments: r#"{"file_path":"src/main.rs"}"#.into(),
+            arguments: r#"{"path":"src/main.rs"}"#.into(),
         };
         // Ordinary path → Proceed WITHOUT awaiting the (silent) driver.
         assert!(!gate.before(&mut call, &tool, &silent_rt()).await.is_deny());
+    }
+
+    #[test]
+    fn graph_match_outside_root_returns_false_instead_of_panicking() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        assert!(!codegraph_sensitive_match(
+            root.path(),
+            &outside.path().join("src/main.rs")
+        ));
     }
 
     #[tokio::test]
@@ -720,7 +743,7 @@ mod tests {
         let mut call = ToolCall {
             id: "1".into(),
             name: "read_file".into(),
-            arguments: r#"{"file_path":"/home/u/.ssh/id_rsa"}"#.into(),
+            arguments: r#"{"path":"/home/u/.ssh/id_rsa"}"#.into(),
         };
         let res = gate.before(&mut call, &tool, &silent_rt()).await;
         assert!(
