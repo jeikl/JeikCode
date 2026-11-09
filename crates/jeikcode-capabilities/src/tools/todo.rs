@@ -34,13 +34,44 @@ pub enum TodoStatus {
 }
 
 impl TodoStatus {
-    fn parse(s: &str) -> Option<TodoStatus> {
+    pub fn parse(s: &str) -> Option<TodoStatus> {
         match s {
             "pending" => Some(TodoStatus::Pending),
             "in_progress" => Some(TodoStatus::InProgress),
             "completed" => Some(TodoStatus::Completed),
             _ => None,
         }
+    }
+
+    /// Lenient status parsing tolerant to common AI variants, aliases, and glyphs.
+    pub fn parse_fuzzy(s: &str) -> Option<TodoStatus> {
+        match s {
+            "pending" => Some(TodoStatus::Pending),
+            "in_progress" => Some(TodoStatus::InProgress),
+            "completed" => Some(TodoStatus::Completed),
+            _ => {
+                let norm = s.trim().to_ascii_lowercase().replace(['_', '-', ' '], "");
+                match norm.as_str() {
+                    "pending" | "todo" | "open" | "waiting" | "[ ]" | "[]" => {
+                        Some(TodoStatus::Pending)
+                    }
+                    "inprogress" | "doing" | "running" | "progress" | "active" | "[•]" | "[~]"
+                    | "[>]" => Some(TodoStatus::InProgress),
+                    "completed" | "complete" | "done" | "finished" | "fixed" | "closed" | "[√]"
+                    | "[x]" | "[v]" | "x" | "v" => Some(TodoStatus::Completed),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Whether status represents keeping/preserving the current task status unchanged.
+    pub fn is_stable(s: &str) -> bool {
+        let norm = s.trim().to_ascii_lowercase().replace(['_', '-', ' '], "");
+        matches!(
+            norm.as_str(),
+            "stable" | "keep" | "same" | "unchanged" | "preserve"
+        )
     }
 }
 
@@ -159,12 +190,327 @@ struct Args {
     todos: Vec<RawItem>,
 }
 
+/// Parse a full plan rebuild payload from a JSON Value or string.
+/// The payload becomes the complete active list: array order is final order, duplicate
+/// payload titles merge (first position, last status wins), and existing tasks NOT
+/// mentioned in the payload are removed from the active list (history stays in the
+/// transcript). `existing` is used only to inherit identity/status for matched titles.
+pub fn parse_plan_rebuild(
+    value: &serde_json::Value,
+    existing: &[TodoItem],
+) -> Result<Vec<TodoItem>, String> {
+    let raw_plan = if let Some(p) = value.get("plan") {
+        p
+    } else if let Some(t) = value.get("todos") {
+        t
+    } else if value.is_array() {
+        value
+    } else {
+        return Err("todowrite: expected `plan` array.".to_string());
+    };
+
+    let items_array: Vec<&serde_json::Value> = if let Some(arr) = raw_plan.as_array() {
+        arr.iter().collect()
+    } else {
+        vec![raw_plan]
+    };
+
+    let mut out: Vec<TodoItem> = Vec::with_capacity(items_array.len());
+
+    for item in items_array.iter() {
+        let (raw_content, raw_status) = if let Some(s) = item.as_str() {
+            (s.to_string(), None)
+        } else if let Some(obj) = item.as_object() {
+            let c = obj
+                .get("content")
+                .or_else(|| obj.get("title"))
+                .or_else(|| obj.get("task"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let st = obj
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            (c, st)
+        } else {
+            continue;
+        };
+
+        let content = normalize_todo_content(&raw_content);
+        if content.is_empty() {
+            return Err("todowrite: every plan item needs non-empty `content`.".to_string());
+        }
+        let key = normalize_todo_content_key(&content);
+
+        let existing_match = existing
+            .iter()
+            .find(|t| normalize_todo_content_key(&t.content) == key);
+
+        let status = match raw_status.as_deref() {
+            Some(st) if TodoStatus::is_stable(st) => existing_match
+                .map(|t| t.status)
+                .unwrap_or(TodoStatus::Pending),
+            Some(st) => TodoStatus::parse_fuzzy(st)
+                .or_else(|| existing_match.map(|t| t.status))
+                .unwrap_or(TodoStatus::Pending),
+            None => existing_match
+                .map(|t| t.status)
+                .unwrap_or(TodoStatus::Pending),
+        };
+
+        // Duplicate payload title: first position wins, last declared status wins.
+        if let Some(pos) = out
+            .iter()
+            .position(|t| normalize_todo_content_key(&t.content) == key)
+        {
+            if raw_status
+                .as_deref()
+                .is_some_and(|st| !TodoStatus::is_stable(st))
+            {
+                out[pos].status = status;
+            }
+            continue;
+        }
+
+        let id = existing_match
+            .and_then(|t| t.id.clone())
+            .or_else(|| Some(new_todo_id()));
+
+        out.push(TodoItem {
+            id,
+            content,
+            status,
+        });
+    }
+
+    // Full rebuild: old tasks not present in the payload are intentionally dropped
+    // from the active list. Single in_progress: the latest plan-declared one wins.
+    if let Some(chosen) = out.iter().rposition(|t| t.status == TodoStatus::InProgress) {
+        for (i, item) in out.iter_mut().enumerate() {
+            if i != chosen && item.status == TodoStatus::InProgress {
+                item.status = TodoStatus::Pending;
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Apply a batch of updates (or single update) against `list`.
+/// Supports:
+/// - content-driven matching (fuzzy normalized content key)
+/// - 1-based id matching fallback
+/// - text refinement via `new_content`
+/// - status transition (or status preservation via "stable"/omitted status)
+/// - single object or array
+pub fn apply_batch_updates(
+    list: &mut Vec<TodoItem>,
+    val: &serde_json::Value,
+) -> Result<(usize, String), String> {
+    let raw_updates = if let Some(u) = val.get("update") {
+        u
+    } else if let Some(u) = val.get("updates") {
+        u
+    } else {
+        val
+    };
+
+    let update_items: Vec<&serde_json::Value> = if let Some(arr) = raw_updates.as_array() {
+        arr.iter().collect()
+    } else {
+        vec![raw_updates]
+    };
+
+    if update_items.is_empty() {
+        return Ok((0, "No updates applied.".to_string()));
+    }
+
+    let mut applied_count = 0;
+    let mut summaries = Vec::new();
+    let mut last_in_progress_idx: Option<usize> = None;
+
+    for (item_seq, u) in update_items.iter().enumerate() {
+        let is_explicit_delete = u.get("delete").and_then(|v| v.as_bool()).unwrap_or(false)
+            || u.get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.eq_ignore_ascii_case("delete") || s.eq_ignore_ascii_case("remove"))
+                .unwrap_or(false);
+
+        // 1. Delete operation (content or id driven)
+        if is_explicit_delete {
+            let target_idx = resolve_update_target(list, u);
+            if let Some(idx) = target_idx {
+                let removed = list.remove(idx);
+                applied_count += 1;
+                summaries.push(format!("Removed: '{}'", removed.content));
+                continue;
+            } else if let Some(id) = json_id(u) {
+                return Err(unknown_task_id(id, list));
+            } else {
+                return Err(format!(
+                    "todowrite: update delete #{item_seq} could not match task to remove."
+                ));
+            }
+        }
+
+        let raw_content = u
+            .get("content")
+            .or_else(|| u.get("add"))
+            .or_else(|| u.get("insert"))
+            .and_then(|v| v.as_str())
+            .map(normalize_todo_content)
+            .filter(|c| !c.is_empty());
+
+        let parsed_status = u
+            .get("status")
+            .and_then(|s| s.as_str())
+            .and_then(TodoStatus::parse_fuzzy);
+
+        // 2. Insert / Move operation — `after` / `after_id` name the task immediately
+        //    PRECEDING the new item, so the item is inserted right after that anchor.
+        //    Legacy `before_content` / `before_id` aliases keep the same semantics.
+        if let Some(anchor) = update_anchor(u) {
+            let Some(anchor_idx) = resolve_anchor_index(list, &anchor) else {
+                return Err(format!(
+                    "todowrite: update item #{item_seq} anchor not found in current list."
+                ));
+            };
+            let Some(content) = raw_content else {
+                return Err(format!(
+                    "todowrite: update item #{item_seq} with an anchor needs non-empty `content`."
+                ));
+            };
+            // Anchor is the PRECEDING task: always insert immediately after it.
+            let insert_at = anchor_idx + 1;
+
+            // Same title already exists → move it instead of duplicating.
+            if let Some(existing_idx) = list.iter().position(|t| {
+                normalize_todo_content_key(&t.content) == normalize_todo_content_key(&content)
+            }) {
+                let mut item = list.remove(existing_idx);
+                if let Some(st) = parsed_status {
+                    item.status = st;
+                }
+                let adjusted = if existing_idx < insert_at {
+                    insert_at - 1
+                } else {
+                    insert_at
+                };
+                let landing = adjusted.min(list.len());
+                list.insert(landing, item);
+                if list[landing].status == TodoStatus::InProgress {
+                    last_in_progress_idx = Some(landing);
+                }
+                applied_count += 1;
+                summaries.push(format!("#{} Moved: {content}", landing + 1));
+            } else {
+                let status = parsed_status.unwrap_or(TodoStatus::Pending);
+                let landing = insert_at.min(list.len());
+                list.insert(
+                    landing,
+                    TodoItem {
+                        id: Some(new_todo_id()),
+                        content: content.clone(),
+                        status,
+                    },
+                );
+                if status == TodoStatus::InProgress {
+                    last_in_progress_idx = Some(landing);
+                }
+                applied_count += 1;
+                summaries.push(format!("#{} Inserted: {content}", landing + 1));
+            }
+            continue;
+        }
+
+        // 3. Bare item — exists → update in place; otherwise append at the tail.
+        let target_idx = resolve_update_target(list, u);
+        let Some(idx) = target_idx else {
+            if let Some(content) = raw_content {
+                let status = parsed_status.unwrap_or(TodoStatus::Pending);
+                let landing = list.len();
+                list.push(TodoItem {
+                    id: Some(new_todo_id()),
+                    content: content.clone(),
+                    status,
+                });
+                if status == TodoStatus::InProgress {
+                    last_in_progress_idx = Some(landing);
+                }
+                applied_count += 1;
+                summaries.push(format!("#{} Added: {content}", landing + 1));
+                continue;
+            }
+            if let Some(id) = json_id(u) {
+                return Err(unknown_task_id(id, list));
+            }
+            return Err(format!(
+                "todowrite: update item #{item_seq} must specify existing `content` or valid `id`."
+            ));
+        };
+
+        // 4. In-place Update (status or content refinement)
+        let mut changed_this_item = false;
+
+        // Content refinement
+        if let Some(new_c) = u
+            .get("new_content")
+            .or_else(|| u.get("new_title"))
+            .and_then(|v| v.as_str())
+        {
+            let norm_c = normalize_todo_content(new_c);
+            if !norm_c.is_empty() && norm_c != list[idx].content {
+                list[idx].content = norm_c;
+                changed_this_item = true;
+            }
+        }
+
+        // Status update
+        if let Some(next_st) = parsed_status {
+            if list[idx].status != next_st {
+                list[idx].status = next_st;
+                changed_this_item = true;
+            }
+            if next_st == TodoStatus::InProgress {
+                last_in_progress_idx = Some(idx);
+            }
+        }
+
+        if changed_this_item {
+            applied_count += 1;
+            summaries.push(format!(
+                "#{} '{}' \u{2192} {}",
+                idx + 1,
+                list[idx].content,
+                list[idx].status
+            ));
+        }
+    }
+
+    if let Some(in_prog_idx) = last_in_progress_idx {
+        ensure_single_in_progress(list, in_prog_idx);
+    }
+
+    let summary = if summaries.is_empty() {
+        "No changes applied.".to_string()
+    } else {
+        summaries.join("\n")
+    };
+
+    Ok((applied_count, summary))
+}
+
 /// Parse + validate the full-list args. Enforces: valid status enum, non-empty
 /// content, at most one `in_progress`. Returns a human-readable reason on failure
 /// (fed back to the model so it can correct and resend).
 pub fn parse_todos(args: &str) -> Result<Vec<TodoItem>, String> {
     let mut value: serde_json::Value = serde_json::from_str(args)
         .map_err(|e| format!("todowrite: invalid arguments: {e}. Expected {{\"todos\":[{{\"content\":\"…\",\"status\":\"pending|in_progress|completed\"}}]}}."))?;
+
+    if value.get("plan").is_some() {
+        return parse_plan_rebuild(&value, &[]);
+    }
     // Keep transcript-derived state aligned with RepairToolArgsMiddleware. The
     // kernel stores the model's original tool call before middleware rewriting,
     // so a provider that emits `{"todos":"[...]"}` must be tolerated here too:
@@ -241,6 +587,29 @@ pub fn try_apply_todo_args(list: &mut Vec<TodoItem>, args: &str) -> Result<Apply
     let mut v = serde_json::from_str::<serde_json::Value>(args)
         .map_err(|e| format!("todowrite: invalid JSON arguments: {e}"))?;
     canonicalize_todo_keys(&mut v);
+
+    // 1. Declarative full-plan rebuild
+    if v.get("plan").is_some() {
+        let before = list.clone();
+        let next = parse_plan_rebuild(&v, list)?;
+        if next == before {
+            return Ok(ApplyOutcome::Unchanged);
+        }
+        *list = next;
+        return Ok(ApplyOutcome::Changed);
+    }
+
+    // 2. Partial batch updates (content-first, id-fallback)
+    if v.get("update").is_some() || v.get("updates").is_some() {
+        let before = list.clone();
+        let (count, _) = apply_batch_updates(list, &v)?;
+        if count == 0 || *list == before {
+            return Ok(ApplyOutcome::Unchanged);
+        }
+        return Ok(ApplyOutcome::Changed);
+    }
+
+    // 3. Legacy actions array
     if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
         if arr.is_empty() {
             return Err("todowrite: `actions` must be a non-empty array.".into());
@@ -422,11 +791,26 @@ fn normalize_todo_content(content: &str) -> String {
 /// a key that differs from one of these only by stray quoting/escaping is a
 /// serialization slip, never a distinct user field.
 const TODO_ACTION_FIELD_KEYS: &[&str] = &[
-    "action", "id", "position", "status", "content", "after", "after_id",
+    "action",
+    "id",
+    "position",
+    "status",
+    "content",
+    "new_content",
+    "new_title",
+    "delete",
+    "before",
+    "before_content",
+    "before_id",
+    "after",
+    "after_id",
 ];
 
 fn is_root_todo_key(key: &str) -> bool {
-    key == "actions" || key == "todos" || TODO_ACTION_FIELD_KEYS.contains(&key)
+    matches!(
+        key,
+        "actions" | "todos" | "plan" | "update" | "updates" | "list"
+    ) || TODO_ACTION_FIELD_KEYS.contains(&key)
 }
 
 /// Exact-match repair for over-escaped keys.
@@ -459,6 +843,15 @@ fn canonicalize_todo_keys(value: &mut serde_json::Value) {
         for item in items {
             if let Some(item) = item.as_object_mut() {
                 canonicalize_key_map(item, |key| key == "content" || key == "status");
+            }
+        }
+    }
+    for field in ["update", "updates"] {
+        if let Some(items) = obj.get_mut(field).and_then(serde_json::Value::as_array_mut) {
+            for item in items {
+                if let Some(item) = item.as_object_mut() {
+                    canonicalize_key_map(item, |key| TODO_ACTION_FIELD_KEYS.contains(&key));
+                }
             }
         }
     }
@@ -776,6 +1169,136 @@ fn item_has_content(v: &serde_json::Value) -> bool {
         .is_some_and(|c| !c.is_empty())
 }
 
+/// A single `update` entry is actionable when it carries a non-empty title, a valid
+/// `id`, or an explicit delete marker. An entry with only empty/absent fields is a
+/// read-only no-op, not an error.
+fn update_item_actionable(item: &serde_json::Value) -> bool {
+    let Some(obj) = item.as_object() else {
+        return false;
+    };
+    let content = obj
+        .get("content")
+        .or_else(|| obj.get("task"))
+        .or_else(|| obj.get("title"))
+        .and_then(|v| v.as_str())
+        .map(normalize_todo_content)
+        .is_some_and(|c| !c.is_empty());
+    content || json_id(item).is_some() || obj.get("delete").and_then(|v| v.as_bool()) == Some(true)
+}
+
+/// `plan` is actionable only when at least one listed item has non-empty content.
+/// An all-empty payload is a read-only query, matching `plan: []`.
+fn plan_has_actionable_items(v: &serde_json::Value) -> bool {
+    match v.get("plan") {
+        Some(serde_json::Value::Array(items)) => items.iter().any(|item| match item {
+            serde_json::Value::String(s) => !normalize_todo_content(s).is_empty(),
+            serde_json::Value::Object(obj) => obj
+                .get("content")
+                .or_else(|| obj.get("title"))
+                .or_else(|| obj.get("task"))
+                .and_then(|v| v.as_str())
+                .map(normalize_todo_content)
+                .is_some_and(|c| !c.is_empty()),
+            _ => false,
+        }),
+        Some(serde_json::Value::String(s)) => !normalize_todo_content(s).is_empty(),
+        Some(serde_json::Value::Object(obj)) => obj
+            .get("content")
+            .or_else(|| obj.get("title"))
+            .or_else(|| obj.get("task"))
+            .and_then(|v| v.as_str())
+            .map(normalize_todo_content)
+            .is_some_and(|c| !c.is_empty()),
+        Some(_) => false,
+        None => false,
+    }
+}
+
+/// `update` is actionable only when at least one entry can match or create a task.
+fn update_has_actionable_items(v: &serde_json::Value) -> bool {
+    match v.get("update").or_else(|| v.get("updates")) {
+        Some(serde_json::Value::Array(items)) => items.iter().any(update_item_actionable),
+        Some(item) => update_item_actionable(item),
+        None => false,
+    }
+}
+
+/// Resolve the update target for a bare update item (no `before` anchor).
+/// Priority: normalized `content` title match, then 1-based `id` rank fallback.
+fn resolve_update_target(list: &[TodoItem], u: &serde_json::Value) -> Option<usize> {
+    let content_opt = u
+        .get("content")
+        .or_else(|| u.get("task"))
+        .or_else(|| u.get("title"))
+        .and_then(|v| v.as_str())
+        .map(normalize_todo_content_key)
+        .filter(|s| !s.is_empty());
+    if let Some(ckey) = content_opt {
+        if let Some(idx) = list
+            .iter()
+            .position(|t| normalize_todo_content_key(&t.content) == ckey)
+        {
+            return Some(idx);
+        }
+    }
+    json_id(u).and_then(|id| {
+        if id >= 1 && (id as usize) <= list.len() {
+            Some((id as usize) - 1)
+        } else {
+            None
+        }
+    })
+}
+
+/// A positional anchor for `update`: the task immediately BEFORE the new item.
+enum AnchorRef<'a> {
+    Id(usize),
+    Content(&'a str),
+}
+
+/// Read the anchor from an update item. Canonical fields are `after` / `after_id`;
+/// `before_content` / `before_id` / `before` remain legacy aliases with identical
+/// "preceding task" semantics.
+fn update_anchor(u: &serde_json::Value) -> Option<AnchorRef<'_>> {
+    if let Some(id) = u.get("after_id").and_then(json_u64) {
+        return Some(AnchorRef::Id(id as usize));
+    }
+    if let Some(v) = u.get("after") {
+        if let Some(id) = v.as_u64() {
+            return Some(AnchorRef::Id(id as usize));
+        }
+        if let Some(s) = v.as_str() {
+            return Some(AnchorRef::Content(s));
+        }
+    }
+    // Legacy aliases: same "anchor is the preceding task" meaning.
+    if let Some(id) = u.get("before_id").and_then(json_u64) {
+        return Some(AnchorRef::Id(id as usize));
+    }
+    if let Some(v) = u.get("before_content").or_else(|| u.get("before")) {
+        if let Some(id) = v.as_u64() {
+            return Some(AnchorRef::Id(id as usize));
+        }
+        if let Some(s) = v.as_str() {
+            return Some(AnchorRef::Content(s));
+        }
+    }
+    None
+}
+
+/// Resolve the preceding-task anchor to its current list index.
+/// The caller inserts the new item immediately AFTER the returned index.
+fn resolve_anchor_index(list: &[TodoItem], anchor: &AnchorRef<'_>) -> Option<usize> {
+    match anchor {
+        AnchorRef::Id(id) => (*id >= 1 && *id <= list.len()).then(|| *id - 1),
+        AnchorRef::Content(s) => {
+            let key = normalize_todo_content_key(s);
+            list.iter()
+                .position(|t| normalize_todo_content_key(&t.content) == key)
+        }
+    }
+}
+
 fn list_is_seedable(list: &[TodoItem]) -> bool {
     list.is_empty() || list.iter().all(|t| t.status == TodoStatus::Completed)
 }
@@ -938,6 +1461,9 @@ pub fn is_todo_plan(args: &str) -> bool {
     if v.get("actions").and_then(|a| a.as_array()).is_some() {
         return false;
     }
+    if v.get("update").is_some() || v.get("updates").is_some() {
+        return false;
+    }
     parse_todos(args).is_ok()
 }
 
@@ -951,31 +1477,62 @@ pub fn is_todo_action_args(args: &str) -> bool {
     if is_todo_plan(args) {
         return false;
     }
-    action_kind(&v).is_some() || v.get("actions").and_then(|a| a.as_array()).is_some()
+    v.get("update").is_some()
+        || v.get("updates").is_some()
+        || action_kind(&v).is_some()
+        || v.get("actions").and_then(|a| a.as_array()).is_some()
+}
+
+/// Apply one transcript todo call onto the running list.
+/// - `plan: [...]` replaces the current list (empty array is read-only).
+/// - legacy `todos: [...]` keeps its full-replace baseline semantics.
+/// - `clear: true` wipes the list.
+/// - `actions` / single action / `update` apply on top.
+fn apply_todo_call(list: &mut Vec<TodoItem>, args: &str) {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(args) else {
+        return;
+    };
+    canonicalize_todo_keys(&mut value);
+
+    if value.get("clear").and_then(|v| v.as_bool()) == Some(true) {
+        list.clear();
+        return;
+    }
+    if value.get("plan").is_some() {
+        // An empty plan is a read-only query, not a wipe.
+        if value
+            .get("plan")
+            .and_then(|p| p.as_array())
+            .is_some_and(|a| a.is_empty())
+        {
+            return;
+        }
+        if let Ok(next) = parse_plan_rebuild(&value, list) {
+            *list = next;
+        }
+        return;
+    }
+    if value.get("actions").and_then(|a| a.as_array()).is_none() && value.get("todos").is_some() {
+        // Legacy full-list replace / replay baseline.
+        if let Ok(todos) = parse_todos(args) {
+            *list = todos;
+        }
+        return;
+    }
+    apply_todo_action(list, args);
 }
 
 /// Fold an ORDERED stream of `(tool_name, args)` todo-affecting calls into the current list.
-/// Baseline = the LAST call carrying a valid full LIST (`{"todos":[…]}`; positions become the
-/// stable 1-based ids); then every incremental `{"action":…}` call AFTER that baseline is
-/// applied in order. Decided by ARG SHAPE, not tool name, so the merged `todowrite` (which
-/// sends the list shape to plan and the action shape to patch) folds correctly — and a resumed
-/// session's legacy `todo`-named calls fold identically. An invalid list never wipes an earlier
-/// valid one; action events before the baseline are void (a re-plan resets the ids). THE single
-/// source of truth for the fold — both the kernel-message reducer and the TUI panel derivation
-/// use this shape rule, so live / replay / injected views never diverge.
+/// Each call is applied in order: `plan` replaces the running list, legacy `todos`
+/// replaces it, and incremental actions/updates patch it. THE single source of truth for
+/// the fold — both the kernel-message reducer and the TUI panel derivation use this,
+/// so live / replay / injected views never diverge.
 pub fn reduce_todos<'a>(calls: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<TodoItem> {
-    // Keep both names so a resumed transcript (legacy `todo` + `todowrite`) folds the same.
-    let calls: Vec<(&str, &str)> = calls
-        .into_iter()
-        .filter(|(n, _)| is_todo_tool_name(n))
-        .collect();
-    let baseline = calls.iter().rposition(|(_, a)| is_todo_plan(a));
-    let (mut list, start) = match baseline {
-        Some(i) => (parse_todos(calls[i].1).unwrap_or_default(), i + 1),
-        None => (Vec::new(), 0),
-    };
-    for (_, a) in &calls[start..] {
-        apply_todo_action(&mut list, a); // no-op unless the args carry an `action`
+    let mut list = Vec::new();
+    for (name, args) in calls {
+        if is_todo_tool_name(name) {
+            apply_todo_call(&mut list, args);
+        }
     }
     list
 }
@@ -1056,10 +1613,14 @@ fn fold_turn_calls(
         return;
     }
     if has_plan || carried.is_empty() {
-        *carried = reduce_todos(batch.iter().copied());
+        let mut next = carried.clone();
+        for (_, args) in batch.iter() {
+            apply_todo_call(&mut next, args);
+        }
+        *carried = next;
     } else {
         for (_, args) in batch.iter() {
-            apply_todo_action(carried, args);
+            apply_todo_call(carried, args);
         }
     }
     batch.clear();
@@ -1516,9 +2077,7 @@ impl TodoTool {
     }
 }
 
-const TODOWRITE_DESCRIPTION: &str = "Create or maintain a multi-step checklist for a task. \
-Checklists are automatically cleared once all items are completed. \
-Use to plan tasks, track progress, and improve delivery quality.";
+const TODOWRITE_DESCRIPTION: &str = "Track multi-step task checklists. Use `plan: [...]` for a full plan rebuild; `update: [...]` to tick progress or locally add, move, or remove tasks while preserving unmentioned tasks; pass an empty object, `plan: []`, or `update: []` to view current tasks; `clear: true` clears everything and must be used alone.";
 
 /// Absorb stringified / single-object / hybrid `actions` payloads. Idempotent.
 pub(crate) fn normalize_todo_write_args(args: &str) -> String {
@@ -1527,7 +2086,19 @@ pub(crate) fn normalize_todo_write_args(args: &str) -> String {
     };
     crate::tools::repair::decode_lenient_array_field(&mut v, "actions", false);
     crate::tools::repair::decode_lenient_array_field(&mut v, "todos", false);
+    crate::tools::repair::decode_lenient_array_field(&mut v, "plan", false);
+    crate::tools::repair::decode_lenient_array_field(&mut v, "update", false);
+    crate::tools::repair::decode_lenient_array_field(&mut v, "updates", false);
     canonicalize_todo_keys(&mut v);
+
+    if v.get("plan").is_some()
+        || v.get("update").is_some()
+        || v.get("updates").is_some()
+        || v.get("list").is_some()
+        || v.get("clear").is_some()
+    {
+        return v.to_string();
+    }
 
     let usable_actions = v
         .get("actions")
@@ -1634,43 +2205,66 @@ impl Tool for TodoTool {
         json!({
             "type": "object",
             "properties": {
-                "actions": {
+                "plan": {
                     "type": "array",
-                    "minItems": 1,
-                    "description": "Batch of task changes, applied in order.",
+                    "description": "Full plan rebuild. Array order defines execution sequence; duplicate titles merge. Items need `content` and optional `status` (pending | in_progress | completed | stable).",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "action": {
+                            "content": {
                                 "type": "string",
-                                "enum": ["add", "insert", "update", "delete", "remove", "clear", "list"],
-                                "description": "Operation. Optional: omit it and the fields decide ({content}→add, {content,position}→insert, {id,status|content}→update, {id}→delete). When present it must agree with the fields; `clear` takes no task text."
+                                "description": "Task description."
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed", "stable"],
+                                "description": "Status. 'stable' or omitted inherits existing status (default: pending)."
+                            }
+                        },
+                        "required": ["content"]
+                    }
+                },
+                "update": {
+                    "description": "Batch or single partial update. Bare items match `content` (title) or `id`; if not found they are appended. `after` / `after_id` name the preceding task and insert (or move) this item right after it. `status: \"delete\"` removes the matched task.",
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "Task title. Matches an existing task, or the new task's text."
                             },
                             "id": {
                                 "type": "integer",
                                 "minimum": 1,
-                                "description": "1-based task number. With `status` or `content` → update; alone → delete."
-                            },
-                            "position": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "description": "1-based insert slot for `content`; omitted → append."
+                                "description": "1-based task number fallback."
                             },
                             "status": {
                                 "type": "string",
-                                "enum": ["pending", "in_progress", "completed"],
-                                "description": "New status. At most one item stays in_progress; demoting the others is automatic."
+                                "enum": ["pending", "in_progress", "completed", "stable", "delete"],
+                                "description": "New status. 'stable' or omitted keeps existing status; 'delete' removes the task."
                             },
-                            "content": {
+                            "new_content": {
                                 "type": "string",
-                                "description": "Task text. Alone → add; with `position` → insert; with `id` → retitle that task."
+                                "description": "Optional updated task description."
+                            },
+                            "after": {
+                                "type": "string",
+                                "description": "The task immediately before the new item: insert or move this item right after this title."
+                            },
+                            "after_id": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "The 1-based number of the task immediately before the new item: insert or move this item right after it."
                             }
-                        },
-                        "required": []
+                        }
                     }
+                },
+                "clear": {
+                    "type": "boolean",
+                    "description": "Clear the entire checklist. Use only when the user explicitly asks to clear all tasks."
                 }
-            },
-            "required": ["actions"]
+            }
         })
     }
     // Never touches the filesystem → risk() defaults to Safe.
@@ -1688,7 +2282,101 @@ impl Tool for TodoTool {
         };
         let mut list = self.board_items();
 
-        // Legacy full-list replace (resume / old transcripts). Prefer `actions`.
+        // Empty `plan` / `update` payloads (empty arrays, or items with no usable
+        // content/id) are read-only queries: strict-fill models often emit them as
+        // defaults, and they must never wipe or mutate the list.
+        let plan_raw = v.get("plan");
+        let update_present = v.get("update").is_some() || v.get("updates").is_some();
+        let plan_actionable = plan_raw.is_some() && plan_has_actionable_items(&v);
+        let update_actionable = update_present && update_has_actionable_items(&v);
+        let clear_requested = v.get("clear").and_then(|c| c.as_bool()) == Some(true);
+
+        if (plan_raw.is_some() || update_present)
+            && !plan_actionable
+            && !update_actionable
+            && v.get("actions").is_none()
+            && v.get("todos").is_none()
+            && !clear_requested
+        {
+            return ok(format!(
+                "Current task list:\n\n{}",
+                render_todos_numbered(&list, false)
+            ));
+        }
+
+        if clear_requested {
+            if plan_actionable
+                || update_actionable
+                || v.get("actions").is_some()
+                || v.get("todos").is_some()
+            {
+                return err(with_current_list_for_args(
+                    "todowrite: `clear` must be used alone; do not combine it with `plan`, `update`, `actions`, or `todos`.",
+                    &self.board_items(),
+                ));
+            }
+            let stored = self.commit_and_read(&[]);
+            return ok(format!(
+                "all tasks cleared\n\n{}",
+                render_todos_numbered(&stored, false)
+            ));
+        }
+
+        if plan_actionable && update_actionable {
+            return err(with_current_list_for_args(
+                "todowrite: provide exactly one of `plan` or `update`.",
+                &self.board_items(),
+            ));
+        }
+
+        // 1. Read-only query: an empty object (no arguments) echoes the current list.
+        // `list=true` and `action=list` stay accepted for legacy transcripts.
+        let is_query_list = v.as_object().is_some_and(|o| o.is_empty())
+            || v.get("list").is_some()
+            || v.get("action").and_then(|a| a.as_str()) == Some("list")
+            || matches!(
+                v.get("actions").and_then(|a| a.as_array()).map(Vec::as_slice),
+                Some([only]) if action_kind(only) == Some("list")
+            );
+        if is_query_list {
+            let items = self.board_items();
+            return ok(format!(
+                "Current task list:\n\n{}",
+                render_todos_numbered(&items, false)
+            ));
+        }
+
+        // 2. Full plan rebuild: the payload becomes the complete active list
+        if plan_actionable {
+            return match parse_plan_rebuild(&v, &list) {
+                Ok(new_items) => {
+                    let stored = self.commit_and_read(&new_items);
+                    ok(format!(
+                        "Plan updated ({} task{}):\n\n{}",
+                        stored.len(),
+                        if stored.len() == 1 { "" } else { "s" },
+                        render_todos_numbered(&stored, false)
+                    ))
+                }
+                Err(e) => err(with_current_list_for_args(e, &self.board_items())),
+            };
+        }
+
+        // 3. Partial batch updates (content-first, id fallback)
+        if update_actionable {
+            return match apply_batch_updates(&mut list, &v) {
+                Ok((_count, summary)) => {
+                    let stored = self.commit_and_read(&list);
+                    ok(format!(
+                        "{summary}\n\n{}",
+                        render_todos_numbered(&stored, false)
+                    ))
+                }
+                Err(e) => err(with_current_list(e, &self.board_items())),
+            };
+        }
+
+        // 4. Legacy full-list replace (resume / old transcripts). Prefer `actions`.
         // `actions` wins if both fields are present (same as the fold).
         if v.get("actions").and_then(|a| a.as_array()).is_none() && v.get("todos").is_some() {
             return match parse_todos(&args) {
@@ -1700,28 +2388,15 @@ impl Tool for TodoTool {
             };
         }
 
+        // 5. Legacy single action wrapped into `actions`
         if v.get("actions").is_none() && v.get("todos").is_none() && action_kind(&v).is_some() {
             let single = v.clone();
             v = json!({ "actions": [single] });
         }
 
-        // Read-only `list`: echo the CURRENT list and touch nothing. The name predates the
-        // `actions` contract and is kept as a first-class read (old transcripts and models still
-        // ask for it), so it answers with the numbered list instead of the mutation summary.
-        if matches!(
-            v.get("actions").and_then(|a| a.as_array()).map(Vec::as_slice),
-            Some([only]) if action_kind(only) == Some("list")
-        ) {
-            let items = self.board_items();
-            return ok(format!(
-                "Current task list:\n\n{}",
-                render_todos_numbered(&items, false)
-            ));
-        }
-
         if v.get("actions").and_then(|a| a.as_array()).is_none() {
             return err(with_current_list_for_args(
-                "todowrite: provide a non-empty `actions` array of task action objects.",
+                "todowrite: provide `plan` for full rebuild, `update` for progress patch, or {} to view current list.",
                 &self.board_items(),
             ));
         }
@@ -2910,8 +3585,8 @@ mod tests {
             "bad action"
         );
         assert!(
-            t.execute(r#"{}"#, &ctx()).await.is_error,
-            "neither todos nor action"
+            t.execute(r#"{"actions":[{}]}"#, &ctx()).await.is_error,
+            "an empty action object is still rejected"
         );
     }
 
@@ -3379,33 +4054,58 @@ mod tests {
         assert!(d.contains("task"), "covers task: {d}");
     }
 
-    /// Advertised surface: one array, every verb expressible, inference still allowed.
-    ///
-    /// The full enum is load-bearing: some models (e.g. Responses-API GPT models) fill
-    /// EVERY declared property. If `action` only offered destructive verbs, such a model
-    /// would be forced to label its intended adds as `clear`.
+    /// Public schema guard: only `plan` and `update` are advertised. Legacy
+    /// compatibility aliases (`actions`, `todos`, `before*`, `position`, `list`)
+    /// remain internal-only and must never leak into the model-facing schema.
     #[test]
-    fn schema_advertises_every_verb_for_strict_fill_models() {
+    fn schema_excludes_internal_aliases_and_legacy_actions() {
         let t = TodoTool::new();
         let s = t.parameters_schema();
-        let items = &s["properties"]["actions"]["items"]["properties"];
-        assert_eq!(s["required"], serde_json::json!(["actions"]));
-        assert_eq!(s["properties"]["actions"]["minItems"].as_u64(), Some(1));
-        let verbs = items["action"]["enum"].as_array().unwrap();
-        for verb in [
-            "add", "insert", "update", "delete", "remove", "clear", "list",
+
+        let props = s["properties"].as_object().expect("properties object");
+        let mut roots: Vec<&str> = props.keys().map(String::as_str).collect();
+        roots.sort_unstable();
+        assert_eq!(roots, vec!["clear", "plan", "update"]);
+
+        let plan_items = s["properties"]["plan"]["items"]["properties"]
+            .as_object()
+            .expect("plan item properties");
+        let mut plan_keys: Vec<&str> = plan_items.keys().map(String::as_str).collect();
+        plan_keys.sort_unstable();
+        assert_eq!(plan_keys, vec!["content", "status"]);
+
+        let update_items = s["properties"]["update"]["items"]["properties"]
+            .as_object()
+            .expect("update item properties");
+        let mut update_keys: Vec<&str> = update_items.keys().map(String::as_str).collect();
+        update_keys.sort_unstable();
+        assert_eq!(
+            update_keys,
+            vec![
+                "after",
+                "after_id",
+                "content",
+                "id",
+                "new_content",
+                "status"
+            ]
+        );
+
+        let serialized = s.to_string();
+        for alias in [
+            "actions",
+            "todos",
+            "before_content",
+            "before_id",
+            "\"before\"",
+            "position",
+            "\"list\"",
         ] {
             assert!(
-                verbs.iter().any(|v| v == verb),
-                "action enum must advertise `{verb}`: {verbs:?}"
+                !serialized.contains(alias),
+                "internal alias `{alias}` leaked into the public schema: {serialized}"
             );
         }
-        assert_eq!(
-            items["status"]["enum"],
-            serde_json::json!(["pending", "in_progress", "completed"])
-        );
-        assert_eq!(items["id"]["minimum"].as_u64(), Some(1));
-        assert_eq!(items["position"]["minimum"].as_u64(), Some(1));
     }
 
     /// Regression: a strict-fill model materialises EVERY declared property, so its
@@ -3814,16 +4514,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_object_is_not_inferred_as_clear() {
+    async fn empty_object_reads_list_without_clearing() {
         let t = TodoTool::new();
         let _ = t
             .execute(r#"{"actions":[{"content":"keep me"}]}"#, &ctx())
             .await;
         let res = t.execute(r#"{}"#, &ctx()).await;
-        assert!(res.is_error, "empty payload must not clear the list");
+        assert!(!res.is_error, "{}", res.content);
+        assert!(
+            res.content.contains("Current task list:"),
+            "{}",
+            res.content
+        );
+        assert!(res.content.contains("keep me"), "{}", res.content);
         let res = t.execute(r#"{"actions":[{}]}"#, &ctx()).await;
         assert!(res.is_error);
         assert!(res.content.contains("could not infer"), "{}", res.content);
+    }
+
+    #[tokio::test]
+    async fn empty_object_and_legacy_list_flag_read_current_tasks_without_mutation() {
+        let t = TodoTool::new();
+        let _ = t.execute(r#"{"plan":["Task 1","Task 2"]}"#, &ctx()).await;
+        for args in ["{}", r#"{"list":true}"#] {
+            let r = t.execute(args, &ctx()).await;
+            assert!(!r.is_error, "{args}: {}", r.content);
+            assert!(r.content.contains("Current task list:"), "{}", r.content);
+            assert!(r.content.contains("1. Task 1"), "{}", r.content);
+            assert!(r.content.contains("2. Task 2"), "{}", r.content);
+        }
     }
 
     #[tokio::test]
@@ -3989,5 +4708,251 @@ mod tests {
             !live_bindings().lock().unwrap().contains_key(&key),
             "the dead binding must be cleared on lookup"
         );
+    }
+
+    #[tokio::test]
+    async fn plan_rebuild_replaces_omitted_tasks() {
+        let t = TodoTool::new();
+        // Initial plan: A, B, C
+        let r1 = t
+            .execute(
+                r#"{"plan":[{"content":"Task A","status":"completed"},{"content":"Task B","status":"in_progress"},{"content":"Task C"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r1.is_error, "{}", r1.content);
+        assert!(r1.content.contains("1. Task A"));
+        assert!(r1.content.contains("2. Task B"));
+        assert!(r1.content.contains("3. Task C"));
+
+        // Full rebuild: new order is C, D, A; omitted B is removed from the active list.
+        let r2 = t
+            .execute(
+                r#"{"plan":[{"content":"Task C","status":"in_progress"},{"content":"Task D","status":"pending"},{"content":"Task A","status":"stable"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(r2.content.contains("1. Task C"), "{}", r2.content);
+        assert!(r2.content.contains("2. Task D"), "{}", r2.content);
+        assert!(r2.content.contains("3. Task A"), "{}", r2.content);
+        assert!(
+            !r2.content.contains("Task B"),
+            "omitted Task B must be removed by a full rebuild: {}",
+            r2.content
+        );
+        // Task A status was 'stable', so it should inherit 'completed'
+        assert!(
+            r2.content.contains("[√] 3. Task A"),
+            "Task A must remain completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_merges_duplicate_payload_titles() {
+        let t = TodoTool::new();
+        let r = t
+            .execute(
+                r#"{"plan":[{"content":"Same","status":"pending"},{"content":"Other"},{"content":"Same","status":"in_progress"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(r.content.matches("Same").count(), 1, "{}", r.content);
+        assert!(r.content.contains("[~] 1. Same"), "{}", r.content);
+        assert!(r.content.contains("2. Other"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn empty_plan_and_update_are_read_only() {
+        let t = TodoTool::new();
+        let _ = t.execute(r#"{"plan":["Keep"]}"#, &ctx()).await;
+        for args in [
+            r#"{"plan":[]}"#,
+            r#"{"update":[]}"#,
+            r#"{"plan":[{"content":""}]}"#,
+            r#"{"update":[{"content":""}]}"#,
+            r#"{"update":[{}]}"#,
+        ] {
+            let r = t.execute(args, &ctx()).await;
+            assert!(!r.is_error, "{args}: {}", r.content);
+            assert!(r.content.contains("Current task list:"), "{}", r.content);
+            assert!(r.content.contains("1. Keep"), "{}", r.content);
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_true_clears_only_when_explicit() {
+        let t = TodoTool::new();
+        let _ = t.execute(r#"{"plan":["Keep"]}"#, &ctx()).await;
+        let combined = t.execute(r#"{"clear":true,"plan":["Keep"]}"#, &ctx()).await;
+        assert!(combined.is_error, "clear must be used alone");
+        let cleared = t.execute(r#"{"clear":true}"#, &ctx()).await;
+        assert!(!cleared.is_error, "{}", cleared.content);
+        assert!(
+            cleared.content.contains("(no tasks)"),
+            "{}",
+            cleared.content
+        );
+    }
+
+    #[tokio::test]
+    async fn content_driven_batch_update_matches_by_title() {
+        let t = TodoTool::new();
+        let _ = t
+            .execute(
+                r#"{"plan":["Configure display name","Update tasks.py","Deploy daemon"]}"#,
+                &ctx(),
+            )
+            .await;
+
+        // Content-driven: complete "Update tasks.py" and advance "Deploy daemon", without needing IDs
+        let r = t
+            .execute(
+                r#"{"update":[{"content":"Update tasks.py","status":"completed"},{"content":"Deploy daemon","status":"in_progress"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("[√] 2. Update tasks.py"),
+            "{}",
+            r.content
+        );
+        assert!(
+            r.content.contains("[•] 3. Deploy daemon")
+                || r.content.contains("[~] 3. Deploy daemon"),
+            "{}",
+            r.content
+        );
+        assert!(
+            r.content.contains("[ ] 1. Configure display name"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn status_stable_protects_existing_status_during_refinement() {
+        let t = TodoTool::new();
+        let _ = t
+            .execute(
+                r#"{"plan":[{"content":"Audit auth","status":"completed"}]}"#,
+                &ctx(),
+            )
+            .await;
+
+        // Refine content with new_content while keeping status stable
+        let r = t
+            .execute(
+                r#"{"update":{"content":"Audit auth","new_content":"Audit auth & permissions","status":"stable"}}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("[√] 1. Audit auth & permissions"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_in_progress_self_heals_to_latest() {
+        let t = TodoTool::new();
+        let r = t
+            .execute(
+                r#"{"plan":[{"content":"Step 1","status":"in_progress"},{"content":"Step 2","status":"in_progress"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        // Only Step 2 should be in_progress; Step 1 should demote to pending
+        assert!(r.content.contains("[ ] 1. Step 1"), "{}", r.content);
+        assert!(r.content.contains("2. Step 2"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn update_supports_local_crud_operations() {
+        let t = TodoTool::new();
+        // 初始状态：A, B, C
+        let _ = t
+            .execute(
+                r#"{"plan":[{"content":"Task A","status":"pending"},{"content":"Task B","status":"pending"},{"content":"Task C","status":"pending"}]}"#,
+                &ctx(),
+            )
+            .await;
+
+        // 1. 局部改（Bare update：存在则改状态）
+        let r1 = t
+            .execute(
+                r#"{"update":[{"content":"Task A","status":"completed"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r1.is_error, "{}", r1.content);
+        assert!(r1.content.contains("[√] 1. Task A"));
+
+        // 2. 局部插（after 指向前置任务：插在 Task A 后面）
+        let r2 = t
+            .execute(
+                r#"{"update":[{"content":"Task A2","after":"Task A","status":"in_progress"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(r2.content.contains("2. Task A2"));
+        assert!(r2.content.contains("3. Task B"));
+
+        // 2b. 局部插（after_id 指向前置任务：插在当前第 2 项 Task A2 后面）
+        let r2b = t
+            .execute(
+                r#"{"update":[{"content":"Task A-mid","after_id":2,"status":"pending"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r2b.is_error, "{}", r2b.content);
+        assert!(r2b.content.contains("3. Task A-mid"));
+        assert!(r2b.content.contains("4. Task B"));
+
+        // 3. 局部增（裸 item 不存在，自动尾部追加）
+        let r3 = t
+            .execute(
+                r#"{"update":[{"content":"Task D","status":"pending"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r3.is_error, "{}", r3.content);
+        assert!(r3.content.contains("6. Task D"));
+
+        // 4. 局部删（status: delete）
+        let r4 = t
+            .execute(
+                r#"{"update":[{"content":"Task B","status":"delete"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r4.is_error, "{}", r4.content);
+        assert!(r4.content.contains("Removed: 'Task B'"));
+        assert!(!r4.content.contains(". Task B"));
+        assert!(r4.content.contains("1. Task A"));
+        assert!(r4.content.contains("2. Task A2"));
+        assert!(r4.content.contains("3. Task A-mid"));
+        assert!(r4.content.contains("4. Task C"));
+        assert!(r4.content.contains("5. Task D"));
+
+        // 5. 局部调序（after 指向前置任务：把已存在的 C 移动到 A 后面）
+        let r5 = t
+            .execute(
+                r#"{"update":[{"content":"Task C","after":"Task A","status":"stable"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r5.is_error, "{}", r5.content);
+        assert!(r5.content.contains("1. Task A"));
+        assert!(r5.content.contains("2. Task C"));
+        assert!(r5.content.contains("3. Task A2"));
+        assert!(r5.content.contains("4. Task A-mid"));
+        assert!(r5.content.contains("5. Task D"));
     }
 }

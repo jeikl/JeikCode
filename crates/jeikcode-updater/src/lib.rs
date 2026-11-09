@@ -130,6 +130,86 @@ pub enum UpgradeEvent {
     },
 }
 
+/// Stable failure categories for hosts that localize their own wording.
+///
+/// Classification happens where the failure is raised, so UIs never have to
+/// guess from error text. The raw [`anyhow`] chain stays available on
+/// [`UpgradeFailure::error`] for diagnostics (URLs, HTTP status, checksums).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpgradeFailureKind {
+    AlreadyLatest,
+    PackageManaged,
+    UnsupportedPlatform,
+    NotWritable,
+    ManifestFetch,
+    Download,
+    ChecksumMismatch,
+    Replace,
+    /// The new binary is installed but the host could not restart it.
+    Restart,
+    Other,
+}
+
+impl UpgradeFailureKind {
+    /// Stable wire code. WebUI catalogs key their wording as
+    /// `update.error.<code>`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AlreadyLatest => "already_latest",
+            Self::PackageManaged => "package_managed",
+            Self::UnsupportedPlatform => "unsupported_platform",
+            Self::NotWritable => "not_writable",
+            Self::ManifestFetch => "manifest_fetch",
+            Self::Download => "download",
+            Self::ChecksumMismatch => "checksum_mismatch",
+            Self::Replace => "replace",
+            Self::Restart => "restart",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Typed upgrade error: category for the UI plus the original chain for logs.
+#[derive(Debug)]
+pub struct UpgradeFailure {
+    pub kind: UpgradeFailureKind,
+    pub error: anyhow::Error,
+}
+
+impl UpgradeFailure {
+    pub fn new(kind: UpgradeFailureKind, error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            kind,
+            error: error.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for UpgradeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if f.alternate() {
+            write!(f, "{:#}", self.error)
+        } else {
+            write!(f, "{}", self.error)
+        }
+    }
+}
+
+impl std::error::Error for UpgradeFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+impl From<anyhow::Error> for UpgradeFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            kind: UpgradeFailureKind::Other,
+            error,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub version: String,
@@ -896,11 +976,16 @@ pub async fn run_upgrade_for_channel(
     current_version: String,
     force: bool,
     tx: mpsc::UnboundedSender<UpgradeEvent>,
-) -> Result<UpgradeSummary> {
+) -> Result<UpgradeSummary, UpgradeFailure> {
     if is_package_managed() {
-        return Err(anyhow!(PACKAGE_MANAGED));
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::PackageManaged,
+            anyhow!(PACKAGE_MANAGED),
+        ));
     }
-    let manifest = fetch_manifest_for_channel(channel).await?;
+    let manifest = fetch_manifest_for_channel(channel)
+        .await
+        .map_err(|e| UpgradeFailure::new(UpgradeFailureKind::ManifestFetch, e))?;
     run_upgrade_with_manifest(manifest, current_version, force, tx).await
 }
 
@@ -2142,22 +2227,46 @@ pub async fn fetch_manifest_from_url(url: &str) -> Result<Manifest> {
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(JEIKCODE_USER_AGENT)
         .build()?;
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("failed to fetch manifest from {}", url))?;
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "fetching manifest from {} returned HTTP {}",
-            url,
-            resp.status()
-        ));
+    // GitHub's release CDN intermittently answers a valid manifest URL with
+    // 5xx (504 on /releases/download/<tag>/latest.json has been observed).
+    // A user-triggered upgrade must not die on one such hiccup, so retry
+    // transport errors and 5xx/429 a couple of times before giving up.
+    const ATTEMPTS: u32 = 3;
+    let mut last_error: Option<anyhow::Error> = None;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(300 << (attempt - 1))).await;
+        }
+        let resp = match client.get(url).send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                last_error = Some(
+                    anyhow::Error::new(err).context(format!("failed to fetch manifest from {url}")),
+                );
+                continue;
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let err = anyhow!("fetching manifest from {url} returned HTTP {status}");
+            if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                last_error = Some(err);
+                continue;
+            }
+            return Err(err);
+        }
+        let body = match resp.text().await {
+            Ok(body) => body,
+            Err(err) => {
+                last_error = Some(anyhow::Error::new(err).context("reading manifest body"));
+                continue;
+            }
+        };
+        let clean_body = body.trim_start_matches('\u{feff}');
+        return serde_json::from_str(clean_body)
+            .with_context(|| format!("parsing manifest (body: {:?})", truncate(clean_body, 200)));
     }
-    let body = resp.text().await.context("reading manifest body")?;
-    let clean_body = body.trim_start_matches('\u{feff}');
-    serde_json::from_str(clean_body)
-        .with_context(|| format!("parsing manifest (body: {:?})", truncate(clean_body, 200)))
+    Err(last_error.unwrap_or_else(|| anyhow!("failed to fetch manifest from {url}")))
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
@@ -2183,27 +2292,38 @@ async fn download_and_verify(
     expected_size: u64,
     dest: &Path,
     progress: &mpsc::UnboundedSender<UpgradeEvent>,
-) -> Result<()> {
+) -> Result<(), UpgradeFailure> {
     use futures::StreamExt;
 
     if dest.exists() {
         let _ = std::fs::remove_file(dest);
     }
 
+    // The 600s cap bounds the whole transfer; connect/read timeouts bound the
+    // two ways a release download silently stalls at 0 bytes (unreachable host
+    // or a connection that opens but never streams). Without them the UI sits
+    // at 0% until the overall timeout fires 10 minutes later.
     let client = apply_proxy_policy(reqwest::Client::builder())
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(60))
         .timeout(std::time::Duration::from_secs(600))
         .user_agent(JEIKCODE_USER_AGENT)
-        .build()?;
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("GET {}", url))?;
+        .build()
+        .map_err(|e| UpgradeFailure::new(UpgradeFailureKind::Download, e))?;
+    let resp = client.get(url).send().await.map_err(|e| {
+        UpgradeFailure::new(
+            UpgradeFailureKind::Download,
+            anyhow::Error::new(e).context(format!("GET {url}")),
+        )
+    })?;
     if !resp.status().is_success() {
-        return Err(anyhow!(
-            "downloading {} returned HTTP {} — release may not exist for this platform",
-            url,
-            resp.status()
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::Download,
+            anyhow!(
+                "downloading {} returned HTTP {} — release may not exist for this platform",
+                url,
+                resp.status()
+            ),
         ));
     }
 
@@ -2227,7 +2347,12 @@ async fn download_and_verify(
     let mut written: u64 = 0;
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("reading response chunk")?;
+        let chunk = chunk.map_err(|e| {
+            UpgradeFailure::new(
+                UpgradeFailureKind::Download,
+                anyhow::Error::new(e).context("reading response chunk"),
+            )
+        })?;
         hasher.update(&chunk);
         file.write_all(&chunk)
             .await
@@ -2244,10 +2369,13 @@ async fn download_and_verify(
 
     if expected_size > 0 && written != expected_size {
         let _ = std::fs::remove_file(dest);
-        return Err(anyhow!(
-            "short download: got {} bytes, expected {}",
-            written,
-            expected_size
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::ChecksumMismatch,
+            anyhow!(
+                "short download: got {} bytes, expected {}",
+                written,
+                expected_size
+            ),
         ));
     }
 
@@ -2258,10 +2386,13 @@ async fn download_and_verify(
         || expected_sha256.eq_ignore_ascii_case("none");
     if !skip_hash && !got.eq_ignore_ascii_case(expected_sha256) {
         let _ = std::fs::remove_file(dest);
-        return Err(anyhow!(
-            "checksum mismatch — possible corruption or tampering.\n  expected: {}\n  got:      {}",
-            expected_sha256,
-            got
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::ChecksumMismatch,
+            anyhow!(
+                "checksum mismatch — possible corruption or tampering.\n  expected: {}\n  got:      {}",
+                expected_sha256,
+                got
+            ),
         ));
     }
 
@@ -2535,20 +2666,26 @@ pub async fn run_upgrade_with_manifest(
     current_version: String,
     force: bool,
     tx: mpsc::UnboundedSender<UpgradeEvent>,
-) -> Result<UpgradeSummary> {
+) -> Result<UpgradeSummary, UpgradeFailure> {
     if is_package_managed() {
-        return Err(anyhow!(PACKAGE_MANAGED));
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::PackageManaged,
+            anyhow!(PACKAGE_MANAGED),
+        ));
     }
     let current_version = current_version.as_str();
     let target = detect_target().ok_or_else(|| {
-        anyhow!(
-            "this platform has no published jeikcode release ({}/{})",
-            std::env::consts::OS,
-            std::env::consts::ARCH
+        UpgradeFailure::new(
+            UpgradeFailureKind::UnsupportedPlatform,
+            anyhow!(
+                "this platform has no published jeikcode release ({}/{})",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
         )
     })?;
     let exe = current_exe_path()?;
-    ensure_writable(&exe)?;
+    ensure_writable(&exe).map_err(|e| UpgradeFailure::new(UpgradeFailureKind::NotWritable, e))?;
     // Drop a leftover auto-update stage so `__sync_config` / the next
     // launch cannot paste an older package over this install.
     clear_pending_pointer();
@@ -2558,18 +2695,24 @@ pub async fn run_upgrade_with_manifest(
     });
 
     if !force && !version_is_newer(&manifest.version, current_version) {
-        return Err(anyhow!(
-            "{}: already on {} (latest is {}). Pass --force to reinstall.",
-            ALREADY_LATEST,
-            current_version,
-            manifest.version
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::AlreadyLatest,
+            anyhow!(
+                "{}: already on {} (latest is {}). Pass --force to reinstall.",
+                ALREADY_LATEST,
+                current_version,
+                manifest.version
+            ),
         ));
     }
 
     let entry = manifest.binaries.get(target).ok_or_else(|| {
-        anyhow!(
-            "manifest has no entry for target {} — this platform may not be in this release",
-            target
+        UpgradeFailure::new(
+            UpgradeFailureKind::UnsupportedPlatform,
+            anyhow!(
+                "manifest has no entry for target {} — this platform may not be in this release",
+                target
+            ),
         )
     })?;
 
@@ -2578,13 +2721,17 @@ pub async fn run_upgrade_with_manifest(
     download_and_verify(&url, &entry.sha256, entry.size, &download, &tx).await?;
 
     let _ = tx.send(UpgradeEvent::Replacing);
-    replace_binary(&download, &exe)?;
+    replace_binary(&download, &exe)
+        .map_err(|e| UpgradeFailure::new(UpgradeFailureKind::Replace, e))?;
     let expected_sha = entry.sha256.as_str();
     let got = file_sha256_hex(&exe)?;
     if !got.eq_ignore_ascii_case(expected_sha) {
-        return Err(anyhow!(
-            "replaced {} but sha256 is {got}, expected {expected_sha}",
-            exe.display()
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::ChecksumMismatch,
+            anyhow!(
+                "replaced {} but sha256 is {got}, expected {expected_sha}",
+                exe.display()
+            ),
         ));
     }
     // 顺带清理可能遗留的历史老版本 ~/.local/bin/jeikcode 孤儿副本
@@ -2649,11 +2796,16 @@ pub async fn run_upgrade(
     current_version: String,
     force: bool,
     tx: mpsc::UnboundedSender<UpgradeEvent>,
-) -> Result<UpgradeSummary> {
+) -> Result<UpgradeSummary, UpgradeFailure> {
     if is_package_managed() {
-        return Err(anyhow!(PACKAGE_MANAGED));
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::PackageManaged,
+            anyhow!(PACKAGE_MANAGED),
+        ));
     }
-    let manifest = fetch_manifest().await?;
+    let manifest = fetch_manifest()
+        .await
+        .map_err(|e| UpgradeFailure::new(UpgradeFailureKind::ManifestFetch, e))?;
     run_upgrade_with_manifest(manifest, current_version, force, tx).await
 }
 
@@ -3860,11 +4012,13 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "should fail on size mismatch");
-        let err = result.unwrap_err().to_string();
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, UpgradeFailureKind::ChecksumMismatch);
+        let msg = err.to_string();
         assert!(
-            err.contains("short download"),
+            msg.contains("short download"),
             "error should mention short download, got: {}",
-            err
+            msg
         );
         // Temp file must be cleaned up on failure.
         assert!(!dest.exists(), "partial download should be removed");
@@ -3906,11 +4060,13 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "should fail on checksum mismatch");
-        let err = result.unwrap_err().to_string();
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, UpgradeFailureKind::ChecksumMismatch);
+        let msg = err.to_string();
         assert!(
-            err.contains("checksum mismatch"),
+            msg.contains("checksum mismatch"),
             "error should mention checksum mismatch, got: {}",
-            err
+            msg
         );
         // Temp file must be cleaned up on failure.
         assert!(!dest.exists(), "corrupted download should be removed");
@@ -3983,12 +4139,39 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, UpgradeFailureKind::Download);
+        let msg = err.to_string();
         assert!(
-            err.contains("HTTP 404"),
+            msg.contains("HTTP 404"),
             "error should mention HTTP 404, got: {}",
-            err
+            msg
         );
+    }
+
+    /// The WebUI keys its wording as `update.error.<code>`; these strings are
+    /// a cross-crate contract and must not drift silently.
+    #[test]
+    fn upgrade_failure_wire_codes_are_stable() {
+        assert_eq!(UpgradeFailureKind::AlreadyLatest.as_str(), "already_latest");
+        assert_eq!(
+            UpgradeFailureKind::PackageManaged.as_str(),
+            "package_managed"
+        );
+        assert_eq!(
+            UpgradeFailureKind::UnsupportedPlatform.as_str(),
+            "unsupported_platform"
+        );
+        assert_eq!(UpgradeFailureKind::NotWritable.as_str(), "not_writable");
+        assert_eq!(UpgradeFailureKind::ManifestFetch.as_str(), "manifest_fetch");
+        assert_eq!(UpgradeFailureKind::Download.as_str(), "download");
+        assert_eq!(
+            UpgradeFailureKind::ChecksumMismatch.as_str(),
+            "checksum_mismatch"
+        );
+        assert_eq!(UpgradeFailureKind::Replace.as_str(), "replace");
+        assert_eq!(UpgradeFailureKind::Restart.as_str(), "restart");
+        assert_eq!(UpgradeFailureKind::Other.as_str(), "other");
     }
 
     #[test]
@@ -4003,6 +4186,7 @@ mod tests {
         let err = super::run_upgrade("v1.0.0".to_string(), true, tx)
             .await
             .expect_err("package-managed build must refuse self-upgrade");
+        assert_eq!(err.kind, UpgradeFailureKind::PackageManaged);
         assert!(err.to_string().contains(super::PACKAGE_MANAGED));
     }
 
@@ -4251,5 +4435,64 @@ mod tests {
         assert!(matches!(res_upgrade, Ok(None)));
 
         seed_offline_verdict(OfflineMode::Off, None);
+    }
+
+    /// A single transient 5xx from the release CDN must not abort an upgrade:
+    /// the manifest fetch retries and returns the next successful response.
+    #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
+    async fn manifest_fetch_retries_transient_5xx() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        seed_offline_verdict(OfflineMode::Off, None);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest.json"))
+            .respond_with(ResponseTemplate::new(504))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/latest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"version":"v7.5.0-beta.2","binaries":{}}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let manifest = fetch_manifest_from_url(&format!("{}/latest.json", server.uri()))
+            .await
+            .expect("a transient 504 should be retried");
+        assert_eq!(manifest.version, "v7.5.0-beta.2");
+    }
+
+    /// 4xx means the URL/permissions are wrong — retrying only burns time.
+    #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
+    async fn manifest_fetch_does_not_retry_client_errors() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        seed_offline_verdict(OfflineMode::Off, None);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest.json"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = fetch_manifest_from_url(&format!("{}/latest.json", server.uri()))
+            .await
+            .expect_err("404 must fail immediately");
+        assert!(err.to_string().contains("404"), "unexpected error: {err}");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "client errors must not be retried"
+        );
     }
 }

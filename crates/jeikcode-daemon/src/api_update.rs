@@ -93,6 +93,10 @@ pub struct UpdateStatus {
     pub bytes: u64,
     pub total: u64,
     pub error: Option<String>,
+    /// Stable `UpgradeFailureKind` code. The WebUI localizes
+    /// `update.error.<code>` and keeps `error` as the raw diagnostic detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 static CURRENT_UPDATE_STATUS: Mutex<Option<UpdateStatus>> = Mutex::new(None);
@@ -109,6 +113,7 @@ fn get_update_status() -> UpdateStatus {
             bytes: 0,
             total: 0,
             error: None,
+            error_code: None,
         })
 }
 
@@ -567,6 +572,7 @@ pub async fn execute_update(
             bytes: 0,
             total: 0,
             error: None,
+            error_code: None,
         });
 
         // WebUI is embedded in this binary. Remote browsers and the desktop
@@ -591,6 +597,11 @@ pub async fn execute_update(
                 bytes: 0,
                 total: 0,
                 error: Some(format!("更新二进制失败: {e}")),
+                error_code: Some(
+                    jeikcode_updater::UpgradeFailureKind::Other
+                        .as_str()
+                        .to_string(),
+                ),
             });
             IS_UPDATING.store(false, Ordering::SeqCst);
         }
@@ -626,9 +637,10 @@ async fn run_cli_update(
         } else {
             format!("v{ver}")
         };
-        let manifest_url =
-            format!("https://github.com/jeikl/JeikCode/releases/download/{tag}/latest.json");
-        match jeikcode_updater::fetch_manifest_from_url(&manifest_url).await {
+        // 走 updater 的 tag 清单解析，避免把下载源硬编码成 github.com：
+        // 用户配置的 JEIKCODE_UPDATE_DOWNLOAD_BASE / [config] update_download_base
+        // 镜像地址必须在这条路径上同样生效。
+        match jeikcode_updater::fetch_manifest_for_tag(&tag).await {
             Ok(manifest) => tokio::spawn(jeikcode_updater::run_upgrade_with_manifest(
                 manifest,
                 current_version,
@@ -665,6 +677,7 @@ async fn run_cli_update(
                     bytes,
                     total,
                     error: None,
+                    error_code: None,
                 });
             }
             jeikcode_updater::UpgradeEvent::Verifying
@@ -675,6 +688,7 @@ async fn run_cli_update(
                     bytes: 0,
                     total: 0,
                     error: None,
+                    error_code: None,
                 });
             }
             jeikcode_updater::UpgradeEvent::Done { exe, .. } => {
@@ -684,6 +698,7 @@ async fn run_cli_update(
                     bytes: 0,
                     total: 0,
                     error: None,
+                    error_code: None,
                 });
                 // File is already swapped in place. Restart so remote WebUI /
                 // serve picks up the new image (Unix exec; Windows delayed spawn).
@@ -720,6 +735,11 @@ async fn run_cli_update(
                         bytes: 0,
                         total: 0,
                         error: Some(format!("重启失败: {err}")),
+                        error_code: Some(
+                            jeikcode_updater::UpgradeFailureKind::Restart
+                                .as_str()
+                                .to_string(),
+                        ),
                     });
                     IS_UPDATING.store(false, Ordering::SeqCst);
                 });
@@ -731,14 +751,34 @@ async fn run_cli_update(
                     bytes: 0,
                     total: 0,
                     error: Some(err),
+                    error_code: None,
                 });
             }
             _ => {}
         }
     }
 
-    let _ = driver.await;
+    // 进度事件只描述 “正在做什么”；真正的失败通过 JoinHandle 的 Result 返回。
+    // 这里必须把它落成 error 终态：若丢弃 Result，清单拉取或下载失败后
+    // WebUI 轮询到的状态会永远停在 “downloading 0%”，既看不到原因也无法重试。
+    let outcome = match driver.await {
+        Ok(result) => result,
+        Err(join_err) => Err(jeikcode_updater::UpgradeFailure::new(
+            jeikcode_updater::UpgradeFailureKind::Other,
+            anyhow::anyhow!("update task terminated before reporting a result: {join_err}"),
+        )),
+    };
     IS_UPDATING.store(false, Ordering::SeqCst);
+    if let Err(failure) = outcome {
+        set_update_status(UpdateStatus {
+            status: "error".to_string(),
+            progress: 0,
+            bytes: 0,
+            total: 0,
+            error: Some(format!("{:#}", failure.error)),
+            error_code: Some(failure.kind.as_str().to_string()),
+        });
+    }
     Ok(())
 }
 

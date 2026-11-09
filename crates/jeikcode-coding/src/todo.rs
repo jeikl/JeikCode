@@ -37,16 +37,8 @@ fn format_completion_nudge(todos: &[TodoItem]) -> String {
 The following items are NOT completed yet:\n\
 {open_items}\n\n\
 Guidance:\n\
-1. If actually completed: Immediately batch-mark each one done via `todo_write` \
-(`{{\"actions\":[{{\"id\":<id>,\"status\":\"completed\"}}, ...]}}`). If you have already \
-delivered your final conclusion to the user and have no new content or further tasks, emit \
-ONLY the pure tool call to update status and finish your turn — do NOT repeat conversational \
-pleasantries, summaries, or duplicate closing text (such as \"the summary above is provided, \
-please review\").\n\
-2. If not done: Keep calling tools to actively work through the remaining tasks; when an open item needs no user confirmation, continue until it is complete.\n\
-3. If stuck or awaiting approval: You may only stop with open items if you genuinely need user \
-approval/input, are stuck, or the request is ambiguous — in that case say so briefly \
-(or call `request_user_input`)."
+1. If not done: If the user previously instructed you to complete all tasks, continue driving forward to finish the remaining tasks. If there are uncertainties, items requiring approval or confirmation, or tasks lacking clear intent to proceed, you may stop without completing the remaining tasks, briefly explain to the user, and call `request_user_input` when appropriate to inquire about user intent.\n\
+2. If actually completed: Mark all task items as completed via `update` (or emit a new `plan`), and conclude this turn with a concise single sentence."
     )
 }
 

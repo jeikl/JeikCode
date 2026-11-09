@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { checkUpdate, executeUpdate, getUpdateStatus, UpdateCheckResponse, UpdateStatus, UpdateVersionEntry } from '../api';
+import { upgradeErrorText } from '../i18n';
 import { copyTextToClipboard } from '../lib/clipboard';
 import { shouldReloadUpgradedPage } from '../lib/upgradeReload';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
@@ -306,6 +307,8 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
   };
 
   const hasUpdate = info?.has_update ?? false;
+  // 稳定失败码命中时直接展示自包含的多语言文案；未知码退回 “更新失败: 原始诊断”。
+  const localizedUpdateError = upgradeErrorText(t, status?.error_code);
   const canInstall =
     !isChecking &&
     !checkError &&
@@ -422,7 +425,11 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
                 />
               </div>
               <div class="update-progress-status-row">
-                <span class="update-progress-text">
+                <span
+                  class="update-progress-text"
+                  // 原始诊断（URL / HTTP 状态）保留在悬浮提示里，正文只用本地化文案。
+                  title={status?.status === 'error' ? status?.error || undefined : undefined}
+                >
                   {status?.status === 'downloading'
                     ? isDesktop
                       ? t('update.downloadingSetup', { percent: status?.progress ?? 0 })
@@ -434,7 +441,8 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
                       : status?.status === 'done'
                         ? t('update.readyCli')
                         : status?.status === 'error'
-                          ? t('update.failed', { error: status?.error || '' })
+                          ? (localizedUpdateError ??
+                            t('update.failed', { error: status?.error || '' }))
                           : t('update.downloading')}
                 </span>
                 <span class="update-progress-percent">

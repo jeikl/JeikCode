@@ -33,6 +33,12 @@ test('a daemon restart starts a new revision epoch and accepts the empty snapsho
   assert.deepEqual(decision.stamp, { instance: 'new-instance', revision: 1 });
 });
 
+test('a legacy local stamp accepts the first identified instance snapshot', () => {
+  const decision = arbitrateRevisionStamp({ revision: 12 }, { instance: 'daemon-a', revision: 3 });
+  assert.equal(decision.accept, true);
+  assert.deepEqual(decision.stamp, { instance: 'daemon-a', revision: 3 });
+});
+
 test('the same instance still rejects a lower revision', () => {
   const local = { instance: 'daemon-a', revision: 12 };
   const decision = arbitrateRevisionStamp(local, { instance: 'daemon-a', revision: 1 });

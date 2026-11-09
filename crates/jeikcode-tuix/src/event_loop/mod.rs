@@ -21048,13 +21048,7 @@ fn handle_agent_event(
             // matching lines and is a no-op).
             if is_todo_tool_name(&name) {
                 if success {
-                    if let Some(board) =
-                        jeikcode_capabilities::tools::read_todo_board(&ctx.current_session.id)
-                    {
-                        if !board.items.is_empty() {
-                            state.active_todos = Some(todo_progress_from_items(&board.items));
-                        }
-                    }
+                    sync_todo_panel_from_board(state, &ctx.current_session.id);
                 }
                 parse_todo_titles_into(&mut state.todo_titles, &output);
                 sync_todo_titles(state);
@@ -22322,14 +22316,7 @@ fn handle_agent_event(
                     state.call_id_to_batch.remove(&cid);
                 }
             }
-            if let Some(board) =
-                jeikcode_capabilities::tools::read_todo_board(&ctx.current_session.id)
-            {
-                if !board.items.is_empty() {
-                    state.active_todos = Some(todo_progress_from_items(&board.items));
-                    sync_todo_titles(state);
-                }
-            }
+            sync_todo_panel_from_board(state, &ctx.current_session.id);
         }
         AgentEvent::SubAgentDispatchStart { tasks } => {
             let n = tasks.len();
@@ -25032,6 +25019,21 @@ pub(crate) fn todo_progress_from_board(session_id: &str) -> Option<crate::render
         return None;
     }
     Some(todo_progress_from_items(&board.items))
+}
+
+/// Bind the footer todo panel to the session board, including the authoritative empty
+/// state. A cleared/closed board must remove the panel and its id→title cache; only
+/// non-empty boards should keep a panel.
+fn sync_todo_panel_from_board(state: &mut crate::state::UiState, session_id: &str) {
+    let items = jeikcode_capabilities::tools::read_todo_board(session_id)
+        .map(|board| board.items)
+        .unwrap_or_default();
+    state.active_todos = if items.is_empty() {
+        None
+    } else {
+        Some(todo_progress_from_items(&items))
+    };
+    sync_todo_titles(state);
 }
 
 #[cfg(test)]

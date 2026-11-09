@@ -992,6 +992,25 @@ test('parseTodosFromOutput extracts authoritative numbered list across various g
   assert.equal(parsed?.[5]?.status, 'completed');
 });
 
+test('parseTodosFromOutput treats canonical (no tasks) as an authoritative empty list', () => {
+  assert.deepEqual(parseTodosFromOutput('all tasks cleared\n\n(no tasks)'), []);
+  assert.equal(parseTodosFromOutput('some unrelated tool output'), null);
+});
+
+test('a clear result leaves no live doc, so stop archives nothing', () => {
+  const live = reduceLiveTodo(null, {
+    type: 'hydrate',
+    items: [{ content: 'stale task', status: 'in_progress' }],
+  });
+  assert.ok(live);
+  const cleared = reduceLiveTodo(live, {
+    type: 'result',
+    items: parseTodosFromOutput('all tasks cleared\n\n(no tasks)')!,
+  });
+  assert.equal(cleared, null);
+  assert.deepEqual(settleLiveTodo(cleared), { archive: null, next: null });
+});
+
 test('archived tool output does not resurrect the live panel', () => {
   const messages = [
     {

@@ -192,7 +192,10 @@ export function parseTodosFromOutput(output?: string | null): TodoItem[] | null 
       items.push({ content, status });
     }
   }
-  return items.length > 0 ? items : null;
+  if (items.length > 0) return items;
+  // Canonical empty-list rendering: an explicit authoritative empty snapshot.
+  // `null` means "could not parse"; `[]` means "the backend says the list is empty".
+  return lines.some((line) => line.trim() === '(no tasks)') ? [] : null;
 }
 
 /** Full-list plan shape. Returns null when args are not a valid plan. */
@@ -208,7 +211,7 @@ export function parseTodoPlan(args: string): TodoItem[] | null {
   // `actions` takes precedence over leftover `todos` field (same as Rust backend).
   if (Array.isArray(value.actions)) return null;
 
-  let todos = value.todos;
+  let todos = value.plan !== undefined ? value.plan : value.todos;
   // Tolerate a single-layer stringified array (same as Rust parse_todos).
   if (typeof todos === 'string') {
     try {
@@ -221,15 +224,20 @@ export function parseTodoPlan(args: string): TodoItem[] | null {
   if (!Array.isArray(todos)) return null;
   const out: TodoItem[] = [];
   for (const raw of todos) {
+    if (typeof raw === 'string') {
+      const content = normalizeTodoContent(raw);
+      if (content) {
+        out.push({ content, status: 'pending' });
+      }
+      continue;
+    }
     if (!isRecord(raw)) return null;
     const content = typeof raw.content === 'string' ? normalizeTodoContent(raw.content) : '';
     const status = typeof raw.status === 'string' ? parseStatus(raw.status) : null;
-    if (!content || !status) return null;
-    const next = upsertTodo(out, content, status, null);
-    out.length = 0;
-    out.push(...next.list);
+    if (!content) continue;
+    out.push({ content, status: status ?? 'pending' });
   }
-  return out;
+  return out.length > 0 ? out : null;
 }
 
 function applyOne(list: TodoItem[], v: Record<string, unknown>): TodoItem[] {

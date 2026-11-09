@@ -5942,7 +5942,7 @@ export function Chat({
         }
         if (todoResult) {
           const authoritative = parseTodosFromOutput(output);
-          if (authoritative && authoritative.length > 0) {
+          if (authoritative !== null) {
             sessionTodoList = authoritative;
           }
         }
@@ -8685,7 +8685,7 @@ export function Chat({
       todoBoardEmptyRef.current.has(targetSid);
     if (!suppressTodoReplay && event.type === 'tool_result' && isTodoTool(event.name)) {
       const fromOutput = parseTodosFromOutput(event.output);
-      if (fromOutput && fromOutput.length > 0) {
+      if (fromOutput !== null) {
         const doc = reduceLiveTodo(
           liveTodoDoc(targetSid),
           { type: 'result', callId: event.id, items: fromOutput },
@@ -9344,7 +9344,7 @@ export function Chat({
           const todoSid = activeIdRef.current;
           if (replayTodoFrame && todoSid && todoBoardEmptyRef.current.has(todoSid)) break;
           const authoritativeFromOutput = parseTodosFromOutput(event.output);
-          if (authoritativeFromOutput && authoritativeFromOutput.length > 0) {
+          if (authoritativeFromOutput !== null) {
             const doc = reduceLiveTodo(liveTodoDoc(todoSid), {
               type: 'result',
               callId: event.id,

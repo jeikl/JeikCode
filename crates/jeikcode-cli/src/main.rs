@@ -5009,7 +5009,7 @@ async fn run_upgrade_cli(
                 println!("  {}", msg.replace(&format!("{}: ", ALREADY_LATEST), ""));
                 Ok(())
             } else {
-                Err(e)
+                Err(e.into())
             }
         }
         Err(e) => Err(anyhow::anyhow!("upgrade task panicked: {}", e)),

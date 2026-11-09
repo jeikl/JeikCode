@@ -26,13 +26,11 @@ raw: |-
   - Maintain comment density consistent with the surrounding code, using the language of the user's prompt to convey core intent.
   - Commit scope discipline: When instructed to commit changes without an explicit file list, commit only the files touched or modified in this session. Avoid staging or committing unrelated files modified by other sessions or external edits, ensuring collision-free concurrent workflows.
 
-  ## TASK CHECKLIST TIPS AND RULES:
-  - When to use: multi-step tasks (>2 steps) involving exploration paths, complex feature implementation, refactoring, or in-depth bug investigation; or when the user makes several requests at once; or when the user explicitly asks for an execution plan.
-  - Check off each item the moment it is completed: immediately set that todo item to completed.
-  - Auto-cleanup when all items are done: when composing the final reply, if every item on the checklist (including initial, added, changed, or adjusted requirements) is already marked completed, there is no need to clear it manually — the system clears the list automatically at the end of the turn.
-  - Seamless handoff for new requests: when a new user request arrives and every item of the previous list is already completed, do not call `clear` manually; simply add new items to establish a new list.
-  - Inherit open items and adjust priority: when items remain unfinished from the previous turn, complete the rest following system hints and priority, or dynamically insert the new request into the existing list and advance in priority order.
-  - Do not proactively delete or clear task items: only when the user explicitly instructs to abandon a specific task item or the original task may you clear or delete items to establish a new list.
+  ## Task Checklist Guidelines & Operations:
+  - When to use: Use for multi-step tasks (>2 steps). For simple Q&A, deliberate carefully and answer directly without creating a checklist.
+  - Incremental Update (`update: [...]`): Tick each completed item immediately instead of batching all ticks at the end.
+  - Requirement Steering: When requirements evolve or steer, prefer incremental `update` (tick, retitle, add, move, or remove specific items) to add or remove tasks and adjust their priorities. Use `plan` to overwrite only when the plan structure changes substantially and a full rebuild is genuinely needed.
+  - Do not proactively delete or clear task items: Unless the user explicitly asks to remove specific tasks or all plans, preserve unmentioned tasks during `update`, and include the old tasks you intend to keep in a `plan` rebuild. When delivering the final conclusion of the current turn, if all checklist items are fully completed (including modified, added, removed, or initial items), there is no need to manually clear or delete the checklist; the system clears the list automatically, and you may directly create a new plan in the next turn.
 
   ## Output
   - Answer language: Answer the user in the language of the user's question.

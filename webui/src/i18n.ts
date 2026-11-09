@@ -971,6 +971,16 @@ const zh = {
   'update.downloadingCli': '正在更新版本 ({percent}%)…',
   'update.readyDesktop': '下载完成，即将启动安装程序并退出应用…',
   'update.readyCli': '更新已完成，正在重启服务…',
+  'update.error.already_latest': '当前已是最新版本，无需重复更新。',
+  'update.error.package_managed': '当前版本由系统包管理器维护，请使用对应的包管理器升级。',
+  'update.error.unsupported_platform': '当前平台没有可用的更新包。',
+  'update.error.not_writable': '安装目录不可写，请使用管理员权限或以用户身份重新安装。',
+  'update.error.manifest_fetch': '无法获取版本清单，请检查网络或更新源后重试。',
+  'update.error.download': '更新包下载失败，请检查网络后重试。',
+  'update.error.checksum_mismatch': '更新包校验失败，请重新下载。',
+  'update.error.replace': '替换程序文件失败，请关闭占用该文件的进程或使用管理员权限。',
+  'update.error.restart': '更新已完成，但自动重启失败，请手动启动 JeikCode。',
+  'update.error.other': '更新过程中出现未知错误，请重试。',
   'update.failed': '更新失败: {error}',
 
   // Config Sync
@@ -2125,6 +2135,16 @@ export const en: Record<MsgKey, string> = {
   'update.downloadingCli': 'Updating binary ({percent}%)…',
   'update.readyDesktop': 'Download complete. Launching installer and exiting…',
   'update.readyCli': 'Update completed. Restarting the service…',
+  'update.error.already_latest': 'You are already on the latest version.',
+  'update.error.package_managed': 'This build is managed by a system package manager; upgrade it there.',
+  'update.error.unsupported_platform': 'No update package is available for this platform.',
+  'update.error.not_writable': 'The install directory is not writable. Run with administrator privileges or reinstall under your user directory.',
+  'update.error.manifest_fetch': 'Could not fetch the release manifest. Check your network or update source and try again.',
+  'update.error.download': 'Failed to download the update package. Check your network and try again.',
+  'update.error.checksum_mismatch': 'The update package failed verification. Please download it again.',
+  'update.error.replace': 'Could not replace the program file. Close any process holding it or run with administrator privileges.',
+  'update.error.restart': 'The update completed but the automatic restart failed. Start JeikCode manually.',
+  'update.error.other': 'An unexpected error occurred during the update. Please try again.',
   'update.failed': 'Update failed: {error}',
 
   // Config Sync
@@ -2364,3 +2384,16 @@ export const messages: Record<Lang, Record<MsgKey, string>> = {
   de: { ...en, ...de } as Record<MsgKey, string>,
   ar: { ...en, ...ar } as Record<MsgKey, string>,
 };
+
+/**
+ * 将后端稳定的失败码翻译成当前语言；码未知时返回 null，由调用方回退到原始诊断文本。
+ * `upgradeErrorText` 只做查表，不解析错误字符串。
+ */
+export function upgradeErrorText(
+  t: (key: MsgKey, params?: Record<string, string | number>) => string,
+  code: string | null | undefined,
+): string | null {
+  if (!code) return null;
+  const key = `update.error.${code}` as MsgKey;
+  return key in messages.en ? t(key) : null;
+}

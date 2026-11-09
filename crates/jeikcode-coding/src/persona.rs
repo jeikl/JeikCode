@@ -183,23 +183,23 @@ In multi-step task execution and throughout interaction workflows, frequently us
 <example>
 user: Run the build and fix any type errors.
 assistant: I will first establish the task list and start the first step in one `todo_write` call:
-`todo_write {\"actions\":[{\"content\":\"Run the project build\"},{\"content\":\"Fix type errors\"},{\"id\":1,\"status\":\"in_progress\"}]}`
+`todo_write {\"plan\":[{\"content\":\"Run the project build\",\"status\":\"in_progress\"},{\"content\":\"Fix type errors\"}]}`
 - Run the project build
 - Fix type errors
 
 Now I will run the build using a terminal command...
-The build finished, revealing 3 concrete type errors. I append them and move the pointer in the same call:
-`todo_write {\"actions\":[{\"content\":\"Fix error A\"},{\"content\":\"Fix error B\"},{\"content\":\"Fix error C\"},{\"id\":1,\"status\":\"completed\"},{\"id\":3,\"status\":\"in_progress\"}]}`
+The build finished, revealing 3 concrete type errors. I update the list and move forward:
+`todo_write {\"update\":[{\"content\":\"Run the project build\",\"status\":\"completed\"}],\"plan\":[{\"content\":\"Run the project build\",\"status\":\"completed\"},{\"content\":\"Fix error A\",\"status\":\"in_progress\"},{\"content\":\"Fix error B\"},{\"content\":\"Fix error C\"}]}`
 
-I fix error A, verify it, and immediately mark it completed while moving the pointer in the same call:
-`todo_write {\"actions\":[{\"id\":3,\"status\":\"completed\"},{\"id\":4,\"status\":\"in_progress\"}]}`
-[Assistant continues this rhythm: finish and verify one step -> mark it completed and switch the pointer in the same call -> never save the ticks for the end]
+I fix error A, verify it, and immediately mark it completed while moving the pointer:
+`todo_write {\"update\":[{\"content\":\"Fix error A\",\"status\":\"completed\"},{\"content\":\"Fix error B\",\"status\":\"in_progress\"}]}`
+[Assistant continues this rhythm: finish and verify one step -> mark it completed and advance -> never save the ticks for the end]
 </example>
 
 <example>
 user: Help me implement a new feature to track and export user metrics.
 assistant: I will first plan this feature and start the first step in one `todo_write` call:
-`todo_write {\"actions\":[{\"content\":\"Research existing telemetry metrics\"},{\"content\":\"Design the collection architecture\"},{\"content\":\"Implement core metrics recording\"},{\"content\":\"Implement multi-format export\"},{\"id\":1,\"status\":\"in_progress\"}]}`
+`todo_write {\"plan\":[{\"content\":\"Research existing telemetry metrics\",\"status\":\"in_progress\"},{\"content\":\"Design the collection architecture\"},{\"content\":\"Implement core metrics recording\"},{\"content\":\"Implement multi-format export\"}]}`
 1. Research existing telemetry metrics in the codebase
 2. Design metrics collection architecture
 3. Implement core metrics recording logic

@@ -41,7 +41,10 @@ export function arbitrateRevisionStamp(
   let instance = local?.instance;
   let revision = local?.revision ?? 0;
   if (remote.instance) {
-    if (instance !== undefined && instance !== remote.instance) revision = 0;
+    // A local stamp without an instance came from a legacy daemon that did not send
+    // `daemon_instance_id`. The first identified instance is a new epoch: accept its
+    // snapshot even when its revision is lower than the legacy local watermark.
+    if (instance !== remote.instance) revision = 0;
     instance = remote.instance;
   }
   if (typeof remote.revision === 'number') {

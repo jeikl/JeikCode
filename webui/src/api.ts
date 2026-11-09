@@ -3400,6 +3400,8 @@ export interface UpdateStatus {
   bytes: number;
   total: number;
   error?: string | null;
+  /** Stable backend failure code; the dialog localizes `update.error.<code>`. */
+  error_code?: string | null;
 }
 
 export interface ConfigDiffItem {
