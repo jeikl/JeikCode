@@ -1317,8 +1317,6 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
                 .into(),
         Msg::ServeNoTokenSecurityWarning =>
             "[CRITICAL SECURITY WARNING] No access token configured!\nIf you have not set up a corresponding firewall, please ask JeikCode AI to help establish firewall rules and whitelist IPs; otherwise, your server can easily be compromised by hackers!".into(),
-        Msg::CodeExploreOpeningReminder =>
-            "Explore the codebase generously before answering. Use `code_explore` to accelerate code logic retrieval and quickly gain a complete overview. Fire concurrent calls when there is no dependency between them. If you are not running an exploration task, please ignore this sentence.".into(),
         Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
             format!("Model returned an empty response, retrying in {wait}s ({attempt}/{max})...")
         } else {

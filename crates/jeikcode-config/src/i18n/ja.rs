@@ -110,8 +110,6 @@ pub(super) fn ja(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::CmdDescProvider => "モデルプロバイダーとAPIアカウントの管理".into(),
         Msg::CmdDescQuit => "JeikCode を終了する".into(),
         Msg::StreamStalled => "esc でキャンセル".into(),
-        Msg::CodeExploreOpeningReminder =>
-            "なお、回答する前にコードベースを十分に探索してください。`code_explore` を使用してコードロジックの検索を高速化し、素早く全体像を把握してください。ツール呼び出し間に依存関係がない場合は、優先して並行して呼び出してください。探索タスクを実行していない場合は、この文を無視してください。".into(),
         Msg::CompactNothingShort => "（圧縮不要 — 会話が短い）\n".into(),
         Msg::CompactStarting => "（LLM 要約で圧縮中...）\n".into(),
         Msg::CompactInterrupted => "（圧縮は中断されました — coding runtime が変更または停止）\n".into(),

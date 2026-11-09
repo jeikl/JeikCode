@@ -215,10 +215,7 @@ async fn full_assembly_lifecycle() {
             "last user must be the real query, not a reminder"
         );
         // StatusReminderHook appends the date to the bottom of the real query; no
-        // independent synthetic user message is created. The opening `<strong-reminder>`
-        // exploration tail (CodeToolsFirstHook, added 2026-10-17) may sit AHEAD of it, so
-        // assert the real query owns BOTH tails instead of pinning a prefix that predates
-        // that feature.
+        // independent synthetic user message is created.
         let tail = &first.last().unwrap().text;
         assert!(
             tail.starts_with("the first task") && tail.contains("Current date"),
@@ -254,8 +251,7 @@ async fn full_assembly_lifecycle() {
     {
         let calls = calls1b.lock().unwrap();
         let first = &calls[0].0;
-        // The user block now carries the opening `<strong-reminder>` exploration tail, so
-        // match the task text itself rather than a fixed `<system-reminder>`-first prefix.
+        // Match the task text itself rather than a fixed `<system-reminder>`-first prefix.
         assert!(
             first.iter().any(|m| m.text.starts_with("the first task")),
             "respawn on the same parts carries the conversation"

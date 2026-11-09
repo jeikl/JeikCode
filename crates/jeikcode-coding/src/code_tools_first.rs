@@ -1,26 +1,19 @@
-//! First-query + wander-loop steering for `code_explore`.
+//! Wander-loop steering for `code_explore`.
 //!
-//! 1. **Opening tail** — on the first real user query, inject a
-//!    `<strong-reminder>` to that same user block (placed cleanly before any
-//!    `<system-reminder>` date block). On the wire, `<strong-reminder>` tags
-//!    are unwrapped, presenting a clean user prompt tail to the model:
-//!    "Explore the codebase generously before answering. Use `code_explore` to accelerate code logic retrieval and quickly gain a complete overview."
-//!    TUI / WebUI / IDEs strip it completely via
-//!    [`jeikcode_capabilities::session::user_text_for_display`].
-//! 2. **Wander meter** — a per-session counter over `grep` + `glob` +
-//!    `read_file` combined. Crossing 7 in a 10-call window appends the wander
-//!    reminder to **that tool result**. `code_explore` or a full window of 10
-//!    resets the counter to 0. Parallel tool `after` hooks serialize on the
-//!    session lock so the count stays exact.
+//! Per-session counter over `grep` + `glob` + `read_file` combined. Crossing 7 in
+//! a 10-call window appends the wander reminder to **that tool result**.
+//! `code_explore` or a full window of 10 resets the counter to 0. Parallel tool
+//! `after` hooks serialize on the session lock so the count stays exact.
 //!
 //! Enabled whenever `code_explore` is mounted. One [`CodeToolsFirstHook`]
-//! instance is both a [`LifecycleHooks`] and a [`ToolMiddleware`], owned by
-//! [`crate::parts::CodingParts`] so a `/model` respawn keeps the same meter.
+//! instance is both a [`LifecycleHooks`] (session-end cleanup) and a
+//! [`ToolMiddleware`], owned by [`crate::parts::CodingParts`] so a `/model`
+//! respawn keeps the same meter.
 
 use async_trait::async_trait;
 use jeikcode_capabilities::reminder::system_reminder;
 use jeikcode_kernel::hook::LifecycleHooks;
-use jeikcode_kernel::message::{Conversation, Role};
+use jeikcode_kernel::message::Conversation;
 use jeikcode_kernel::middleware::{AfterOutcome, ToolMiddleware};
 use jeikcode_kernel::tool::{Tool, ToolResult};
 use std::collections::HashMap;
@@ -30,28 +23,11 @@ use std::sync::{Mutex, OnceLock};
 const WANDER_WINDOW: u8 = 10;
 const WANDER_NUDGE_AT: u8 = 8;
 
-pub fn opening_body_for(locale: jeikcode_config::locale::Locale) -> std::borrow::Cow<'static, str> {
-    jeikcode_config::i18n::t_with(
-        locale,
-        jeikcode_config::i18n::Msg::CodeExploreOpeningReminder,
-    )
-}
-
 const WANDER_BODY: &str = "\
 Little `code_explore` so far. If this is still primary code exploration, split intent \
 and call `code_explore` in parallel.";
 
-const OPENING_NEEDLE: &str = "<strong-reminder>";
 const WANDER_NEEDLE: &str = "Little `code_explore` so far";
-
-fn has_opening_reminder(text: &str) -> bool {
-    text.contains(OPENING_NEEDLE)
-        || text.contains("`code_explore`")
-        || text.contains("加快代码逻辑检索速度")
-        || text.contains("accelerate code logic retrieval")
-        || text.contains("tăng tốc độ truy xuất logic mã")
-        || text.contains("Explore the codebase generously")
-}
 
 fn wander_meters() -> &'static Mutex<HashMap<String, u8>> {
     static MAP: OnceLock<Mutex<HashMap<String, u8>>> = OnceLock::new();
@@ -124,37 +100,6 @@ impl CodeToolsFirstHook {
 
 #[async_trait]
 impl LifecycleHooks for CodeToolsFirstHook {
-    async fn turn_start(&self, convo: &mut Conversation) {
-        if !self.enabled {
-            return;
-        }
-        let real_users = convo
-            .messages
-            .iter()
-            .filter(|m| m.role == Role::User && !m.synthetic)
-            .count();
-        if real_users != 1 {
-            return;
-        }
-        let Some(query) = convo
-            .messages
-            .iter_mut()
-            .rfind(|m| m.role == Role::User && !m.synthetic)
-        else {
-            return;
-        };
-        if has_opening_reminder(&query.text) {
-            return;
-        }
-        let locale = jeikcode_config::i18n::current_locale();
-        let body = opening_body_for(locale);
-        jeikcode_capabilities::reminder::insert_strong_reminder_before_system_reminders(
-            &mut query.text,
-            &body,
-            OPENING_NEEDLE,
-        );
-    }
-
     async fn session_end(&self, _convo: &Conversation) {
         drop_session(&self.session_key);
     }
@@ -179,15 +124,8 @@ impl ToolMiddleware for CodeToolsFirstHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jeikcode_kernel::message::Message;
     use jeikcode_kernel::tool::ToolContext;
     use serde_json::json;
-
-    fn convo(msgs: Vec<Message>) -> Conversation {
-        let mut c = Conversation::default();
-        c.messages = msgs;
-        c
-    }
 
     struct Named(&'static str);
 
@@ -293,91 +231,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_appends_to_the_first_user_block() {
-        let hook = CodeToolsFirstHook::new(true, Some("sess-open"));
-        let mut c = convo(vec![Message::user("how does auth work")]);
-        hook.turn_start(&mut c).await;
-        assert_eq!(c.messages.len(), 1, "must not insert a separate user block");
-        assert!(!c.messages[0].synthetic);
-        assert!(
-            c.messages[0]
-                .text
-                .starts_with("how does auth work\n\n<strong-reminder>")
-                && c.messages[0].text.contains("code_explore")
-                && c.messages[0].text.contains("concurrent calls"),
-            "{}",
-            c.messages[0].text
-        );
-        // Wire unwrap gives clean user tail
-        let wire = jeikcode_capabilities::reminder::unwrap_strong_reminders(&c.messages[0].text);
-        assert!(!wire.contains("<strong-reminder>"));
-        assert!(wire.contains("code_explore"));
-        // Display strip gives original user prompt
-        let display = jeikcode_capabilities::reminder::strip_injected_reminders_for_display(
-            &c.messages[0].text,
-        );
-        assert_eq!(display, "how does auth work");
-        hook.session_end(&c).await;
-    }
-
-    #[tokio::test]
-    async fn opening_is_idempotent_and_sits_before_an_existing_date_tail() {
-        let hook = CodeToolsFirstHook::new(true, Some("sess-date"));
-        let mut c = convo(vec![Message::user(
-            "hi\n\n<system-reminder>\nCurrent date: 2026-06-15 (Mon)\n</system-reminder>",
-        )]);
-        hook.turn_start(&mut c).await;
-        hook.turn_start(&mut c).await;
-        let text = &c.messages[0].text;
-        assert_eq!(
-            text.matches("<strong-reminder>").count(),
-            1,
-            "strong-reminder once: {text}"
-        );
-        assert_eq!(
-            text.matches("<system-reminder>").count(),
-            1,
-            "date once: {text}"
-        );
-        assert!(
-            text.find("<strong-reminder>").unwrap() < text.find("<system-reminder>").unwrap(),
-            "strong-reminder must sit before date tail: {text}"
-        );
-        // Wire unwrap leaves clean user tail before system-reminder
-        let wire = jeikcode_capabilities::reminder::unwrap_strong_reminders(text);
-        assert!(!wire.contains("<strong-reminder>"));
-        assert!(wire.contains("hi\n\n"));
-        assert!(wire
-            .contains("\n\n<system-reminder>\nCurrent date: 2026-06-15 (Mon)\n</system-reminder>"));
-        hook.session_end(&c).await;
-    }
-
-    #[tokio::test]
-    async fn opening_skips_later_user_turns_and_unmounted_tool() {
-        let hook = CodeToolsFirstHook::new(true, Some("sess-later"));
-        let mut c = convo(vec![
-            Message::user("first"),
-            Message::assistant("ok", vec![]),
-            Message::user("again"),
-        ]);
-        hook.turn_start(&mut c).await;
-        assert_eq!(c.messages[2].text, "again");
-
+    async fn unmounted_hook_does_not_nudge() {
         let off = CodeToolsFirstHook::new(false, Some("sess-off"));
-        let mut d = convo(vec![Message::user("hi")]);
-        off.turn_start(&mut d).await;
-        assert_eq!(d.messages[0].text, "hi");
-        hook.session_end(&c).await;
-        off.session_end(&d).await;
-    }
-
-    #[tokio::test]
-    async fn frontier_also_gets_the_opening_tail() {
-        let hook = CodeToolsFirstHook::new(true, Some("sess-frontier"));
-        let mut c = convo(vec![Message::user("hi")]);
-        hook.turn_start(&mut c).await;
-        assert!(c.messages[0].text.contains(OPENING_NEEDLE));
-        hook.session_end(&c).await;
+        for _ in 0..8 {
+            let out = after_named(&off, "grep", "hits").await;
+            assert!(!out.contains(WANDER_NEEDLE), "{out}");
+        }
+        off.session_end(&Conversation::default()).await;
     }
 
     #[tokio::test]

@@ -110,8 +110,6 @@ pub(super) fn ar(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::CmdDescProvider => "إدارة مزودي النماذج وحسابات API".into(),
         Msg::CmdDescQuit => "إنهاء JeikCode".into(),
         Msg::StreamStalled => "اضغط على esc للإلغاء".into(),
-        Msg::CodeExploreOpeningReminder =>
-            "بالإضافة إلى ذلك، يرجى استكشاف قاعدة الكود بدقة قبل الإجابة. استخدم `code_explore` لتسريع استرجاع منطق الكود والحصول سريعًا على نظرة شاملة. عندما لا يكون هناك اعتماد متبادل بين استدعاءات الأدوات، قم بتشغيلها بالتوازي كأولوية. إذا لم تكن تنفذ مهمة استكشاف، يمكنك تجاهل هذه الجملة.".into(),
         Msg::CompactNothingShort => "(لا شيء لضغطه — المحادثة قصيرة)\n".into(),
         Msg::CompactStarting => "(جارٍ الضغط بملخص LLM...)\n".into(),
         Msg::CompactInterrupted => "(تمت مقاطعة الضغط — تغيّر coding runtime أو توقف)\n".into(),

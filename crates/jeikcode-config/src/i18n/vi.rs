@@ -1248,8 +1248,6 @@ Msg::CmdDescBackground => "Chạy tác vụ một lần trong ngữ cảnh nền
                 .into(),
         Msg::ServeNoTokenSecurityWarning =>
             "[CẢNH BÁO AN NINH NGHIÊM TRỌNG] Phát hiện bạn chưa sử dụng mã truy cập (Token)!\nNếu hiện tại chưa thiết lập tường lửa tương ứng, vui lòng nhờ AI của JeikCode hỗ trợ thiết lập tường lửa và danh sách IP trắng, nếu không máy chủ của bạn rất dễ bị hacker xâm nhập!".into(),
-        Msg::CodeExploreOpeningReminder =>
-            "Ngoài ra, hãy khám phá kỹ lưỡng cơ sở mã trước khi trả lời. Sử dụng `code_explore` để tăng tốc độ truy xuất logic mã nhằm nhanh chóng nắm bắt bức tranh toàn cảnh. Kích hoạt các lệnh gọi đồng thời khi không có sự phụ thuộc lẫn nhau. Nếu bạn không thực hiện nhiệm vụ khám phá, vui lòng bỏ qua câu này.".into(),
         // Kernel liveness/retry advisories: fall back to the English catalog.
         Msg::AgentRetryEmpty { .. }
         | Msg::AgentRetryThinking { .. }

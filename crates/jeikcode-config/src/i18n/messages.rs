@@ -1727,9 +1727,6 @@ pub enum Msg<'a> {
     ConhostScrollHint,
     /// Critical security warning shown in serve banner when bound to 0.0.0.0 without token.
     ServeNoTokenSecurityWarning,
-    /// Tail reminder injected on the first user turn to encourage exploring via code_explore.
-    CodeExploreOpeningReminder,
-
     // ── kernel liveness / retry advisories (yellow notices) ──
     /// Empty 200 from the gateway; the kernel re-issues the request.
     AgentRetryEmpty {

@@ -2270,15 +2270,11 @@ mod tests {
         if first_turn_path.exists() {
             let first_turn_content = std::fs::read_to_string(&first_turn_path).unwrap();
             assert!(
-                first_turn_content.contains("Explore the codebase generously before answering")
-                    || first_turn_content
-                        .to_lowercase()
-                        .contains("explore the codebase generously before answering"),
-                "code_tools_first.rs must contain generous exploration"
-            );
-            assert!(
-                !first_turn_content.contains("Prioritize `code_explore` and `repo_map`"),
-                "code_tools_first.rs must NOT contain obsolete prompt 'Prioritize `code_explore` and `repo_map`'"
+                !first_turn_content.contains("CodeExploreOpeningReminder")
+                    && !first_turn_content.contains("opening_body_for")
+                    && !first_turn_content
+                        .contains("Explore the codebase generously before answering"),
+                "code_tools_first.rs must not inject a first-turn exploration tail"
             );
         }
     }

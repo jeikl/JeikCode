@@ -110,8 +110,6 @@ pub(super) fn ru(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::CmdDescProvider => "Управление провайдерами и аккаунтами API".into(),
         Msg::CmdDescQuit => "Выйти из JeikCode".into(),
         Msg::StreamStalled => "нажмите esc для отмены".into(),
-        Msg::CodeExploreOpeningReminder =>
-            "Кроме того, перед ответом тщательно исследуйте кодовую базу. Используйте `code_explore`, чтобы ускорить поиск логики кода и быстро получить полную картину. Если между вызовами инструментов нет зависимостей, вызывайте их параллельно. Если вы не выполняете задачу исследования, проигнорируйте эту фразу.".into(),
         Msg::CompactNothingShort => "(нечего сжимать — разговор короткий)\n".into(),
         Msg::CompactStarting => "(сжатие с помощью LLM-сводки...)\n".into(),
         Msg::CompactInterrupted => "(сжатие прервано — coding runtime изменился или остановлен)\n".into(),

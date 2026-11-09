@@ -769,8 +769,8 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     hooks.push(Arc::new(
         jeikcode_capabilities::session::WriteStateHook::new(),
     ));
-    // Opening-turn code_explore tail (appended to the first real user block, like
-    // the date reminder) + wander-meter middleware registered in `assemble`.
+    // Per-session code_explore wander meter: the tool middleware is registered in
+    // `assemble`, and this lifecycle handle keeps the session-end cleanup.
     let code_tools_first = Arc::new(crate::code_tools_first::CodeToolsFirstHook::new(
         code_explore_mounted,
         session.as_ref().map(|b| b.id.as_str()),

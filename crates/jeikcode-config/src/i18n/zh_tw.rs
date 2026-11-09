@@ -110,8 +110,6 @@ pub(super) fn zh_tw(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::CmdDescProvider => "管理模型提供商與 API 帳號".into(),
         Msg::CmdDescQuit => "結束 JeikCode 對話".into(),
         Msg::StreamStalled => "按 esc 可取消".into(),
-        Msg::CodeExploreOpeningReminder =>
-            "還有，在回答前請充分探索程式碼庫。使用 `code_explore` 加快程式碼邏輯檢索速度以便快速獲得全貌。當工具調用之間無依賴時，優先並行發起調用。如果你沒在執行探索任務，請忽略此句即可。".into(),
         Msg::CompactNothingShort => "（無需壓縮 — 對話較短）\n".into(),
         Msg::CompactStarting => "（正在使用 LLM 摘要進行壓縮...）\n".into(),
         Msg::CompactInterrupted => "（壓縮已中斷 — coding runtime 已變更或停止）\n".into(),
