@@ -26,7 +26,7 @@
 - **[Tool Search & Approval] Two-switch search visibility for grep and glob**:
   - `.gitignore` / `.ignore` no longer hide search results; the default filter is now the curated `.codegraphignore` noise list plus build/cache/dependency directories.
   - `include_ignored=true` opens build/cache/dependency paths; `include_logs=true` independently opens log contents for grep; `include_sensitive=true` opens credential paths and requires approval outside Auto mode.
-  - `glob` includes log paths by default; `grep` skips log contents by default. Zero-match responses explain the filter and point to the correct switch (`include_ignored` or `include_logs`).
+  - `glob` includes log paths by default; `grep` skips log contents by default. Zero-match responses explain the filter and independently surface noise, log, and sensitive hints.
   - Existing user configs remove the legacy standalone `*.log` line from `.codegraphignore`; custom rules are preserved, so `include_logs` reliably controls log visibility.
   - `read` now reuses the same `.codegraphignore.graph` sensitive rules through `SensitivePathGate` (Build prompts, Auto continues).
   - Truncated results return shape-aware guidance (`files_with_matches`, `count`, narrower path/glob, or a focused `read` window) instead of only a raw truncation notice.
@@ -37,21 +37,82 @@
   - Argument normalization no longer rewrites path field names; it only repairs hunk shapes, so model calling habits are not polluted.
   - Edit coalescing, recovery parsing, approval target extraction, and worker scope checks recognize the same aliases.
 
+- **[Skills & User Commands Architecture] Complete separation of model skill guides and slash commands**:
+  - `SkillRegistry` now loads only `*/SKILL.md` / `*/skill.md` (case-insensitive); flat `*.md` files are user commands, not skills.
+  - Shared `UserCommandRegistry` supports `$ARGUMENTS`, `$N`, and inline shell command expansion; covers `$JEIKCODE_HOME`, `.claude`, `.agents`, and project `.jeikcode` directories.
+  - TUI `/skills <name> <task>` dispatches `use_skill(<canonical>)\n\n<task>` instead of expanding guide templates locally.
+  - Daemon introduces `/commands` endpoints to resolve slash commands before session persistence, and the WebUI slash menu directly queries available commands.
+
+- **[WebUI Timeline, Replay & Rendering] Causal stream ordering and boundary-anchored replay**:
+  - Streaming assistant rounds now track monotonic session sequence numbers (`streamSeq`), inserting new live rows before later rounds to prevent late watch subscribers from temporarily misordering turns.
+  - Assistant replay frames are anchored before the succeeding user boundary, preventing old answers from flipping below new questions after expanded window replays.
+  - Cache schema upgraded to invalidate legacy inverted derived canvases and safely reload from the server.
+
+- **[WebUI Mobile & Composer Experience] Virtual keyboard docking, layout stability, and input history**:
+  - Added `interactive-widget=resizes-content` viewport declaration for mobile Chromium, dynamically synchronizing visual viewport height and eliminating gaps above mobile keyboards.
+  - Up/Down command recall now triggers only when the composer is empty or fully selected, preventing accidental overwrites of drafts and partial edits.
+  - Input history is recorded for all delivered prompts across both new and existing sessions, keyed by unique session ID.
+  - Pinned timeline measurements prevent transient `height:auto` textarea collapses from losing auto-scroll bottom anchoring; contained inline editor scroll chaining.
+
+- **[Session Checklist & State Synchronization] Authoritative empty todo boards across reconnect**:
+  - TodoBoard always serializes `todos` (including empty lists) and emits atomic items and revisions.
+  - Board clear or completion actions advance the revision, and `daemon_instance_id` allows clients to reset revision watermarks on daemon restart.
+  - WebUI arbitrates todo snapshots strictly by `(daemon instance, revision)`, ignoring stale replayed todo frames after authoritative empty board states.
+
+- **[Windows & Shell Integration] In-process Shell APIs for file revealing and opening**:
+  - Replaced external `explorer.exe` and `cmd.exe /c start` process spawning with in-process Windows Shell COM STA calls (`SHOpenFolderAndSelectItems` and `ShellExecuteW`).
+  - Dispatches asynchronously in detached threads so daemon HTTP handlers return immediately, and failures are silently handled without noisy toasts.
+
+- **[Release Notes & Updater] Complete release notes retrieval**:
+  - Repaired edge-level announcement truncations (~10k characters) by enriching Cloudflare responses with GitHub Atom feeds and REST API fallbacks, ensuring full changelog dialog rendering.
+
+- **[Prompt & Persona Modernization] Explore reminder cleanup and environment facts**:
+  - Removed first-turn forced `code_explore` reminder injection from `CodeToolsFirstHook` along with localized string translations.
+  - Aligned system environment facts and updated test assertions for prompt structures.
+
 ---
 
-- **[工具搜索与审批] grep / glob 双开关搜索可见性**：
+- **[工具搜索与审批] grep / glob 双开关搜索可见性与日志规则迁移**：
   - `.gitignore` / `.ignore` 不再隐藏搜索结果；默认过滤改为 `.codegraphignore` 噪声规则加构建/缓存/依赖目录。
-  - `include_ignored=true` 打开构建/缓存/依赖路径；`include_logs=true` 独立打开 grep 的日志内容；`include_sensitive=true` 打开敏感凭据路径，Build 模式需审批，Auto 自动继续。
-  - `glob` 默认包含日志路径；`grep` 默认跳过日志内容。零匹配时会解释过滤原因并提示正确的开关（`include_ignored` 或 `include_logs`）。
-  - 已有用户配置会自动移除 `.codegraphignore` 中遗留的单独 `*.log` 行，保留自定义规则，确保 `include_logs` 能可靠控制日志可见性。
-  - `read` 通过 `SensitivePathGate` 复用同一套 `.codegraphignore.graph` 敏感规则（Build 弹审核，Auto 自动继续）。
-  - 结果被截断时返回按形状区分的引导（`files_with_matches`、`count`、缩小 path/glob，或使用聚焦的 `read` 窗口），不再只给裸截断提示。
-  - 删除 `before_context` / `after_context`，统一由 `context` 控制前后文。
+  - `include_ignored=true` 打开构建/缓存/依赖路径；新增独立的 `include_logs=true` 开关控制 grep 日志内容可见性（`glob` 默认包含日志路径，`grep` 默认跳过日志内容）。
+  - `include_sensitive=true` 打开敏感凭据路径，Build 模式需审批，Auto 自动继续；`read` 通过 `SensitivePathGate` 复用同一套敏感路径规则。
+  - 零匹配时敏感、日志、噪声提示独立展示；截断时提供区分形态的针对性引导（`files_with_matches`、`count`、缩小范围或聚焦 `read`）；删除 `before_context` / `after_context` 统一由 `context` 控制前后文。
+  - 启动时自动从已有 `.codegraphignore` 中移除遗留的 `*.log` 单独规则，确保升级用户日志搜索开关平滑生效。
 
-- **[EDIT 工具] 对外 `path`，内部兼容 `file_path`**：
-  - edit schema 只暴露 `path`；`file_path`、`filePath`、`target_file`、`filename` 仅作为内部 serde 别名。
-  - 参数归一化不再改写路径字段名，只修复 hunk 形状，避免污染模型调用习惯。
-  - edit 合并、恢复解析、审批目标提取与子代理作用域检查识别同一组别名。
+- **[EDIT 工具] 对外暴露规范 path 并保持旧别名兼容**：
+  - edit schema 仅对外暴露 `path`；内部对 `file_path`、`filePath`、`target_file`、`filename` 保持 serde 别名兼容。
+  - 参数归一化不再改写路径字段名，避免污染模型调用习惯；edit 合并、恢复解析、审批目标提取与子代理作用域检查统一识别同一组别名。
+
+- **[技能与用户命令架构] 模型技能与用户斜杠命令彻底解耦**：
+  - `SkillRegistry` 严格仅加载 `*/SKILL.md` / `*/skill.md`；扁平 `*.md` 归为用户命令，不再当作技能；移除冗余的 `ListSkillsTool` 与 `allowed_tools`。
+  - 新增共享 `UserCommandRegistry`，支持 `$ARGUMENTS`、`$N` 与内嵌 shell 命令渲染，统一覆盖 `$JEIKCODE_HOME`、`.claude`、`.agents` 及项目 `.jeikcode` 路径。
+  - TUI `/skills <名称> <任务>` 改为直接提交 `use_skill(<规范名>)\n\n<任务>`；新增 daemon `/commands` 端点并在持久化前展开斜杠命令，WebUI 斜杠菜单直接拉取并展示用户命令。
+
+- **[WebUI 画布、回放与渲染] 流式因果排序与跨轮次回放锚定**：
+  - 流式助手轮次引入单调递增的 `streamSeq` 序列号，新 live 行插入到对应轮次之前，避免较晚加入的订阅者导致思考/正文/工具行短暂篡位或倒挂。
+  - 助手回放帧以 user 边界为锚点，新提问到达时先处理 user 再回插上一轮暂存的 assistant 帧，彻底解决窗口展开回放导致旧回答倒挂在下一轮新提问之后的问题。
+  - 升级缓存 schema，安全失效旧版本产生的不一致本地派生画布并自动重新从服务端同步。
+
+- **[WebUI 移动端与输入台体验] 虚拟键盘沉浸贴合、布局防抖与输入历史**：
+  - 移动端声明 `interactive-widget=resizes-content`，动态映射视口高度并消除输入台与虚拟键盘之间的死区，键盘弹起时清零底部安全区并隐藏建议胶囊。
+  - 输入历史上下键召回仅在输入框为空或全文选中时触发，输入草稿或局部选中时保持原生光标移动，防止误覆盖正在编辑的文本。
+  - 所有成功投递的提问均记录输入历史，支持已有会话上下翻阅；新建会话首条输入在完成项目绑定后保持稳定。
+  - 输入框高度自适应计算期间冻结消息视口，防止 `height:auto` 瞬间展开导致丢失底部贴合；隔离回溯编辑器滚动链。
+
+- **[待办任务与状态同步] 空会话任务清单断网重连与权威同步**：
+  - 服务端始终序列化 `todos`（包括空数组），原子化返回待办项与 revision，关闭或清空时递增 revision，并提供 `daemon_instance_id` 用于跨重启重置仲裁水位。
+  - WebUI 统一在 `getSession` 边界归一化，按 (daemon 实例, revision) 仲裁快照；权威空板后丢弃 replay 的旧 todo 帧，防止旧清单死灰复燃。
+
+- **[Windows 与系统集成] 进程内 Windows Shell API 唤起**：
+  - 将 daemon 中外部拉起 `explorer.exe` 和 `cmd.exe /c start` 改为进程内 Windows Shell COM STA 调用（`SHOpenFolderAndSelectItems` 与 `ShellExecuteW`）。
+  - 后台分离线程异步派发，接口瞬间返回，并静默忽略非致命失败，不再弹出无意义的错误气泡。
+
+- **[版本更新与公告] 完整更新说明回源防截断**：
+  - 识别并修复 Cloudflare 边缘公告约 10k 字符处的截断问题，通过 GitHub Atom feed 与 REST API 动态回源完整正文，确保更新弹窗完整展示版本日志。
+
+- **[提示词与人格现代化] 探查提醒清理与环境事实对齐**：
+  - 移除 `CodeToolsFirstHook` 在首轮对话末尾强制注入的 `code_explore` 探查提醒，清理全部 11 种语言的相关文案。
+  - 对齐系统提示词环境事实结构与相关单测断言。
 
 ## v7.5.0-beta.0 (2026-11-08)
 
