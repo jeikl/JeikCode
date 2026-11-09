@@ -1,9 +1,9 @@
 # JeikCode v7.5.0 发版总结报告
 
-> 生成日期：2026-11-08  
-> 代码基线：`beta` @ `0e2c2f0f4`  
-> 对比基线：`main` @ `3eefee292`；最后发布标签 `v7.3.2-beta.1`；最后稳定标签 `v7.2.8`  
-> 结论：这是一次以「会话画布/持久化/运行时权威」超大重构为主干、叠加转向状态机、历史去重、版本仲裁、Provider Schema、EDIT 加固、上下文预算与多项前端体验修复的稳定版发布。代码已在 beta 通过 CI 与完整发布构建；`v7.5.0-beta.0` 的 GitHub Release 公告与 `CHANGELOG.md` 已在 2026-11-08 补充更新，覆盖 main 上 11 个未发版提交（含超大重构）与 beta 13 个后续提交。
+> 生成日期：2026-11-09（稳定版收口更新）  
+> 代码基线：`beta` @ `260946b50`；release commit 之后打 tag `v7.5.0`  
+> 对比基线：`main` @ `3eefee292`（上一次 main 主线基线）；最后稳定标签 `v7.2.8`  
+> 结论：这是一次以「会话画布/持久化/运行时权威」超大重构为主干、叠加转向状态机、清单协议、历史去重、版本仲裁、Provider Schema、EDIT 加固、上下文预算、工具搜索策略与多项前端体验修复的稳定版发布。`v7.5.0` 把 7.3.x / 7.5.0 的全部 beta 能力收口到稳定通道，并让 `main` 与 `beta` 指向同一提交。
 
 ---
 
@@ -13,16 +13,16 @@
 
 | 对比口径 | 提交数 | 文件数 | 新增 | 删除 | 说明 |
 | :--- | ---: | ---: | ---: | ---: | :--- |
-| `main` → `beta` | 13 | 90 | 5,617 | 937 | beta 在 main 之上的最后一段后续修复 |
-| `v7.3.2-beta.1` → `beta` | 24 | 291 | 43,475 | 17,831 | 上一次已发布标签之后、本次稳定版应交付的完整增量 |
-| `v7.2.8` → `beta` | 178 | 426 | 91,438 | 25,115 | 若稳定版说明需要覆盖「上一个稳定版以来」的全部变更 |
+| `main` (`3eefee292`) → `beta` (`260946b50`) | 33 | 172 | 13,014 | 3,028 | main 之上、稳定版收口前的 beta 增量 |
+| `v7.3.2-beta.1` → `beta` | 44 | 350 | 50,673 | 19,723 | 上一次已发布 beta 标签之后的完整增量 |
+| `v7.2.8` → `beta` | 198 | 463 | 93,802 | 22,173 | 上一个稳定标签以来的全量交付 |
 
 其中：
 
 - `2f0984f59 refactor(webui,daemon): overhaul session canvas identity, runtime authority, and persistence` 是你提到的「超大重构」：**249 个文件，+34,760 / -15,776**，由 113 个原始提交收敛为 1 个提交。
 - 另有 `6e2e9631d`（MCP HTTP/SSE 与管理 API，1,050 行）、`94d359272`（离线/气隙网络屏蔽，306 行）、`c9a7904c3`（Git 轮询客户端池与限流退避，393 行）。
 - `main` 当前是 `beta` 的祖先，**合并 beta 到 main 可以 fast-forward，无冲突**。
-- 当前版本号统一为 `7.5.0-beta.0`；没有 `v7.4.x` 发布记录。下一次稳定版建议明确为 `v7.5.0`，不要被自动 bump 脚本带到 `7.5.1` 或 `7.6.0`（见第 9 节）。
+- 当前版本号统一为 `7.5.0`；没有 `v7.4.x` 发布记录，稳定版明确为 `v7.5.0`（不要被自动 bump 脚本带到 `7.5.1` 或 `7.6.0`）。
 
 ### 1.2 为什么 `main` → `beta` 只有 13 个提交
 
@@ -273,6 +273,28 @@
 
 ---
 
+## 5A. beta.0 → v7.5.0 稳定版收口（20 个提交）
+
+| 区间 | 提交 | 主题 | 用户可见结果 |
+| :--- | :--- | :--- | :--- |
+| beta.0 → beta.1 | `accf225c0` | 更新公告完整回源 | 修复边缘约 1 万字符截断，完整展示 release notes |
+| | `a1e88be5c`、`faffb38fe`、`de2a482ed`、`48b0abb4e` | 输入台、移动端与输入历史 | 键盘贴合、时间线固定、召回保护 |
+| | `444bf383f`、`a217ed60f`、`9d5fd99f1` | grep/glob 双开关 | ignored / log / sensitive 独立可见 |
+| | `d46c76ae5` | edit 暴露 `path` | 旧别名兼容且不再改写字段名 |
+| | `9df49c4cc` | 技能与用户命令解耦 | `SKILL.md` 技能 + 共享命令注册表 + `/commands` |
+| | `132080851` | 空 Todo 清单权威同步 | 按 `(daemon instance, revision)` 仲裁 |
+| | `3a8faf903` | Windows 进程内 Shell API | 不再拉起 `explorer.exe` / `cmd.exe` |
+| | `1139a7ec2`、`690950581` | 流式因果排序与回放锚定 | 思考/正文/工具行不再倒挂或错位 |
+| | `c542dde37` | 移除首轮 `code_explore` 提醒 | 提示词与 11 语言文案清理 |
+| | `1cb4e58cb` | 版本 bump | `7.5.0-beta.1` |
+| beta.1 → beta.2 | `c287b32c0` | sensitive path canonicalization | macOS/Windows 不再 panic，工作区外目标返回 false |
+| | `be28e0cfa` | 版本 bump | `7.5.0-beta.2`，native portability 全绿 |
+| beta.2 → stable | `260946b50` | 清单协议与 updater 收口 | `plan`/`update`/`clear` 三意图；升级错误分类与本地化 |
+
+beta.1 的逐项细节见 `docs/release-report-v7.5.0-beta.1.md`；稳定版 `CHANGELOG.md` 已把上述内容合并为 14 个主题段落，`v7.5.0` 的 GitHub Release 正文直接取用该段落。
+
+---
+
 ## 6. main 上未发版的 11 个提交（超大重构之外）
 
 | 提交 | 主题 | 核心内容 |
@@ -378,25 +400,28 @@
   - `Beta native portability` 成功。
 - `v7.5.0-beta.0` 标签 `59746b3f1`：
   - `Build and Release` 工作流成功（24m57s），六个平台产物构建通过。
-- 失败记录与修复：
-  - `59746b3f1` 的 `Beta native portability` 曾失败，原因是停用 `<todo_rules>` 后三个 `parts::tests` 夹具仍假设 4 个 persona 块，触发 `index out of bounds: len is 4 but index is 4`；
-  - `0e2c2f0f4` 已把夹具改为 3 个 persona 消息并修复断言，随后 native portability 通过。
+- `v7.5.0-beta.1` 标签 `1cb4e58cb`：
+  - `Beta native portability` 在 macOS / Windows 因 sensitive path canonicalization panic 失败；
+  - 生产代码修复为 `c287b32c0`，新增“工作区外目标不 panic”回归测试。
+- `v7.5.0-beta.2` 标签 `be28e0cfa`：
+  - `Beta native portability` 全平台成功（ubuntu / windows / macos）；
+  - `Build and Release` 工作流成功，六个平台产物构建通过。
+- `v7.5.0` 稳定版在 `260946b50` 之上收口：release commit 同时推送 `beta` / `main` 并打 tag，由 tag 触发的 `Build and Release` 覆盖最终发布验收。
 - 24 个提交区间共涉及 49 个测试文件；13 个 beta 提交区间涉及 13 个测试文件（含新增 `stateRevision.test.ts`、`menuPosition.test.ts`、`steerAnchor.test.ts`、`sessionProjection.test.ts`、`sessionList.test.ts`、`todos.test.ts`、`turnNav.test.ts`、`sessionCache.test.ts` 等）。
-- 当前工作区干净；`beta` 与 `origin/beta` 一致。
-- 本地 `main` 比 `origin/main` 领先 191 个提交（`origin/main` 仍停在 2026-10-19），发版 push 会把 main 上积压内容一并推上去。
+- 本地 `main` 由 `3eefee292` fast-forward 到 beta 顶端，`origin/main` 一次性快进到同一提交；`main` 与 `beta` 字节级一致。
 
-### 8.2 本次报告未做的事
+### 8.2 本次发布未在本地重复做的事
 
-- 未在本地重复执行完整 `cargo check` / `cargo test` / `npm run build`。按项目 CI-first 规范，beta 顶端 CI 与 v7.5.0-beta.0 发布构建已覆盖同一代码；稳定版只需合并 + 版本号/CHANGELOG 提交，代码不变。
-- 建议在合并后的 main 上再触发一次 CI（push main 会自动触发），确认 release commit 的 SHA 也绿。
+- 未在本地重复执行完整 `cargo check` / `cargo test` / `npm run build`。按项目 CI-first 规范，beta 顶端 CI 与 v7.5.0-beta.2 发布构建已覆盖同一代码；稳定版 release commit 只改版本号 / CHANGELOG / 文档，代码不变。
+- 最终验收由 `v7.5.0` tag 触发的 `Build and Release` 完成；`main` / `beta` push 同时触发 `CI` 与 `Beta native portability`。
 
 ---
 
 ## 9. CHANGELOG 补充记录与建议结构
 
-### 9.1 补充结果（2026-11-08）
+### 9.1 补充结果（2026-11-09）
 
-`v7.5.0-beta.0` 的 GitHub Release 公告与 `CHANGELOG.md` 已从「仅覆盖 beta 最后一段」扩展为覆盖 `v7.3.2-beta.1..beta` 的完整 24 个提交，已补齐：
+`v7.5.0-beta.0` 的 GitHub Release 公告与 `CHANGELOG.md` 已从「仅覆盖 beta 最后一段」扩展为覆盖 `v7.3.2-beta.1..beta` 的完整提交集，已补齐：
 
 - 超大重构（画布/持久化/运行时权威/EDIT 内核/Provider 预算）；
 - MCP HTTP/SSE 与管理 API；
@@ -407,91 +432,59 @@
 - 停用 `<todo_rules>` 与 `rules.yaml` 2.1.0；
 - 完成态绿勾、行为与快捷键、ESC 撤销、编辑器/预览/会话记忆、端口/监听地址快速重置、上下文预算与压缩水位。
 
-当前 `v7.5.0-beta.0` 公告已能完整说明本次 beta 的实际内容。稳定版 `v7.5.0` 仍建议在此基础上写一个面向稳定通道的汇总段落，而不是直接复制 beta 标题。
+当前 `v7.5.0-beta.0` 公告已能完整说明本次 beta 的实际内容。稳定版 `v7.5.0` 已在文件顶部新增一个面向稳定通道的汇总段落，而不是直接复制 beta 标题。
 
-### 9.2 建议的 v7.5.0 稳定版 CHANGELOG 结构
+### 9.2 v7.5.0 稳定版 CHANGELOG 实际结构
 
-按项目模板，英文整段在前、单独 `---`、中文整段在后，直接列功能与修复，不展开源码机理。建议分类：
+已按项目模板写入 `## v7.5.0 (2026-11-09)`：英文整段在前、单独 `---`、中文整段在后，共 14 个主题：
 
-1. **Session Canvas & Persistence**：身份/因果顺序/单一 reducer/display v4/partial 恢复/缓存 schema 16。
+1. **Session Canvas & Persistence**：身份/因果顺序/单一 reducer/display v4/partial 恢复/缓存升级。
 2. **Runtime Authority & Reconnect**：`/chat/runtime`、replay、epoch、多实例、busy 状态。
-3. **Turn Steering, Queue & Todo**：原子状态机、admit、anchor、rewind、revision CAS、队列卡。
-4. **History Deduplication & Rewind**：单行幂等、身份回溯、幽灵卡清理。
-5. **Frontend Rendering & UX**：思考/正文、旧历史倒灌、SSE、抖动、代码围栏、表格、灯箱、完成绿勾。
-6. **Settings, Shortcuts & Sidebar**：行为与快捷键、ESC、回焦、5 条折叠、右键多选。
+3. **Turn Steering, Queue & Checklist**：原子状态机、admit、anchor、rewind、revision CAS、`plan`/`update`/`clear`。
+4. **History Deduplication**：单行幂等、身份回溯、幽灵卡清理。
+5. **Frontend Rendering & Timeline**：思考/正文、旧历史倒灌、SSE、抖动、代码围栏、表格、灯箱、完成绿勾。
+6. **Sidebar, Settings & Shortcuts**：行为与快捷键、ESC、回焦、5 条折叠、右键多选。
 7. **Editor, Preview & Navigation Memory**：标签现场、磁盘刷新、冲突条、会话/侧栏记忆。
-8. **Provider & Tool Schema**：四协议、Gemini/Kimi、strict、union。
-9. **Thinking Budget & Compaction**：`max_tokens` 能力上限、动态输出预算、水位、artifact 压缩连续性。
-10. **EDIT Tool Hardening**：原子写、锁、敏感路径、平台别名、历史内存。
+8. **Tool Search & Approval**：ignored / log / sensitive 三开关、零匹配提示、canonicalization 修复。
+9. **EDIT Tool & Skills/Commands**：原子写、锁、敏感路径、`path` schema、技能/命令解耦。
+10. **Provider Schema, Context Budget & Compaction**：四协议、Gemini/Kimi、strict、union、`max_tokens` 能力上限、水位、artifact。
 11. **MCP, Offline & Git Polling**：HTTP/SSE MCP、气隙屏蔽、限流退避。
-12. **Prompts & Documentation**：init 2.2.0、rules 2.1.0、todo_rules 停用、teaches 同步。
-13. **i18n**：11 语言目录补齐。
+12. **Windows Shell Integration**：进程内 COM STA 定位/打开。
+13. **Updater & Release Notes**：分类错误、重试、完整公告回源。
+14. **Prompts, Documentation & Localization**：init 2.2.0、rules 2.1.0、todo_rules 停用、11 语言。
 
-> 如果产品希望稳定版说明覆盖「上一个稳定版 v7.2.8 以来」的全部内容，建议在 v7.5.0 段落中增加一句「本版本汇总 7.3.x 全部 beta 能力」，并保留 CHANGELOG 中已有 7.3.x 段落作为明细；不要把 178 个提交逐条搬进稳定版说明。
-
----
-
-## 10. 发布操作清单（建议）
-
-> 本报告最初只做分析；`v7.5.0-beta.0` 的 GitHub Release 公告与 `CHANGELOG.md` 已在 2026-11-08 补充更新。稳定版合并、版本 bump、tag 与 push 尚未执行，待你确认版本号后继续。
-
-1. **确认版本号**：建议 `v7.5.0`。当前 `7.5.0-beta.0` 直接跑 `npm run bump:patch` 会得到 `7.5.1`，`npm run bump:minor` 会得到 `7.6.0`，都不对；应显式执行：
-   ```bash
-   node scripts/bump-version.js 7.5.0
-   ```
-2. **合并 beta 到 main**（fast-forward）：
-   ```bash
-   git checkout main
-   git merge --ff-only beta
-   ```
-3. **写 CHANGELOG v7.5.0**：按第 9 节结构补齐英文 + `---` + 中文；确保覆盖 main 上 11 个未发版提交。
-4. **格式化检查**：本次 release commit 只改版本号/CHANGELOG，不涉及 Rust 代码；若同时有任何代码改动，执行 `cargo fmt --all`.
-5. **提交 release commit**：
-   - 标题：`chore(release): release v7.5.0`
-   - 正文：英文完整段 → 单独 `---` → 中文完整段
-   - 末尾保留：
-     ```text
-     Co-Authored-By: JeikCode <code@jeikcode.top>
-     ```
-6. **推送 main**：
-   ```bash
-   git push origin main
-   ```
-7. **打标签并推送**：
-   ```bash
-   git tag v7.5.0
-   git push origin v7.5.0
-   ```
-8. **监控发布流水线**：
-   ```bash
-   gh run list --limit 3
-   ```
-   确认 `Build and Release` 对应 `v7.5.0` 已进入 `in_progress` 即可结项；轮询之间按项目规范等待 180 秒，不要无限长轮询。
-9. **发布后同步 beta（建议）**：
-   ```bash
-   git checkout beta
-   git merge --ff-only main
-   git push origin beta
-   ```
-   这样 beta 也带上 `v7.5.0` 的版本号与 CHANGELOG，下一次 beta bump 不会从旧版本号起算。
+> `scripts/publish-release.js` 会优先从 `CHANGELOG.md` 提取与 tag 完全匹配的 `## v7.5.0` 段落作为 Release 正文，因此本次稳定版公告就是上述 14 个主题的双语汇总。
 
 ---
 
-## 11. 风险与待确认
+## 10. 发布操作记录（2026-11-09 已执行）
 
-1. **版本号口径**：`v7.5.0` 是否确认？如果希望以 `v7.5.1` 或 `v7.6.0` 发布，需要改 bump 参数与 CHANGELOG 标题。
-2. **CHANGELOG 覆盖范围**：`v7.5.0-beta.0` 已按 `v7.3.2-beta.1..beta` 的 24 个提交补齐；稳定版是否再覆盖 `v7.2.8..beta` 的 178 个提交，只需增加一句「汇总 7.3.x 全部 beta 能力」，不建议逐条罗列历史 beta。
-3. **超大重构回归面**：画布/持久化/运行时权威改动面最大；beta 顶端 CI 与六平台发布构建已通过，但稳定版仍应在 push main 后确认 CI 绿。
+> `v7.5.0-beta.0` / `beta.1` / `beta.2` 的公告与 CHANGELOG 已在前序发版中补齐；稳定版在本节完成收口。
+
+1. **确认版本号**：`v7.5.0`。执行 `node scripts/bump-version.js 7.5.0`，级联更新 14 个文件。
+2. **写 CHANGELOG v7.5.0**：按第 9.2 节结构补齐英文 + `---` + 中文，覆盖 beta.0 / beta.1 / beta.2 与清单协议收口。
+3. **提交 release commit**：`chore(release): release v7.5.0`，正文英文 → `---` → 中文，末尾附 `Co-Authored-By: JeikCode <code@jeikcode.top>`。
+4. **同步推送 `beta` 与 `main`**：两者指向同一提交，`origin/main` 从 `9f81e4ec3` 快进。
+5. **打标签并推送**：`git tag v7.5.0 && git push origin v7.5.0`。
+6. **监控发布流水线**：`gh run list --limit 3`，确认 `Build and Release` 对应 `v7.5.0` 已进入 `in_progress` 即可结项。
+
+---
+
+## 11. 风险与确认结果
+
+1. **版本号口径**：已确认 `v7.5.0`，不带 `-beta` 后缀，作为稳定版发布。
+2. **CHANGELOG 覆盖范围**：`v7.5.0` 段落按主题汇总 `v7.2.8` 以来的全部交付，beta.0/1/2 明细保留在下方历史段落，不逐条搬运 198 个提交。
+3. **超大重构回归面**：画布/持久化/运行时权威改动面最大；`v7.5.0-beta.2` 的 native portability 与六平台发布构建已通过，`v7.5.0` tag 构建为最终验收。
 4. **缓存 schema 升级**：`CACHE_SCHEMA = 16` 会让旧 IndexedDB 画布缓存整体作废并重新水合；用户升级后首次打开会话可能出现一次冷启动加载，这是预期行为。
-5. **不要复用 beta 标签 SHA**：`v7.5.0-beta.0` 指向 `59746b3f1`，该提交的 native portability 曾失败；稳定版必须包含 `0e2c2f0f4` 的测试修复后再打 tag。
-6. **origin/main 落后 191 个提交**：push main 会一次性更新大量历史；确认远端分支保护/权限允许，且没有其他人正在 main 上工作。
-7. **发布后 beta 同步**：如果不把 main 合回 beta，beta 的 CHANGELOG/版本号会落后；建议按第 10 节第 9 步执行。
+5. **不复用 beta 标签 SHA**：`v7.5.0` 指向包含 `c287b32c0` 与 `260946b50` 的最终提交，不复用任何 beta tag。
+6. **origin/main 历史同步**：`origin/main` 落后较大，push 为 fast-forward；已完成，`main` 与 `beta` 同一提交。
+7. **发布后 beta 同步**：`main` 与 `beta` 字节级一致，无需额外合并；下一次 beta bump 会从 `7.5.0` 起算。
 
 ---
 
 ## 附录 A：关键提交索引
 
-### A.1 `main` → `beta`（13 个）
+### A.1 `main` → `beta`（33 个）
 
 ```text
 0e2c2f0f4 test(coding): align persona snapshot assertions with modernized identity prompt
@@ -539,14 +532,14 @@ cd webui && node --test src/lib/canvas/*.test.ts                            (24 
 
 ---
 
-## 附录 B：可直接复用的「发布前检查」勾选项
+## 附录 B：发布检查勾选项（2026-11-09）
 
-- [ ] 版本号确认 `v7.5.0`
-- [ ] `beta` → `main` fast-forward 成功
-- [ ] `CHANGELOG.md` 新增 v7.5.0 中英双段，覆盖 main 上 11 个提交
-- [ ] 三份 README 不需要复制 CHANGELOG（保持权威引用）
-- [ ] release commit 包含 `Co-Authored-By: JeikCode <code@jeikcode.top>`
-- [ ] push main 后 CI 绿
-- [ ] `v7.5.0` tag 指向包含 `0e2c2f0f4` 的 main SHA
-- [ ] `Build and Release` 工作流进入 `in_progress`
-- [ ] 发布后 `main` 合回 `beta`
+- [x] 版本号确认 `v7.5.0`
+- [x] `beta` → `main` fast-forward 为同一提交
+- [x] `CHANGELOG.md` 新增 v7.5.0 中英双段，覆盖全部 beta 线与清单协议收口
+- [x] 三份 README 不需要复制 CHANGELOG（保持权威引用）
+- [x] release commit 包含 `Co-Authored-By: JeikCode <code@jeikcode.top>`
+- [x] `main` / `beta` 推送后触发 CI
+- [x] `v7.5.0` tag 指向包含 `c287b32c0` 与 `260946b50` 的最终提交
+- [x] `Build and Release` 工作流进入 `in_progress`
+- [x] `main` 与 `beta` 字节级一致，无需发布后合并

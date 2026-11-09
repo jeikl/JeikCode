@@ -21,6 +21,168 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.0 (2026-11-09)
+
+**This stable release consolidates the complete 7.5.0 beta line into the stable channel: the session-canvas overhaul, durable runtime, steering and checklist state, provider-schema and context-budget alignment, the reworked search and approval policy, and the latest WebUI, editor, updater, and cross-platform fixes.**
+
+- **[Session Canvas & Persistence] Stable identity, causal ordering, and durable recovery**:
+  - Canvas records carry stable identities, ordered parts, and a single reducer/store write path; duplicate rows merge by identity, and array order is the only causal order used for rendering.
+  - The display log is now an append-only v4 projection with sequence metadata, offset indexes, version migration, torn-tail tolerance, session locks, and atomic rewrites.
+  - Prompts are persisted at admission before any model request; compaction and warning notices, interrupted streams, and partial answers survive refresh, reconnect, and cold start.
+  - Rewind, delete, and edit clear the discarded branch from snapshots, display, transcript, and input log; incompatible canvas caches are invalidated and rehydrated.
+
+- **[Runtime Authority & Reconnect] Server-owned running state**:
+  - `GET /chat/runtime` is the single authority for running state, phase, owner, compaction start, terminal state, and revisions.
+  - Busy indicators, stop/send-now handovers, and multi-instance updates follow the daemon; replay frames carry an explicit flag and daemon epoch.
+  - Cross-session stream isolation, wake-up snapshot pulls, idle confirmation, and reconnect replay keep every client on the same transcript.
+
+- **[Turn Steering, Queue & Checklist] Durable state machines with monotonic revisions**:
+  - Steering intents move through a durable state machine and are admitted atomically by the daemon; refresh and reconnect never duplicate submissions, and promoted steers are anchored to their causal message.
+  - Editing, rewinding, and deleting truncate by identity and clear discarded inputs, so removed steer cards and tool bubbles cannot reappear.
+  - The checklist protocol is finalized around three intents: `plan` rebuilds the full list, `update` applies incremental changes with `after`/`after_id` anchors and stable/delete semantics, and `clear: true` is the only explicit wipe; empty payloads are read-only queries.
+  - An authoritative empty checklist clears the WebUI and TUI live panels and title caches, and revision arbitration accepts the first identified daemon instance after a legacy stamp instead of rejecting its empty snapshot.
+
+- **[History Deduplication] One row per admitted user prompt**:
+  - The kernel is the only writer of conversation rows, and real user prompts are idempotent by identity across retries, resume replays, and steer re-delivery.
+  - Duplicate bubbles and double token costs from snapshot pre-writes are eliminated.
+
+- **[Frontend Rendering & Timeline] One answer in one bubble, stable streaming**:
+  - Thinking and body stay in one logical block per message; replay converges by canonical message/part identity, and tool barriers remain hard boundaries.
+  - Earlier tool cards and reasoning no longer flood in below a finished answer; content fingerprints and an interleaved-gap guard keep the timeline causally ordered.
+  - Streaming Markdown updates the trailing text node in place, path badges are layout-neutral, and fenced code blocks stay intact while streaming.
+  - Live streaming rounds use a monotonic sequence, replay frames are anchored before the next user boundary, and cache upgrades discard inconsistent derived canvases.
+  - Markdown table column resizing, image lightbox/gallery, high-contrast search highlights, and stable scroll/selection behavior are included.
+
+- **[Sidebar, Settings & Shortcuts] Completion badge, batch management, and ESC undo**:
+  - A session that genuinely completes shows a one-shot green check that clears across tabs and devices when viewed or when the session runs again.
+  - Project groups fold to five sessions with Show more/Show less, keep running and active rows visible, and support Ctrl/Cmd+click and Shift+click multi-select for batch deletion.
+  - The settings tab is now Behavior & Shortcuts with an ESC undo preference that is synchronized across tabs; ESC scopes are unified without affecting modal dismissal.
+  - Keyboard focus returns to the composer after sends, uploads, and slash commands; remote access supports host toggling, an editable port, and immediate restart with token preservation.
+
+- **[Editor, Preview & Navigation Memory] State survives switching and refresh**:
+  - Open tabs stay mounted with edit/preview mode, unsaved drafts, caret selection, scroll position, and undo history preserved; per-canvas snapshots and close tombstones survive unavoidable remounts.
+  - Files refresh from disk in place, dirty tabs keep their draft behind a keep/reload conflict bar, and disk polling pauses when the page is hidden.
+  - The selected session, sidebar expansion, list snapshot, and scroll position are restored after refresh; only an explicit new session or a confirmed 404 clears navigation memory.
+
+- **[Tool Search & Approval] Independent visibility switches for ignored, log, and sensitive paths**:
+  - `.gitignore` and `.ignore` no longer hide search results; the default filter is the curated `.codegraphignore` noise list plus build/cache/dependency directories.
+  - `include_ignored`, `include_logs`, and `include_sensitive` are independent switches; sensitive paths require approval outside Auto mode, and `read` reuses the same rules.
+  - Zero-match responses explain each filter separately, and truncated results return shape-aware guidance.
+  - `context` controls both sides of a match; the legacy asymmetric context parameters are removed.
+  - Canonicalized targets outside the workspace root no longer panic the sensitive-path matcher on macOS or Windows.
+
+- **[EDIT Tool & Skills/Commands] Safer edits and a clean skill/command boundary**:
+  - Edits use same-directory temp files, fsync, atomic replacement, conflict re-reads, in-process and cross-process locks, bounded history, and rejection of sensitive or escaping targets.
+  - The edit schema exposes `path` only, while legacy path field names remain internal aliases and are no longer rewritten.
+  - Only `*/SKILL.md` files load as skills; flat `*.md` files are user commands. A shared user-command registry expands `$ARGUMENTS`, `$N`, and shell snippets across home, `.claude`, `.agents`, and project directories.
+  - The daemon resolves slash commands before persistence, the WebUI slash menu queries available commands, and TUI `/skills` dispatches `use_skill` directly.
+
+- **[Provider Schema, Context Budget & Compaction] One projection, capability ceilings, durable summaries**:
+  - Tool schemas are projected consistently across Gemini, Responses, Chat Completions, and Anthropic; Gemini uses standard JSON Schema, and Moonshot/Kimi dialects are normalized while unions are preserved.
+  - `max_tokens` is a capability ceiling rather than a per-request target; output budgets are clamped by the window, a soft cap, and the remaining prompt room.
+  - Auto-compaction, pre-send warnings, and the context meter share one input watermark; CJK-heavy sessions use a conservative estimate and no longer dodge compaction.
+  - Thinking budgets never expand the output budget and keep at least 1024 tokens of answer room; drained spans are archived with `artifact://` pointers, and compaction state survives refresh.
+
+- **[MCP, Offline & Git Polling] Remote MCP management, air-gap shielding, resilient polling**:
+  - Native HTTP/SSE MCP support, CLI add-http/remove/list, and daemon management APIs support adding and removing servers with hot reload.
+  - Offline/air-gap mode denies subagent network egress and `web_fetch`/`web_search` at the tool boundary while workers continue with local tools.
+  - GitHub, GitLab, Gitee, and GitHub App polling share one HTTP client, honor `Retry-After` and rate-limit headers, and apply adaptive exponential backoff with jitter.
+
+- **[Windows Shell Integration] In-process file revealing and opening**:
+  - File revealing and opening use in-process Windows Shell COM calls instead of spawning `explorer.exe` or `cmd.exe`.
+  - Calls dispatch on detached threads so daemon handlers return immediately, and non-fatal failures stay silent.
+
+- **[Updater & Release Notes] Typed failures, retries, and complete announcements**:
+  - Upgrade failures are classified into stable categories for localized UI wording, while the raw error chain remains available for diagnostics.
+  - Manifest fetching retries transport errors and 5xx/429 responses; downloads apply connect and read timeouts and clean up short or checksum-mismatched files.
+  - Release notes retrieve the full announcement through GitHub Atom and REST fallbacks, fixing truncation near 10k characters at the edge.
+
+- **[Prompts, Documentation & Localization] Persona 2.2.0, rules 2.1.0, and eleven locales**:
+  - The system persona is structured around identity, language, model identity, configuration-read boundaries, runtime facts, and a four-tier precedence hierarchy.
+  - The legacy `<todo_rules>` block is disabled in favor of the unified checklist guidance, and the first-turn forced `code_explore` reminder is removed.
+  - Every new UI string is localized across zh, en, vi, zh-TW, ja, ko, ru, fr, es, de, and ar.
+
+---
+
+**本次稳定版将完整的 7.5.0 beta 线收口到稳定通道：会话画布超大重构、持久化运行时与转向/清单状态、模型协议与上下文预算对齐、搜索与审批策略升级，以及最新的 WebUI、编辑器、更新器与跨平台修复。**
+
+- **[会话画布与持久化] 稳定身份、因果顺序与可靠恢复**：
+  - 画布记录携带稳定身份、有序部件与单一 reducer/store 写入口；重复行按身份合并，数组顺序成为唯一因果渲染顺序。
+  - 展示日志升级为追加式 v4 投影，带序列元数据、偏移索引、版本迁移、半行容忍、会话锁与原子重写。
+  - 用户提问在任何模型请求之前准入落盘；压缩与警告通知、中断流与半截回答跨刷新、重连与冷启动保留。
+  - 回溯、删除与编辑会同步清理被丢弃分支的快照、展示、原始转录与输入日志；不兼容的画布缓存自动作废并重新水合。
+
+- **[运行时权威与重连] 服务端持有的运行状态**：
+  - `GET /chat/runtime` 成为运行状态、阶段、owner、压缩起点、终态与 revision 的唯一权威。
+  - busy 指示、停止/立即发送交接与多实例更新全部跟随 daemon；回放帧显式携带 replay 标记与 daemon epoch。
+  - 跨会话流隔离、唤醒拉取快照、空闲确认与重连回放，让每个客户端看到同一份转录。
+
+- **[转向、队列与清单] 持久状态机与单调 revision**：
+  - 转向意图经过持久状态机并由 daemon 原子准入；刷新与重连不重复提交，已提升的转向按因果消息锚定。
+  - 编辑、回溯与删除按身份截断并清理被丢弃输入，已删除的转向卡与工具气泡不会复活。
+  - 清单协议收敛为三个意图：`plan` 全量重建、`update` 增量更新（`after`/`after_id` 锚点与 stable/delete 语义）、`clear: true` 为唯一显式清空；空 payload 只读查询。
+  - 权威空清单会清空 WebUI 与 TUI 的实时面板与标题缓存；revision 仲裁在旧本地 stamp 之后接受首个带实例标识的 daemon 快照。
+
+- **[历史去重] 同一提问只保留一行**：
+  - 内核成为会话行的唯一写入方，真实用户提问在重试、恢复重放与转向重投下按身份幂等。
+  - 消除快照预写导致的重复气泡与双倍 Token 开销。
+
+- **[前端渲染与时间线] 一个回答一个气泡，流式稳定**：
+  - 思考与正文在每条消息内保持一个逻辑块；回放按规范消息/部件身份收敛，工具边界保持硬隔离。
+  - 回答完成后不再被早先轮次的工具卡或思考倒灌；内容指纹与交错缺口保护维持因果顺序。
+  - 流式 Markdown 就地扩展尾部文本节点，路径徽章布局中性，代码围栏在流式过程中保持完整。
+  - 实时流轮次使用单调序列，回放帧锚定在下一个 user 边界之前，缓存升级会丢弃不一致的派生画布。
+  - 包含 Markdown 表格列宽拖拽、图片灯箱/画廊、高对比搜索高亮与稳定滚动/选区行为。
+
+- **[侧栏、设置与快捷键] 完成徽标、批量管理与 ESC 撤销**：
+  - 真正完成的会话显示一次性绿色对勾，被查看或再次开跑后跨标签页/多端同步熄灭。
+  - 项目分组恢复 5 条折叠与展开更多/收起，运行中与当前选中行始终可见，支持 Ctrl/Cmd+左键与 Shift+左键多选批量删除。
+  - 设置页更名为「行为与快捷键」，ESC 撤销偏好跨标签页同步；ESC 作用域统一，不影响弹窗关闭。
+  - 发送、上传与斜杠命令后焦点回到输入框；远程访问支持监听地址切换、端口编辑与保留 Token 的立即重启。
+
+- **[编辑器、预览与导航记忆] 切换与刷新不丢状态**：
+  - 已打开标签保持挂载，编辑/预览模式、未保存草稿、光标选区、滚动位置与撤销栈全部保留；按画布隔离的现场快照与关闭墓碑支撑不可避免的重挂载。
+  - 文件原地跟踪磁盘变化，脏标签保留草稿并显示「保留/重新加载」冲突条，页面隐藏时暂停轮询。
+  - 刷新后恢复选中会话、侧栏展开、列表快照与滚动位置；只有显式新建或确认 404 才清空导航记忆。
+
+- **[工具搜索与审批] 忽略、日志与敏感路径的独立可见性开关**：
+  - `.gitignore` 与 `.ignore` 不再隐藏搜索结果；默认过滤改为 `.codegraphignore` 噪声规则加构建/缓存/依赖目录。
+  - `include_ignored`、`include_logs`、`include_sensitive` 三个开关互相独立；敏感路径在非 Auto 模式需审批，`read` 复用同一套规则。
+  - 零匹配时逐类解释过滤原因，截断结果按形态给出针对性引导。
+  - `context` 统一控制前后文，旧的非对称上下文参数已移除。
+  - canonicalize 后落在工作区外的目标不再让 macOS/Windows 的敏感路径匹配 panic。
+
+- **[EDIT 工具与技能/命令] 更安全的编辑与清晰的资源边界**：
+  - 编辑使用同目录临时文件、fsync、原子替换、冲突重读、进程内/跨进程锁、有界历史，并拒绝敏感或逃逸目标。
+  - edit schema 只对外暴露 `path`，旧路径字段名保留为内部别名且不再被改写。
+  - 仅 `*/SKILL.md` 作为技能加载，扁平 `*.md` 归为用户命令；共享命令注册表支持 `$ARGUMENTS`、`$N` 与内嵌 shell，覆盖 home、`.claude`、`.agents` 与项目目录。
+  - daemon 在持久化前解析斜杠命令，WebUI 斜杠菜单直接查询可用命令，TUI `/skills` 直接派发 `use_skill`。
+
+- **[模型协议、上下文预算与压缩] 统一投影、能力上限与持久摘要**：
+  - 工具 Schema 在 Gemini、Responses、Chat Completions 与 Anthropic 之间统一投影；Gemini 使用标准 JSON Schema，Moonshot/Kimi 方言归一化并保留 union。
+  - `max_tokens` 回归能力上限而非每次请求目标；输出预算按窗口、软上限与提示剩余空间共同夹取。
+  - 自动压缩、发送前预警与上下文表共用一条输入水位；CJK 重的会话采用保守估算，不再绕过压缩。
+  - 思考预算绝不反向抬升输出预算，至少保留 1024 tokens 答案空间；被压缩掉的 span 带 `artifact://` 指针归档，压缩状态跨刷新保留。
+
+- **[MCP、离线与 Git 轮询] 远程 MCP 管理、气隙屏蔽与韧性轮询**：
+  - 新增原生 HTTP/SSE MCP、CLI add-http/remove/list 与 daemon 管理 API，支持增删与热重载。
+  - 离线/气隙模式在工具边界拒绝子代理网络出口与 `web_fetch`/`web_search`，worker 仍可继续使用本地工具。
+  - GitHub、GitLab、Gitee 与 GitHub App 轮询共享 HTTP client，解析 `Retry-After` 与限流头，并采用带抖动的自适应指数退避。
+
+- **[Windows Shell 集成] 进程内文件定位与打开**：
+  - 文件定位与打开改用进程内 Windows Shell COM 调用，不再拉起 `explorer.exe` 或 `cmd.exe`。
+  - 调用在分离线程异步派发，daemon 处理器立即返回，非致命失败静默处理。
+
+- **[更新器与发布公告] 分类错误、重试与完整公告**：
+  - 升级失败归类为稳定类别，供 UI 本地化文案使用；原始错误链仍保留用于诊断。
+  - 清单获取对传输错误与 5xx/429 重试；下载增加连接/读取超时，并清理长度不足或校验不匹配的文件。
+  - 发布公告通过 GitHub Atom 与 REST 回源获取完整正文，修复边缘约 1 万字符处的截断。
+
+- **[系统提示词、文档与本地化] Persona 2.2.0、rules 2.1.0 与 11 种语言**：
+  - 系统提示词围绕身份、语言、模型身份、配置读取边界、运行环境事实与四层优先级结构化。
+  - 停用旧 `<todo_rules>` 块，统一由清单指引接管；移除首轮强制 `code_explore` 提醒。
+  - 所有新增 UI 文案覆盖 zh、en、vi、zh-TW、ja、ko、ru、fr、es、de、ar。
+
 ## v7.5.0-beta.2 (2026-11-09)
 
 - **[Sensitive Path Approval] Cross-platform canonicalization fix**:
