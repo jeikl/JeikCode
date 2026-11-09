@@ -21,6 +21,20 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.0-beta.2 (2026-11-09)
+
+- **[Sensitive Path Approval] Cross-platform canonicalization fix**:
+  - `codegraph_sensitive_match` now handles canonicalized targets that fall outside the original cwd prefix without panicking; in-root `.codegraphignore.graph` rules still apply.
+  - Read approval tests align with the public `path` schema, and a regression test covers out-of-root targets.
+  - Fixes the macOS `/var` ↔ `/private/var` and Windows canonical-prefix failures in `Beta native portability`.
+
+---
+
+- **[敏感路径审批] 跨平台 canonicalization 修复**：
+  - `codegraph_sensitive_match` 在目标 canonicalize 后不再因 cwd 前缀不一致而 panic；工作区内 `.codegraphignore.graph` 规则仍正常匹配。
+  - read 审批测试对齐公开的 `path` schema，并新增“目标不在 root 下不 panic”的回归测试。
+  - 修复 macOS `/var` ↔ `/private/var` 与 Windows canonical 前缀导致的 `Beta native portability` 失败。
+
 ## v7.5.0-beta.1 (2026-11-09)
 
 - **[Tool Search & Approval] Two-switch search visibility for grep and glob**:
