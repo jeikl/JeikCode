@@ -16,6 +16,7 @@ import {
   identifiedAssistantIndex,
   insertAssistantRowInCausalOrder,
   mergeOlderMessages,
+  moveAssistantRowBefore,
   paintAssistantNotice,
   paintAssistantReasoning,
   paintAssistantText,
@@ -63,6 +64,8 @@ export type CanvasEventAction =
       partRev?: number;
       /** First live frame's session seq; used when the row is first created. */
       recordSeq?: number;
+      /** Replay of the previous turn: insert the new row before this user id. */
+      beforeMessageId?: string;
     }
   | {
       type: 'reasoning';
@@ -72,6 +75,7 @@ export type CanvasEventAction =
       partId?: string;
       partRev?: number;
       recordSeq?: number;
+      beforeMessageId?: string;
     }
   | {
       type: 'text_batch';
@@ -81,6 +85,7 @@ export type CanvasEventAction =
         partId?: string;
         partRev?: number;
         recordSeq?: number;
+        beforeMessageId?: string;
       }>;
     }
   | { type: 'notice'; text: string; targetId?: string; id?: string }
@@ -101,7 +106,13 @@ export type CanvasEventAction =
       text: string;
       ts?: number;
     }
-  | { type: 'tool_start'; tool: ToolRow; messageId?: string; recordSeq?: number }
+  | {
+      type: 'tool_start';
+      tool: ToolRow;
+      messageId?: string;
+      recordSeq?: number;
+      beforeMessageId?: string;
+    }
   | {
       type: 'tool_update';
       id: string;
@@ -393,6 +404,7 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
         action.messageId,
         action.partId,
       );
+      next = moveAssistantRowBefore(next, action.messageId, action.beforeMessageId);
       break;
     case 'text_batch': {
       let acc = rows;
@@ -410,6 +422,7 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
           item.messageId,
           item.partId,
         );
+        acc = moveAssistantRowBefore(acc, item.messageId, item.beforeMessageId);
       }
       next = acc;
       break;
@@ -428,6 +441,7 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
         action.messageId,
         action.partId,
       );
+      next = moveAssistantRowBefore(next, action.messageId, action.beforeMessageId);
       break;
     case 'notice':
       next = paintAssistantNotice(rows, action.text, action.targetId, action.id);
@@ -481,6 +495,7 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
     }
     case 'tool_start':
       next = upsertToolRow(rows, action.tool, action.messageId, action.recordSeq);
+      next = moveAssistantRowBefore(next, action.messageId, action.beforeMessageId);
       break;
     case 'tool_update':
       next = updateToolRow(rows, action.id, action.update, action.derive);

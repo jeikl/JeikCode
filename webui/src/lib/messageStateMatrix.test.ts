@@ -366,8 +366,8 @@ test('after a compacted disk snapshot, a new steer keeps the full display histor
   assert.ok(toolIndex > steerIndex);
 });
 
-test('cache schema version is 16, so pre-inflight-overlay canvases are not trusted', async () => {
+test('cache schema version is 17, so canvases with above-fold replay pollution are not trusted', async () => {
   const { CACHE_DISPLAY_VERSION, CACHE_SCHEMA } = await import('./sessionCache.ts');
-  assert.equal(CACHE_SCHEMA, 16);
+  assert.equal(CACHE_SCHEMA, 17);
   assert.equal(CACHE_DISPLAY_VERSION, CACHE_SCHEMA);
 });

@@ -137,6 +137,37 @@ export function insertAssistantRowInCausalOrder<T extends ProjectionMessage>(
   return [...messages, stamped];
 }
 
+/**
+ * Move an assistant row that was just painted to BEFORE an explicit user anchor.
+ *
+ * A late replay can deliver the previous turn's final answer after the new
+ * turn's opening user is already on canvas. The row is not a duplicate (it was
+ * absent), so appending it corrupts the order and dropping it loses the only
+ * copy. The fold returns it with `before={messageId: openingUser}`; this helper
+ * puts it back where it belongs.
+ */
+export function moveAssistantRowBefore<T extends ProjectionMessage>(
+  messages: T[],
+  messageId?: string,
+  beforeId?: string,
+): T[] {
+  if (!messageId || !beforeId) return messages;
+  const assistant = identifiedAssistantIndex(messages, messageId);
+  if (assistant < 0) return messages;
+  const isAnchor = (message: T): boolean => (
+    message.role === 'user'
+    && (message.id === beforeId || message.clientInputId === beforeId)
+  );
+  const anchorBefore = messages.findIndex(isAnchor);
+  if (anchorBefore < 0 || assistant < anchorBefore) return messages;
+  const next = messages.slice();
+  const [row] = next.splice(assistant, 1);
+  const anchor = next.findIndex(isAnchor);
+  if (anchor < 0) return messages;
+  next.splice(anchor, 0, row!);
+  return next;
+}
+
 /** Stamp the first live frame's stream seq onto an existing placeholder/row. */
 export function stampAssistantRowSeq<T extends ProjectionMessage>(
   messages: T[],

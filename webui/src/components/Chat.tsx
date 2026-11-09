@@ -2687,6 +2687,8 @@ export function Chat({
     onBeforeForegroundFrame?: (frame: SSEEvent) => 'proceed' | 'skip' | 'handled';
     onForegroundTerminal: () => void;
     onBackgroundTerminal: () => void;
+    /** Current running operation: above-fold frames are its own open turn. */
+    allowAboveFoldPaint?: boolean;
   }): (event: SSEEvent) => void {
     const fold = createReplayFold();
     let steerAnchor: TurnUserAnchor | undefined;
@@ -2720,11 +2722,17 @@ export function Chat({
         (candidate) => replayFrameOnCanvas(watchReplayCanvas(params.loadId), candidate),
         transcriptHasOpenUserTurn(watchReplayCanvas(params.loadId)),
         (candidate) => replayQueryAboveFold(params.loadId, candidate),
-        true,
+        params.allowAboveFoldPaint === true,
         serverCapsRef.current.includes('explicit_replay'),
       );
       placeReplayUsers(params.loadId, accepted);
+      const insertBeforeMessageId = accepted.before?.messageId;
       for (const frame of accepted.paint) {
+        const anchoredFrame = insertBeforeMessageId
+          && frame.type !== 'user'
+          && frame.type !== 'user_identified'
+          ? ({ ...frame, insert_before_message_id: insertBeforeMessageId } as unknown as SSEEvent)
+          : frame;
         if (typeof frame.seq === 'number') {
           const prevSeq = readStreamCursor(params.loadId)?.seq ?? 0;
           if (frame.seq > prevSeq) writeStreamCursor(params.loadId, frame.seq);
@@ -2743,7 +2751,7 @@ export function Chat({
         const isCurrentView = activeIdRef.current === params.loadId;
         if (!isCurrentView) {
           // 会话在后台运行时，总线推流实时反哺进会话专属缓存 messageCacheRef。
-          applyEventToSessionCache(params.loadId, frame);
+          applyEventToSessionCache(params.loadId, anchoredFrame);
           if (frameIsTerminal) {
             if (isStaleProgrammaticStop(frame, params.loadId)) continue;
             disarmTurn(params.loadId);
@@ -2763,7 +2771,7 @@ export function Chat({
           sessionGenerationRef.current !== params.loadGeneration &&
           activeIdRef.current !== params.loadId
         ) {
-          applyEventToSessionCache(params.loadId, frame);
+          applyEventToSessionCache(params.loadId, anchoredFrame);
           continue;
         }
         if (canvasReadySessionIdRef.current !== params.loadId) {
@@ -2774,11 +2782,12 @@ export function Chat({
             preMountStreamBufferRef.current.set(params.loadId, buf);
           }
           buf.push({
-            frame,
+            frame: anchoredFrame,
             opts: {
               requireReplayDedup: needsReplayDedup(frame, params.attachNeedsDedup),
               repeatUserAfterSettled: false,
               steerAnchor: frame.type === 'steered' ? steerAnchor : undefined,
+              insertBeforeMessageId,
             },
           });
           steerAnchor = frame.type === 'steered' ? undefined : (anchorForSteer(frame) ?? steerAnchor);
@@ -2793,7 +2802,7 @@ export function Chat({
           }
         }
         if (activeIdRef.current !== params.loadId) {
-          applyEventToSessionCache(params.loadId, frame);
+          applyEventToSessionCache(params.loadId, anchoredFrame);
           // Background cache retry: the anchor assistant row may have just landed.
           retryDeferredSteers(params.loadId);
           continue;
@@ -2801,11 +2810,12 @@ export function Chat({
         if (frame.type === 'text' || frame.type === 'reasoning') {
           ensureAssistantBubbleForWatch(frame.message_id, params.loadId);
         }
-        handleEvent(frame, {
+        handleEvent(anchoredFrame, {
           requireReplayDedup: needsReplayDedup(frame, params.attachNeedsDedup),
           repeatUserAfterSettled: false,
           steerAnchor: frame.type === 'steered' ? steerAnchor : undefined,
           targetSid: params.loadId,
+          insertBeforeMessageId,
         });
         // 记账：这一帧落到哪条助手行 —— 下一个 steered 要插在它后面。
         // 无身份帧（如 tokens / artifact_* / warning）必须沿用上一条有效锚点，绝不能清空。
@@ -2935,6 +2945,9 @@ export function Chat({
             createWatchEventHandler({
               loadId,
               attachNeedsDedup,
+              // Active reconnect: the replay belongs to the current operation,
+              // whose early frames may legitimately start above the tail window.
+              allowAboveFoldPaint: true,
               onValidEvent: () => {
                 retryCount = 0; // 成功收到有效事件立即重置重试计数器
                 lastFrameAt = Date.now();
@@ -3740,6 +3753,7 @@ export function Chat({
     partId?: string;
     partRev?: number;
     recordSeq?: number;
+    beforeMessageId?: string;
   }>>([]);
   const pendingTextSessionIdRef = useRef<string | null>(null);
   const textRafRef = useRef<number | null>(null);
@@ -5993,6 +6007,7 @@ export function Chat({
           part_id: item.partId,
           part_rev: item.partRev,
           seq: item.recordSeq,
+          insert_before_message_id: item.beforeMessageId,
         } as any);
       }
       return;
@@ -6003,7 +6018,7 @@ export function Chat({
   function appendToLastAssistant(
     content: string,
     opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean },
-    ids?: { messageId?: string; partId?: string; partRev?: number; seq?: number },
+    ids?: { messageId?: string; partId?: string; partRev?: number; seq?: number; beforeMessageId?: string },
     targetSid?: string,
   ) {
     const replay = opts?.requireReplayDedup === true && opts?.skipReplayDedup !== true;
@@ -6018,6 +6033,7 @@ export function Chat({
           part_id: ids?.partId,
           part_rev: ids?.partRev,
           seq: ids?.seq,
+          insert_before_message_id: ids?.beforeMessageId,
         } as any);
         return;
       }
@@ -6029,6 +6045,7 @@ export function Chat({
         partId: ids?.partId,
         partRev: ids?.partRev,
         recordSeq: ids?.seq,
+        beforeMessageId: ids?.beforeMessageId,
       });
       return;
     }
@@ -6039,6 +6056,7 @@ export function Chat({
       partId: ids?.partId,
       partRev: ids?.partRev,
       recordSeq: ids?.seq,
+      beforeMessageId: ids?.beforeMessageId,
     });
     if (textRafRef.current == null) {
       textRafRef.current = window.requestAnimationFrame(() => {
@@ -8436,8 +8454,13 @@ export function Chat({
     if (activeIdRef.current) artifactOpenBySessionRef.current.delete(activeIdRef.current);
   }
 
-  function addToolToLastAssistant(tool: ToolRow, messageId?: string, recordSeq?: number) {
-    setMessages({ type: 'tool_start', tool, messageId, recordSeq });
+  function addToolToLastAssistant(
+    tool: ToolRow,
+    messageId?: string,
+    recordSeq?: number,
+    beforeMessageId?: string,
+  ) {
+    setMessages({ type: 'tool_start', tool, messageId, recordSeq, beforeMessageId });
   }
 
   /**
@@ -8534,6 +8557,7 @@ export function Chat({
         partId: event.part_id,
         partRev: event.part_rev,
         recordSeq: (event as { seq?: number }).seq,
+        beforeMessageId: (event as { insert_before_message_id?: string }).insert_before_message_id,
       }));
       return;
     }
@@ -8583,6 +8607,7 @@ export function Chat({
         partId: event.part_id,
         partRev: event.part_rev,
         recordSeq: (event as { seq?: number }).seq,
+        beforeMessageId: (event as { insert_before_message_id?: string }).insert_before_message_id,
       }));
       return;
     }
@@ -8714,6 +8739,7 @@ export function Chat({
           },
           messageId: event.message_id,
           recordSeq: (event as { seq?: number }).seq,
+          beforeMessageId: (event as { insert_before_message_id?: string }).insert_before_message_id,
         });
         break;
       }
@@ -8925,10 +8951,17 @@ export function Chat({
       repeatUserAfterSettled?: boolean;
       steerAnchor?: TurnUserAnchor;
       targetSid?: string;
+      /** Replayed previous-turn row: place it before this user message id. */
+      insertBeforeMessageId?: string;
     },
   ) {
     if (opts?.targetSid && activeIdRef.current !== opts.targetSid) {
-      applyEventToSessionCache(opts.targetSid, event);
+      applyEventToSessionCache(
+        opts.targetSid,
+        opts.insertBeforeMessageId
+          ? ({ ...event, insert_before_message_id: opts.insertBeforeMessageId } as unknown as SSEEvent)
+          : event,
+      );
       return;
     }
     const observerOnly = opts?.observerOnly === true;
@@ -9180,6 +9213,7 @@ export function Chat({
             partId: event.part_id,
             partRev: event.part_rev,
             seq: (event as { seq?: number }).seq,
+            beforeMessageId: opts?.insertBeforeMessageId,
           },
           opts?.targetSid,
         );
@@ -9204,6 +9238,7 @@ export function Chat({
           partId: event.part_id,
           partRev: event.part_rev,
           recordSeq: (event as { seq?: number }).seq,
+          beforeMessageId: opts?.insertBeforeMessageId,
         });
         const rDelta = estimateTextTokens(event.content);
         if (rDelta > 0) {
@@ -9227,7 +9262,7 @@ export function Chat({
           args: argsStr,
           status: 'pending',
           ...(subtasks ? { subtasks } : {}),
-        }, event.message_id, (event as { seq?: number }).seq);
+        }, event.message_id, (event as { seq?: number }).seq, opts?.insertBeforeMessageId);
         if (isTodoTool(event.name)) {
           const replayTodoFrame = (event as { replay?: boolean }).replay === true;
           if (replayTodoFrame && activeIdRef.current && todoBoardEmptyRef.current.has(activeIdRef.current)) {

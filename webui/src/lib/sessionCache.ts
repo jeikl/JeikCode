@@ -33,7 +33,10 @@ import { readStreamCursor } from './streamCursor.ts';
 /// v16: 废弃在「display 只有首问 / streaming partial 未投影」时把 promoted/pending
 ///      steer 提前缓存在 assistant 之前的画布；服务端已改为先投影 inflight tail
 ///      与当前 streaming partial，再投影 pending/promoted steer。
-export const CACHE_SCHEMA = 16;
+/// v17: 废弃被 idle standby replay 污染的画布：窗口起点之前的上一轮 assistant
+///      终态曾被 held 缓冲释放到时间线末尾（q2 之后出现旧回合 r1stop）。
+///      replayFold 已改为在命中窗口开场提问时把 held 段标记为 above-fold。
+export const CACHE_SCHEMA = 17;
 
 /** @deprecated 使用 [`CACHE_SCHEMA`]；保留别名仅为兼容既有导入。 */
 export const CACHE_DISPLAY_VERSION = CACHE_SCHEMA;

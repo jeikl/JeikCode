@@ -174,10 +174,33 @@ export function acceptReplayFrame(
     return { paint: [event], placeUsers: [] };
   }
   const terminal = TERMINAL.has(event.type);
+  const userEvent = event as SSEEvent & {
+    message_id?: string;
+    client_input_id?: string;
+  };
+  const userAnchorId = userEvent.message_id ?? userEvent.client_input_id;
+  // A user boundary always re-anchors whatever assistant frames arrived before
+  // it — regardless of `historyOffset`. With the window fully expanded
+  // (offset 0) the old code released those frames immediately and appended them
+  // after the new turn; the anchor must not depend on the fold line existing.
+  if (isTurnUser(event) && state.held.length > 0 && userAnchorId) {
+    const placeUsers = state.held.filter((held) => held.type === 'user');
+    const assistants = state.held.filter(
+      (held) => held.type !== 'user' && !onCanvas(held),
+    );
+    state.held.length = 0;
+    state.overlapped = true;
+    return {
+      paint: [event, ...assistants],
+      placeUsers,
+      before: { messageId: userAnchorId },
+    };
+  }
   // 整份记录都在页内、直播帧、终态：不再按住。没碰到当前页的暂存是还没落盘的这一轮，一起放出来。
-  const release = historyOffset <= 0 || !replay || terminal;
+  const release = !replay || terminal
+    || (historyOffset <= 0 && (isTurnUser(event) || onCanvas(event)));
   if (release) {
-    if (historyOffset > 0 && !state.overlapped && state.held.length > 0 && (!replay || terminal)) {
+    if (!state.overlapped && state.held.length > 0 && (!replay || terminal)) {
       const flushed = state.held.splice(0, state.held.length);
       // 折叠线以上的旧回合：它们已经在磁盘上（窗口之外），补到末尾就是“提问跑到底部”的孪生 bug。
       if (state.aboveFold && !allowAboveFoldPaint) return { paint: [event], placeUsers: [] };

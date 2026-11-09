@@ -205,6 +205,49 @@ test('settling the later round tool result does not regress the repaired order',
   assert.equal((m2.parts[1] as { tool?: { status?: string } }).tool?.status, 'done');
 });
 
+test('an anchored replay row is reinserted before the opening user, not appended', () => {
+  const opening = { role: 'user', id: 'q2', parts: [{ kind: 'text', text: 'q2' }] } as Row;
+  const current = { role: 'assistant', id: 'm-current', parts: [{ kind: 'text', text: 'r2' }] } as Row;
+  const events = [
+    { ...reasoning('m-prev', 'r1', 20), beforeMessageId: 'q2' },
+    { ...tool('m-prev', 'tool1', 21), beforeMessageId: 'q2' },
+  ];
+  let rows = fold([opening, current], events);
+  assert.deepEqual(ids(rows), ['m-prev', 'q2', 'm-current']);
+  assert.deepEqual(parts(rows, 'm-prev'), ['reasoning:r1', 'tool:tool1']);
+
+  // Replaying the same anchored frames must be idempotent: no duplicate row,
+  // no second copy of the tool, and the anchor position stays.
+  rows = fold(rows, events);
+  assert.deepEqual(ids(rows), ['m-prev', 'q2', 'm-current']);
+  assert.deepEqual(parts(rows, 'm-prev'), ['reasoning:r1', 'tool:tool1']);
+});
+
+test('an anchored text replay is reinserted before the opening user too', () => {
+  const opening = { role: 'user', id: 'q2', parts: [{ kind: 'text', text: 'q2' }] } as Row;
+  const current = { role: 'assistant', id: 'm-current', parts: [{ kind: 'text', text: 'r2' }] } as Row;
+  const rows = fold([opening, current], [
+    { ...text('m-prev', 'r1stop', 20), beforeMessageId: 'q2' },
+  ]);
+  assert.deepEqual(ids(rows), ['m-prev', 'q2', 'm-current']);
+  assert.deepEqual(parts(rows, 'm-prev'), ['text:r1stop']);
+});
+
+test('multiple held rows keep their arrival order before the opening user', () => {
+  const opening = { role: 'user', id: 'q2', parts: [{ kind: 'text', text: 'q2' }] } as Row;
+  const current = { role: 'assistant', id: 'm-current', parts: [{ kind: 'text', text: 'r2' }] } as Row;
+  const events = [
+    { ...reasoning('m-prev1', 'r1 first', 20), beforeMessageId: 'q2' },
+    { ...tool('m-prev1', 'tool1', 21), beforeMessageId: 'q2' },
+    { ...text('m-prev1', 'r1stop', 22), beforeMessageId: 'q2' },
+    { ...reasoning('m-prev2', 'r2 first', 23), beforeMessageId: 'q2' },
+  ];
+  const rows = fold([opening, current], events);
+  assert.deepEqual(ids(rows), ['m-prev1', 'm-prev2', 'q2', 'm-current']);
+  assert.deepEqual(parts(rows, 'm-prev1'), ['reasoning:r1 first', 'tool:tool1', 'text:r1stop']);
+  assert.deepEqual(parts(rows, 'm-prev2'), ['reasoning:r2 first']);
+});
+
 test('different arrival permutations converge to the same display order', () => {
   const frames = [
     reasoning('m1', 'r1', 10),

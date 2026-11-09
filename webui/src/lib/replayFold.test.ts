@@ -205,6 +205,95 @@ test('提问已经在页上时不打开折叠线，但未证明在折叠线以�
   assert.equal(fold.held.length, 0);
 });
 
+test('idle watch: held previous-turn assistant is reinserted before the opening user', () => {
+  // Real shape: window starts at the new turn's opening user (offset 38).
+  // The replay begins with the PREVIOUS turn's final assistant frame, then the
+  // opening user (already on canvas), then the current turn's assistant.
+  const canvas: ReplayFoldMessage[] = [
+    { id: 'u-window', role: 'user', parts: [{ kind: 'text', text: '这一问' }] },
+    assistant('m-current'),
+  ];
+  const fold = createReplayFold();
+  const onCanvas = (event: SSEEvent) => replayFrameOnCanvas(canvas, event);
+  const previousFinal = seq({ type: 'text', content: '上一轮最终答案', message_id: 'm-prev' }, 1);
+  const openingUser = seq({ type: 'user', content: '这一问', message_id: 'u-window' }, 2);
+  const current = seq({ type: 'text', content: '本轮内容', message_id: 'm-current' }, 3);
+
+  assert.deepEqual(acceptReplayFrame(fold, previousFinal, 38, onCanvas).paint, []);
+  const atOpening = acceptReplayFrame(fold, openingUser, 38, onCanvas);
+  assert.deepEqual(
+    atOpening.paint,
+    [openingUser, previousFinal],
+    'the opening user is processed first, then the previous answer is anchored before it',
+  );
+  assert.deepEqual(atOpening.before, { messageId: 'u-window' });
+  assert.equal(fold.held.length, 0);
+
+  const painted = acceptReplayFrame(fold, current, 38, onCanvas, false, undefined, false);
+  assert.deepEqual(painted.paint, [current]);
+});
+
+test('anchor works even with historyOffset 0 (window fully expanded)', () => {
+  // The stop-time replay can still contain the previous turn's final answer
+  // before the new turn's user. This must not depend on the 48-row fold line
+  // existing: with offset 0 the old release path appended it immediately.
+  const canvas: ReplayFoldMessage[] = [
+    { id: 'u-window', role: 'user', parts: [{ kind: 'text', text: '这一问' }] },
+    assistant('m-current'),
+  ];
+  const fold = createReplayFold();
+  const onCanvas = (event: SSEEvent) => replayFrameOnCanvas(canvas, event);
+  const previousFinal = seq({ type: 'text', content: '上一轮最终答案', message_id: 'm-prev' }, 1);
+  const openingUser = seq({ type: 'user', content: '这一问', message_id: 'u-window' }, 2);
+
+  assert.deepEqual(acceptReplayFrame(fold, previousFinal, 0, onCanvas).paint, []);
+  const atOpening = acceptReplayFrame(fold, openingUser, 0, onCanvas);
+  assert.deepEqual(atOpening.paint, [openingUser, previousFinal]);
+  assert.deepEqual(atOpening.before, { messageId: 'u-window' });
+});
+
+test('multiple held previous-turn messages keep their wire order at the anchor', () => {
+  const canvas: ReplayFoldMessage[] = [
+    { id: 'u-window', role: 'user', parts: [{ kind: 'text', text: '这一问' }] },
+    assistant('m-current'),
+  ];
+  const fold = createReplayFold();
+  const onCanvas = (event: SSEEvent) => replayFrameOnCanvas(canvas, event);
+  const first = seq({ type: 'text', content: 'r1', message_id: 'm-prev1' }, 1);
+  const firstTool = seq(
+    { type: 'tool_start', id: 'tool-prev', name: 'bash', arguments: {}, message_id: 'm-prev1' },
+    2,
+  );
+  const second = seq({ type: 'reasoning', content: 'r2', message_id: 'm-prev2' }, 3);
+  const openingUser = seq({ type: 'user', content: '这一问', message_id: 'u-window' }, 4);
+
+  for (const frame of [first, firstTool, second]) {
+    assert.deepEqual(acceptReplayFrame(fold, frame, 38, onCanvas).paint, []);
+  }
+  const atOpening = acceptReplayFrame(fold, openingUser, 38, onCanvas);
+  assert.deepEqual(atOpening.paint, [openingUser, first, firstTool, second]);
+  assert.deepEqual(atOpening.before, { messageId: 'u-window' });
+});
+
+test('a held previous-turn tool frame is reinserted before the opening user too', () => {
+  const canvas: ReplayFoldMessage[] = [
+    { id: 'u-window', role: 'user', parts: [{ kind: 'text', text: '这一问' }] },
+    assistant('m-current'),
+  ];
+  const fold = createReplayFold();
+  const onCanvas = (event: SSEEvent) => replayFrameOnCanvas(canvas, event);
+  const earlyTool = seq(
+    { type: 'tool_start', id: 'tool-prev', name: 'bash', arguments: {}, message_id: 'm-prev' },
+    1,
+  );
+  const openingUser = seq({ type: 'user', content: '这一问', message_id: 'u-window' }, 2);
+
+  assert.deepEqual(acceptReplayFrame(fold, earlyTool, 38, onCanvas).paint, []);
+  const atOpening = acceptReplayFrame(fold, openingUser, 38, onCanvas);
+  assert.deepEqual(atOpening.paint, [openingUser, earlyTool]);
+  assert.deepEqual(atOpening.before, { messageId: 'u-window' });
+});
+
 test('没有更早历史时不按住，短会话的回放仍整段落笔', () => {
   const fold = createReplayFold();
   const user = seq({ type: 'user', content: '只有一轮' }, 1);
