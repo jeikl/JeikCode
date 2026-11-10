@@ -21,6 +21,70 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.1-beta.1 (2026-11-10)
+
+**This beta aligns the OpenAI-, Responses-, and Anthropic-compatible conversation endpoints with the 7.5.0 session architecture. An API turn now behaves like a WebUI send: the newest user message is admitted once, persisted before the model runs, shown in the right-rail outline, and resumed through the same session key mapping. It also fixes the post-first-turn "amnesia" regression.**
+
+- **[API Conversation Endpoints] One admission path with WebUI**:
+  - `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` now enter the same admission pipeline as a WebUI send: stable message identity, durable input/display rows, active-turn ownership, and event fan-out.
+  - Fixed the 7.5.0 regression where the second and later API turns lost the newest user message and the model replied as if it had no context.
+  - API questions now appear in the right-rail outline and survive refresh/replay like WebUI questions.
+  - A turn without a real, non-empty user message now fails fast instead of silently running an empty prompt.
+
+- **[Session Identity] Stable `user` key mapping**:
+  - The client `user` value remains the session key; no explicit session id or extra header is required.
+  - Protocol sessions store an immutable key that is independent of the display title, so renaming a session in the WebUI no longer breaks API resume.
+  - Legacy sessions are backfilled from their exact display name on first use.
+  - Omitting `user` now creates an ephemeral `api-<uuid>` session per request instead of sharing a global `"default"` conversation.
+
+- **[Conversation Contract] Stateful frontend semantics**:
+  - Only the newest `role=user` message is admitted; earlier history, client system/developer prompts, and Responses `instructions` are ignored.
+  - Trailing assistant/tool rows are ignored rather than replaying an older prompt.
+  - The three wire formats are unchanged: request/response shapes, SSE chunks, `model` echo, usage, and `jeikcode` metadata stay compatible.
+  - The OpenAI-compatible surfaces accept `input_text` / `input_image` and both object/string `image_url`; all three endpoints accept images in the newest user message.
+
+- **[Approval & Tool Behavior] Auto automation preserved**:
+  - API turns remain forced to Auto: no permission modal and no user-input modal, independent of the WebUI global mode.
+  - A model `request_user_input` call is still returned as the assistant's final text and declined to the model so it waits for the next user message.
+  - A second request while a turn is running keeps latest-wins preemption (stop + new turn, bounded wait), not mid-turn steering.
+  - Non-stream final-answer delivery keeps the Todo-guard fallback that prefers the substantive pre-tool answer.
+
+- **[Documentation & Verification]**
+  - Expanded the English and Chinese API compatibility pages with session keys, stateful history, preemption, images, Auto mode, tool limits, and troubleshooting.
+  - Added regression coverage for compatibility admission, two-turn memory, empty-user rejection, outline rows, Auto policy, and session-key persistence; verified all three protocol surfaces against a mock upstream and the docs build.
+
+---
+
+**本次 beta 将 OpenAI、Responses 与 Anthropic 兼容对话端点全面接入 7.5.0 的新会话架构。API 回合现在等价于 WebUI 点击发送：最新 user 消息只准入一次、在模型请求前落盘、出现在右栏大纲，并通过同一套会话键恢复；同时修复首轮之后“失忆”的回归。**
+
+- **[API 对话端点] 与 WebUI 共用一条准入路径**：
+  - `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 现在与 WebUI 发送走同一准入流程：稳定消息身份、输入/展示落盘、活跃回合占位与事件 fan-out。
+  - 修复 7.5.0 中第二轮及之后 API 提问丢失、模型像没有上下文一样复读问候的回归。
+  - API 提问现在会出现在右栏大纲，并像 WebUI 提问一样跨刷新与回放保留。
+  - 没有真实非空 user 消息时立即失败，不再静默跑空 prompt。
+
+- **[会话身份] 稳定的 `user` 键映射**：
+  - 客户端 `user` 仍是会话键；不需要显式 session id，也不需要额外请求头。
+  - 协议会话保存不可变键，与显示标题解耦；WebUI 重命名不再破坏 API 恢复。
+  - 旧会话首次使用时按精确显示名回填键。
+  - 省略 `user` 时每次请求创建临时 `api-<uuid>` 会话，不再共享全局 `"default"`。
+
+- **[对话契约] 纯前端有状态语义**：
+  - 只准入最新一条 `role=user` 消息；更早历史、客户端 system/developer 提示词与 Responses `instructions` 均忽略。
+  - 尾部 assistant/tool 行只忽略，不会重放旧 user 提问。
+  - 三大端点 wire 格式不变：请求/响应结构、SSE 块、model 回显、usage 与 jeikcode 元数据保持兼容。
+  - OpenAI 兼容面接受 input_text/input_image 以及对象/字符串形式 image_url；三个端点都支持最新 user 消息中的图片输入。
+
+- **[审批与工具行为] 保留 Auto 自动化**：
+  - API 回合继续强制 Auto：不弹审批窗、不弹用户输入窗，不受 WebUI 全局模式影响。
+  - 模型 request_user_input 仍转为 assistant 最终文本，并以 declined 结束，等待用户下一条消息。
+  - 回合运行中收到第二条请求仍是最新优先的抢占（停止 + 新回合，有界等待），不是回合内转向。
+  - 非流式最终回答继续保留 Todo 保护回锚，优先返回打勾前的实质正文。
+
+- **[文档与验证]**：
+  - 补齐中英文 API 兼容端点文档：会话键、有状态历史、抢占、图片、Auto 模式、工具边界与排查。
+  - 增加兼容准入、两轮记忆、空提问拒绝、大纲条目、Auto 策略与会话键持久化回归测试；并用 mock 上游验证三个协议面与文档构建。
+
 ## v7.5.0 (2026-11-09)
 
 **This stable release consolidates the complete 7.5.0 beta line into the stable channel: the session-canvas overhaul, durable runtime, steering and checklist state, provider-schema and context-budget alignment, the reworked search and approval policy, and the latest WebUI, editor, updater, and cross-platform fixes.**
