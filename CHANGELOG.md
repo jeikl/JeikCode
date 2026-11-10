@@ -21,6 +21,32 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.1-beta.2 (2026-11-10)
+
+**This beta fixes a message-row ordering regression where a mid-turn steer card could jump ahead of already-streamed reasoning and tool blocks during session switches or streaming, then snap back when the turn stopped. Steer and user rows now keep their causal position across foreground/background fold, refresh, repeated session switches, and terminal reconciliation.**
+
+- **[Message Ordering] Stable steer and user row placement**:
+  - Provisional window/outline indexes are no longer written into transcript ordering metadata; only disk- or server-confirmed indexes can decide a row's position.
+  - A mid-turn steer card keeps its causal position after foreground fold, background fold, full refresh, repeated session switches, and terminal reconciliation.
+  - Later reasoning/tool rounds are no longer displaced ahead of the steer; the unpersisted tail stays in array order as one contiguous suffix.
+  - When the steer fold acknowledgement arrives for a bubble already painted by the user echo, the bubble is promoted with its steer identity instead of being treated as a normal prompt.
+- **[Verification]**:
+  - 941 WebUI tests and TypeScript checks pass; the debug build was stress-tested on port 13462 with foreground/background steer, full reload, repeated session switches, and Stop reconciliation; no row drift, duplicate ids, or index monotonicity violations.
+  - No protocol/API changes and no data migration required.
+
+---
+
+**本次 beta 修复消息行顺序回归：回合中的转向卡在切会话或推流期间可能跳到已输出的思考/工具块之前，并在回合结束后才归位。现在转向与用户消息在前后台 fold、刷新、反复切会话和终态对账后都保持原有因果位置。**
+
+- **[消息顺序] 转向与用户消息稳定归位**：
+  - 临时的窗口/大纲下标不再写入消息的顺序元数据；只有磁盘或服务端确认的下标才能决定消息位置。
+  - 前台 fold、后台 fold、整页刷新、反复切会话、终态对账后，转向卡都保持在原本的因果位置。
+  - 后续的思考/工具轮不会再被转向卡挤到前面；未落盘尾巴作为一段连续后缀保持数组顺序。
+  - 转向 fold 回执到达时，已经由用户回声画出的气泡会补上转向身份，避免降级为普通提问。
+- **[验证]**：
+  - 941 个 WebUI 测试与 TypeScript 检查通过；debug 版本在 13462 完成前台/后台转向、整页刷新、多次切会话与 Stop 对账压测；无消息行漂移、无重复 id、无下标单调性违例。
+  - 无协议/API 变更，无需数据迁移。
+
 ## v7.5.1-beta.1 (2026-11-10)
 
 **This beta aligns the OpenAI-, Responses-, and Anthropic-compatible conversation endpoints with the 7.5.0 session architecture. An API turn now behaves like a WebUI send: the newest user message is admitted once, persisted before the model runs, shown in the right-rail outline, and resumed through the same session key mapping. It also fixes the post-first-turn "amnesia" regression.**
