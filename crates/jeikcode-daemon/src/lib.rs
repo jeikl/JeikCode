@@ -1328,6 +1328,30 @@ mod session_window_tests {
         let info = MessageInfo::from_kernel(&msg);
         assert_eq!(info.content, long);
     }
+
+    #[test]
+    fn empty_user_display_rows_never_enter_the_outline() {
+        let record = jeikcode_capabilities::session::DisplayRecord {
+            v: jeikcode_capabilities::session::DISPLAY_VERSION,
+            session_id: "s1".into(),
+            turn_id: 1,
+            index: 0,
+            seq: 1,
+            role: "user".into(),
+            id: Some("m-empty".into()),
+            content: "   \n\t".into(),
+            reasoning: None,
+            synthetic: false,
+            internal_origin: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            is_error: false,
+            images: Vec::new(),
+            created_at: None,
+            elapsed_ms: None,
+        };
+        assert!(session_records_user_outline(&[record], 0).is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -4046,13 +4070,14 @@ impl ActiveChatRegistry {
     async fn admit_or_preempt(
         self,
         session_id: Option<String>,
+        request_id: Option<String>,
         occupancy: Option<String>,
         timeout: Duration,
     ) -> Result<ActiveChatAdmission, ActiveChatAdmissionError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             match self
-                .admit_occupied(session_id.clone(), None, occupancy.clone())
+                .admit_occupied(session_id.clone(), request_id.clone(), occupancy.clone())
                 .await
             {
                 Ok(admission) => return Ok(admission),
@@ -7302,6 +7327,9 @@ pub struct SessionSummary {
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
+    /// Internal protocol-key lookup only; never exposed on the session wire.
+    #[serde(skip)]
+    pub protocol_key: Option<String>,
 }
 
 fn catalog_scan_in_root(
@@ -7340,6 +7368,7 @@ fn catalog_entry_to_session_summary(
         preferred_model,
         reasoning_effort: entry.reasoning_effort.clone(),
         thinking_budget: entry.thinking_budget,
+        protocol_key: None,
     }
 }
 
@@ -11372,6 +11401,11 @@ async fn fork_session(
             };
 
         forked.meta.updated_at = now.saturating_add(1);
+        // A fork is a new manual conversation. It must never steal the source
+        // session's protocol key (or its protocol origin), otherwise a later
+        // `/v1/*` request could resume the fork instead of the original.
+        forked.meta.protocol_key = None;
+        forked.meta.origin = jeikcode_capabilities::session::SessionOrigin::Manual;
         if let Some(title) = req
             .title
             .as_deref()
@@ -11618,8 +11652,9 @@ pub struct ChatRequest {
     /// Session ID to continue (optional, creates new if not provided)
     #[serde(default)]
     pub session_id: Option<String>,
-    /// Per-request cancellation key supplied by the webui. Unlike `session_id`,
-    /// this is available during the first turn of a brand-new conversation.
+    /// Per-request correlation id. WebUI/IDE clients usually supply it;
+    /// `admit_chat_turn` mints one when the wire omits it (compat endpoints).
+    /// Unlike `session_id`, this is available during the first turn.
     #[serde(default)]
     pub request_id: Option<String>,
     /// Attached images (base64). Empty = text-only. The native `/chat` path forwards
@@ -14540,6 +14575,199 @@ impl ChatRuntimeProjector {
     }
 }
 
+/// How a new turn is admitted when the session already owns a running turn.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ChatAdmissionMode {
+    /// Native /chat: reject with 409 instead of stopping another turn.
+    RejectIfBusy,
+    /// Compat /v1/*: latest-wins. Stop the running turn, wait for its
+    /// snapshot/display flush, then admit this one.
+    Preempt { timeout: Duration },
+}
+
+/// One admitted turn plus the transport-neutral event stream. Both `/chat` and
+/// the OpenAI/Anthropic compat surfaces MUST come through here; this is the
+/// single "user clicked send" boundary.
+pub(crate) struct AdmittedChatTurn {
+    pub request: ChatRequest,
+    pub operation_id: String,
+    pub session_id: String,
+    pub client_input_id: String,
+    pub cancellation: CancellationToken,
+    pub rx: mpsc::UnboundedReceiver<ChatEvent>,
+    pub fan_tx: mpsc::UnboundedSender<ChatEvent>,
+    pub terminal_sent: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Persist the admitted prompt before any model request. This is the exact
+/// behavior of a WebUI send: the prompt gets an identity, an input-log row and
+/// a display admission row even if the client disconnects before the first frame.
+fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_id: &str) {
+    let created_at = u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0);
+    let mut input = jeikcode_capabilities::session::SessionInput {
+        id: client_input_id.to_string(),
+        seq: 0,
+        session_id: session_id.to_string(),
+        delivery: "prompt".into(),
+        status: "admitted".into(),
+        text: request.message.clone(),
+        images: request
+            .images
+            .iter()
+            .map(|image| jeikcode_kernel::message::ImageContent {
+                media_type: image.media_type.clone(),
+                data: image.data.clone(),
+            })
+            .collect(),
+        created_at,
+        message_id: Some(client_input_id.to_string()),
+        operation_id: Some(client_input_id.to_string()),
+    };
+    if let Err(error) = jeikcode_capabilities::session::inputs::append_global(&mut input) {
+        tracing::warn!(
+            session_id = %session_id,
+            client_input_id = %client_input_id,
+            error = %error,
+            "chat admission: input log append failed"
+        );
+    }
+
+    let bucket = if let Some(dir) = request.working_dir.as_deref() {
+        NativeSessionManager::project_hash(dir)
+    } else if let Ok(Some(resolved)) = resolve_session_by_id(session_id) {
+        resolved.project_hash
+    } else {
+        String::new()
+    };
+    if bucket.is_empty() {
+        return;
+    }
+    let manager =
+        NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(&bucket));
+    let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = request
+        .images
+        .iter()
+        .map(|image| jeikcode_capabilities::session::DisplayImage {
+            media_type: image.media_type.clone(),
+            data: image.data.clone(),
+            missing: false,
+        })
+        .collect();
+    if let Err(error) = manager.append_display_user(
+        session_id,
+        client_input_id,
+        &request.message,
+        &display_images,
+        Some(created_at),
+    ) {
+        tracing::warn!(
+            session_id = %session_id,
+            client_input_id = %client_input_id,
+            error = %error,
+            "chat admission: display admission append failed"
+        );
+    }
+}
+
+/// The one admission pipeline for every chat transport.
+///
+/// It mints the internal identity when the wire did not provide one, admits the
+/// ActiveChat operation, persists the prompt before the model runs, and returns
+/// the fan-out stream the transport should project.
+pub(crate) async fn admit_chat_turn(
+    state: &AppState,
+    mut request: ChatRequest,
+    mode: ChatAdmissionMode,
+    occupancy: Option<String>,
+) -> Result<AdmittedChatTurn, ActiveChatAdmissionError> {
+    if request
+        .session_id
+        .as_deref()
+        .map_or(true, |session_id| session_id.trim().is_empty())
+    {
+        request.session_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+    let session_id = request
+        .session_id
+        .clone()
+        .expect("session id was just ensured");
+
+    // Identity is minted HERE, never at the wire boundary. Compat endpoints do
+    // not (and should not) require a request_id from third-party clients.
+    let client_input_id = request
+        .request_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(jeikcode_kernel::message::new_message_id);
+    request.request_id = Some(client_input_id.clone());
+
+    let admission = match mode {
+        ChatAdmissionMode::RejectIfBusy => {
+            state
+                .active_chats
+                .admit_occupied(
+                    Some(session_id.clone()),
+                    Some(client_input_id.clone()),
+                    occupancy.clone(),
+                )
+                .await
+        }
+        ChatAdmissionMode::Preempt { timeout } => {
+            state
+                .active_chats
+                .clone()
+                .admit_or_preempt(
+                    Some(session_id.clone()),
+                    Some(client_input_id.clone()),
+                    occupancy.clone(),
+                    timeout,
+                )
+                .await
+        }
+    }?;
+
+    persist_admitted_user(&request, &session_id, &client_input_id);
+
+    let (client_tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
+    let event_bus = state
+        .active_chats
+        .event_bus(&admission.operation_id)
+        .await
+        .expect("just admitted operation always has an event bus");
+    let replay = state
+        .active_chats
+        .event_bus_with_replay(&admission.operation_id)
+        .await
+        .map(|(_, replay)| replay);
+    let fan_tx = fanout_chat_events_for_session(
+        client_tx,
+        event_bus,
+        replay,
+        Some(session_id.clone()),
+        request.working_dir.clone(),
+    );
+
+    tracing::info!(
+        session_id = %session_id,
+        client_input_id = %client_input_id,
+        operation_id = %admission.operation_id,
+        occupancy = occupancy.as_deref().unwrap_or(""),
+        preempt = matches!(mode, ChatAdmissionMode::Preempt { .. }),
+        "chat admission: turn admitted"
+    );
+
+    Ok(AdmittedChatTurn {
+        request,
+        operation_id: admission.operation_id,
+        session_id,
+        client_input_id,
+        cancellation: admission.cancellation,
+        rx,
+        fan_tx,
+        terminal_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    })
+}
+
 /// POST /chat - Stream chat response with SSE
 async fn chat_stream(
     State(state): State<AppState>,
@@ -14547,21 +14775,6 @@ async fn chat_stream(
     headers: axum::http::HeaderMap,
     Json(mut req): Json<ChatRequest>,
 ) -> axum::response::Response {
-    // Ensure a valid session_id exists ahead of admission so RPC response and event bus always bind cleanly.
-    if req
-        .session_id
-        .as_deref()
-        .map_or(true, |s| s.trim().is_empty())
-    {
-        req.session_id = Some(uuid::Uuid::new_v4().to_string());
-    }
-
-    // Parse session UUID for telemetry scope
-    let session_uuid = req
-        .session_id
-        .as_deref()
-        .and_then(|s| uuid::Uuid::parse_str(s).ok());
-
     // Use current project working directory if not specified
     if req.working_dir.is_none() {
         let project = state.project.read().await;
@@ -14576,139 +14789,6 @@ async fn chat_stream(
         }
     }
 
-    // 客户端关联键 = 落盘消息 id（新契约下两者同值），先捕获再借用。
-    // API / 旧客户端可能没有 request_id：仍必须为这一轮铸造唯一身份，
-    // 否则 user 回声、展示行、大纲三处无 id，WebUI 观看时会重复或丢提问。
-    let client_input_id = req
-        .request_id
-        .clone()
-        .or_else(|| Some(jeikcode_kernel::message::new_message_id()));
-    let admission = match state
-        .active_chats
-        .admit(req.session_id.as_deref(), client_input_id.as_deref())
-        .await
-    {
-        Ok(admission) => admission,
-        Err(error) => {
-            let (code, message) = match error {
-                ActiveChatAdmissionError::SessionBusy => (
-                    "session_busy",
-                    "This session already has an active chat operation",
-                ),
-                ActiveChatAdmissionError::RequestBusy => (
-                    "request_busy",
-                    "This request id already has an active chat operation",
-                ),
-            };
-            return (
-                StatusCode::CONFLICT,
-                Json(ApiError {
-                    success: false,
-                    error: message.to_string(),
-                    code: Some(code.to_string()),
-                    retryable: Some(true),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    // Durable input admission: a refresh between POST acceptance and the first
-    // kernel frame must not lose the user's question. The input log is the
-    // projection source for the pending user row/rail entry; the kernel echo
-    // promotes it by the same id.
-    if let (Some(sid), Some(input_id)) = (req.session_id.as_deref(), client_input_id.as_deref()) {
-        let mut input = jeikcode_capabilities::session::SessionInput {
-            id: input_id.to_string(),
-            seq: 0,
-            session_id: sid.to_string(),
-            delivery: "prompt".into(),
-            status: "admitted".into(),
-            text: req.message.clone(),
-            images: req
-                .images
-                .iter()
-                .map(|image| jeikcode_kernel::message::ImageContent {
-                    media_type: image.media_type.clone(),
-                    data: image.data.clone(),
-                })
-                .collect(),
-            created_at: u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0),
-            message_id: Some(input_id.to_string()),
-            operation_id: Some(input_id.to_string()),
-        };
-        let _ = jeikcode_capabilities::session::inputs::append_global(&mut input);
-
-        // 提问的物理落盘分两层，canonical `.snapshot` 只归内核：
-        // 1) 输入日志（上方 `append_global`）：受理即持久，供画布/大纲把「已受理
-        //    未折叠」的提问投影成用户行（`append_pending_inputs`）；
-        // 2) display.jsonl（下方 `append_display_user`）：确立提问排在模型输出之前的时序。
-        // canonical `.snapshot` 绝不能在运行时启动前追加这条提问：运行时会以
-        // `Resume` 语义从该快照起步，随后又 submit 同一条提问，同 id 的用户消息
-        // 于是在历史里存成两条（第二条才被追加 `<system-reminder>` 日期），
-        // 一条提问直接翻倍 token。历史行由内核独家写入（turn_start 写 inflight、
-        // turn_complete 写 canonical）。
-        let bucket = if let Some(dir) = req.working_dir.as_deref() {
-            NativeSessionManager::project_hash(std::path::Path::new(dir))
-        } else if let Ok(Some(resolved)) = resolve_session_by_id(sid) {
-            resolved.project_hash
-        } else {
-            String::new()
-        };
-        if !bucket.is_empty() {
-            let manager = NativeSessionManager::with_root(
-                NativeSessionManager::sessions_root().join(&bucket),
-            );
-            // 关键物理落盘铁律（单一真源）：在发起任何模型网络请求之前，
-            // 提问直接原子写入 display.jsonl！从物理源头确立提问排在所有模型输出之前的绝对时序！
-            let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = req
-                .images
-                .iter()
-                .map(|img| jeikcode_capabilities::session::DisplayImage {
-                    media_type: img.media_type.clone(),
-                    data: img.data.clone(),
-                    missing: false,
-                })
-                .collect();
-            let _ = manager.append_display_user(
-                sid,
-                input_id,
-                &req.message,
-                &display_images,
-                Some(input.created_at),
-            );
-        }
-    }
-
-    let (client_tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
-    let operation_id = admission.operation_id.clone();
-    let cancel_token = admission.cancellation;
-    let event_bus = state
-        .active_chats
-        .event_bus(&admission.operation_id)
-        .await
-        .expect("just admitted operation always has an event bus");
-    // Fan-out so /chat/watch (WebUI reattach) sees the same events as this SSE,
-    // including a full replay log for mid-turn page refresh.
-    let replay = state
-        .active_chats
-        .event_bus_with_replay(&admission.operation_id)
-        .await
-        .map(|(_, r)| r);
-    let fan_tx = fanout_chat_events_for_session(
-        client_tx.clone(),
-        event_bus,
-        replay,
-        req.session_id.clone(),
-        req.working_dir.clone(),
-    );
-
-    // Clone state for the spawned task
-    let active_chats = state.active_chats.clone();
-    let mcp_pool = state.mcp_pool.clone();
-    let telemetry = state.telemetry.clone();
-    let pending_permissions = state.pending_permissions.clone();
-    let pending_user_inputs = state.pending_user_inputs.clone();
     // POST /chat is always a *native* owner turn (WebUI / channel / IDE).
     // Observers of API turns use GET /chat/watch and do not enter here.
     // YOLO forces automation on every surface; otherwise honor native UX.
@@ -14733,6 +14813,50 @@ async fn chat_stream(
         approval_mode = ?req.approval_mode,
         "chat_stream: native turn policy"
     );
+
+    let admitted = match admit_chat_turn(&state, req, ChatAdmissionMode::RejectIfBusy, None).await {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            let (code, message) = match error {
+                ActiveChatAdmissionError::SessionBusy => (
+                    "session_busy",
+                    "This session already has an active chat operation",
+                ),
+                ActiveChatAdmissionError::RequestBusy => (
+                    "request_busy",
+                    "This request id already has an active chat operation",
+                ),
+            };
+            return (
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    success: false,
+                    error: message.to_string(),
+                    code: Some(code.to_string()),
+                    retryable: Some(true),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let AdmittedChatTurn {
+        request: req,
+        operation_id,
+        session_id,
+        client_input_id: _,
+        cancellation: cancel_token,
+        rx,
+        fan_tx,
+        terminal_sent,
+    } = admitted;
+    let session_uuid = uuid::Uuid::parse_str(&session_id).ok();
+
+    // Clone state for the spawned task
+    let active_chats = state.active_chats.clone();
+    let mcp_pool = state.mcp_pool.clone();
+    let telemetry = state.telemetry.clone();
+    let pending_permissions = state.pending_permissions.clone();
+    let pending_user_inputs = state.pending_user_inputs.clone();
 
     // Build CurrentContext for the spawned task (task_local doesn't auto-propagate across spawn)
     // Use the request's working_dir to detect repo_origin dynamically (not the
@@ -14760,7 +14884,6 @@ async fn chat_stream(
     let rpc_sid = chat_session_id.clone();
     let cleanup_chats = active_chats.clone();
     let inner_event_tx = fan_tx.clone();
-    let terminal_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let inner_terminal_sent = terminal_sent.clone();
 
     tokio::spawn(async move {
@@ -14935,6 +15058,41 @@ async fn finalize_chat_task(
     }
 }
 
+/// Whether the last conversation row is a real, non-empty user turn. Every
+/// driver must satisfy this before starting a runtime; an empty prompt is a
+/// transport/admission bug, never a valid model turn.
+fn turn_input_is_real_user_message(message: &jeikcode_kernel::message::Message) -> bool {
+    message.role == jeikcode_kernel::message::Role::User
+        && !message.synthetic
+        && (!message.text.trim().is_empty() || !message.images.is_empty())
+}
+
+#[cfg(test)]
+mod admission_identity_tests {
+    use super::turn_input_is_real_user_message;
+    use jeikcode_kernel::message::Message;
+
+    #[test]
+    fn synthetic_and_empty_rows_never_start_a_turn() {
+        let mut synthetic = Message::user("<available_skills>");
+        synthetic.synthetic = true;
+        assert!(!turn_input_is_real_user_message(&synthetic));
+
+        let empty = Message::user("   ");
+        assert!(!turn_input_is_real_user_message(&empty));
+
+        let assistant = Message::assistant("previous answer", Vec::new());
+        assert!(!turn_input_is_real_user_message(&assistant));
+    }
+
+    #[test]
+    fn a_real_user_prompt_is_valid_even_without_a_caller_id() {
+        let real = Message::user("Q2: continue");
+        assert!(real.id.is_none());
+        assert!(turn_input_is_real_user_message(&real));
+    }
+}
+
 /// Process a chat request and stream events
 pub(crate) async fn process_chat_request(
     req: ChatRequest,
@@ -15057,7 +15215,7 @@ pub(crate) async fn process_chat_request(
             .map(str::trim)
             .is_some_and(|title| !title.is_empty())
     {
-        mark_protocol_origin(&working_dir, &session_id);
+        mark_protocol_origin(&working_dir, &session_id, req.session_title.as_deref());
     }
 
     // AI session title is owned exclusively by CodingRuntime (first-submit
@@ -15137,11 +15295,20 @@ pub(crate) async fn process_chat_request(
         };
         user_msg.created_at_ms = created_at;
         user_msg.id = req.request_id.clone();
-        if !conv.iter().any(|m| {
-            m.id.as_deref() == req.request_id.as_deref()
-                && m.role == jeikcode_kernel::message::Role::User
-        }) {
-            conv.push(user_msg);
+        // 一条真实用户提问就是一条历史行。兼容端点的 request_id 是 None，
+        // 而 None 不是身份；这里绝不能把 None 当成“已存在”的匹配键。
+        // 内核 Conversation::push 已经对 Some(id) 的真实用户消息幂等，
+        // daemon 侧不再重复实现一层去重。
+        conv.push(user_msg);
+        // 输入准入硬不变量：任何真实回合都必须从一条非空 user 行开始。
+        // 一旦上游把提问丢掉，这里立刻失败，而不是让模型对着空 prompt 复读问候。
+        let admitted_turn_is_valid = conv
+            .last()
+            .is_some_and(|message| turn_input_is_real_user_message(message));
+        if !admitted_turn_is_valid {
+            anyhow::bail!(
+                "refusing to start a turn without a real user message (session {session_id})"
+            );
         }
         // 会话历史只有一个写入方——内核。这里只把刚受理的提问放进**本回合的内存投影**
         // （`run_chat_turn_v2` 依赖它取 prefix/正文，早停路径也据此落盘），绝不提前写
@@ -15448,13 +15615,23 @@ pub(crate) async fn process_chat_request(
 /// they were loaded above. Keeping persistence and notification in one helper
 /// prevents clients from binding an id that a later request cannot resume.
 ///
-/// `session_title`: OpenAI/Anthropic `user` (or `"default"` when omitted). When
-/// set, the durable display name is that title with `user_renamed=true` so
-/// first-prompt auto-naming does not overwrite it.
-fn mark_protocol_origin(working_dir: &std::path::Path, session_id: &str) {
+/// `session_title`: OpenAI/Anthropic `user` (or an ephemeral `api-<uuid>` when
+/// omitted). When set, the durable display name is that title with
+/// `user_renamed=true` so first-prompt auto-naming does not overwrite it. The
+/// same value is stored as the immutable `protocol_key`.
+fn mark_protocol_origin(
+    working_dir: &std::path::Path,
+    session_id: &str,
+    protocol_key: Option<&str>,
+) {
     let manager = NativeSessionManager::for_project(working_dir);
     let _ = manager.update_meta(session_id, |meta| {
         meta.origin = jeikcode_capabilities::session::SessionOrigin::Protocol;
+        if let Some(key) = protocol_key.map(str::trim).filter(|key| !key.is_empty()) {
+            if meta.protocol_key.is_none() {
+                meta.protocol_key = Some(key.to_string());
+            }
+        }
     });
 }
 
@@ -15479,17 +15656,25 @@ fn publish_chat_session_assignment(
         );
         meta.owner = jeikcode_capabilities::session::StorageOwner::Native;
         meta.preferred_model = preferred_model.map(str::to_string);
-        meta.approval_mode = Some(
+        let has_protocol_title = session_title
+            .map(str::trim)
+            .is_some_and(|title| !title.is_empty());
+        // Protocol sessions are automation-owned: their durable mode is Auto.
+        // Native WebUI sessions keep the live session/global mode.
+        meta.approval_mode = Some(if has_protocol_title {
+            crate::approval_mode::ApprovalMode::Auto.wire().to_string()
+        } else {
             live_api::live_session_approval_mode(Some(session_id))
                 .wire()
-                .to_string(),
-        );
+                .to_string()
+        });
         meta.message_count = 1;
         if let Some(title) = session_title.map(str::trim).filter(|t| !t.is_empty()) {
             meta.name = title.to_string();
-            // Pin API / client-provided titles (including the stable "default"
-            // key) so turn-complete auto-name and AI naming leave them alone.
+            // Pin API / client-provided titles (including ephemeral api-<uuid>
+            // keys) so turn-complete auto-name and AI naming leave them alone.
             meta.user_renamed = true;
+            meta.protocol_key = Some(title.to_string());
             meta.origin = jeikcode_capabilities::session::SessionOrigin::Protocol;
         } else if let Some(provisional) = first_user_prompt
             .and_then(jeikcode_coding::session_title::provisional_title_from_user_input)
@@ -24213,7 +24398,7 @@ mod tests {
 
         let second = registry
             .clone()
-            .admit_or_preempt(Some("session-1".into()), None, Duration::from_secs(2))
+            .admit_or_preempt(Some("session-1".into()), None, None, Duration::from_secs(2))
             .await
             .expect("preempt should admit after previous turn completes");
         assert_ne!(second.operation_id, first.operation_id);
@@ -24246,6 +24431,7 @@ mod tests {
             .clone()
             .admit_or_preempt(
                 Some("unbound-uuid".into()),
+                None,
                 Some("compat-user:alice".into()),
                 Duration::from_secs(2),
             )

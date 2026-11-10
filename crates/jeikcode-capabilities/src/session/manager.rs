@@ -404,6 +404,11 @@ pub struct SessionMeta {
     /// `user_renamed` so a resumed session does not run the one-shot namer again.
     #[serde(default)]
     pub ai_named: bool,
+    /// Stable protocol session key (OpenAI/Anthropic `user`). The display
+    /// `name` may be renamed by the user; this key must never change, so a
+    /// compat request can still resume the same session by name-key lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_key: Option<String>,
     /// Durable storage authority. Missing on pre-S2 metadata, which must be
     /// resolved under the session lease instead of guessed by readers.
     #[serde(default)]
@@ -479,6 +484,7 @@ impl SessionMeta {
             id,
             user_renamed: false,
             ai_named: false,
+            protocol_key: None,
             owner: StorageOwner::Unconfirmed,
             import_info: None,
             fork_info: None,
@@ -8462,5 +8468,21 @@ mod tests {
         let old = r#"{"id":"x","name":"n","working_dir":"/w","created_at":0,"updated_at":0}"#;
         let parsed: SessionMeta = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.origin, SessionOrigin::Manual);
+    }
+
+    #[test]
+    fn protocol_key_survives_display_rename_and_roundtrip() {
+        let mut meta = SessionMeta::new("s1", "/tmp/p", 0);
+        meta.protocol_key = Some("alice".into());
+        meta.name = "Renamed in WebUI".into();
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.protocol_key.as_deref(), Some("alice"));
+        assert_eq!(back.name, "Renamed in WebUI");
+
+        // Old metadata without the field must still deserialize.
+        let old = r#"{"id":"x","name":"n","working_dir":"/w","created_at":0,"updated_at":0}"#;
+        let parsed: SessionMeta = serde_json::from_str(old).unwrap();
+        assert!(parsed.protocol_key.is_none());
     }
 }

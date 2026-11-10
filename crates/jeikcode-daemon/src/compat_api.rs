@@ -18,12 +18,17 @@
 //!
 //! Design (JeikCode core, not a dumb proxy):
 //! - Client multi-turn history is **ignored**; only the latest user query is admitted.
-//! - System prompts from the request are appended **after** AGENTS.md / glossary / db packs.
-//! - OpenAI/Anthropic `user` is a client session key (`alice_1`, `chat-2`): same key
-//!   resumes, different key creates a new session; omit for ephemeral.
-//! - A second request on the same `user` while a turn is running **preempts**:
-//!   the previous turn is stopped like WebUI `/chat/stop` (running bash/tools
-//!   included), its snapshot is persisted, then the new message is admitted.
+//! - Client system/developer prompts are **ignored**; the backend prompt is the only
+//!   authority (pure stateful-frontend contract).
+//! - OpenAI/Anthropic `user` is a durable client session key (`alice_1`, `chat-2`):
+//!   same key resumes, different key creates a new session; omit for an ephemeral
+//!   `api-<uuid>` key (never a shared global "default").
+//! - Every turn is forced **Auto**: no permission/user-input modals. A model
+//!   `request_user_input` call is returned as the final answer and declined to the
+//!   model so it waits for the next user message.
+//! - A second request on the same `user` while a turn is running **preempts**
+//!   (latest-wins: stop + new turn, not `/chat/steer`). The previous turn's
+//!   snapshot/display is persisted before the new message is admitted.
 //! - Dropping the owning HTTP connection (SSE stream or non-stream handler)
 //!   cancels that same turn so a client timeout does not keep burning tokens.
 //! - Request `model` is resolved every turn so model switches take effect immediately.
@@ -49,9 +54,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::approval_mode::ApprovalMode;
 use crate::{
-    fanout_chat_events_for_session, process_chat_request, public_compat_model_id,
-    resolve_chat_provider, ActiveChatAdmissionError, AppState, ChatEvent, ChatRequest, ImageInput,
-    SessionSummary,
+    process_chat_request, public_compat_model_id, resolve_chat_provider, ActiveChatAdmissionError,
+    AppState, ChatEvent, ChatRequest, ImageInput, SessionSummary,
 };
 use jeikcode_config::config::Config;
 use jeikcode_telemetry::{CurrentContext, SessionMode};
@@ -69,10 +73,11 @@ struct CompatTurn {
     system_append: Option<String>,
     /// Client-controlled session key from OpenAI/Anthropic `user`.
     ///
-    /// Distinct non-empty keys map 1:1 to JeikCode sessions (exact name match).
-    /// Clients typically use stable ids such as `tenant_alice`, `chat-42`,
-    /// `user123_proj-x`. Different `user` ⇒ new session; same `user` ⇒ resume.
-    /// Omitted / blank ⇒ ephemeral session (new UUID every request).
+    /// Distinct non-empty keys map 1:1 to JeikCode sessions (`protocol_key`,
+    /// with exact-name fallback for legacy sessions). Clients typically use
+    /// stable ids such as `tenant_alice`, `chat-42`, `user123_proj-x`.
+    /// Different `user` ⇒ new session; same `user` ⇒ resume.
+    /// Omitted / blank ⇒ ephemeral `api-<uuid>` session key (new session every request).
     session_key: Option<String>,
     /// Requested model (catalog key, `account/model`, or bare wire id).
     /// Resolved every turn; the response always echoes `{account}/{wire_model}`.
@@ -136,8 +141,19 @@ struct OpenAiContentPart {
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiImageUrl {
-    url: String,
+#[serde(untagged)]
+enum OpenAiImageUrl {
+    Object { url: String },
+    Url(String),
+}
+
+impl OpenAiImageUrl {
+    fn into_url(self) -> String {
+        match self {
+            Self::Object { url } => url,
+            Self::Url(url) => url,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,7 +178,9 @@ pub(crate) struct OpenAiResponsesRequest {
     model: Option<String>,
     #[serde(default)]
     input: Option<ResponsesInput>,
+    /// Accepted for wire compatibility; intentionally ignored (backend prompt wins).
     #[serde(default)]
+    #[allow(dead_code)]
     instructions: Option<String>,
     #[serde(default)]
     stream: Option<bool>,
@@ -222,6 +240,7 @@ struct AnthropicMetadata {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+#[allow(dead_code)] // Accepted for wire compatibility; intentionally ignored.
 enum AnthropicSystem {
     Text(String),
     Blocks(Vec<AnthropicContentBlock>),
@@ -506,6 +525,9 @@ fn list_project_sessions(working_dir: &std::path::Path) -> Vec<(String, SessionS
         if entry.project_bucket != project_hash {
             continue;
         }
+        let meta = jeikcode_capabilities::session::SessionManager::for_project(&entry.working_dir)
+            .read_meta(&entry.id)
+            .ok();
         let summary = SessionSummary {
             id: entry.id.clone(),
             name: entry.name.clone(),
@@ -519,24 +541,10 @@ fn list_project_sessions(working_dir: &std::path::Path) -> Vec<(String, SessionS
                     .wire()
                     .to_string(),
             ),
-            preferred_model: jeikcode_capabilities::session::SessionManager::for_project(
-                &entry.working_dir,
-            )
-            .read_meta(&entry.id)
-            .ok()
-            .and_then(|m| m.preferred_model),
-            reasoning_effort: jeikcode_capabilities::session::SessionManager::for_project(
-                &entry.working_dir,
-            )
-            .read_meta(&entry.id)
-            .ok()
-            .and_then(|m| m.reasoning_effort),
-            thinking_budget: jeikcode_capabilities::session::SessionManager::for_project(
-                &entry.working_dir,
-            )
-            .read_meta(&entry.id)
-            .ok()
-            .and_then(|m| m.thinking_budget),
+            preferred_model: meta.as_ref().and_then(|m| m.preferred_model.clone()),
+            reasoning_effort: meta.as_ref().and_then(|m| m.reasoning_effort.clone()),
+            thinking_budget: meta.as_ref().and_then(|m| m.thinking_budget),
+            protocol_key: meta.as_ref().and_then(|m| m.protocol_key.clone()),
         };
         out.push((entry.project_bucket, summary));
     }
@@ -555,16 +563,36 @@ fn normalize_session_key(raw: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Find the most recently updated session whose **name** equals the client session key.
+/// Find the session for a client-provided `user` key.
+///
+/// The protocol key is the durable identity. `name` remains the fallback for
+/// sessions created before `protocol_key` existed; the fallback backfills the
+/// key so a later WebUI rename cannot break API resume.
 fn find_session_id_by_key(working_dir: &std::path::Path, key: &str) -> Option<String> {
     let key = key.trim();
     if key.is_empty() {
         return None;
     }
-    list_project_sessions(working_dir)
+    let sessions = list_project_sessions(working_dir);
+    if let Some(id) = sessions
+        .iter()
+        .find(|(_, s)| s.protocol_key.as_deref() == Some(key))
+        .map(|(_, s)| s.id.clone())
+    {
+        return Some(id);
+    }
+    let found = sessions
         .into_iter()
         .find(|(_, s)| s.name == key)
-        .map(|(_, s)| s.id)
+        .map(|(_, s)| s.id)?;
+    // Legacy protocol session: pin the key now so renames stop affecting lookup.
+    let manager = jeikcode_capabilities::session::SessionManager::for_project(working_dir);
+    let _ = manager.update_meta(&found, |meta| {
+        if meta.protocol_key.is_none() {
+            meta.protocol_key = Some(key.to_string());
+        }
+    });
+    Some(found)
 }
 
 /// Resolve session for a client key:
@@ -592,7 +620,11 @@ pub(crate) async fn list_sessions(
     let filter = normalize_session_key(q.user.as_deref());
     let data: Vec<CompatSession> = list_project_sessions(&working_dir)
         .into_iter()
-        .filter(|(_, s)| filter.as_ref().map(|t| s.name == *t).unwrap_or(true))
+        .filter(|(_, s)| {
+            filter
+                .as_ref()
+                .is_none_or(|key| s.name == *key || s.protocol_key.as_deref() == Some(key.as_str()))
+        })
         .take(limit)
         .map(|(project_hash, s)| CompatSession {
             id: s.id,
@@ -618,8 +650,12 @@ pub(crate) async fn get_session(State(state): State<AppState>, Path(id): Path<St
     let key = normalize_session_key(Some(id.as_str())).unwrap_or(id.clone());
     match list_project_sessions(&working_dir)
         .into_iter()
-        .find(|(_, s)| s.id == key || s.id.starts_with(&key) || s.name == key)
-    {
+        .find(|(_, s)| {
+            s.id == key
+                || s.id.starts_with(&key)
+                || s.name == key
+                || s.protocol_key.as_deref() == Some(key.as_str())
+        }) {
         Some((project_hash, s)) => Json(CompatSession {
             id: s.id,
             object: "session",
@@ -715,7 +751,7 @@ async fn collect_openai_content(
             let mut images = Vec::new();
             for p in parts {
                 match p.kind.as_str() {
-                    "text" => {
+                    "text" | "input_text" | "output_text" => {
                         if let Some(t) = p.text {
                             if !text.is_empty() {
                                 text.push('\n');
@@ -723,9 +759,9 @@ async fn collect_openai_content(
                             text.push_str(&t);
                         }
                     }
-                    "image_url" => {
+                    "image_url" | "input_image" => {
                         if let Some(img) = p.image_url {
-                            images.push(resolve_image_url(img.url).await?);
+                            images.push(resolve_image_url(img.into_url()).await?);
                         } else if let Some(src) = p.source {
                             if let Some(data) = src.data {
                                 images.push(ImageInput {
@@ -752,7 +788,7 @@ async fn collect_openai_content(
                                 images.push(resolve_image_url(url).await?);
                             }
                         } else if let Some(img) = p.image_url {
-                            images.push(resolve_image_url(img.url).await?);
+                            images.push(resolve_image_url(img.into_url()).await?);
                         }
                     }
                     _ => {}
@@ -766,20 +802,13 @@ async fn collect_openai_content(
 async fn extract_openai_turn(
     messages: Vec<OpenAiMessage>,
 ) -> Result<(Option<String>, String, Vec<ImageInput>), String> {
-    let mut systems = Vec::new();
+    // Pure stateful frontend contract: the backend prompt is authoritative.
+    // Client system/developer text and all prior turns are ignored. The newest
+    // `role=user` row wins; a trailing assistant/tool row is ignored.
     let mut last_user: Option<OpenAiMessage> = None;
     for m in messages {
-        match m.role.to_ascii_lowercase().as_str() {
-            "system" | "developer" => {
-                if let Some(c) = m.content {
-                    let (t, _) = collect_openai_content(c).await?;
-                    if !t.trim().is_empty() {
-                        systems.push(t);
-                    }
-                }
-            }
-            "user" => last_user = Some(m),
-            _ => {}
+        if m.role.eq_ignore_ascii_case("user") {
+            last_user = Some(m);
         }
     }
     let user = last_user.ok_or_else(|| "no user message in request".to_string())?;
@@ -790,41 +819,14 @@ async fn extract_openai_turn(
     if text.trim().is_empty() && images.is_empty() {
         return Err("latest user message is empty".into());
     }
-    let system = if systems.is_empty() {
-        None
-    } else {
-        Some(systems.join("\n\n"))
-    };
-    Ok((system, text, images))
+    Ok((None, text, images))
 }
 
 async fn extract_anthropic_turn(
-    system: Option<AnthropicSystem>,
+    _system: Option<AnthropicSystem>,
     messages: Vec<AnthropicMessage>,
 ) -> Result<(Option<String>, String, Vec<ImageInput>), String> {
-    let mut system_text = None;
-    if let Some(sys) = system {
-        match sys {
-            AnthropicSystem::Text(t) if !t.trim().is_empty() => system_text = Some(t),
-            AnthropicSystem::Blocks(blocks) => {
-                let mut parts = Vec::new();
-                for b in blocks {
-                    if b.kind == "text" {
-                        if let Some(t) = b.text {
-                            if !t.trim().is_empty() {
-                                parts.push(t);
-                            }
-                        }
-                    }
-                }
-                if !parts.is_empty() {
-                    system_text = Some(parts.join("\n\n"));
-                }
-            }
-            _ => {}
-        }
-    }
-
+    // Pure stateful frontend contract: ignore client system prompts.
     let last_user = messages
         .into_iter()
         .rev()
@@ -875,7 +877,7 @@ async fn extract_anthropic_turn(
     if text.trim().is_empty() && images.is_empty() {
         return Err("latest user message is empty".into());
     }
-    Ok((system_text, text, images))
+    Ok((None, text, images))
 }
 
 /// Extract client session key from OpenAI/Anthropic `user` (preferred) or metadata.
@@ -953,16 +955,15 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
     // Client `user` is the session key:
     //   user=alice_a  → resume or create session named "alice_a"
     //   user=alice-b  → different key → different session
-    //   (omit user)   → stable default key "default" (automation-friendly)
+    //   (omit user)   → ephemeral `api-<uuid>` (never shares a global "default")
     let session_key_raw = turn
         .session_key
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("default")
-        .to_string();
-    let (session_id, session_key) =
-        resolve_session_for_key(&working_dir, Some(session_key_raw.as_str()));
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("api-{}", uuid::Uuid::new_v4()));
+    let (session_id, _) = resolve_session_for_key(&working_dir, Some(session_key_raw.as_str()));
 
     // Always Auto for OpenAI/Anthropic API; serve --yolo additionally disables
     // interactive user-input modals process-wide via AppState.yolo.
@@ -971,27 +972,28 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         working_dir: Some(working_dir),
         provider: Some(selection.clone()),
         session_id,
+        // The wire may omit it; the shared admission service mints an internal id.
         request_id: None,
         images: turn.images,
         approval_mode: Some(ApprovalMode::Auto),
         extra_system_append: turn.system_append,
         // On create, native runtime names the session exactly as this key
         // (`user_renamed=true`) so later lookups by `user` stay stable.
-        session_title: session_key.clone(),
+        session_title: Some(session_key_raw.clone()),
     };
 
     let occupancy = format!("compat-user:{session_key_raw}");
-    let admission = match state
-        .active_chats
-        .clone()
-        .admit_or_preempt(
-            chat_req.session_id.clone(),
-            Some(occupancy),
-            Duration::from_secs(60),
-        )
-        .await
+    let admitted = match crate::admit_chat_turn(
+        &state,
+        chat_req,
+        crate::ChatAdmissionMode::Preempt {
+            timeout: Duration::from_secs(60),
+        },
+        Some(occupancy),
+    )
+    .await
     {
-        Ok(a) => a,
+        Ok(admitted) => admitted,
         Err(ActiveChatAdmissionError::SessionBusy) => {
             return api_error(
                 StatusCode::CONFLICT,
@@ -1003,36 +1005,22 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
             return api_error(StatusCode::CONFLICT, "request is busy", "request_busy");
         }
     };
-
-    let (client_tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
-    let operation_id = admission.operation_id.clone();
-    let cancel_token = admission.cancellation;
-    let event_bus = state
-        .active_chats
-        .event_bus(&admission.operation_id)
-        .await
-        .expect("just admitted operation always has an event bus");
-    let replay = state
-        .active_chats
-        .event_bus_with_replay(&admission.operation_id)
-        .await
-        .map(|(_, r)| r);
-    let fan_tx = fanout_chat_events_for_session(
-        client_tx,
-        event_bus,
-        replay,
-        chat_req.session_id.clone(),
-        chat_req
-            .working_dir
-            .as_deref()
-            .map(std::path::PathBuf::from),
-    );
+    let crate::AdmittedChatTurn {
+        request: chat_req,
+        operation_id,
+        session_id,
+        client_input_id,
+        cancellation: cancel_token,
+        rx,
+        fan_tx,
+        terminal_sent,
+    } = admitted;
+    let session_key = Some(session_key_raw.clone());
     let active_chats = state.active_chats.clone();
     let mcp_pool = state.mcp_pool.clone();
     let telemetry = state.telemetry.clone();
     let pending_permissions = state.pending_permissions.clone();
     let pending_user_inputs = state.pending_user_inputs.clone();
-    let terminal_sent = Arc::new(AtomicBool::new(false));
     let terminal_sent_inner = terminal_sent.clone();
     let active_conns = state.active_connections.clone();
     active_conns.fetch_add(1, Ordering::Relaxed);
@@ -1057,15 +1045,15 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         yolo = state.yolo,
         enforce_token = state.is_token_enforced(),
         session_key = %session_key_raw,
+        session_id = %session_id,
+        client_input_id = %client_input_id,
+        wire_format = ?format,
         "compat turn: API policy (Auto approval, no permission/user-input modals)"
     );
 
     let ctx = CurrentContext {
         mode: Some(SessionMode::Channel),
-        session_id: chat_req
-            .session_id
-            .as_deref()
-            .and_then(|s| uuid::Uuid::parse_str(s).ok()),
+        session_id: uuid::Uuid::parse_str(&session_id).ok(),
         ..CurrentContext::current()
     };
 
@@ -1544,17 +1532,11 @@ pub(crate) async fn openai_responses(
     State(state): State<AppState>,
     Json(body): Json<OpenAiResponsesRequest>,
 ) -> Response {
-    let mut system = body.instructions.filter(|s| !s.trim().is_empty());
+    // Pure stateful frontend contract: ignore `instructions` and client system
+    // text. The backend system prompt is the only authority.
     let (message, images) = if !body.messages.is_empty() {
         match extract_openai_turn(body.messages).await {
-            Ok((sys, msg, imgs)) => {
-                if system.is_none() {
-                    system = sys;
-                } else if let Some(s) = sys {
-                    system = Some(format!("{}\n\n{s}", system.unwrap()));
-                }
-                (msg, imgs)
-            }
+            Ok((_sys, msg, imgs)) => (msg, imgs),
             Err(e) => return api_error(StatusCode::BAD_REQUEST, e, "invalid_request"),
         }
     } else {
@@ -1563,20 +1545,10 @@ pub(crate) async fn openai_responses(
             Some(ResponsesInput::Items(items)) => {
                 let mut last_user_text = String::new();
                 let mut images = Vec::new();
-                let mut systems = Vec::new();
                 for item in items {
                     let role = item.role.as_deref().unwrap_or("user");
                     if role.eq_ignore_ascii_case("system") || role.eq_ignore_ascii_case("developer")
                     {
-                        if let Some(c) = item.content {
-                            if let Ok((t, _)) = collect_openai_content(c).await {
-                                if !t.trim().is_empty() {
-                                    systems.push(t);
-                                }
-                            }
-                        } else if let Some(t) = item.text {
-                            systems.push(t);
-                        }
                         continue;
                     }
                     if role.eq_ignore_ascii_case("user")
@@ -1592,9 +1564,6 @@ pub(crate) async fn openai_responses(
                             last_user_text = t;
                         }
                     }
-                }
-                if system.is_none() && !systems.is_empty() {
-                    system = Some(systems.join("\n\n"));
                 }
                 if last_user_text.trim().is_empty() && images.is_empty() {
                     return api_error(
@@ -1619,7 +1588,7 @@ pub(crate) async fn openai_responses(
     let turn = CompatTurn {
         message,
         images,
-        system_append: system,
+        system_append: None,
         session_key,
         model_selection: body.model,
         stream: body.stream.unwrap_or(false),
@@ -1632,7 +1601,8 @@ pub(crate) async fn anthropic_messages(
     State(state): State<AppState>,
     Json(body): Json<AnthropicMessagesRequest>,
 ) -> Response {
-    let (system, message, images) = match extract_anthropic_turn(body.system, body.messages).await {
+    let (_system, message, images) = match extract_anthropic_turn(body.system, body.messages).await
+    {
         Ok(v) => v,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e, "invalid_request"),
     };
@@ -1642,7 +1612,7 @@ pub(crate) async fn anthropic_messages(
     let turn = CompatTurn {
         message,
         images,
-        system_append: system,
+        system_append: None,
         session_key,
         model_selection: body.model,
         // Anthropic SDK defaults stream=false; many agent clients set true.
@@ -1911,9 +1881,38 @@ mod tests {
             },
         ];
         let (sys, text, imgs) = extract_openai_turn(messages).await.unwrap();
-        assert_eq!(sys.as_deref(), Some("sys"));
+        assert!(sys.is_none(), "client system prompts are ignored");
         assert_eq!(text, "latest");
         assert!(imgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trailing_assistant_message_is_ignored_and_last_user_wins() {
+        let messages = vec![
+            OpenAiMessage {
+                role: "user".into(),
+                content: Some(OpenAiContent::Text("old".into())),
+            },
+            OpenAiMessage {
+                role: "assistant".into(),
+                content: Some(OpenAiContent::Text("reply".into())),
+            },
+        ];
+        let (_, text, _) = extract_openai_turn(messages).await.unwrap();
+        assert_eq!(text, "old");
+    }
+
+    #[tokio::test]
+    async fn responses_input_text_parts_are_extracted() {
+        let parts = OpenAiContent::Parts(vec![OpenAiContentPart {
+            kind: "input_text".into(),
+            text: Some("hello from responses".into()),
+            image_url: None,
+            source: None,
+        }]);
+        let (text, images) = collect_openai_content(parts).await.unwrap();
+        assert_eq!(text, "hello from responses");
+        assert!(images.is_empty());
     }
 
     #[test]

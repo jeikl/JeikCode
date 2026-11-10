@@ -101,5 +101,6 @@ When exposed over local networks or public IP addresses, the backend strictly re
 ### 2.7 Open AI Chat & Third-Party Compatibility Endpoints <Badge type="tip" text="Ecosystem Ready" />
 **Unified AI Gateway with Direct OpenClaw Integration**
 
-- **Built-in Tri-Protocol Compatibility Endpoints**: In addition to powering its own interfaces, the JeikCode server exposes standard **OpenAI**, **Anthropic**, and **Gemini** compatible API endpoints.
+- **Built-in Tri-Protocol Compatibility Endpoints**: In addition to powering its own interfaces, the JeikCode server exposes standard **OpenAI Chat Completions**, **OpenAI Responses**, and **Anthropic Messages** compatible API endpoints.
 - **Interoperability with Third-Party Agents**: External developer tools, translation plugins, IDE extensions, or agent frameworks (such as **OpenClaw**) can directly connect to JeikCode as a unified AI gateway and dialog proxy.
+- **Stateful Conversation Contract**: `/v1/*` endpoints admit only the newest user message; client history, system prompts, and client tools are ignored. Sessions resume through the `user` key, and every turn runs in Auto mode without approval modals. See [API Compatibility Endpoints](/usage/api-compat) for the full contract.

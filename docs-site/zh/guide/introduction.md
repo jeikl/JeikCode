@@ -101,5 +101,6 @@ JeikCode 聚焦于工程落地效率、极致上下文管理、严格工具纪�
 ### 2.7 开放 AI 对话能力与第三方兼容端点 <Badge type="tip" text="生态互联" />
 **内置三大主流标准接口，轻松接入 OpenClaw 等工具**
 
-- **内置三大主流兼容端点**：JeikCode 服务端不仅向自身各端提供核心能力，还向上暴露出标准的 **OpenAI**、**Anthropic**、**Gemini** 格式兼容 API 端点；
+- **内置三大主流兼容端点**：JeikCode 服务端不仅向自身各端提供核心能力，还向上暴露出标准的 **OpenAI Chat Completions**、**OpenAI Responses** 与 **Anthropic Messages** 格式兼容 API 端点；
 - **赋能外部生态与第三方智能体**：第三方开发工具、翻译插件、桌面套件或 Agent 框架（如 **OpenClaw** 等）可以直接将 JeikCode 作为统一的 AI 网关与对话中枢进行连接与协作，实现生态无缝互联。
+- **有状态对话契约**：`/v1/*` 只准入最新的 user 消息；客户端历史、system 提示词与客户端工具均被忽略。会话通过 `user` 键恢复，每个回合强制 Auto 模式且不弹审批窗。完整契约见 [API 兼容端点](/zh/usage/api-compat)。

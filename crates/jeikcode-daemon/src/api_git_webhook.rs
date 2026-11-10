@@ -6,23 +6,20 @@
 //! - `POST /api/git/binding`
 
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::git_adapter::{
     find_binding_by_repo, get_binding_by_project, get_platform_adapter, save_binding,
     GitAdapterConfig, GitEventKind, GitPlatformAdapter, NormalizedGitEvent,
 };
-use crate::{
-    fanout_chat_events_for_session, process_chat_request, AppState, ChatEvent, ChatRequest,
-};
+use crate::{process_chat_request, AppState, ChatEvent, ChatRequest};
 use jeikcode_telemetry::{CurrentContext, SessionMode};
 
 #[derive(Debug, Deserialize)]
@@ -559,13 +556,16 @@ pub(crate) async fn execute_git_workflow(
         )),
     };
 
-    // 6. 调用活跃会话准入
-    let admission = match state
-        .active_chats
-        .admit(Some(&session_id), chat_req.request_id.as_deref())
-        .await
+    // 6. Shared admission: same identity, input-log and display rows as /chat.
+    let admitted = match crate::admit_chat_turn(
+        &state,
+        chat_req,
+        crate::ChatAdmissionMode::RejectIfBusy,
+        None,
+    )
+    .await
     {
-        Ok(adm) => adm,
+        Ok(admitted) => admitted,
         Err(e) => {
             tracing::warn!(
                 "[git_webhook] Could not admit chat turn for session `{session_id}`: {e:?}"
@@ -576,31 +576,20 @@ pub(crate) async fn execute_git_workflow(
             return Ok(());
         }
     };
-
-    let (client_tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
-    let operation_id = admission.operation_id.clone();
-    let cancel_token = admission.cancellation;
-    let event_bus = state
-        .active_chats
-        .event_bus(&admission.operation_id)
-        .await
-        .ok_or_else(|| "Failed to acquire event bus for admitted operation".to_string())?;
-    let replay = state
-        .active_chats
-        .event_bus_with_replay(&admission.operation_id)
-        .await
-        .map(|(_, r)| r);
-    let fan_tx = fanout_chat_events_for_session(
-        client_tx.clone(),
-        event_bus,
-        replay,
-        Some(session_id.clone()),
-        Some(working_dir.clone()),
-    );
+    let crate::AdmittedChatTurn {
+        request: chat_req,
+        operation_id,
+        session_id: admitted_session_id,
+        cancellation: cancel_token,
+        rx: mut rx,
+        fan_tx,
+        terminal_sent,
+        ..
+    } = admitted;
+    let _ = admitted_session_id;
 
     let cleanup_chats = state.active_chats.clone();
     let cleanup_op = operation_id.clone();
-    let terminal_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let terminal_sent_inner = terminal_sent.clone();
     let mcp_pool = state.mcp_pool.clone();
     let telemetry = state.telemetry.clone();

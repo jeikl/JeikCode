@@ -530,6 +530,7 @@ fn convert_legacy_session_with_diagnostic(
         name: session.name.clone(),
         user_renamed: session.user_renamed,
         ai_named: session.ai_named,
+        protocol_key: None,
         owner: StorageOwner::Legacy,
         import_info: None,
         fork_info: None,
