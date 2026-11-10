@@ -2554,7 +2554,7 @@ export function Chat({
     return ownsRunningLocalSend(localActiveStreamsBySessionRef.current.get(sid));
   }
   /** Identity first: a persisted outline id matches exactly. Text is only the
-   *  legacy fallback for rows written before ids. */
+   * legacy fallback for rows written before ids. */
   function outlineMatchesPrompt(
     turn: SessionTurnOutline,
     content: string,
@@ -2563,6 +2563,22 @@ export function Chat({
     if (messageId && turn.id) return turn.id === messageId;
     const raw = turn.label ?? (turn as { text?: string }).text ?? '';
     return userTextsMatch(raw, content);
+  }
+
+  /**
+   * 只有服务端确认过的大纲下标才能当作转录坐标使用。
+   * 本地 provisional 条目只是右栏的临时位置；把它写进消息的 `sourceIndex`
+   * 会在运行中对账时把转向行插到已经在它前面的工具轮之前。
+   */
+  function authoritativeOutlineIndex(
+    outline: SessionTurnOutline[],
+    content: string,
+    messageId?: string,
+  ): number | undefined {
+    return [...outline]
+      .reverse()
+      .find((turn) => turn.provisional !== true && outlineMatchesPrompt(turn, content, messageId))
+      ?.index;
   }
 
   /** 回放帧的提问是否落在折叠线以上（右栏大纲里它的绝对下标早于当前窗口起点）。 */
@@ -2605,7 +2621,7 @@ export function Chat({
         if (event.type !== 'user' || typeof event.content !== 'string') return event;
         const hit = [...outline]
           .reverse()
-          .find((turn) => outlineMatchesPrompt(turn, event.content!, event.message_id ?? event.client_input_id));
+          .find((turn) => turn.provisional !== true && outlineMatchesPrompt(turn, event.content!, event.message_id ?? event.client_input_id));
         return hit ? { ...event, source_index: hit.index } : event;
       })
       .filter((event) => {
@@ -5828,6 +5844,7 @@ export function Chat({
           ts: msg.created_at,
           isSteer: isSteer ? true : undefined,
           sourceIndex,
+          sourceIndexAuthority: 'disk',
           // P0: the server's display-order seq is the ONLY order key. `sourceIndex`
           // stays as a pagination cursor for older daemons that do not send seq.
           seq: msg.seq,
@@ -5854,6 +5871,7 @@ export function Chat({
               ts: msg.created_at,
               id: msg.id,
               sourceIndex,
+              sourceIndexAuthority: 'disk',
               seq: msg.seq,
             });
           }
@@ -5910,6 +5928,7 @@ export function Chat({
           ts: msg.created_at,
           elapsedMs: msg.elapsed_ms,
           sourceIndex,
+          sourceIndexAuthority: 'disk',
           seq: msg.seq,
           turnId: msg.turn_id,
           id: msg.id,
@@ -7039,6 +7058,9 @@ export function Chat({
               const patched: Message = {
                 ...m,
                 images: m.images && m.images.length > 0 ? m.images : resolvedImages,
+                // 回声可能先于 `steered` 到达并由普通 user 路径创建；fold 回执必须
+                // 补上转向身份，否则卡片样式与后续合并都会把它当普通提问。
+                isSteer: true,
                 pendingSteerId: undefined,
               };
               // 唯一性守卫：同一个落盘 id 绝不贴到第二条消息上。
@@ -8653,7 +8675,9 @@ export function Chat({
         role: 'user' as const,
         parts: [{ kind: 'text', text: userText }],
         ts: created,
-        sourceIndex: nextIndex,
+        // 后台回声只画数组因果位次，绝不合成 sourceIndex：窗口总数/大纲下标
+        // 都不是真实转录坐标，写进去会在切回时把这条提问插到在途工具轮之前。
+        ...(isSteerUserMessage({ role: 'user', content: event.content }) ? { isSteer: true } : {}),
         // 新后端回声直接带落盘 id；后台缓存也必须带上，切回时才能按 id 收敛。
         ...(event.message_id ? { id: event.message_id } : {}),
       }), { clientInputId: knownUserId });
@@ -9186,15 +9210,18 @@ export function Chat({
             row?.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join('') ?? '',
           );
           if (rowText || event.message_id) {
-            outlineIndex = [...turnOutlineRef.current]
-              .reverse()
-              .find((turn) => outlineMatchesPrompt(turn, rowText, event.message_id))?.index;
+            outlineIndex = authoritativeOutlineIndex(
+              turnOutlineRef.current,
+              rowText,
+              event.message_id,
+            );
           }
         }
         setMessages({
           type: 'stamp_user_source',
           messageId: event.message_id,
           sourceIndex: outlineIndex,
+          allowMove: true,
         });
         if (activeIdRef.current) {
           turnUserAnchorBySessionRef.current.set(activeIdRef.current, event.message_id);

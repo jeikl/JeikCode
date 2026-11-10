@@ -268,6 +268,10 @@ export function mergeDiskWithUnpersistedTail<T extends TailMessage>(
     const seenTailIds = new Set<string>();
     const tail: T[] = [];
     const insertBefore: Array<{ row: T; at: number }> = [];
+    // 未落盘尾巴是画布的一段连续后缀：一旦出现第一条不能按权威下标定位的行，
+    // 它和它之后的所有行都必须整体按原数组顺序接回。否则后面的 assistant 行
+    // 会按 sourceIndex 跳到这条 user/steer 行前面，造成可见的消息行漂移。
+    let tailStarted = false;
     const diskUserTurns = disk.filter((m) => m.role === 'user');
     const diskLastUser = diskUserTurns[diskUserTurns.length - 1];
 
@@ -309,8 +313,21 @@ export function mergeDiskWithUnpersistedTail<T extends TailMessage>(
         continue;
       }
       const src = (row as { sourceIndex?: number }).sourceIndex;
-      if (typeof src === 'number') insertBefore.push({ row, at: src });
-      else tail.push(row);
+      // 只有磁盘/服务端 outline 映射出的下标才能参与“按位次插回”。
+      // 本地预测的 sourceIndex（旧缓存 / 后台回声）没有权威来源，必须留在
+      // 数组因果位次上，绝不按它重新排序——这正是转向卡前移的根因。
+      // assistant/tool 行不受这条限制：它们不会拿到本地预测下标，保留旧的
+      // 「更早行插回位次」语义（历史旧副本仍要归位）。
+      const authority = (row as { sourceIndexAuthority?: string }).sourceIndexAuthority;
+      const isUserRow = (row as { role?: string }).role === 'user';
+      if (tailStarted) {
+        tail.push(row);
+      } else if (typeof src === 'number' && (!isUserRow || authority != null)) {
+        insertBefore.push({ row, at: src });
+      } else {
+        tailStarted = true;
+        tail.push(row);
+      }
     }
     let merged = [...head, ...disk];
     // 带因果下标的行先按位次插回；无下标的本地尾行最后接上（它们属于正在进行的回合）。

@@ -43,6 +43,9 @@ export interface ProjectionMessage {
   sourceIndex?: number;
   /** 服务端 display order。通知按它定位，不再使用 anchorId。 */
   seq?: number;
+  /** `sourceIndex` 的来源。只有磁盘/服务端映射出的下标才是权威排序坐标；
+   *  本地预测（provisional）下标永远不能写进 `sourceIndex`，更不能用它 splice。 */
+  sourceIndexAuthority?: 'disk' | 'outline';
   /** Watch-stream causal order for a LIVE-created assistant row.
    *  Deliberately separate from `seq`: disk DisplayRecord.seq and the replay
    *  cursor are different coordinate systems. Never persisted as display order. */
@@ -604,6 +607,7 @@ export function stampUserSourceIndex<T extends ProjectionMessage>(
   messages: T[],
   messageId: string | undefined,
   sourceIndex: number | undefined,
+  opts?: { allowMove?: boolean },
 ): T[] {
   if (
     !messageId ||
@@ -616,7 +620,9 @@ export function stampUserSourceIndex<T extends ProjectionMessage>(
   const index = messages.findIndex((message) => message.role === 'user' && message.id === messageId);
   if (index < 0) return messages;
   const row = messages[index]!;
-  if (typeof row.sourceIndex === 'number') return messages;
+  // 已有权威来源的下标不再覆盖；旧缓存/本地预测留下的无来源下标允许用
+  // 服务端 outline 的值重新盖章（健康收敛，避免旧状态永久粘住）。
+  if (typeof row.sourceIndex === 'number' && row.sourceIndexAuthority != null) return messages;
 
   // 若画布上没有任何“绝对下标比它更大”且排在它前面的行，说明它原本就处在正确的因果位置
   // （例如当前回合末尾的 user 后紧跟着无 sourceIndex 的直播 assistant 占位行）。
@@ -624,9 +630,13 @@ export function stampUserSourceIndex<T extends ProjectionMessage>(
   const firstGreater = messages.findIndex(
     (message) => typeof message.sourceIndex === 'number' && message.sourceIndex > sourceIndex,
   );
-  if (firstGreater < 0 || firstGreater > index) {
+  // 铁律：已有因果位置的用户行只盖章、不搬动。转向行尤其如此——它在 fold 时
+  // 由数组因果序确定位置，任何“临时下标”都不足以证明它应当前移。
+  const isSteer = (row as { isSteer?: boolean }).isSteer === true;
+  const allowMove = opts?.allowMove === true && !isSteer;
+  if (!allowMove || firstGreater < 0 || firstGreater > index) {
     const next = messages.slice();
-    next[index] = { ...row, sourceIndex } as T;
+    next[index] = { ...row, sourceIndex, sourceIndexAuthority: 'outline' } as T;
     return next;
   }
 
@@ -647,6 +657,7 @@ export function stampUserSourceIndex<T extends ProjectionMessage>(
   const stamped = {
     ...row,
     sourceIndex,
+    sourceIndexAuthority: 'outline',
     ...(adjustedSeq !== row.seq ? { seq: adjustedSeq } : {}),
   } as T;
   const next = rest.slice();
@@ -845,7 +856,9 @@ export function placeRecoveredTurnUsers<T extends ProjectionMessage>(
       ts: userTs,
       ...(eventImages ? { images: eventImages } : {}),
       ...(isSteer ? { isSteer: true } : {}),
-      ...(typeof event.source_index === 'number' ? { sourceIndex: event.source_index } : {}),
+      ...(typeof event.source_index === 'number'
+        ? { sourceIndex: event.source_index, sourceIndexAuthority: 'outline' as const }
+        : {}),
       // New daemons echo the persisted id; `clientInputId` is only the legacy
       // alias when the frame has no `message_id` at all.
       ...(event.message_id
@@ -1888,6 +1901,7 @@ function pruneDuplicatedTailContent<T extends { sourceIndex?: number; id?: strin
 export function spliceAuthoritativeDiskTail<
   T extends {
     sourceIndex?: number;
+    sourceIndexAuthority?: 'disk' | 'outline';
     id?: string;
     clientInputId?: string;
     isSteer?: boolean;

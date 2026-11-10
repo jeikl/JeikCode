@@ -145,7 +145,7 @@ export type CanvasEventAction =
       clientInputId?: string;
       clearPendingId?: string;
     }
-  | { type: 'stamp_user_source'; messageId: string; sourceIndex?: number }
+  | { type: 'stamp_user_source'; messageId: string; sourceIndex?: number; allowMove?: boolean }
   | {
       type: 'stamp_user_identity';
       match: (row: any) => boolean;
@@ -566,7 +566,9 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
       if (action.clearPendingId) next = clearPendingInput(next, action.clearPendingId);
       break;
     case 'stamp_user_source':
-      next = stampUserSourceIndex(rows, action.messageId, action.sourceIndex);
+      next = stampUserSourceIndex(rows, action.messageId, action.sourceIndex, {
+        allowMove: action.allowMove === true,
+      });
       break;
     case 'stamp_user_identity': {
       for (let i = rows.length - 1; i >= 0; i -= 1) {

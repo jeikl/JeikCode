@@ -43,6 +43,9 @@ export interface CanvasRecord {
   elapsedMs?: number;
   /** Absolute index in the persisted raw transcript（= 磁盘行的 seq）。 */
   sourceIndex?: number;
+  /** `sourceIndex` 的来源：只有磁盘/服务端映射出的下标是权威排序坐标；
+   *  本地预测下标没有该标记，合并时只能沿用数组因果顺序。 */
+  sourceIndexAuthority?: 'disk' | 'outline';
   /** Persisted kernel turn id of the row (display/session detail). Lets a steer
    *  delivered after a terminal be distinguished from a mid-turn steer even
    *  after a refresh; live rows may omit it. */

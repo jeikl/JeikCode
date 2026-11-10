@@ -226,6 +226,25 @@ test('mergeDiskWithUnpersistedTail：磁盘停在上一轮时不得抹掉画布�
   assert.deepEqual(kept.map((m) => m.id), ['q0', 'a0', 'steer-1', 'live-1']);
 });
 
+test('mergeDiskWithUnpersistedTail：没有权威来源的 sourceIndex 绝不参与按位次插回', () => {
+  const disk = [
+    { role: 'assistant', id: 'a0', sourceIndex: 940, sourceIndexAuthority: 'disk', parts: [{ kind: 'tool', tool: { id: 't0', name: 'run_command' } }] },
+  ];
+  const canvas = [
+    ...disk,
+    { role: 'user', id: 'q2', sourceIndex: 941, sourceIndexAuthority: 'disk', parts: [{ kind: 'text', text: '测试' }] },
+    { role: 'assistant', id: 'r1-t1', sourceIndex: 942, sourceIndexAuthority: 'disk', parts: [{ kind: 'tool', tool: { id: 't1', name: 'run_command' } }] },
+    { role: 'assistant', id: 'r2-t2', sourceIndex: 944, sourceIndexAuthority: 'disk', parts: [{ kind: 'tool', tool: { id: 't2', name: 'run_command' } }] },
+    // 后台/旧缓存遗留的临时下标：没有 authority，只能按数组因果位次接在尾部。
+    { role: 'user', id: 'steer-1', isSteer: true, sourceIndex: 942, parts: [{ kind: 'text', text: '继续' }] },
+    { role: 'assistant', id: 'r3-t3', parts: [{ kind: 'tool', tool: { id: 't3', name: 'run_command' } }] },
+  ];
+  assert.deepEqual(
+    mergeDiskWithUnpersistedTail(disk, canvas, { diskCoversTail: false }).map((m) => m.id),
+    ['a0', 'q2', 'r1-t1', 'r2-t2', 'steer-1', 'r3-t3'],
+  );
+});
+
 test('diskCoversCanvasTail：磁盘只有当前提问、还没有当前回答时不算覆盖尾部', () => {
   const disk = [
     { role: 'user', id: 'q0', parts: [{ kind: 'text' as const, text: '上一问' }] },

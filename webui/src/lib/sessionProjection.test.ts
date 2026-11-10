@@ -1388,7 +1388,7 @@ test('stampUserSourceIndex 用身份帧的绝对下标只回填无下标的回�
     // 回放恢复出来的提问：有 id（刚被 user_identified 绑定）但没有下标。
     { role: 'user', id: 'm-u7', parts: [{ kind: 'text' as const, text: '开场提问' }] },
     // 磁盘投影行：已有权威下标。
-    { role: 'user', id: 'm-u9', sourceIndex: 9, parts: [{ kind: 'text' as const, text: '磁盘行' }] },
+    { role: 'user', id: 'm-u9', sourceIndex: 9, sourceIndexAuthority: 'disk' as const, parts: [{ kind: 'text' as const, text: '磁盘行' }] },
   ];
   const stamped = stampUserSourceIndex(canvas, 'm-u7', 7);
   assert.equal(stamped[0]!.sourceIndex, 7);
@@ -1400,15 +1400,31 @@ test('stampUserSourceIndex 用身份帧的绝对下标只回填无下标的回�
   assert.equal(stampUserSourceIndex(stamped, 'm-u7', Number.NaN), stamped);
   assert.equal(stampUserSourceIndex(stamped, undefined, 7), stamped);
 
-  // 已错位到末尾的无下标行：盖章后必须真的重排回头部（渲染按数组序）。
+  // 已错位到末尾的无下标行：只有显式允许移动时才会重排回头部（渲染按数组序）。
   const stray = [
     { role: 'assistant', id: 'a-55', sourceIndex: 55, parts: [{ kind: 'text' as const, text: '窗口内回答' }] },
     { role: 'user', id: 'm-u7', parts: [{ kind: 'text' as const, text: '开场提问' }] },
   ];
-  const reordered = stampUserSourceIndex(stray, 'm-u7', 7);
+  const reordered = stampUserSourceIndex(stray, 'm-u7', 7, { allowMove: true });
   assert.equal(reordered[0]!.id, 'm-u7');
   assert.equal(reordered[0]!.sourceIndex, 7);
+  assert.equal(reordered[0]!.sourceIndexAuthority, 'outline');
   assert.equal(reordered[1]!.sourceIndex, 55);
+
+  // 默认只盖章、不搬动：已有因果位置的 user 行绝不能因为一个下标被前移。
+  const inPlace = stampUserSourceIndex(stray, 'm-u7', 7);
+  assert.deepEqual(inPlace.map((row) => row.id), ['a-55', 'm-u7']);
+  assert.equal(inPlace[1]!.sourceIndex, 7);
+
+  // 转向行即使显式 allowMove，也绝不前移；只盖章。
+  const steerCanvas = [
+    { role: 'assistant', id: 'a-55', sourceIndex: 55, parts: [{ kind: 'text' as const, text: '工具轮' }] },
+    { role: 'user', id: 'steer-1', isSteer: true, parts: [{ kind: 'text' as const, text: '转向' }] },
+  ];
+  const steerStamped = stampUserSourceIndex(steerCanvas, 'steer-1', 42, { allowMove: true });
+  assert.deepEqual(steerStamped.map((row) => row.id), ['a-55', 'steer-1']);
+  assert.equal(steerStamped[1]!.sourceIndex, 42);
+  assert.equal(steerStamped[1]!.sourceIndexAuthority, 'outline');
 });
 
 
