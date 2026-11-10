@@ -36,8 +36,7 @@ impl ProviderType {
     }
 }
 
-/// How an account authenticates against a preset. `OAuth` is reserved for future
-/// adapters (e.g. GitHub Copilot, deferred); no current preset uses it.
+/// How an account authenticates against a preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthKind {
     ApiKey,
@@ -118,6 +117,17 @@ pub const GEMINI_COMPATIBLE: ProviderPreset = ProviderPreset {
     provider_type: ProviderType::Gemini,
     default_base_url: None,
     auth_kind: AuthKind::ApiKey,
+    api_key_env: None,
+    model_source: ModelSource::Manual,
+};
+
+/// ChatGPT Plus / Pro Codex endpoint via OAuth.
+pub const CHATGPT_CODEX: ProviderPreset = ProviderPreset {
+    id: "chatgpt-codex",
+    display_name: "ChatGPT Plus/Pro (Codex)",
+    provider_type: ProviderType::Responses,
+    default_base_url: Some("https://chatgpt.com/backend-api/codex"),
+    auth_kind: AuthKind::OAuth,
     api_key_env: None,
     model_source: ModelSource::Manual,
 };
@@ -226,6 +236,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         api_key_env: Some("OPENAI_API_KEY"),
         model_source: ModelSource::DiscoveryApi,
     },
+    CHATGPT_CODEX,
     ProviderPreset {
         id: "anthropic",
         display_name: "Anthropic (Claude)",
@@ -265,6 +276,7 @@ pub fn preset(id: &str) -> Option<&'static ProviderPreset> {
 pub fn canonical_preset_id(id: &str) -> &str {
     match id.trim().to_ascii_lowercase().as_str() {
         "responses" | "openai-responses" => "responses-compatible",
+        "codex" | "chatgpt" | "chatgpt-codex" => "chatgpt-codex",
         "claude" => "anthropic",
         "google-gemini" => "gemini",
         "openai-compat" | "openai_compat" => "openai-compatible",
@@ -378,13 +390,28 @@ mod tests {
                     p.id
                 );
             }
-            // Ollama is keyless local; every hosted vendor here uses an API key
-            // (OAuth presets are deferred with GitHub Copilot).
+            // Ollama is keyless local; ChatGPT Codex uses OAuth; other hosted vendors use API key
             match p.provider_type {
                 ProviderType::Ollama => assert_eq!(p.auth_kind, AuthKind::None, "{}", p.id),
+                _ if p.auth_kind == AuthKind::OAuth => {
+                    assert_eq!(p.id, "chatgpt-codex");
+                }
                 _ => assert_eq!(p.auth_kind, AuthKind::ApiKey, "{}", p.id),
             }
         }
+    }
+
+    #[test]
+    fn chatgpt_codex_preset_resolves() {
+        let p = preset_or_compatible("codex");
+        assert_eq!(p.id, "chatgpt-codex");
+        assert_eq!(p.auth_kind, AuthKind::OAuth);
+        assert_eq!(p.provider_type, ProviderType::Responses);
+        assert_eq!(
+            p.default_base_url,
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+        assert!(!p.default_base_url.unwrap().ends_with("/responses"));
     }
 
     #[test]
@@ -431,5 +458,19 @@ mod tests {
         );
         assert_eq!(preset_or_compatible("claude").id, "anthropic");
         assert_eq!(preset_or_compatible("google-gemini").id, "gemini");
+    }
+
+    #[test]
+    fn chatgpt_codex_preset_configuration() {
+        let p = preset("chatgpt-codex").expect("chatgpt-codex preset must be registered");
+        assert_eq!(p.id, "chatgpt-codex");
+        assert_eq!(p.provider_type, ProviderType::Responses);
+        assert_eq!(p.auth_kind, AuthKind::OAuth);
+        assert_eq!(
+            p.default_base_url,
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+        // Must NOT end with /responses because ResponsesProvider::new appends /responses
+        assert!(!p.default_base_url.unwrap().ends_with("/responses"));
     }
 }

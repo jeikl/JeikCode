@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use jeikcode_capabilities::provider::{
     AnthropicConfig, AnthropicProvider, ApplyTimeouts, GeminiConfig, GeminiProvider, OllamaConfig,
-    OllamaProvider, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningPolicy, RequestSigner,
-    ResponsesConfig, ResponsesProvider,
+    OllamaProvider, OpenAiCompatConfig, OpenAiCompatProvider, OpenAiOAuthSigner, ReasoningPolicy,
+    RequestSigner, ResponsesConfig, ResponsesProvider,
 };
 use jeikcode_kernel::provider::LlmProvider;
 
@@ -86,7 +86,7 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
             .clone()
             .unwrap_or_else(|| self.default_user_agent.clone());
         let provider: Arc<dyn LlmProvider> = match cfg.provider_type.as_str() {
-            "responses" | "openai-responses" => {
+            "responses" | "openai-responses" | "codex" | "chatgpt-codex" => {
                 let mut rc = ResponsesConfig::new(&cfg.api_key, &cfg.base_url, &cfg.model);
                 rc.context_window = cfg.context_window;
                 rc.apply_timeouts(&cfg.timeouts);
@@ -111,6 +111,22 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 rc.skip_tls_verify = cfg.skip_tls_verify;
                 if let Some(authenticator) = &self.authenticator {
                     rc.request_signer = authenticator.request_signer(&cfg.base_url)?;
+                }
+                if rc.request_signer.is_none()
+                    && (cfg.provider_type == "codex"
+                        || cfg.provider_type == "chatgpt-codex"
+                        || cfg.provider_name.starts_with("chatgpt-codex")
+                        || jeikcode_config::config::provider_preset::canonical_preset_id(
+                            &cfg.provider_name,
+                        ) == "chatgpt-codex"
+                        || jeikcode_config::config::provider_preset::preset(&cfg.provider_name)
+                            .is_some_and(|p| {
+                                p.auth_kind
+                                    == jeikcode_config::config::provider_preset::AuthKind::OAuth
+                            })
+                        || cfg.base_url.contains("chatgpt.com"))
+                {
+                    rc.request_signer = Some(Arc::new(OpenAiOAuthSigner::new()));
                 }
                 Arc::new(
                     ResponsesProvider::new(rc)
@@ -411,5 +427,18 @@ mod tests {
         assert_eq!(default_max_tokens(2_000_000), 65_536);
         assert_eq!(default_max_tokens(200_000), 65_536);
         assert_eq!(default_max_tokens(32_000), 32_000);
+    }
+
+    #[test]
+    fn chatgpt_codex_provider_builds_and_routes_to_responses() {
+        let factory = DefaultCodingProviderFactory::new("fallback-agent");
+        let mut cfg = config("responses");
+        cfg.provider_name = "chatgpt-codex".to_string();
+        cfg.base_url = "https://custom-proxy.internal/codex".to_string();
+        assert!(factory.build(&cfg, None).is_ok());
+
+        let mut codex_type_cfg = config("codex");
+        codex_type_cfg.provider_name = "custom".to_string();
+        assert!(factory.build(&codex_type_cfg, None).is_ok());
     }
 }

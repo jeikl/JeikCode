@@ -1349,15 +1349,19 @@ pub fn get_valid_token() -> Result<String> {
 /// both are success from the user's perspective ("you're logged out").
 pub fn logout() -> Result<()> {
     let auth_path = auth_file_path();
-    // Absent file ⇒ already logged out. Return before touching the lock so a
+    let openai_path = crate::openai_oauth::openai_auth_file_path();
+    // Absent files ⇒ already logged out. Return before touching the lock so a
     // never-logged-in user's /logout stays a pure no-op — no directory or lock
     // file created, and no failure on a read-only HOME.
-    if !auth_path.exists() {
+    if !auth_path.exists() && !openai_path.exists() {
         return Ok(());
     }
     with_auth_lock(|| {
         if auth_path.exists() {
             std::fs::remove_file(&auth_path).context("Failed to remove auth file")?;
+        }
+        if openai_path.exists() {
+            let _ = std::fs::remove_file(&openai_path);
         }
         Ok(())
     })
@@ -1382,7 +1386,7 @@ pub fn save_auth(auth: &AuthInfo) -> Result<()> {
 /// Execute one authentication-store transaction. Every writer uses this seam so
 /// a refresh response cannot overwrite a concurrent login/logout from another
 /// thread or process.
-fn with_auth_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn with_auth_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let auth_path = auth_file_path();
     let parent = auth_path
         .parent()
@@ -1402,12 +1406,16 @@ fn with_auth_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     with_auth_lock_file(&parent.join("auth-refresh.lock"), operation)
 }
 
-fn with_auth_lock_file<T>(
+pub(crate) fn with_auth_lock_file<T>(
     lock_path: &std::path::Path,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     use fs2::FileExt;
     use std::fs::OpenOptions;
+
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
 
     let lock = OpenOptions::new()
         .create(true)

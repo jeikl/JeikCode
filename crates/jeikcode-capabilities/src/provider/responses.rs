@@ -16,12 +16,12 @@
 use super::openai_compat::{build_http_client, resolve_wire_effort, SwappableClient};
 use super::reasoning::ReasoningPolicy;
 use super::retry::{self, RetryPolicy};
-use super::sign::RequestSigner;
+use super::sign::{RequestSigner, RequestSigningError};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use jeikcode_kernel::message::{Message, Role};
-use jeikcode_kernel::provider::{ChatOptions, LlmProvider, ReasoningEffort, ToolChoice};
+use jeikcode_kernel::provider::{ChatOptions, LlmProvider, ToolChoice};
 use jeikcode_kernel::stream::{ProviderError, StreamEvent, TokenUsage};
 use jeikcode_kernel::tool::{ToolCall, ToolDef};
 use serde_json::{json, Map, Value};
@@ -111,7 +111,12 @@ impl ResponsesProvider {
         let connect_timeout = cfg.connect_timeout;
         let skip_tls_verify = cfg.skip_tls_verify;
         let user_agent = cfg.user_agent.clone();
-        let url = format!("{}/responses", cfg.base_url.trim_end_matches('/'));
+        let trimmed_base = cfg.base_url.trim_end_matches('/');
+        let url = if trimmed_base.ends_with("/responses") {
+            trimmed_base.to_string()
+        } else {
+            format!("{trimmed_base}/responses")
+        };
         let initial_tls12 = jeikcode_config::tls::should_cap_url(&url);
         let client = std::sync::Arc::new(SwappableClient::new(initial_tls12, move |tls12| {
             build_http_client(connect_timeout, skip_tls_verify, user_agent.clone(), tls12)
@@ -234,6 +239,16 @@ impl LlmProvider for ResponsesProvider {
     }
 }
 
+fn authentication_expired_error(code: u16) -> ProviderError {
+    ProviderError {
+        retryable: false,
+        message: "Authentication expired — please re-authenticate".to_string(),
+        http_status: Some(code),
+        code: Some("authentication_expired".to_string()),
+        ..Default::default()
+    }
+}
+
 async fn open_responses_stream(
     client: &SwappableClient,
     url: &str,
@@ -247,13 +262,14 @@ async fn open_responses_stream(
 ) -> Result<reqwest::Response, ProviderError> {
     let _ = rate_limit_retry_owner;
     let mut attempt = 1u32;
+    let mut auth_recovery_attempted = false;
     loop {
         let http = client.get();
         let mut req = http
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body_bytes.to_vec());
-        match signer {
+        let signed_auth = match signer {
             Some(signer) => {
                 let auth = signer.sign(body_bytes).map_err(|error| ProviderError {
                     retryable: false,
@@ -265,11 +281,13 @@ async fn open_responses_stream(
                 for (name, value) in &auth.headers {
                     req = req.header(name.as_str(), value.as_str());
                 }
+                Some(auth)
             }
             None => {
                 req = req.bearer_auth(api_key);
+                None
             }
-        }
+        };
         req = super::apply_session_affinity(req, session_id);
         let sent = match retry::send_with_ttfb(req, open_timeout).await {
             retry::OpenSend::Timeout => {
@@ -287,6 +305,45 @@ async fn open_responses_stream(
             Ok(resp) if resp.status().is_success() => return Ok(resp),
             Ok(resp) => {
                 let status = resp.status().as_u16();
+                if status == reqwest::StatusCode::UNAUTHORIZED.as_u16() {
+                    if let (Some(signer), Some(rejected)) = (signer, signed_auth.as_ref()) {
+                        if !auth_recovery_attempted {
+                            auth_recovery_attempted = true;
+                            match signer.recover_unauthorized(rejected).await {
+                                Ok(true) => {
+                                    let _ = resp.bytes().await;
+                                    continue;
+                                }
+                                Ok(false) => {}
+                                Err(RequestSigningError::ReauthenticationRequired(_)) => {
+                                    let _ = resp.bytes().await;
+                                    return Err(authentication_expired_error(status));
+                                }
+                                Err(RequestSigningError::RecoveryTransient(message)) => {
+                                    let _ = resp.bytes().await;
+                                    return Err(ProviderError {
+                                        retryable: true,
+                                        message,
+                                        code: Some("authentication_refresh_transient".to_string()),
+                                        ..Default::default()
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = resp.bytes().await;
+                                    return Err(ProviderError {
+                                        retryable: false,
+                                        message: error.to_string(),
+                                        code: Some(error.code().to_string()),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        } else {
+                            let _ = resp.bytes().await;
+                            return Err(authentication_expired_error(status));
+                        }
+                    }
+                }
                 let detail = resp.text().await.unwrap_or_default();
                 let retryable = status == 429 || (500..600).contains(&status);
                 if retryable && attempt < policy.max_attempts {
@@ -1384,5 +1441,161 @@ mod tests {
         assert!(body["reasoning"].get("max_tokens").is_none());
         assert_eq!(body["max_output_tokens"].as_u64(), Some(8192));
         assert!((body["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-4);
+    }
+
+    #[test]
+    fn responses_provider_url_computation() {
+        let cfg1 =
+            ResponsesConfig::new("k", "https://chatgpt.com/backend-api/codex", "codex-model");
+        let p1 = ResponsesProvider::new(cfg1).unwrap();
+        assert_eq!(p1.url, "https://chatgpt.com/backend-api/codex/responses");
+
+        let cfg2 = ResponsesConfig::new(
+            "k",
+            "https://chatgpt.com/backend-api/codex/responses",
+            "codex-model",
+        );
+        let p2 = ResponsesProvider::new(cfg2).unwrap();
+        assert_eq!(p2.url, "https://chatgpt.com/backend-api/codex/responses");
+
+        let cfg3 = ResponsesConfig::new("k", "https://api.openai.com/v1/", "gpt-5");
+        let p3 = ResponsesProvider::new(cfg3).unwrap();
+        assert_eq!(p3.url, "https://api.openai.com/v1/responses");
+    }
+
+    struct TestRecoveringSigner {
+        generation: std::sync::atomic::AtomicUsize,
+        recoveries: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RequestSigner for TestRecoveringSigner {
+        fn sign(
+            &self,
+            _body: &[u8],
+        ) -> Result<crate::provider::sign::SignedAuth, RequestSigningError> {
+            Ok(crate::provider::sign::SignedAuth {
+                bearer: Some(format!(
+                    "token-{}",
+                    self.generation.load(std::sync::atomic::Ordering::SeqCst)
+                )),
+                headers: vec![("x-test".to_string(), "true".to_string())],
+                account_id: Some("acc-123".to_string()),
+            })
+        }
+
+        async fn recover_unauthorized(
+            &self,
+            rejected: &crate::provider::sign::SignedAuth,
+        ) -> Result<bool, RequestSigningError> {
+            assert_eq!(rejected.bearer.as_deref(), Some("token-0"));
+            self.recoveries
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.generation
+                .store(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_signer_recovers_401_and_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let responses = Arc::new(AtomicUsize::new(0));
+        let sequence = responses.clone();
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(move |_request: &wiremock::Request| {
+                if sequence.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(401).set_body_string("unauthorized")
+                } else {
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n")
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let signer = Arc::new(TestRecoveringSigner {
+            generation: AtomicUsize::new(0),
+            recoveries: AtomicUsize::new(0),
+        });
+
+        let mut cfg = ResponsesConfig::new("unused", server.uri(), "test-model");
+        cfg.request_signer = Some(signer.clone());
+        let provider = ResponsesProvider::new(cfg).unwrap();
+
+        let stream = provider
+            .chat_stream(&[Message::user("hello")], &[], &ChatOptions::default())
+            .await
+            .expect("401 recovery should reopen stream successfully");
+
+        let events: Vec<_> = stream.collect().await;
+        assert!(events
+            .iter()
+            .any(|ev| matches!(ev, StreamEvent::Done { .. })));
+        assert_eq!(signer.recoveries.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn responses_signer_401_recovery_failure_surfaces_authentication_expired() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        struct FailingSigner;
+        #[async_trait::async_trait]
+        impl RequestSigner for FailingSigner {
+            fn sign(
+                &self,
+                _body: &[u8],
+            ) -> Result<crate::provider::sign::SignedAuth, RequestSigningError> {
+                Ok(crate::provider::sign::SignedAuth {
+                    bearer: Some("bad-token".to_string()),
+                    headers: vec![],
+                    account_id: None,
+                })
+            }
+            async fn recover_unauthorized(
+                &self,
+                _rejected: &crate::provider::sign::SignedAuth,
+            ) -> Result<bool, RequestSigningError> {
+                Err(RequestSigningError::ReauthenticationRequired(
+                    "Token expired and refresh rejected".to_string(),
+                ))
+            }
+        }
+
+        let mut cfg = ResponsesConfig::new("unused", server.uri(), "test-model");
+        cfg.request_signer = Some(std::sync::Arc::new(FailingSigner));
+        let provider = ResponsesProvider::new(cfg).unwrap();
+
+        let mut stream = provider
+            .chat_stream(&[Message::user("hello")], &[], &ChatOptions::default())
+            .await
+            .expect("stream opens");
+
+        let event = stream.next().await.expect("must yield event");
+        match event {
+            StreamEvent::Error(err) => {
+                assert_eq!(err.code.as_deref(), Some("authentication_expired"));
+                assert_eq!(err.http_status, Some(401));
+                assert!(!err.retryable);
+            }
+            other => panic!("expected StreamEvent::Error, got {:?}", other),
+        }
     }
 }
