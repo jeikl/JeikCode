@@ -20811,9 +20811,10 @@ fn handle_agent_event(
             let detail = enrich_todo_detail(&name, &arguments, &detail, &state.todo_titles);
             let display = display_tool_name(&name);
 
-            // The merged `todowrite` carries EITHER the full-list PLAN shape (`{todos:[…]}`) or
-            // the incremental `{action}` / `{actions:[…]}` shape; a resumed session may also
-            // carry legacy `todo` calls. Distinguish by ARG SHAPE, not tool name.
+            // The merged `todowrite` carries the declarative PLAN shape (`{plan:[…]}` or legacy
+            // `{todos:[…]}`) and/or the incremental `{action}` / `{actions:[…]}` / `{update:[…]}`
+            // shape; a plan call may also carry `update`, applied after the rebuild. A resumed
+            // session may carry legacy `todo` calls. Distinguish by ARG SHAPE, not tool name.
             let is_todo_call = is_todo_tool_name(&name);
             let todo_plan =
                 if is_todo_call && jeikcode_capabilities::tools::todo::is_todo_plan(&arguments) {
