@@ -67,7 +67,7 @@ impl ProviderError {
         // 2. HTTP 400 + message signature (Anthropic "prompt is too long", others).
         if self.http_status == Some(400) {
             let m = self.message.to_ascii_lowercase();
-            const NEEDLES: [&str; 9] = [
+            const NEEDLES: [&str; 11] = [
                 "context length",
                 "context window",
                 "maximum context",
@@ -77,6 +77,8 @@ impl ProviderError {
                 "range of input length",     // Bailian / Tencent gateway
                 "maximum prompt length",     // Anthropic-style variant
                 "too large for model with ", // trailing space: don't match "...without..."
+                "input token count exceeds", // Gemini: "The input token count exceeds the maximum number of tokens allowed ..."
+                "exceeds the maximum number of tokens",
             ];
             if NEEDLES.iter().any(|n| m.contains(n)) {
                 return true;
@@ -292,6 +294,13 @@ mod overflow_tests {
             Some(400),
             None,
             "too large for model with 8192 maximum context length"
+        )
+        .is_context_overflow());
+        // Gemini / Vertex API shape.
+        assert!(err(
+            Some(400),
+            None,
+            "[api_error] The input token count exceeds the maximum number of tokens allowed 1048576."
         )
         .is_context_overflow());
         // Unrelated 400s stay false — including near-miss substrings of the tightened needles.
