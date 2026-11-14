@@ -663,6 +663,22 @@ pub fn wire_output_budget_for_prompt(
 /// guard and the `CompactionView` handed to the strategy are all sized against THIS, so the
 /// declared output budget cannot influence when context pressure is acted on — real context
 /// is only ever measured by the provider-reported usage (or the byte estimate as fallback).
+/// Conservative wire estimate for mounted tool schemas so mid-turn auto-compaction
+/// and pre-send overflow guards match actual provider prompt tokens (where ~50 tool
+/// schemas add tens of thousands of tokens).
+fn estimate_tool_defs_tokens(tools: &[crate::tool::ToolDef]) -> u64 {
+    if tools.is_empty() {
+        return 0;
+    }
+    let byte_count: usize = tools
+        .iter()
+        .map(|tool| {
+            tool.name.len() + tool.description.len() + tool.parameters.to_string().len() + 24
+        })
+        .sum();
+    ((byte_count / 4) as u64).max(1)
+}
+
 fn input_watermark_budget(window: u32) -> u32 {
     window.saturating_sub(OUTPUT_WATERMARK_BUFFER.min(window / 4))
 }
@@ -1962,7 +1978,7 @@ impl RunningAgent {
         }
         let mut message = match kind {
             PromptKind::User => Message::user_with_images(text, images),
-            PromptKind::Synthetic => Message::synthetic_user(text),
+            PromptKind::Synthetic => Message::synthetic_turn(text),
         };
         // 身份契约：调用方给的 id 优先。`Conversation::push` 只在缺省时分配，
         // 因此这个 id 会原样写进 snapshot / display log / 事件帧，跨端可对账。
@@ -2471,6 +2487,7 @@ impl RunningAgent {
         // provider. Runtime catalog updates become visible on the next turn.
         let turn_tools = self.tools.snapshot();
         let defs = turn_tools.defs();
+        let tool_defs_est = estimate_tool_defs_tokens(&defs);
         // Mint this turn's id ONCE — constant across all rounds (incl. offer_continuation
         // continuations) of this turn. Monotonic counter ⇒ deterministic.
         let turn_id = self.turn_counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -2729,10 +2746,13 @@ impl RunningAgent {
             // block below still owns the hard backstop.
             if !midturn_auto_attempted {
                 let window = self.provider.context_window();
-                let estimated_prompt: u32 = messages
+                let messages_tokens: u64 = messages
                     .iter()
-                    .map(|m| m.estimate_tokens_conservative())
+                    .map(|m| m.estimate_tokens_conservative() as u64)
                     .sum();
+                let estimated_prompt = messages_tokens
+                    .saturating_add(tool_defs_est)
+                    .min(u32::MAX as u64) as u32;
                 if let Some(utilization) =
                     midturn_auto_utilization(window, self.compact_threshold, estimated_prompt)
                 {
@@ -2750,9 +2770,15 @@ impl RunningAgent {
                         sacred_floor: convo.sacred_floor(),
                     };
                     if self.compaction.will_summarize(&view) {
-                        midturn_auto_attempted = true;
+                        let epoch_before = convo.cache_epoch;
                         self.run_compaction(convo, CompactTrigger::Auto { utilization })
                             .await;
+                        // Latch only when compaction could not commit; when a
+                        // committed pass relieved pressure, allow subsequent rounds
+                        // in a very long turn to compact again if history regrows.
+                        if convo.cache_epoch == epoch_before {
+                            midturn_auto_attempted = true;
+                        }
                         messages = convo.model_history();
                         self.hooks.pre_request(&mut messages, &turn_ctx).await;
                         let stored_wire = convo.model_history();
@@ -2793,7 +2819,7 @@ impl RunningAgent {
                 let mut attempts: u8 = 0;
                 while has_drainable
                     && window > 0
-                    && est(&messages) >= limit as u64
+                    && est(&messages).saturating_add(tool_defs_est) >= limit as u64
                     && attempts < MAX_OVERFLOW_ATTEMPTS
                 {
                     let before = est(&convo.messages);
@@ -2822,8 +2848,10 @@ impl RunningAgent {
                 // the advisory and the compaction verdict agree for CJK content.
                 let est: u32 = messages
                     .iter()
-                    .map(|m| m.estimate_tokens_conservative())
-                    .sum();
+                    .map(|m| m.estimate_tokens_conservative() as u64)
+                    .sum::<u64>()
+                    .saturating_add(tool_defs_est)
+                    .min(u32::MAX as u64) as u32;
                 let window = self.provider.context_window();
                 let limit = input_watermark_budget(window);
                 if let Some(advisory) = over_window_advisory(est, window, limit) {
@@ -7125,6 +7153,10 @@ mod synthetic_send_tests {
             user.synthetic,
             "a synthetic prompt must be stored as synthetic"
         );
+        assert!(
+            user.autonomous_turn,
+            "SendSyntheticMessage must mark autonomous_turn=true for compaction turn alignment"
+        );
         assert_eq!(
             user.text, "continue!!",
             "the hook's rewrite must land in storage"
@@ -7264,5 +7296,37 @@ mod synthetic_send_tests {
         assert_eq!(state.observe(fp2.clone()), ToolLoopDecision::Warn);
         assert_eq!(state.observe(fp1.clone()), ToolLoopDecision::Warn);
         assert_eq!(state.observe(fp2.clone()), ToolLoopDecision::Stop);
+    }
+
+    #[test]
+    fn estimate_tool_defs_tokens_and_compaction_turn_start_predicates() {
+        assert_eq!(estimate_tool_defs_tokens(&[]), 0);
+        let defs = vec![crate::tool::ToolDef {
+            name: "read".into(),
+            description: "x".repeat(400),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "y".repeat(400) } }
+            }),
+        }];
+        let est = estimate_tool_defs_tokens(&defs);
+        assert!(
+            est >= 200,
+            "non-trivial tool schemas must contribute meaningful token overhead (got {est})"
+        );
+
+        let anchor = Message::synthetic_user("<!-- jeikcode:anchor v1 -->\nsummary");
+        let goal_turn = Message::synthetic_turn("[goal continuation]");
+        let real_turn = Message::user("Start");
+        assert!(!anchor.is_compaction_turn_start());
+        assert!(goal_turn.is_compaction_turn_start());
+        assert!(real_turn.is_compaction_turn_start());
+
+        let mut convo = Conversation::new();
+        convo.push(Message::system("sys"));
+        convo.push(Message::synthetic_user("<memory>k</memory>"));
+        convo.push(goal_turn);
+        // frozen_prefix_end stops before autonomous_turn even before the first real user.
+        assert_eq!(convo.frozen_prefix_end(), 2);
     }
 }

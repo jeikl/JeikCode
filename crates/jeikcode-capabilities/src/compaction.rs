@@ -551,7 +551,7 @@ fn render_full_transcript(span: &[Message]) -> String {
     ));
     let mut indexed = false;
     for (index, message) in span.iter().enumerate() {
-        if message.role == Role::User && !message.synthetic {
+        if message.is_compaction_turn_start() {
             let preview: String = message
                 .text
                 .lines()
@@ -961,7 +961,7 @@ fn active_turn_start(msgs: &[Message], keep_recent_turns: usize) -> usize {
     let starts: Vec<usize> = msgs
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.role == Role::User && !m.synthetic)
+        .filter(|(_, m)| m.is_compaction_turn_start())
         .map(|(i, _)| i)
         .collect();
     if starts.len() <= keep_recent_turns {
@@ -972,8 +972,8 @@ fn active_turn_start(msgs: &[Message], keep_recent_turns: usize) -> usize {
 
 /// Drain boundary that keeps the most-recent WHOLE turns whose combined token
 /// estimate fits within `keep_budget_tokens` — but ALWAYS at least the active
-/// turn. Turn-aligned (a turn starts at a non-synthetic [`Role::User`] message)
-/// so a drain never splits a turn / orphans a tool call from its result.
+/// turn. Turn-aligned (a turn starts at a real user message or autonomous
+/// `/goal` turn) so a drain never splits a turn / orphans a tool call from its result.
 /// `msgs[..boundary]` is drained+summarized; `msgs[boundary..]` is kept verbatim.
 /// Clamped to `>= floor`. Replaces the old `active_turn_start(msgs, 1)` so a big
 /// context window retains proportionally more recent history (see
@@ -983,7 +983,7 @@ fn recent_keep_boundary(msgs: &[Message], keep_budget_tokens: usize, floor: usiz
     let starts: Vec<usize> = msgs
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.role == Role::User && !m.synthetic)
+        .filter(|(_, m)| m.is_compaction_turn_start())
         .map(|(i, _)| i)
         .collect();
     let Some(&active) = starts.last() else {
@@ -2599,6 +2599,48 @@ Dependencies verified.
             "small tool output kept verbatim"
         );
         assert!(out.contains(&big_user), "user text is never truncated");
+    }
+
+    #[tokio::test]
+    async fn goal_synthetic_turns_provide_drainable_compaction_boundaries() {
+        let mut msgs = vec![
+            Message::system("You are a coding assistant."),
+            Message::user("Achieve the goal."),
+            Message::assistant("Starting round 1.", Vec::new()),
+        ];
+        // Simulate 10 /goal continuation rounds using `Message::synthetic_turn(...)`.
+        let big = "goal output ".repeat(5_000);
+        for round in 2..=11 {
+            msgs.push(Message::synthetic_turn(format!(
+                "[goal continuation #{round}]"
+            )));
+            msgs.push(Message::assistant(big.clone(), Vec::new()));
+        }
+        let convo = jeikcode_kernel::message::Conversation {
+            messages: msgs,
+            cache_epoch: 0,
+        };
+        let floor = convo.sacred_floor();
+        assert_eq!(
+            floor, 2,
+            "sacred_floor remains anchored on the first real user prompt"
+        );
+
+        let view = CompactionView {
+            messages: &convo.messages,
+            trigger: CompactTrigger::Manual { focus: None },
+            ctx_window: 100_000,
+            used_tokens: 90_000,
+            utilization: 0.90,
+            sacred_floor: floor,
+        };
+        let strategy = OverflowCompaction::new(StubCompaction::default(), None);
+        let plan = strategy.plan(&view).await;
+        assert!(
+            plan.drain_to > floor,
+            "multi-round /goal history must drain older synthetic rounds instead of clamping to floor={floor}, got {:?}",
+            plan
+        );
     }
 }
 
