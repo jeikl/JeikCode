@@ -833,7 +833,11 @@ pub const DONE_LABELS: &[&str] = &[
 #[derive(Debug, Clone, Default)]
 pub struct ContextSnapshot {
     pub system_tokens: usize,
+    /// History tokens excluding `system_tokens` and `tool_defs_tokens` (`cold + messages`).
     pub sent_tokens: usize,
+    /// Authoritative total prompt occupancy (`system + tool_defs + cold + messages`)
+    /// displayed by the footer gauge when provided by usage/compaction/runtime stats.
+    pub used_tokens: Option<usize>,
     pub tool_defs_tokens: usize,
     pub cold_zone_tokens: usize,
     pub total_messages: usize,
@@ -843,6 +847,13 @@ pub struct ContextSnapshot {
     /// Surfaced by `/context prompt`. Empty until the first rich
     /// emission lands.
     pub system_prompt: String,
+}
+
+impl ContextSnapshot {
+    /// Prompt occupancy shown by the footer gauge and saved into `TurnStat`.
+    pub fn footer_used_tokens(&self) -> usize {
+        self.used_tokens.unwrap_or(self.sent_tokens)
+    }
 }
 
 /// One entry in `message_queue`. Replaces the prior `String`-only
@@ -1404,21 +1415,90 @@ impl UiState {
         ctx_name: &str,
         system_prompt: &str,
     ) {
+        self.apply_context_stats(
+            system_tokens,
+            sent_tokens,
+            None,
+            tool_defs_tokens,
+            cold_zone_tokens,
+            total_messages,
+            ctx_window,
+            ctx_name,
+            system_prompt,
+        );
+    }
+
+    /// Merge a native coding-runtime `RuntimeContextStats` emission, carrying
+    /// both total prompt occupancy (`used_tokens`) for the footer gauge and
+    /// overhead-excluded history (`sent_tokens`) for `/context`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_runtime_context_stats(
+        &mut self,
+        system_tokens: usize,
+        sent_tokens: usize,
+        used_tokens: usize,
+        tool_defs_tokens: usize,
+        cold_zone_tokens: usize,
+        total_messages: usize,
+        ctx_window: usize,
+        ctx_name: &str,
+        system_prompt: &str,
+    ) {
+        self.apply_context_stats(
+            system_tokens,
+            sent_tokens,
+            Some(used_tokens),
+            tool_defs_tokens,
+            cold_zone_tokens,
+            total_messages,
+            ctx_window,
+            ctx_name,
+            system_prompt,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_context_stats(
+        &mut self,
+        system_tokens: usize,
+        sent_tokens: usize,
+        total_used_tokens: Option<usize>,
+        tool_defs_tokens: usize,
+        cold_zone_tokens: usize,
+        total_messages: usize,
+        ctx_window: usize,
+        ctx_name: &str,
+        system_prompt: &str,
+    ) {
         let is_rich = ctx_window > 0;
         let snap = self
             .last_context
             .get_or_insert_with(ContextSnapshot::default);
+        let apply_total = |snap: &mut ContextSnapshot, post: Option<usize>| match total_used_tokens
+        {
+            Some(used) if used > 0 => {
+                if post.is_none_or(|post_used| used <= post_used) {
+                    snap.used_tokens = Some(used);
+                    snap.sent_tokens = sent_tokens;
+                }
+            }
+            Some(_) => {
+                if sent_tokens > 0 && post.is_none() {
+                    snap.sent_tokens = sent_tokens;
+                }
+            }
+            None => {
+                if sent_tokens > 0 && post.is_none() {
+                    snap.sent_tokens = sent_tokens;
+                }
+            }
+        };
         if is_rich {
             snap.system_tokens = system_tokens;
-            // A rich emission with `sent_tokens == 0` means "no completed turn yet
-            // this runtime generation" (`last_usage` is None), NOT a
-            // genuine zero occupancy — `emit_context_stats` never reports a real 0.
-            // Preserve a value restored from the persisted session on resume so
-            // `/context`'s `RefreshContextStats` round-trip can't re-zero the gauge
-            // the moment the user runs it. A real turn always sends `sent > 0`.
-            if sent_tokens > 0 && self.post_compaction_used_tokens.is_none() {
-                snap.sent_tokens = sent_tokens;
-            }
+            // A rich emission with `sent_tokens == 0` / `used_tokens == 0` means
+            // "no completed turn yet this runtime generation", NOT a genuine
+            // zero occupancy — preserve a value restored from the persisted session.
+            apply_total(snap, self.post_compaction_used_tokens);
             snap.tool_defs_tokens = tool_defs_tokens;
             snap.cold_zone_tokens = cold_zone_tokens;
             snap.total_messages = total_messages;
@@ -1432,9 +1512,7 @@ impl UiState {
         if system_tokens > 0 {
             snap.system_tokens = system_tokens;
         }
-        if sent_tokens > 0 && self.post_compaction_used_tokens.is_none() {
-            snap.sent_tokens = sent_tokens;
-        }
+        apply_total(snap, self.post_compaction_used_tokens);
         if tool_defs_tokens > 0 {
             snap.tool_defs_tokens = tool_defs_tokens;
         }
@@ -1479,6 +1557,11 @@ impl UiState {
         let snap = self
             .last_context
             .get_or_insert_with(ContextSnapshot::default);
+        snap.system_tokens = 0;
+        snap.tool_defs_tokens = 0;
+        snap.cold_zone_tokens = 0;
+        snap.total_messages = 0;
+        snap.used_tokens = Some(used_tokens);
         snap.sent_tokens = used_tokens;
         if ctx_window > 0 && snap.ctx_window == 0 {
             snap.ctx_window = ctx_window;
@@ -1488,9 +1571,12 @@ impl UiState {
     /// Project the committed `/compact` result into the context gauge without
     /// migrating the legacy `/context` command protocol in this slice.
     pub fn on_compaction_committed(&mut self, used_tokens: usize) {
-        self.last_context
-            .get_or_insert_with(ContextSnapshot::default)
-            .sent_tokens = used_tokens;
+        let snap = self
+            .last_context
+            .get_or_insert_with(ContextSnapshot::default);
+        snap.used_tokens = Some(used_tokens);
+        snap.sent_tokens =
+            used_tokens.saturating_sub(snap.system_tokens.saturating_add(snap.tool_defs_tokens));
         self.post_compaction_used_tokens = Some(used_tokens);
     }
 
@@ -1504,7 +1590,9 @@ impl UiState {
         let snap = self
             .last_context
             .get_or_insert_with(ContextSnapshot::default);
-        snap.sent_tokens = used_tokens;
+        snap.used_tokens = Some(used_tokens);
+        snap.sent_tokens =
+            used_tokens.saturating_sub(snap.system_tokens.saturating_add(snap.tool_defs_tokens));
         if ctx_window > 0 {
             snap.ctx_window = ctx_window;
         }
@@ -2235,6 +2323,70 @@ mod tests {
 
         assert_eq!(s.last_context.as_ref().unwrap().sent_tokens, 12_000);
         assert_eq!(s.post_compaction_used_tokens, Some(12_000));
+    }
+
+    #[test]
+    fn runtime_context_refresh_preserves_footer_used_tokens_when_sent_excludes_overhead() {
+        let mut s = UiState::new();
+        s.on_token_usage(100_000, 1_000_000);
+
+        s.on_runtime_context_stats(
+            3_400,
+            50_800,
+            100_000,
+            45_800,
+            0,
+            10,
+            1_000_000,
+            "coding-runtime",
+            "sys",
+        );
+
+        let snap = s.last_context.as_ref().unwrap();
+        assert_eq!(snap.footer_used_tokens(), 100_000);
+        assert_eq!(snap.sent_tokens, 50_800);
+        assert_eq!(
+            snap.system_tokens + snap.tool_defs_tokens + snap.sent_tokens,
+            100_000
+        );
+    }
+
+    #[test]
+    fn compact_then_runtime_context_refresh_avoids_double_counting_overhead() {
+        let mut s = UiState::new();
+        s.on_runtime_context_stats(
+            3_400,
+            50_800,
+            100_000,
+            45_800,
+            0,
+            10,
+            1_000_000,
+            "coding-runtime",
+            "sys",
+        );
+        s.on_compaction_committed(60_000);
+
+        s.on_runtime_context_stats(
+            3_400,
+            10_800,
+            60_000,
+            45_800,
+            2_000,
+            4,
+            1_000_000,
+            "coding-runtime",
+            "sys",
+        );
+
+        let snap = s.last_context.as_ref().unwrap();
+        assert_eq!(snap.footer_used_tokens(), 60_000);
+        assert_eq!(snap.sent_tokens, 10_800);
+        assert_eq!(snap.cold_zone_tokens, 2_000);
+        assert_eq!(
+            snap.system_tokens + snap.tool_defs_tokens + snap.sent_tokens,
+            60_000
+        );
     }
 
     #[test]

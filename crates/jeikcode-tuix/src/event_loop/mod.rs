@@ -19008,15 +19008,16 @@ fn handle_runtime_event(
                 CodingRuntimeEvent::ContextStatsRefreshed(result) => {
                     match result {
                         Ok(stats) => {
-                            state.on_context_stats(
-                                0,
+                            state.on_runtime_context_stats(
+                                stats.system_tokens,
+                                stats.sent_tokens,
                                 stats.used_tokens as usize,
-                                0,
-                                0,
-                                0,
+                                stats.tool_defs_tokens,
+                                stats.cold_zone_tokens,
+                                stats.total_messages,
                                 stats.context_window as usize,
                                 "coding-runtime",
-                                "",
+                                &stats.system_prompt,
                             );
                             if let Some(show_prompt) = state.pending_context_render.take() {
                                 renderer.render(UiLine::CommandOutput(
@@ -21609,7 +21610,7 @@ fn handle_agent_event(
             let (last_used, last_window) = state
                 .last_context
                 .as_ref()
-                .map(|c| (c.sent_tokens, c.ctx_window))
+                .map(|c| (c.footer_used_tokens(), c.ctx_window))
                 .unwrap_or((0, 0));
             ctx.current_session
                 .turn_stats
@@ -23057,7 +23058,7 @@ fn status_context_usage(
     }
     match state.last_context.as_ref() {
         Some(snap) => (
-            snap.sent_tokens,
+            snap.footer_used_tokens(),
             if snap.ctx_window > 0 {
                 snap.ctx_window
             } else {

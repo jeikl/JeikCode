@@ -7105,6 +7105,7 @@ mod tests {
         let snap = crate::state::ContextSnapshot {
             system_tokens: 100,
             sent_tokens: 200,
+            used_tokens: None,
             tool_defs_tokens: 0,
             cold_zone_tokens: 0,
             total_messages: 5,
@@ -7123,6 +7124,7 @@ mod tests {
         let snap = crate::state::ContextSnapshot {
             system_tokens: 8_000,
             sent_tokens: 30_000, // includes cold
+            used_tokens: None,
             tool_defs_tokens: 14_500,
             cold_zone_tokens: 2_000,
             total_messages: 42,
@@ -7164,6 +7166,7 @@ mod tests {
         let snap = crate::state::ContextSnapshot {
             system_tokens: 1_000,
             sent_tokens: 10_000,
+            used_tokens: None,
             tool_defs_tokens: 0,
             cold_zone_tokens: 3_000,
             total_messages: 10,
@@ -7193,6 +7196,7 @@ mod tests {
         let snap = crate::state::ContextSnapshot {
             system_tokens: 20_000,
             sent_tokens: 80_000,
+            used_tokens: None,
             tool_defs_tokens: 20_000,
             cold_zone_tokens: 0,
             total_messages: 50,
@@ -7222,6 +7226,7 @@ mod tests {
         let snap = crate::state::ContextSnapshot {
             system_tokens: 1_000,
             sent_tokens: 5_000,
+            used_tokens: None,
             tool_defs_tokens: 500,
             cold_zone_tokens: 0,
             total_messages: 8,
@@ -7247,6 +7252,7 @@ mod tests {
         let snap = crate::state::ContextSnapshot {
             system_tokens: 1_000,
             sent_tokens: 5_000,
+            used_tokens: None,
             tool_defs_tokens: 500,
             cold_zone_tokens: 0,
             total_messages: 8,
@@ -7275,6 +7281,7 @@ mod tests {
         let snap = crate::state::ContextSnapshot {
             system_tokens: 100,
             sent_tokens: 200,
+            used_tokens: None,
             tool_defs_tokens: 0,
             cold_zone_tokens: 0,
             total_messages: 3,
