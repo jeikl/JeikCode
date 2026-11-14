@@ -113,6 +113,8 @@ ttft_secs = 180                 # 首个思考/正文/工具 token（别名 firs
 transition_secs = 180           # 思考结束到正文/工具首字
 streaming_sliding_secs = 120    # 相邻业务 token 滑动窗口
 first_token_timeout_retries = 3 # 首 Token 超时后自动重试次数
+compact_threshold = 0.9         # 自动压缩触发水位比例（0.1–1.0；>= 1.0 关闭按比例触发）
+# compact_max_tokens = 350000   # 可选固定自动压缩 Token 上限（取与比例换算值中更严格的一方）
 ```
 
 环境变量覆盖：`JEIKCODE_CONNECT_TIMEOUT_SECS`、`JEIKCODE_OPEN_TIMEOUT_SECS`、`JEIKCODE_TTFT_SECS`（或 `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS`）、`JEIKCODE_TRANSITION_SECS`、`JEIKCODE_STREAMING_SECS`（或 `JEIKCODE_STREAM_TIMEOUT_SECS`）。内容钟为 `0` 表示关闭该档。SSE ping / `ResponseId` / `Usage` 不重置内容滑动窗口。

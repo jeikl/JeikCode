@@ -76,6 +76,15 @@ pub struct CodingConfig {
     /// How many times the round is re-issued after a first-token timeout.
     /// Env `JEIKCODE_FIRST_TOKEN_RETRIES` overrides. Default 6.
     pub first_token_timeout_retries: u32,
+    /// Auto-compaction trigger as a fraction of the model's watermark input budget.
+    /// Stored as `f64` so decimals serialize cleanly in TOML (`0.9` vs `f32` drift).
+    /// Default `0.9`; values `>= 1.0` disable percentage-triggered auto-compaction.
+    #[serde(default = "default_compact_threshold")]
+    pub compact_threshold: f64,
+    /// Optional fixed token ceiling for auto-compaction (e.g. `350000`).
+    /// When set, the effective trigger is the stricter of this ceiling and `compact_threshold`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_max_tokens: Option<u32>,
 }
 
 /// How aggressively the coding agent should start a structured todo list.
@@ -444,6 +453,33 @@ fn default_auto_update_interval_mins() -> u64 {
     30
 }
 
+pub const DEFAULT_COMPACT_THRESHOLD: f64 = 0.9;
+pub const MIN_COMPACT_THRESHOLD: f64 = 0.1;
+pub const MIN_COMPACT_MAX_TOKENS: u32 = 8_000;
+
+fn default_compact_threshold() -> f64 {
+    DEFAULT_COMPACT_THRESHOLD
+}
+
+/// Validate a percentage/fraction threshold for auto-compaction.
+/// Accepts finite values >= `MIN_COMPACT_THRESHOLD`; values >= 1.0 normalize to `1.0` (disabled).
+pub fn sanitize_compact_threshold(value: f64) -> Option<f64> {
+    if !value.is_finite() || value < MIN_COMPACT_THRESHOLD {
+        return None;
+    }
+    if value >= 1.0 {
+        Some(1.0)
+    } else {
+        // Round to 4 decimals to prevent float representation drift in TOML.
+        Some((value * 10_000.0).round() / 10_000.0)
+    }
+}
+
+/// Validate a fixed auto-compaction token ceiling.
+pub fn sanitize_compact_max_tokens(tokens: u32) -> Option<u32> {
+    (tokens >= MIN_COMPACT_MAX_TOKENS).then_some(tokens)
+}
+
 impl Default for ToolOutputConfig {
     fn default() -> Self {
         Self {
@@ -463,6 +499,8 @@ impl Default for CodingConfig {
             transition_secs: 180,
             streaming_sliding_secs: 120,
             first_token_timeout_retries: 6,
+            compact_threshold: DEFAULT_COMPACT_THRESHOLD,
+            compact_max_tokens: None,
         }
     }
 }
@@ -2929,6 +2967,31 @@ model = "missing-type"
         assert_eq!(cfg.coding.ttft_secs, 60);
         assert_eq!(cfg.coding.streaming_sliding_secs, 120);
         assert_eq!(cfg.coding.connect_timeout_secs, 10);
+        assert_eq!(cfg.coding.compact_threshold, DEFAULT_COMPACT_THRESHOLD);
+        assert_eq!(cfg.coding.compact_max_tokens, None);
+    }
+
+    #[test]
+    fn coding_config_compact_threshold_round_trips_cleanly_in_toml() {
+        let mut cfg = Config::default();
+        cfg.coding.compact_threshold = sanitize_compact_threshold(0.35).unwrap();
+        cfg.coding.compact_max_tokens = sanitize_compact_max_tokens(350_000);
+
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            serialized.contains("compact_threshold = 0.35"),
+            "expected clean 0.35 decimal in TOML:\n{serialized}"
+        );
+        assert!(
+            serialized.contains("compact_max_tokens = 350000"),
+            "expected compact_max_tokens = 350000 in TOML:\n{serialized}"
+        );
+
+        let parsed: Config = toml::from_str(&serialized).unwrap();
+        assert!((parsed.coding.compact_threshold - 0.35).abs() < 1e-9);
+        assert_eq!(parsed.coding.compact_max_tokens, Some(350_000));
+        assert_eq!(sanitize_compact_threshold(0.05), None);
+        assert_eq!(sanitize_compact_max_tokens(4_000), None);
     }
 
     #[test]

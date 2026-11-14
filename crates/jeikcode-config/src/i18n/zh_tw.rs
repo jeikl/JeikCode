@@ -127,6 +127,26 @@ pub(super) fn zh_tw(msg: Msg<'_>) -> Cow<'static, str> {
             format!("已壓縮 · 摘要 {} 條 · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("已摺疊工具輸出 · 節省 ~{} tok", saved).into(),
+        Msg::CompactThresholdStatus { summary, effective, path } =>
+            format!(
+                "  自動壓縮閾值：{summary}\n  \
+                 目前模型生效：{effective}\n  \
+                 設定檔：{path}\n  \
+                 用法：/compact threshold <350k | 35% | 0.35 | off | default>\n"
+            )
+            .into(),
+        Msg::CompactThresholdUpdated { summary, effective, path } =>
+            format!(
+                "  已更新自動壓縮閾值 → {summary}\n  \
+                 目前模型生效：{effective}\n  \
+                 已儲存至：{path}\n"
+            )
+            .into(),
+        Msg::CompactThresholdInvalid { input } =>
+            format!(
+                "無效的自動壓縮閾值「{input}」。請使用百分比（10%-100% 或 0.1-1.0）、Token 數（>= 8000，例如 350k）、'off' 或 'default'。"
+            )
+            .into(),
         _ => super::zh_cn::zh_cn(msg),
     }
 }

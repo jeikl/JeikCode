@@ -894,7 +894,7 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::CmdDescSession => "Start a new session (clears conversation) — use /new".into(),
         Msg::CmdDescCost => "Show token cost".into(),
         Msg::CmdDescContext => "Show context budget breakdown".into(),
-        Msg::CmdDescCompact => "Compact conversation history".into(),
+        Msg::CmdDescCompact => "Compact conversation history (or configure auto-compact threshold)".into(),
         Msg::CmdDescRemember => "Save a fact to memory (/remember --global for global)".into(),
         Msg::CmdDescForget => "Remove matching memories".into(),
         Msg::CmdDescMemory => "Show all saved memories".into(),
@@ -1074,6 +1074,26 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         }
         Msg::CompactMarkStub { saved } =>
             format!("Tool output folded · saved ~{} tok", saved).into(),
+        Msg::CompactThresholdStatus { summary, effective, path } =>
+            format!(
+                "  Auto-compaction threshold: {summary}\n  \
+                 Effective on active model: {effective}\n  \
+                 Config: {path}\n  \
+                 Usage: /compact threshold <350k | 35% | 0.35 | off | default>\n"
+            )
+            .into(),
+        Msg::CompactThresholdUpdated { summary, effective, path } =>
+            format!(
+                "  Updated auto-compaction threshold → {summary}\n  \
+                 Effective on active model: {effective}\n  \
+                 Saved to: {path}\n"
+            )
+            .into(),
+        Msg::CompactThresholdInvalid { input } =>
+            format!(
+                "Invalid auto-compaction threshold '{input}'. Use a percentage (10%-100% or 0.1-1.0), token count (>= 8000, e.g. 350k), 'off', or 'default'."
+            )
+            .into(),
         Msg::GoalHelp =>
             "  /goal — autonomous multi-round work toward a stated condition.\n  \
              Usage:\n  \

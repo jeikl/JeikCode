@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 
 use super::{
     apply_persisted_config, bg_runtime, provider_transition_pending, reload_persisted_config,
-    request_context_stats_render, save_and_reload, save_language_and_reload, LoopCtx,
-    PersistedConfigReload,
+    request_context_stats_render, save_and_reload, save_language_and_reload,
+    update_config_and_reload, ConfigReloadSelection, LoopCtx, PersistedConfigReload,
 };
 use crate::i18n::{t, Msg};
 use crate::modals::{
@@ -36,7 +36,9 @@ use crate::state::{AgentMode, UiState};
 use anyhow::Result;
 use jeikcode_capabilities::commands::ArgsRequirement;
 use jeikcode_capabilities::memory::MemoryStore;
-use jeikcode_config::config::Config;
+use jeikcode_config::config::{
+    sanitize_compact_max_tokens, sanitize_compact_threshold, Config, DEFAULT_COMPACT_THRESHOLD,
+};
 
 use crate::markdown::{fence_start, is_closing_fence};
 
@@ -2387,13 +2389,7 @@ fn execute_slash_command_impl(
                 renderer.flush();
             }
         }
-        "compact" => {
-            let focus = (!arg.trim().is_empty()).then(|| arg.trim().to_string());
-            if let Err(error) = ctx.runtime.compact(focus) {
-                renderer.render(UiLine::Error(error.to_string()));
-                renderer.flush();
-            }
-        }
+        "compact" => handle_compact_command(ctx, renderer, state, arg),
         "remember" => {
             let text = arg.trim();
             if text.is_empty() {
@@ -4867,6 +4863,251 @@ pub(super) fn render_context_report(state: &UiState, ctx: &LoopCtx, show_prompt:
     format_context_report(state.last_context.as_ref(), &ctx.model_name, show_prompt)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum CompactThresholdUpdate {
+    Default,
+    Off,
+    Fraction(f64),
+    MaxTokens(u32),
+}
+
+fn parse_compact_threshold_arg(raw: &str) -> Option<CompactThresholdUpdate> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        "default" | "reset" => return Some(CompactThresholdUpdate::Default),
+        "off" | "disable" | "disabled" => return Some(CompactThresholdUpdate::Off),
+        _ => {}
+    }
+    if let Some(pct_str) = lower.strip_suffix('%') {
+        let pct = pct_str.trim().parse::<f64>().ok()?;
+        return sanitize_compact_threshold(pct / 100.0).map(CompactThresholdUpdate::Fraction);
+    }
+    if let Some(num_str) = lower.strip_suffix('k') {
+        let scaled = num_str.trim().parse::<f64>().ok()? * 1_000.0;
+        if !scaled.is_finite() || scaled < 0.0 || scaled > u32::MAX as f64 {
+            return None;
+        }
+        return sanitize_compact_max_tokens(scaled.round() as u32)
+            .map(CompactThresholdUpdate::MaxTokens);
+    }
+    if let Some(num_str) = lower.strip_suffix('m') {
+        let scaled = num_str.trim().parse::<f64>().ok()? * 1_000_000.0;
+        if !scaled.is_finite() || scaled < 0.0 || scaled > u32::MAX as f64 {
+            return None;
+        }
+        return sanitize_compact_max_tokens(scaled.round() as u32)
+            .map(CompactThresholdUpdate::MaxTokens);
+    }
+    if !lower.contains('.') {
+        let plain = lower.replace('_', "");
+        if let Ok(tokens) = plain.parse::<u32>() {
+            if tokens == 1 {
+                return Some(CompactThresholdUpdate::Off);
+            }
+            return sanitize_compact_max_tokens(tokens).map(CompactThresholdUpdate::MaxTokens);
+        }
+        return None;
+    }
+    let frac = lower.parse::<f64>().ok()?;
+    sanitize_compact_threshold(frac).map(CompactThresholdUpdate::Fraction)
+}
+
+fn apply_compact_threshold_update(
+    coding: &mut jeikcode_config::config::CodingConfig,
+    update: CompactThresholdUpdate,
+) {
+    match update {
+        CompactThresholdUpdate::Default => {
+            coding.compact_threshold = DEFAULT_COMPACT_THRESHOLD;
+            coding.compact_max_tokens = None;
+        }
+        CompactThresholdUpdate::Off => {
+            coding.compact_threshold = 1.0;
+            coding.compact_max_tokens = None;
+        }
+        CompactThresholdUpdate::Fraction(frac) => {
+            coding.compact_threshold = frac;
+            coding.compact_max_tokens = None;
+        }
+        CompactThresholdUpdate::MaxTokens(tokens) => {
+            coding.compact_threshold = DEFAULT_COMPACT_THRESHOLD;
+            coding.compact_max_tokens = Some(tokens);
+        }
+    }
+}
+
+fn format_tok(t: usize) -> String {
+    if t >= 1000 {
+        format!("{:.1}K", t as f64 / 1000.0)
+    } else {
+        format!("{t}")
+    }
+}
+
+fn format_compact_threshold_summary(coding: &jeikcode_config::config::CodingConfig) -> String {
+    let ratio = if coding.compact_threshold >= 1.0 {
+        "off".to_string()
+    } else {
+        format!(
+            "{:.0}% ({})",
+            coding.compact_threshold * 100.0,
+            coding.compact_threshold
+        )
+    };
+    match coding.compact_max_tokens {
+        Some(cap) => format!("{ratio}, ≤ {}", format_tok(cap as usize)),
+        None => ratio,
+    }
+}
+
+fn format_effective_compact_threshold(
+    context_window: u32,
+    coding: &jeikcode_config::config::CodingConfig,
+    model_name: &str,
+) -> String {
+    let model = if model_name.is_empty() {
+        "-"
+    } else {
+        model_name
+    };
+    let effective = jeikcode_coding::effective_compact_threshold_for(
+        context_window,
+        coding.compact_threshold as f32,
+        coding.compact_max_tokens,
+    );
+    if effective >= 1.0 {
+        return format!("off ({model}, {})", format_tok(context_window as usize));
+    }
+    let budget = jeikcode_coding::watermark_input_budget(context_window);
+    let trigger_tokens = ((budget as f64) * (effective as f64)).round() as usize;
+    format!(
+        "~{} / {} ({:.0}% of {} budget, {model})",
+        format_tok(trigger_tokens),
+        format_tok(context_window as usize),
+        (effective * 100.0).round(),
+        format_tok(budget as usize),
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CompactSubcommand<'a> {
+    Threshold(&'a str),
+    ThresholdNearMiss(&'a str),
+    Manual(Option<String>),
+}
+
+fn classify_compact_subcommand(arg: &str) -> CompactSubcommand<'_> {
+    let trimmed = arg.trim();
+    if trimmed.eq_ignore_ascii_case("threshold") {
+        return CompactSubcommand::Threshold("");
+    }
+    if let Some((head, tail)) = trimmed.split_once(char::is_whitespace) {
+        if head.eq_ignore_ascii_case("threshold") {
+            return CompactSubcommand::Threshold(tail.trim());
+        }
+        if head.eq_ignore_ascii_case("thresholds") {
+            return CompactSubcommand::ThresholdNearMiss(trimmed);
+        }
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "thresholds"
+        || lower.starts_with("threshold=")
+        || lower.starts_with("threshold:")
+        || lower.starts_with("thresholds=")
+        || lower.starts_with("thresholds:")
+    {
+        return CompactSubcommand::ThresholdNearMiss(trimmed);
+    }
+    let focus = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    CompactSubcommand::Manual(focus)
+}
+
+fn handle_compact_command(
+    ctx: &mut LoopCtx,
+    renderer: &mut dyn Renderer,
+    state: &UiState,
+    arg: &str,
+) {
+    let subarg = match classify_compact_subcommand(arg) {
+        CompactSubcommand::Threshold(sub) => sub,
+        CompactSubcommand::ThresholdNearMiss(raw) => {
+            renderer.render(UiLine::Error(
+                t(Msg::CompactThresholdInvalid { input: raw }).into_owned(),
+            ));
+            renderer.flush();
+            return;
+        }
+        CompactSubcommand::Manual(focus) => {
+            if let Err(error) = ctx.runtime.compact(focus) {
+                renderer.render(UiLine::Error(error.to_string()));
+                renderer.flush();
+            }
+            return;
+        }
+    };
+
+    let config_path = ctx.config_store.path().display().to_string();
+    let window = state
+        .last_context
+        .as_ref()
+        .map(|snap| snap.ctx_window as u32)
+        .filter(|w| *w > 0)
+        .unwrap_or_else(|| ctx.config.default_context_window().min(u32::MAX as usize) as u32);
+    let model_name = ctx.model_name.clone();
+
+    if subarg.is_empty() {
+        let coding = ctx
+            .config_store
+            .read()
+            .map(|snap| snap.config.coding)
+            .unwrap_or_else(|_| ctx.config.coding.clone());
+        let summary = format_compact_threshold_summary(&coding);
+        let effective = format_effective_compact_threshold(window, &coding, &model_name);
+        renderer.render(UiLine::CommandOutput(
+            t(Msg::CompactThresholdStatus {
+                summary: &summary,
+                effective: &effective,
+                path: &config_path,
+            })
+            .into_owned(),
+        ));
+        renderer.flush();
+        return;
+    }
+
+    let Some(update) = parse_compact_threshold_arg(subarg) else {
+        renderer.render(UiLine::Error(
+            t(Msg::CompactThresholdInvalid { input: subarg }).into_owned(),
+        ));
+        renderer.flush();
+        return;
+    };
+
+    let _ = update_config_and_reload(
+        ctx,
+        renderer,
+        ConfigReloadSelection::KeepCurrent,
+        |cfg| {
+            apply_compact_threshold_update(&mut cfg.coding, update);
+            Ok(cfg.coding.clone())
+        },
+        |coding| {
+            let summary = format_compact_threshold_summary(coding);
+            let effective = format_effective_compact_threshold(window, coding, &model_name);
+            t(Msg::CompactThresholdUpdated {
+                summary: &summary,
+                effective: &effective,
+                path: &config_path,
+            })
+            .into_owned()
+        },
+    );
+}
+
 /// Pure-function core of `/context` — testable without constructing
 /// `LoopCtx`. Returns the rendered CommandOutput body.
 fn format_context_report(
@@ -4929,13 +5170,7 @@ fn format_context_report(
         }
         format!("{:>4.1}%", (t as f64 * 100.0) / window as f64)
     };
-    let k = |t: usize| -> String {
-        if t >= 1000 {
-            format!("{:.1}K", t as f64 / 1000.0)
-        } else {
-            format!("{}", t)
-        }
-    };
+    let k = format_tok;
 
     let used_pct = pct(total_used);
 
@@ -8016,5 +8251,106 @@ mod split_skill_names_tests {
         let (skills, task) = split_skill_names("BrainStorming brainstorming 任务", resolve);
         assert_eq!(pairs(&skills), vec![("BrainStorming", "brainstorming")]);
         assert_eq!(task, "任务");
+    }
+}
+
+#[cfg(test)]
+mod compact_threshold_tests {
+    use super::*;
+
+    #[test]
+    fn compact_threshold_parser_accepts_tokens_percentages_ratios_and_keywords() {
+        assert_eq!(
+            parse_compact_threshold_arg("350k"),
+            Some(CompactThresholdUpdate::MaxTokens(350_000))
+        );
+        assert_eq!(
+            parse_compact_threshold_arg("1M"),
+            Some(CompactThresholdUpdate::MaxTokens(1_000_000))
+        );
+        assert_eq!(
+            parse_compact_threshold_arg("350000"),
+            Some(CompactThresholdUpdate::MaxTokens(350_000))
+        );
+        assert_eq!(
+            parse_compact_threshold_arg("35%"),
+            Some(CompactThresholdUpdate::Fraction(0.35))
+        );
+        assert_eq!(
+            parse_compact_threshold_arg("0.35"),
+            Some(CompactThresholdUpdate::Fraction(0.35))
+        );
+        assert_eq!(
+            parse_compact_threshold_arg("off"),
+            Some(CompactThresholdUpdate::Off)
+        );
+        assert_eq!(
+            parse_compact_threshold_arg("default"),
+            Some(CompactThresholdUpdate::Default)
+        );
+        assert_eq!(parse_compact_threshold_arg("0.05"), None);
+        assert_eq!(parse_compact_threshold_arg("5%"), None);
+        assert_eq!(parse_compact_threshold_arg("35"), None);
+        assert_eq!(parse_compact_threshold_arg("500"), None);
+        assert_eq!(parse_compact_threshold_arg("abc"), None);
+    }
+
+    #[test]
+    fn compact_threshold_update_and_effective_formatting() {
+        let mut coding = jeikcode_config::config::CodingConfig::default();
+        apply_compact_threshold_update(&mut coding, CompactThresholdUpdate::MaxTokens(350_000));
+        assert_eq!(coding.compact_threshold, DEFAULT_COMPACT_THRESHOLD);
+        assert_eq!(coding.compact_max_tokens, Some(350_000));
+        assert_eq!(
+            format_compact_threshold_summary(&coding),
+            "90% (0.9), ≤ 350.0K"
+        );
+        let eff = format_effective_compact_threshold(1_000_000, &coding, "gemini-flash");
+        assert!(eff.contains("350.0K"), "expected 350.0K in `{eff}`");
+        assert!(eff.contains("gemini-flash"), "expected model in `{eff}`");
+
+        apply_compact_threshold_update(&mut coding, CompactThresholdUpdate::Fraction(0.5));
+        assert_eq!(coding.compact_max_tokens, None);
+        assert_eq!(coding.compact_threshold, 0.5);
+
+        apply_compact_threshold_update(&mut coding, CompactThresholdUpdate::Off);
+        assert_eq!(coding.compact_threshold, 1.0);
+        assert!(format_effective_compact_threshold(1_000_000, &coding, "m").starts_with("off"));
+
+        apply_compact_threshold_update(&mut coding, CompactThresholdUpdate::Default);
+        assert_eq!(coding.compact_threshold, DEFAULT_COMPACT_THRESHOLD);
+        assert_eq!(coding.compact_max_tokens, None);
+    }
+
+    #[test]
+    fn compact_subcommand_catches_threshold_near_misses_before_manual_compaction() {
+        assert_eq!(
+            classify_compact_subcommand("threshold"),
+            CompactSubcommand::Threshold("")
+        );
+        assert_eq!(
+            classify_compact_subcommand("threshold 350k"),
+            CompactSubcommand::Threshold("350k")
+        );
+        assert_eq!(
+            classify_compact_subcommand("threshold=350k"),
+            CompactSubcommand::ThresholdNearMiss("threshold=350k")
+        );
+        assert_eq!(
+            classify_compact_subcommand("thresholds 350k"),
+            CompactSubcommand::ThresholdNearMiss("thresholds 350k")
+        );
+        assert_eq!(
+            classify_compact_subcommand("threshold:350k"),
+            CompactSubcommand::ThresholdNearMiss("threshold:350k")
+        );
+        assert_eq!(
+            classify_compact_subcommand("focus on api changes"),
+            CompactSubcommand::Manual(Some("focus on api changes".to_string()))
+        );
+        assert_eq!(
+            classify_compact_subcommand(""),
+            CompactSubcommand::Manual(None)
+        );
     }
 }

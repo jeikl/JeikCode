@@ -108,6 +108,8 @@ ttft_secs = 180                 # Time to first thinking/content/tool token (ali
 transition_secs = 180           # Transition timeout from thinking completion to first content/tool token
 streaming_sliding_secs = 120    # Sliding window between consecutive content tokens
 first_token_timeout_retries = 3 # Automatic retry attempts upon first token timeout
+compact_threshold = 0.9         # Auto-compaction watermark fraction (0.1–1.0; >= 1.0 disables)
+# compact_max_tokens = 350000   # Optional hard token cap for auto-compaction (stricter limit wins)
 ```
 
 Environment variable overrides: `JEIKCODE_CONNECT_TIMEOUT_SECS`, `JEIKCODE_OPEN_TIMEOUT_SECS`, `JEIKCODE_TTFT_SECS` (or `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS`), `JEIKCODE_TRANSITION_SECS`, `JEIKCODE_STREAMING_SECS` (or `JEIKCODE_STREAM_TIMEOUT_SECS`). Setting to `0` disables that specific timeout stage. SSE ping, `ResponseId`, and `Usage` do not reset the content sliding window.

@@ -221,17 +221,16 @@ pub struct CodingAgentConfig {
     /// Kimi K2.6 preserved thinking: `thinking.keep`. `None` ⇒ omit.
     pub thinking_keep: Option<String>,
     /// Auto-compaction trigger as a fraction of the model's WATERMARK input budget
-    /// (`window − min(20K, the round's output budget)`; the usage side is the provider's
+    /// (`window − min(20K, window / 4)`; the usage side is the provider's
     /// reported prompt tokens). At/above this, the task-boundary trigger runs
     /// [`StubCompaction`] and — past the high-water mark — escalates to a drain+summary.
-    /// Default `0.9`. The denominator is the watermark budget, NOT the raw window and NOT
-    /// `[models.X] max_tokens`: a declared output ceiling (e.g. 384K) caps the per-call
-    /// budget but must never shrink the usable context (that conflation made a 1M-window
-    /// session warn "near the limit" at 49% while never auto-compacting). Set `>= 1.0` to
-    /// effectively disable.
+    /// Default `0.9`. Set `>= 1.0` to disable unless [`Self::compact_max_tokens`] is set.
     ///
     /// [`StubCompaction`]: jeikcode_capabilities::compaction::StubCompaction
     pub compact_threshold: f32,
+    /// Optional fixed token ceiling for auto-compaction (e.g. `350_000`). When set,
+    /// the effective threshold is the stricter of this ceiling and `compact_threshold`.
+    pub compact_max_tokens: Option<u32>,
     /// `web_search` backend: `"exa"` (default, globally reachable, keyless) or
     /// `"duckduckgo"`/`"ddg"` (legacy HTML scraping, blocked in some regions). `None`/empty
     /// /unknown ⇒ Exa. Mirrors v1's `[web_search] provider` config knob — without this the
@@ -323,6 +322,8 @@ pub struct CodingRuntimeConfig {
     pub skip_tls_verify: bool,
     pub loop_max_rounds: u32,
     pub turn_max_rounds: u32,
+    pub compact_threshold: f32,
+    pub compact_max_tokens: Option<u32>,
     /// Unified transport + three-phase content clocks.
     pub timeouts: jeikcode_kernel::timeouts::TimeoutPolicy,
     /// How many times the round is re-issued after a first-token timeout.
@@ -431,6 +432,15 @@ impl CodingRuntimeConfig {
                 config.coding.max_rounds,
                 std::env::var("JEIKCODE_TURN_MAX_ROUNDS").ok().as_deref(),
             ),
+            compact_threshold: jeikcode_config::config::sanitize_compact_threshold(
+                config.coding.compact_threshold,
+            )
+            .unwrap_or(jeikcode_config::config::DEFAULT_COMPACT_THRESHOLD)
+                as f32,
+            compact_max_tokens: config
+                .coding
+                .compact_max_tokens
+                .and_then(jeikcode_config::config::sanitize_compact_max_tokens),
             timeouts: resolve_timeout_policy(&config.coding),
             first_token_timeout_retries: {
                 std::env::var("JEIKCODE_FIRST_TOKEN_RETRIES")
@@ -500,6 +510,8 @@ impl CodingRuntimeConfig {
         config.session_display_name = self.session_display_name.clone();
         config.loop_max_rounds = self.loop_max_rounds;
         config.max_rounds = self.turn_max_rounds;
+        config.compact_threshold = self.compact_threshold;
+        config.compact_max_tokens = self.compact_max_tokens;
         config.timeouts = self.timeouts;
         config.first_token_timeout_retries = self.first_token_timeout_retries;
         config.subagent_config = self.subagent_config.clone();
@@ -773,7 +785,64 @@ pub fn resolve_turn_max_rounds(configured: u32, env: Option<&str>) -> u32 {
         .unwrap_or(configured)
 }
 
+/// Compute the model's watermark input budget (`window − min(20K, window / 4)`),
+/// delegating directly to [`jeikcode_kernel::agent::input_watermark_budget`].
+pub fn watermark_input_budget(window: u32) -> u32 {
+    jeikcode_kernel::agent::input_watermark_budget(window)
+}
+
+/// Resolve the effective auto-compaction watermark fraction (`>= 1.0` disables),
+/// taking the stricter (lower) of `compact_threshold` and `compact_max_tokens`.
+pub fn effective_compact_threshold_for(
+    context_window: u32,
+    compact_threshold: f32,
+    compact_max_tokens: Option<u32>,
+) -> f32 {
+    let pct = if compact_threshold.is_finite() && compact_threshold > 0.0 {
+        compact_threshold
+    } else {
+        jeikcode_config::config::DEFAULT_COMPACT_THRESHOLD as f32
+    };
+    let Some(cap) =
+        compact_max_tokens.and_then(jeikcode_config::config::sanitize_compact_max_tokens)
+    else {
+        return pct;
+    };
+    let budget = watermark_input_budget(context_window);
+    if budget == 0 {
+        return pct;
+    }
+    let cap_frac = (cap as f32 / budget as f32).min(1.0);
+    pct.min(cap_frac)
+}
+
 impl CodingAgentConfig {
+    /// Effective auto-compaction threshold fraction against this config's `context_window`.
+    pub fn effective_compact_threshold(&self) -> f32 {
+        effective_compact_threshold_for(
+            self.context_window,
+            self.compact_threshold,
+            self.compact_max_tokens,
+        )
+    }
+
+    /// Build the shared `OverflowCompaction` strategy configured for this agent's
+    /// effective auto-compaction threshold.
+    pub(crate) fn build_compaction_strategy(
+        &self,
+        summary_provider: Arc<dyn jeikcode_kernel::provider::LlmProvider>,
+    ) -> jeikcode_capabilities::compaction::OverflowCompaction {
+        let eff = self.effective_compact_threshold();
+        let mut strategy = jeikcode_capabilities::compaction::OverflowCompaction::new(
+            jeikcode_capabilities::compaction::StubCompaction::default(),
+            Some(summary_provider),
+        );
+        if eff < 1.0 && eff < jeikcode_capabilities::compaction::AUTO_DRAIN_UTILIZATION {
+            strategy = strategy.with_auto_drain_utilization(eff);
+        }
+        strategy
+    }
+
     /// Construct with the required fields and sane defaults for the rest.
     pub fn new(
         api_key: impl Into<String>,
@@ -812,7 +881,8 @@ impl CodingAgentConfig {
             thinking_budget: None,
             thinking_type: None,
             thinking_keep: None,
-            compact_threshold: 0.9,
+            compact_threshold: jeikcode_config::config::DEFAULT_COMPACT_THRESHOLD as f32,
+            compact_max_tokens: None,
             web_search_provider: None,
             keep_interrupted_context: false,
             user_agent: None,
@@ -846,6 +916,28 @@ mod tests {
         // The wall-clock cap is OFF by default (0 = disabled); the goal is bounded
         // by the round cap + evaluator instead. Re-enable via env if ever needed.
         assert_eq!(c.goal_max_duration_secs, 0);
+    }
+
+    #[test]
+    fn effective_compact_threshold_honors_stricter_token_cap_or_percentage() {
+        let mut cfg = CodingAgentConfig::new("k", "https://x/v1", "m", "/tmp");
+        cfg.context_window = 1_000_000;
+        assert!((cfg.effective_compact_threshold() - 0.9).abs() < 1e-6);
+
+        // 350K on 1M model (watermark 980K) → 350_000 / 980_000 ≈ 0.3571
+        cfg.compact_max_tokens = Some(350_000);
+        let eff_1m = cfg.effective_compact_threshold();
+        assert!((eff_1m - (350_000.0 / 980_000.0)).abs() < 1e-5);
+
+        // Switching to a 128K model (watermark 108K): 90% (~97.2K) is stricter than 350K
+        cfg.context_window = 128_000;
+        assert!((cfg.effective_compact_threshold() - 0.9).abs() < 1e-6);
+
+        // Explicit 50% beats 700K cap on 1M model
+        cfg.context_window = 1_000_000;
+        cfg.compact_threshold = 0.5;
+        cfg.compact_max_tokens = Some(700_000);
+        assert!((cfg.effective_compact_threshold() - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -1197,6 +1289,71 @@ mod tests {
             bound.lock().unwrap().as_deref(),
             Some("parent-sess-123"),
             "the tier provider must bind the parent session id when built"
+        );
+    }
+
+    #[test]
+    fn effective_compact_threshold_honors_minimum_token_cap_on_large_windows() {
+        let frac = effective_compact_threshold_for(1_048_576, 0.9, Some(8_000));
+        let budget = watermark_input_budget(1_048_576) as f32;
+        assert!(
+            frac < 0.10,
+            "8K cap on 1M window must not clamp up to 0.10 (got {frac})"
+        );
+        assert!((frac - (8_000.0 / budget)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn build_compaction_strategy_propagates_effective_auto_drain_utilization() {
+        use jeikcode_kernel::message::{
+            CompactTrigger, CompactionStrategy, CompactionView, Message,
+        };
+
+        struct StubProvider;
+        #[async_trait::async_trait]
+        impl jeikcode_kernel::provider::LlmProvider for StubProvider {
+            fn model_name(&self) -> &str {
+                "stub"
+            }
+            async fn chat_stream(
+                &self,
+                _m: &[jeikcode_kernel::message::Message],
+                _t: &[jeikcode_kernel::tool::ToolDef],
+                _o: &jeikcode_kernel::provider::ChatOptions,
+            ) -> Result<
+                futures::stream::BoxStream<'static, jeikcode_kernel::stream::StreamEvent>,
+                jeikcode_kernel::stream::ProviderError,
+            > {
+                unreachable!("not called")
+            }
+        }
+
+        let mut cfg = CodingAgentConfig::new("k", "https://api.example.com/v1", "m", "/tmp");
+        cfg.context_window = 1_048_576;
+        cfg.compact_max_tokens = Some(350_000);
+        let strategy = cfg.build_compaction_strategy(Arc::new(StubProvider));
+        let eff = cfg.effective_compact_threshold();
+        let big_body = "x".repeat(400_000); // ~100K tokens per message
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("initial prompt"),
+            Message::assistant(big_body.clone(), Vec::new()),
+            Message::user("second prompt"),
+            Message::assistant(big_body, Vec::new()),
+            Message::user("latest prompt"),
+            Message::assistant("latest reply", Vec::new()),
+        ];
+        let view = CompactionView {
+            messages: &messages,
+            trigger: CompactTrigger::Auto { utilization: eff },
+            ctx_window: watermark_input_budget(cfg.context_window),
+            used_tokens: 350_000,
+            utilization: eff,
+            sacred_floor: 2,
+        };
+        assert!(
+            strategy.will_summarize(&view),
+            "strategy must honor effective auto_drain_utilization ({eff})"
         );
     }
 }

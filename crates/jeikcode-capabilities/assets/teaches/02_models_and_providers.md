@@ -111,7 +111,7 @@ reasoning_history = "exclude"
 
 | 参数名 | 类型 / 取值 | 详细行为与差异说明 |
 | :--- | :--- | :--- |
-| `context_window` | 整数 | 上下文总窗口 Token 限制（如 64000, 128000）。压缩水位 = 窗口 − 20K 固定缓冲（**输出上限不参与计算**）；自动压缩在**水位的 90%**（任务边界，按 provider 真实回传用量）触发——上下文在窗口内动态增长。 |
+| `context_window` | 整数 | 上下文总窗口 Token 限制（如 64000, 128000）。压缩水位 = 窗口 − 20K 固定缓冲（**输出上限不参与计算**）；自动压缩默认在**水位的 90%**（可在 `[coding]` 中通过 `compact_threshold` / `compact_max_tokens` 或 `/compact threshold` 调整）触发——上下文在窗口内动态增长。 |
 | `max_tokens` | 整数 | **模型输出能力声明**（面板档位：32K / 64K / 128K / 256K / 384K / 自定义；未配置时默认 64K），作为各协议的 max budget 原样下发给模型，模型真实输出以实际生成为准。**完全不参与上下文统计与压缩水位计算**。 |
 | `reasoning_model` | 布尔值 | 声明是否为深度推理模型（如 DeepSeek R1、o1、GLM-Zero 等）。 |
 | **`reasoning_history`** | `"exclude"` \| `"include"` | **思考历史多轮回传控制**：<br>• `"exclude"`（默认）：多轮对话中不把前序轮次的 `<think>` 内容发回后端，大幅节省 Token 且避免多数模型 API 报错。<br>• `"include"`：保留并回传思考历史。Gemini 2.5/3、DeepSeek 官方或要求 `thoughtSignature` 校验的中转网关必须开启。 |
