@@ -1142,6 +1142,26 @@ impl CodingParts {
         self.mcp_catalog_ready.subscribe()
     }
 
+    pub(crate) fn mounted_tools(&self) -> Option<&MountedTools> {
+        self.mounted_tools.as_ref()
+    }
+
+    pub(crate) fn runtime_resume(&self) -> Option<&SessionSnapshot> {
+        self.runtime_resume.as_ref()
+    }
+
+    pub(crate) fn baseline_system_blocks(&self, cfg: &CodingAgentConfig) -> [String; 4] {
+        let (b1, b2, b3, b4) = crate::persona::coding_persona_blocks_with_context(
+            &cfg.model,
+            cfg.preferred_language,
+            self.todo_enabled,
+            self.request_user_input_enabled,
+            self.review_provider.is_some(),
+            Some(&cfg.working_dir),
+        );
+        [b1, b2, b3, b4]
+    }
+
     /// Fail-closed cutover used before a capability reload reads mutable MCP
     /// config/trust/auth state. Once disabled, this scope's late connection events
     /// cannot republish tools even if the replacement candidate fails.

@@ -359,6 +359,12 @@ pub struct RuntimeContextStats {
     pub utilization: f32,
     pub model: String,
     pub working_dir: std::path::PathBuf,
+    pub system_tokens: usize,
+    pub tool_defs_tokens: usize,
+    pub cold_zone_tokens: usize,
+    pub sent_tokens: usize,
+    pub total_messages: usize,
+    pub system_prompt: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2695,6 +2701,7 @@ fn spawn_runtime_owner_with_optional_agent(
         let _wakeup_guard = _closed_wakeup_tx;
         let mut agent = initial;
         let mut observed_tokens = None;
+        let mut latest_snapshot: Option<Arc<SessionSnapshot>> = None;
         let mut controls_open = true;
         let mut compaction_suspended = false;
         let mut agent_available = matches!(initial_phase, RuntimePhase::Ready);
@@ -4135,19 +4142,13 @@ fn spawn_runtime_owner_with_optional_agent(
                         let used_tokens = observed_tokens
                             .unwrap_or_default()
                             .min(u32::MAX as usize) as u32;
-                        let context_window = runtime.config.context_window;
-                        let utilization = if context_window == 0 {
-                            0.0
-                        } else {
-                            used_tokens as f32 / context_window as f32
-                        };
-                        let _ = done.send(Ok(RuntimeContextStats {
-                            context_window,
+                        let stats = crate::context::compute_runtime_context_stats(
+                            &runtime.parts,
+                            &runtime.config,
+                            latest_snapshot.as_deref(),
                             used_tokens,
-                            utilization,
-                            model: runtime.config.model.clone(),
-                            working_dir: runtime.config.working_dir.clone(),
-                        }));
+                        );
+                        let _ = done.send(Ok(stats));
                     }
                     Some(CodingRuntimeControl::WaitMcpReady {
                         generation: request_generation,
@@ -4918,6 +4919,11 @@ fn spawn_runtime_owner_with_optional_agent(
                         event_generation.store(generation, Ordering::Release);
                         agent_available = true;
                         observed_tokens = None;
+                        if changes_session {
+                            latest_snapshot = None;
+                        } else if let Some(snapshot) = stop_report.snapshot {
+                            latest_snapshot = Some(Arc::new(snapshot));
+                        }
                         snapshot_in_flight = false;
                         compaction_suspended = false;
                         let changed = session_changed(generation, &runtime);
@@ -5057,6 +5063,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                 observed_tokens = None;
                                 snapshot_in_flight = false;
                                 let snapshot = Arc::new(truncated);
+                                latest_snapshot = Some(snapshot.clone());
                                 resources = Some(runtime);
                                 controls.state.store(
                                     runtime_phase_state(generation, RuntimePhase::Ready),
@@ -5237,6 +5244,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                 event_generation.store(generation, Ordering::Release);
                                 agent_available = true;
                                 observed_tokens = None;
+                                latest_snapshot = None;
                                 snapshot_in_flight = false;
                                 let changed = session_changed(generation, &runtime);
                                 resources = Some(runtime);
@@ -5644,6 +5652,7 @@ fn spawn_runtime_owner_with_optional_agent(
                             event,
                             &mut compactions,
                             &mut observed_tokens,
+                            Some(&mut latest_snapshot),
                             &runtime_event_tx,
                         );
                         if let Some(error) = uncertain_compaction {
@@ -5954,6 +5963,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                     }
                                 }
                                 let snapshot = Arc::new(snapshot);
+                                latest_snapshot = Some(snapshot.clone());
                                 let undo_snapshot = resources
                                     .as_ref()
                                     .and_then(current_runtime_snapshot)
@@ -7116,8 +7126,7 @@ fn persist_runtime_snapshot(
 }
 
 fn current_runtime_snapshot(runtime: &RuntimeResources) -> Option<SessionSnapshot> {
-    let binding = runtime.parts.session.as_ref()?;
-    binding.manager.load_snapshot(&binding.id).ok()
+    crate::context::current_parts_snapshot(&runtime.parts)
 }
 
 fn native_session_health_error(runtime: &RuntimeResources) -> Option<String> {
@@ -7187,6 +7196,7 @@ fn handle_compaction_event(
     event: AgentEvent,
     compactions: &mut CompactionTracker,
     observed_tokens: &mut Option<usize>,
+    latest_snapshot: Option<&mut Option<Arc<SessionSnapshot>>>,
     runtime_event_tx: &RuntimeEventEmitter,
 ) -> Option<AgentEvent> {
     match event {
@@ -7217,6 +7227,11 @@ fn handle_compaction_event(
             outcome.committed_snapshot = snapshot.map(Arc::new);
             if committed {
                 *observed_tokens = Some(outcome.estimated_tokens_after);
+                if let (Some(slot), Some(committed_snap)) =
+                    (latest_snapshot, outcome.committed_snapshot.as_ref())
+                {
+                    *slot = Some(committed_snap.clone());
+                }
             }
             let _ = runtime_event_tx.send(CodingRuntimeEvent::CompactionFinished {
                 completion: CompactionCompletion::Completed(outcome),
@@ -7302,6 +7317,7 @@ async fn stop_current_agent(
                         event,
                         compactions,
                         observed_tokens,
+                        None,
                         runtime_event_tx,
                     ) {
                         Some(AgentEvent::Usage(meta)) => {
@@ -7330,7 +7346,7 @@ async fn stop_current_agent(
 
     while let Ok(event) = agent.events.try_recv() {
         record_stopped_conversation_event(&mut report, &event);
-        match handle_compaction_event(event, compactions, observed_tokens, runtime_event_tx) {
+        match handle_compaction_event(event, compactions, observed_tokens, None, runtime_event_tx) {
             Some(AgentEvent::Usage(meta)) => {
                 *observed_tokens = Some(meta.used_tokens as usize);
             }
@@ -14743,5 +14759,65 @@ mod tests {
             "empty input must NOT re-engage the goal (classifier skipped)"
         );
         handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compute_runtime_context_stats_reports_breakdown_from_snapshot_and_observed_tokens() {
+        let mut start = native_start(false);
+        start.agent.context_window = 1_000_000;
+        let parts = prepare_with_plugin_hook_source(
+            &start.agent,
+            start.prepare.clone(),
+            start.plugin_hooks.as_ref(),
+        )
+        .await
+        .unwrap();
+        let (wakeup_tx, _wakeup_rx) = mpsc::unbounded_channel();
+        let mut runtime = RuntimeResources {
+            config: start.agent,
+            prepare: start.prepare,
+            provider_factory: start.provider_factory,
+            plugin_hooks: start.plugin_hooks,
+            parts,
+            wakeup_tx,
+            loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            image_preprocessor: None,
+        };
+        let agent = assemble_runtime_resources(&mut runtime).unwrap();
+
+        let baseline =
+            crate::context::compute_runtime_context_stats(&runtime.parts, &runtime.config, None, 0);
+        assert!(baseline.system_tokens > 0);
+        assert!(baseline.tool_defs_tokens > 0);
+        assert!(!baseline.system_prompt.is_empty());
+        assert_eq!(baseline.cold_zone_tokens, 0);
+        assert_eq!(baseline.sent_tokens, 0);
+        assert_eq!(baseline.total_messages, 0);
+
+        let sys_msg = Message::system("You are a coding assistant.");
+        let first_user = Message::user("Fix the context breakdown bug.");
+        let reply = Message::assistant("Sure, inspecting runtime stats.", Vec::new());
+        let expected_sys_tokens = sys_msg.estimate_tokens() as usize;
+        let snap = SessionSnapshot::new(vec![sys_msg, first_user, reply]);
+        let observed = (expected_sys_tokens + baseline.tool_defs_tokens + 4_500) as u32;
+
+        let stats = crate::context::compute_runtime_context_stats(
+            &runtime.parts,
+            &runtime.config,
+            Some(&snap),
+            observed,
+        );
+        assert_eq!(stats.used_tokens, observed);
+        assert_eq!(stats.system_tokens, expected_sys_tokens);
+        assert_eq!(stats.tool_defs_tokens, baseline.tool_defs_tokens);
+        assert_eq!(stats.cold_zone_tokens, 0);
+        assert_eq!(stats.total_messages, 2);
+        assert_eq!(stats.system_prompt, "You are a coding assistant.");
+        assert_eq!(
+            stats.system_tokens + stats.tool_defs_tokens + stats.sent_tokens,
+            observed as usize
+        );
+        let _ = agent.commands.send(AgentCommand::Shutdown);
+        let _ = agent.task.await;
     }
 }
