@@ -13702,6 +13702,14 @@ where
         ConfigReloadSelection::FollowPersisted => commit.snapshot.config.clone(),
     };
     let message = success_message(&value);
+    if provider_configuration_missing(&desired) {
+        jeikcode_config::proxy::apply_process_proxy_config(&desired.network.proxy);
+        ctx.config = desired;
+        ctx.observed_config_revision = Some(commit.snapshot.revision);
+        renderer.render(UiLine::CommandOutput(message));
+        renderer.flush();
+        return Some(value);
+    }
     stage_committed_config_reload(
         ctx,
         desired,

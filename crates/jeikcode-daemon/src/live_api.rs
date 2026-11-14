@@ -897,6 +897,15 @@ pub(crate) fn chat_runtime_config(
             config.coding.max_rounds,
             std::env::var("JEIKCODE_TURN_MAX_ROUNDS").ok().as_deref(),
         ),
+        compact_threshold: jeikcode_config::config::sanitize_compact_threshold(
+            config.coding.compact_threshold,
+        )
+        .unwrap_or(jeikcode_config::config::DEFAULT_COMPACT_THRESHOLD)
+            as f32,
+        compact_max_tokens: config
+            .coding
+            .compact_max_tokens
+            .and_then(jeikcode_config::config::sanitize_compact_max_tokens),
         timeouts: jeikcode_coding::resolve_timeout_policy(&config.coding),
         first_token_timeout_retries: {
             std::env::var("JEIKCODE_FIRST_TOKEN_RETRIES")

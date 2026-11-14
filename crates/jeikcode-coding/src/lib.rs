@@ -64,9 +64,10 @@ mod todo;
 pub(crate) use assemble::CodingPersonaHook;
 pub use assemble::{build_coding_agent, build_coding_agent_with, try_build_coding_agent_with};
 pub use config::{
-    apply_provider_config, resolve_loop_max_rounds, resolve_provider_pricing,
-    resolve_resolved_pricing, resolve_timeout_policy, resolve_turn_max_rounds, CodingAgentConfig,
-    CodingRuntimeConfig, SubagentProvider, TierProvider,
+    apply_provider_config, effective_compact_threshold_for, resolve_loop_max_rounds,
+    resolve_provider_pricing, resolve_resolved_pricing, resolve_timeout_policy,
+    resolve_turn_max_rounds, watermark_input_budget, CodingAgentConfig, CodingRuntimeConfig,
+    SubagentProvider, TierProvider,
 };
 pub use controllers::{GoalPhase, GoalProgress, GoalTerminal, LoopProgress};
 pub use init_prompt::INIT_PROMPT;

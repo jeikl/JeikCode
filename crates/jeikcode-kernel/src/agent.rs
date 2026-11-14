@@ -663,7 +663,7 @@ pub fn wire_output_budget_for_prompt(
 /// guard and the `CompactionView` handed to the strategy are all sized against THIS, so the
 /// declared output budget cannot influence when context pressure is acted on — real context
 /// is only ever measured by the provider-reported usage (or the byte estimate as fallback).
-fn input_watermark_budget(window: u32) -> u32 {
+pub fn input_watermark_budget(window: u32) -> u32 {
     window.saturating_sub(OUTPUT_WATERMARK_BUFFER.min(window / 4))
 }
 
@@ -2744,7 +2744,7 @@ impl RunningAgent {
                     let view = CompactionView {
                         messages: &convo.messages,
                         trigger: CompactTrigger::Auto { utilization },
-                        ctx_window: window,
+                        ctx_window: input_watermark_budget(window),
                         used_tokens: estimated_prompt,
                         utilization,
                         sacred_floor: convo.sacred_floor(),

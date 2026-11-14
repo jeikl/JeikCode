@@ -224,6 +224,16 @@ mode = "follow_system"
 [loop_config]
 max_rounds = 100
 
+# =============================================================================
+# Coding 运行时与自动压缩阈值
+# =============================================================================
+[coding]
+# 当输入达到模型可用上下文预算的该比例时触发自动压缩（默认 0.9；>= 1.0 表示关闭比例自动压缩）。
+# 可在 TUI 中通过 `/compact threshold <值>` 热更新并持久化。
+compact_threshold = 0.9
+# 可选：固定 token 上限（如 350000，相当于 350k）。设置后与 compact_threshold 取更严格（更早触发）的一方。
+# compact_max_tokens = 350000
+
 # Todo 任务跟踪。JEIKCODE_TODO 环境变量仍可覆盖 enabled；修改 enabled 后需重启当前 runtime。
 # eager: auto（DeepSeek V4 Flash 自动增强）| preferred（复杂任务优先提醒）| always（provider 支持时强制先建表）
 [tools.todo]
