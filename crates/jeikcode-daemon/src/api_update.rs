@@ -77,9 +77,7 @@ where
         Some(Boolish::Bool(v)) => Ok(Some(v)),
         Some(Boolish::Int(0)) => Ok(Some(false)),
         Some(Boolish::Int(1)) => Ok(Some(true)),
-        Some(Boolish::Int(v)) => Err(D::Error::custom(format!(
-            "expected 0/1 boolean, got {v}"
-        ))),
+        Some(Boolish::Int(v)) => Err(D::Error::custom(format!("expected 0/1 boolean, got {v}"))),
         Some(Boolish::Str(v)) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => Ok(Some(true)),
             "0" | "false" | "no" | "off" => Ok(Some(false)),
@@ -1095,7 +1093,9 @@ mod tests {
         assert_eq!(numeric.refresh, Some(false));
 
         let textual = Query::<UpdateCheckQuery>::try_from_uri(
-            &"/api/update/check?summary=true&refresh=false".parse().unwrap(),
+            &"/api/update/check?summary=true&refresh=false"
+                .parse()
+                .unwrap(),
         )
         .expect("textual boolean query")
         .0;
