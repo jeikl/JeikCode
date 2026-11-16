@@ -21,6 +21,58 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.1-beta.3 (2026-11-16)
+
+**This beta unifies code-graph and search ignore handling across global, project, and nested rules, restores files that could remain missing from `code_explore`, and improves bilingual retrieval. It also adds a permanent update kill switch and allows one `todo_write` call to combine `plan` and `update`.**
+
+- **[Code Search & Graph] One consistent ignore policy**:
+  - Global, project-root, `.jeikcode`, and nested `.codegraphignore` rules now follow one precedence order; project rules can re-open global exclusions.
+  - Sensitive credential rules remain a separate hard gate; `include_ignored` never exposes them.
+  - Subdirectory searches, new files, new subdirectories, warm indexing, and agent edits now honor the same workspace policy.
+  - Previously failed or empty file units are retried, and stale graph snapshots are recomposed when they do not cover every file.
+  - Zero-hit hints identify which ignore file caused the exclusion.
+
+- **[Retrieval] Better Chinese/English business-term matching**:
+  - CJK segment matching and hard/soft thesaurus expansion reduce over-expansion and false positives.
+  - Multi-intent queries retain per-intent evidence and show `INTENT HITS`.
+  - Candidate pruning and BM25 keep large workspaces responsive.
+
+- **[Todo] Combined plan and update**:
+  - A single `todo_write` call can carry both `plan` and `update`; `plan` is applied first, `update` references rebuilt ids, and a failed update leaves the existing checklist unchanged.
+
+- **[CLI] Permanent update kill switch**:
+  - Hidden `update dead` disables update paths across CLI, daemon, TUI, WebUI, and bundled config sync.
+
+- **[Verification]**:
+  - Relevant ignore/search/graph tests pass. The full `jeikcode-capabilities` lib suite reports 1243 passed and 2 ignored; three bash timing tests that timed out under parallel load pass when rerun serially.
+  - Live coverage includes global/project/nested ignores, sensitive gating, subdirectory search, new-file discovery, failed-parse retry, and missing graph units.
+
+---
+
+**本次 beta 统一了代码图谱与搜索在全局、项目、嵌套规则下的 ignore 行为，修复了部分文件可能长期不出现在 `code_explore` 中的问题，并提升中英文业务词检索精度。同时新增永久关闭更新的开关，并允许一次 `todo_write` 同时提交 `plan` 与 `update`。**
+
+- **[代码搜索与图谱] 统一 ignore 策略**：
+  - 全局、项目根、`.jeikcode` 与嵌套 `.codegraphignore` 使用同一优先级；项目规则可以重新打开全局排除项。
+  - 敏感凭据规则保持独立硬门；`include_ignored` 永远不会打开敏感文件。
+  - 子目录搜索、新文件、新子目录、warm 索引与 agent 编辑都遵循同一工作区策略。
+  - 曾经解析失败或为空的文件 unit 会自动重试；旧 graph 快照未覆盖全部文件时会重新组合。
+  - 零命中提示会指出是哪一条 ignore 规则导致排除。
+
+- **[检索] 改善中英文业务词匹配**：
+  - CJK segment 匹配与 Hard/Soft 词林扩展减少过度扩展与误召回。
+  - 多意图查询保留每个意图的证据并展示 `INTENT HITS`。
+  - 候选裁剪与 BM25 保持大工作区的响应速度。
+
+- **[Todo] 支持 plan 与 update 合并**：
+  - 一次 `todo_write` 可以同时携带 `plan` 与 `update`；先应用 `plan`，`update` 引用重建后的 id，失败时保留原清单不变。
+
+- **[CLI] 永久关闭更新开关**：
+  - 隐藏的 `update dead` 可关闭 CLI、daemon、TUI、WebUI 与内置配置同步的所有更新路径。
+
+- **[验证]**：
+  - 相关 ignore/搜索/图谱测试通过。`jeikcode-capabilities` 完整 lib 测试为 1243 passed、2 ignored；三个 bash 计时测试并行负载下超时，串行复跑全部通过。
+  - 实时覆盖全局/项目/嵌套 ignore、敏感门、子目录搜索、新文件发现、解析失败重试与缺失 graph unit。
+
 ## v7.5.1-beta.2 (2026-11-10)
 
 **This beta fixes a message-row ordering regression where a mid-turn steer card could jump ahead of already-streamed reasoning and tool blocks during session switches or streaming, then snap back when the turn stopped. Steer and user rows now keep their causal position across foreground/background fold, refresh, repeated session switches, and terminal reconciliation.**
