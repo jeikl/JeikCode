@@ -5,6 +5,14 @@ import { stripExtendedPathPrefix } from './lib/displayPath.ts';
 import type { PermissionDecisionResult } from './lib/pendingPermission.ts';
 import type { ServerChatRuntime } from './lib/serverRuntime.ts';
 import { normalizeSessionTodoSnapshot } from './lib/todoWire.ts';
+import {
+  canUseStreamMux,
+  isMuxFallbackActive,
+  muxStreamGlobalEvents,
+  muxWatchChatSession,
+  runSseGlobalLeader,
+  waitUntilVisible,
+} from './lib/streamMux.ts';
 
 // Serve / webui bootstrap: `/?token=<uuid>` is handed off via HttpOnly cookie
 // AND left visible on first paint so we can stash it for Authorization.
@@ -50,7 +58,10 @@ function storedWebuiToken(): string {
 
 function tokenFromUrl(): string {
   try {
-    return new URLSearchParams(location.search).get('token') ?? '';
+    const fromQuery = new URLSearchParams(location.search).get('token');
+    if (fromQuery) return fromQuery;
+    const match = (location.pathname || '').match(/^\/token=([^/?#]+)/);
+    return match ? decodeURIComponent(match[1]) : '';
   } catch {
     return '';
   }
@@ -79,13 +90,20 @@ function tokenFromDocumentCookie(): string {
   return '';
 }
 
+function stripTokenPathPrefix(pathname: string): string {
+  const cleaned = pathname.replace(/^\/token=[^/?#]+(?=\/|$)/, '');
+  return cleaned || '/';
+}
+
 function stripTokenFromAddressBar() {
   try {
     const url = new URL(location.href);
-    if (!url.searchParams.has('token')) return;
+    const hasPathToken = /^\/token=[^/?#]+/.test(url.pathname);
+    if (!url.searchParams.has('token') && !hasPathToken) return;
     url.searchParams.delete('token');
     const q = url.searchParams.toString();
-    history.replaceState(null, '', url.pathname + (q ? `?${q}` : '') + url.hash);
+    const pathname = hasPathToken ? stripTokenPathPrefix(url.pathname) : url.pathname;
+    history.replaceState(null, '', pathname + (q ? `?${q}` : '') + url.hash);
   } catch {
     /* ignore */
   }
@@ -122,10 +140,13 @@ function forgetWebuiToken(value: string) {
   }
   try {
     const url = new URL(location.href);
-    if (url.searchParams.get('token') !== token) return;
-    url.searchParams.delete('token');
+    const pathMatch = url.pathname.match(/^\/token=([^/?#]+)/);
+    const pathMatchesRejected = pathMatch && decodeURIComponent(pathMatch[1]) === token;
+    if (url.searchParams.get('token') !== token && !pathMatchesRejected) return;
+    if (url.searchParams.get('token') === token) url.searchParams.delete('token');
     const q = url.searchParams.toString();
-    history.replaceState(null, '', url.pathname + (q ? `?${q}` : '') + url.hash);
+    const pathname = pathMatchesRejected ? stripTokenPathPrefix(url.pathname) : url.pathname;
+    history.replaceState(null, '', pathname + (q ? `?${q}` : '') + url.hash);
   } catch {
     /* ignore */
   }
@@ -203,6 +224,9 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
       /* ignore */
     }
     clearAuthExpired();
+  });
+  window.addEventListener('jeikcode:config-reloaded', () => {
+    invalidateConfigCache();
   });
 }
 
@@ -394,15 +418,86 @@ function parseTokenInput(raw: string): string {
   return text;
 }
 
+const DEFAULT_API_TIMEOUT_MS = 15_000;
+const LEGACY_API_TIMEOUT_MS = 25_000;
+const inFlightGets = new Map<string, Promise<Response>>();
+
+function requestUrlString(input: RequestInfo | URL): string {
+  return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+}
+
+function requestPathname(input: RequestInfo | URL): string {
+  const raw = requestUrlString(input);
+  try {
+    return new URL(raw, 'http://localhost').pathname;
+  } catch {
+    return raw.split('?')[0] ?? raw;
+  }
+}
+
+function resolveAutoTimeoutMs(input: RequestInfo | URL): number {
+  const path = requestPathname(input);
+  if (
+    path === '/events' ||
+    path === '/chat' ||
+    path === '/chat/watch' ||
+    path === '/files/upload' ||
+    path === '/api/update/execute' ||
+    path === '/api/remote-access' ||
+    path.startsWith('/api/git/')
+  ) {
+    return 0;
+  }
+  if (path === '/api/system/legacy-status' || path === '/api/system/migrate-legacy') {
+    return LEGACY_API_TIMEOUT_MS;
+  }
+  return DEFAULT_API_TIMEOUT_MS;
+}
+
+function canDedupeGetRequest(input: RequestInfo | URL, init: RequestInit): boolean {
+  const method = (init.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' || init.signal) return false;
+  const path = requestPathname(input);
+  return path !== '/events' && path !== '/chat/watch' && !path.startsWith('/terminal/ws');
+}
+
+function cloneResponseSafe(resp: Response): Response {
+  return typeof resp.clone === 'function' ? resp.clone() : resp;
+}
+
 /**
  * Same-origin fetch that always includes cookies (HttpOnly token handoff)
  * and merges auth headers. Remote LAN clients need both cookie + Bearer.
  */
-async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+async function executeApiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const headers = buildHeaders(init);
   const sentToken = tokenFromAuthorization(headers.get('Authorization'));
+  const timeoutMs = !init.signal && typeof AbortController === 'function' ? resolveAutoTimeoutMs(input) : 0;
+  const timeoutCtrl = timeoutMs > 0 ? new AbortController() : null;
+  let timedOut = false;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  if (timeoutCtrl) {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      timeoutCtrl.abort();
+    }, timeoutMs);
+    if (typeof (timeoutId as any).unref === 'function') {
+      (timeoutId as any).unref();
+    }
+  }
+
   try {
-    const resp = await fetch(input, { ...init, credentials: 'include', headers });
+    const fetchInit: RequestInit = {
+      ...init,
+      credentials: 'include',
+      headers,
+      ...(timeoutCtrl ? { signal: timeoutCtrl.signal } : {}),
+    };
+    const resp = await fetch(input, fetchInit);
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
     if (resp.status === 401) {
       console.warn('[API] 401 Unauthorized: 访问凭据无效或已失效', input);
       return await recoverUnauthorized(input, init, sentToken, resp);
@@ -418,6 +513,9 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promi
     }
     return resp;
   } catch (err: any) {
+    if (timedOut) {
+      throw new Error(`请求超时 (${Math.round(timeoutMs / 1000)}s)，请检查宿主机服务状态后重试`);
+    }
     const isNetworkErr = err instanceof TypeError && (
       err.message.includes('fetch') ||
       err.message.includes('network') ||
@@ -427,7 +525,28 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promi
       throw new Error('连接宿主机后端失败 (Failed to fetch)，请检查网络连接或宿主机服务状态');
     }
     throw err;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
   }
+}
+
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  if (!canDedupeGetRequest(input, init)) {
+    return executeApiFetch(input, init);
+  }
+  const headers = buildHeaders(init);
+  const key = `${requestUrlString(input)}|${headers.get('Authorization') ?? ''}|${headers.get('If-None-Match') ?? ''}`;
+  const existing = inFlightGets.get(key);
+  if (existing) {
+    const shared = await existing;
+    return cloneResponseSafe(shared);
+  }
+  const pending = executeApiFetch(input, init).finally(() => {
+    inFlightGets.delete(key);
+  });
+  inFlightGets.set(key, pending);
+  const res = await pending;
+  return cloneResponseSafe(res);
 }
 
 /** Current session token (URL bootstrap or session/localStorage). */
@@ -1069,98 +1188,159 @@ export async function watchChatSession(
   signal?: AbortSignal,
   opts?: { standbyOnly?: boolean; afterSeq?: number; clientId?: string },
 ): Promise<void> {
-  const params = new URLSearchParams({ session_id: sessionId });
-  if (opts?.standbyOnly) params.set('standby', 'true');
-  if (opts?.afterSeq !== undefined) params.set('after_seq', String(opts.afterSeq));
   const effectiveClientId = opts?.clientId || getTabClientId();
-  if (effectiveClientId) params.set('client_id', effectiveClientId);
-  const streamAbort = new AbortController();
-  const onParentAbort = () => streamAbort.abort();
-  if (signal) {
-    if (signal.aborted) streamAbort.abort();
-    else signal.addEventListener('abort', onParentAbort, { once: true });
+
+  // 优先走单连接 `/stream/ws` 多路复用，避免占用 HTTP/1.1 同源 6 连接上限
+  if (canUseStreamMux() && !isMuxFallbackActive()) {
+    try {
+      await muxWatchChatSession(
+        () => currentWebuiToken(),
+        sessionId,
+        onEvent,
+        signal,
+        {
+          standbyOnly: opts?.standbyOnly,
+          afterSeq: opts?.afterSeq,
+          clientId: effectiveClientId,
+        },
+      );
+      return;
+    } catch (err: any) {
+      if (err?.name !== 'MuxUnavailableError') {
+        throw err;
+      }
+    }
   }
 
-  let lastActivity = Date.now();
-  // 活性看门狗：后端每 15 秒发送一次 ping 心跳。
-  // 若超过 25 秒没有任何网络数据（含 15s keepalive ping），判定连接底层假死，主动 abort 中断当前 reader。
-  const watchdog = setInterval(() => {
-    if (Date.now() - lastActivity > 25000) {
-      streamAbort.abort();
+  let nextAfterSeq = opts?.afterSeq;
+  const wrappedOnEvent = (ev: SSEEvent & SeqTaggedFrame) => {
+    if (typeof ev.seq === 'number' && Number.isInteger(ev.seq)) {
+      nextAfterSeq = ev.seq;
     }
-  }, 4000);
+    onEvent(ev);
+  };
 
-  try {
-    const resp = await apiFetch(
-      `/chat/watch?${params.toString()}`,
-      { headers: authHeaders(), signal: streamAbort.signal },
-    );
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+  while (!signal?.aborted) {
+    if (opts?.standbyOnly && typeof document !== 'undefined' && document.hidden) {
+      await waitUntilVisible(signal);
+      if (signal?.aborted) break;
     }
-    const reader = resp.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let terminalSeen = false;
 
-    const emit = (event: SSEEvent) => {
-      if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
-        terminalSeen = true;
+    const params = new URLSearchParams({ session_id: sessionId });
+    if (opts?.standbyOnly) params.set('standby', 'true');
+    if (nextAfterSeq !== undefined) params.set('after_seq', String(nextAfterSeq));
+    if (effectiveClientId) params.set('client_id', effectiveClientId);
+
+    const streamAbort = new AbortController();
+    let hiddenPaused = false;
+    const onParentAbort = () => streamAbort.abort();
+    if (signal) {
+      if (signal.aborted) streamAbort.abort();
+      else signal.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const onVisibilityChange = () => {
+      if (opts?.standbyOnly && typeof document !== 'undefined' && document.hidden) {
+        hiddenPaused = true;
+        streamAbort.abort();
       }
-      onEvent(event);
     };
-
-    while (true) {
-      const { done, value } = await reader.read();
-      lastActivity = Date.now();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() ?? '';
-      for (const part of parts) {
-        const dataLine = part.split('\n').find((line) => line.startsWith('data:'));
-        if (!dataLine) continue;
-        const jsonStr = dataLine.slice('data:'.length).trim();
-        if (!jsonStr) continue;
-        try {
-          emit(JSON.parse(jsonStr) as SSEEvent);
-        } catch {
-          /* keep-alive */
-        }
-      }
+    if (opts?.standbyOnly && typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange);
     }
 
-    if (buffer.trim()) {
-      const dataLine = buffer.split('\n').find((line) => line.startsWith('data:'));
-      if (dataLine) {
-        const jsonStr = dataLine.slice('data:'.length).trim();
-        if (jsonStr) {
+    let lastActivity = Date.now();
+    // 活性看门狗：后端每 15 秒发送一次 ping 心跳。
+    // 若超过 25 秒没有任何网络数据（含 15s keepalive ping），判定连接底层假死，主动 abort 中断当前 reader。
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastActivity > 25000) {
+        streamAbort.abort();
+      }
+    }, 4000);
+
+    try {
+      const resp = await apiFetch(
+        `/chat/watch?${params.toString()}`,
+        { headers: authHeaders(), signal: streamAbort.signal },
+      );
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+      }
+      const reader = resp.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let terminalSeen = false;
+
+      const emit = (event: SSEEvent & SeqTaggedFrame) => {
+        if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
+          terminalSeen = true;
+        }
+        wrappedOnEvent(event);
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        lastActivity = Date.now();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() ?? '';
+        for (const part of parts) {
+          const dataLine = part.split('\n').find((line) => line.startsWith('data:'));
+          if (!dataLine) continue;
+          const jsonStr = dataLine.slice('data:'.length).trim();
+          if (!jsonStr) continue;
           try {
-            emit(JSON.parse(jsonStr) as SSEEvent);
+            emit(JSON.parse(jsonStr) as SSEEvent & SeqTaggedFrame);
           } catch {
-            /* ignore */
+            /* keep-alive */
           }
         }
       }
-    }
 
-    if (signal?.aborted) {
-      const error = new Error('chat watch aborted');
-      error.name = 'AbortError';
-      throw error;
+      if (buffer.trim()) {
+        const dataLine = buffer.split('\n').find((line) => line.startsWith('data:'));
+        if (dataLine) {
+          const jsonStr = dataLine.slice('data:'.length).trim();
+          if (jsonStr) {
+            try {
+              emit(JSON.parse(jsonStr) as SSEEvent & SeqTaggedFrame);
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      }
+
+      if (signal?.aborted) {
+        const error = new Error('chat watch aborted');
+        error.name = 'AbortError';
+        throw error;
+      }
+      if (hiddenPaused) {
+        continue;
+      }
+      if (!terminalSeen) {
+        onEvent({
+          type: 'done',
+          tokens: 0,
+          tool_calls: 0,
+          session_id: sessionId,
+          stop_reason: 'watch_closed',
+        } as SSEEvent);
+      }
+      return;
+    } catch (err) {
+      if (hiddenPaused && !signal?.aborted) {
+        continue;
+      }
+      throw err;
+    } finally {
+      clearInterval(watchdog);
+      if (signal) signal.removeEventListener('abort', onParentAbort);
+      if (opts?.standbyOnly && typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
     }
-    if (!terminalSeen) {
-      onEvent({
-        type: 'done',
-        tokens: 0,
-        tool_calls: 0,
-        session_id: sessionId,
-        stop_reason: 'watch_closed',
-      } as SSEEvent);
-    }
-  } finally {
-    clearInterval(watchdog);
-    if (signal) signal.removeEventListener('abort', onParentAbort);
   }
 }
 
@@ -1498,7 +1678,10 @@ export interface SessionTokenUsage {
 // lookups where 50 is enough (e.g. URL-restore of a recent session).
 export async function listSessions(): Promise<SessionMetaWithProject[]> {
   const resp = await apiFetch('/sessions', { headers: authHeaders() });
-  return resp.json();
+  if (!resp.ok) throw new Error(`list sessions failed: ${resp.status}`);
+  const data: unknown = await resp.json();
+  if (!Array.isArray(data)) throw new Error('list sessions returned an invalid payload');
+  return data as SessionMetaWithProject[];
 }
 
 // A single project's sessions, UNCAPPED (reads one bucket directly). This is
@@ -1511,8 +1694,9 @@ export async function listProjectSessions(projectHash: string): Promise<SessionM
     headers: authHeaders(),
   });
   if (!resp.ok) throw new Error(`list project sessions failed: ${resp.status}`);
-  const list: SessionMeta[] = await resp.json();
-  return list.map((m) => ({ ...m, project_hash: projectHash }));
+  const list: unknown = await resp.json();
+  if (!Array.isArray(list)) throw new Error('list project sessions returned an invalid payload');
+  return (list as SessionMeta[]).map((m) => ({ ...m, project_hash: projectHash }));
 }
 
 /**
@@ -1535,7 +1719,9 @@ export async function searchSessions(q: string): Promise<SessionMetaWithProject[
     headers: authHeaders(),
   });
   if (!resp.ok) throw new Error(`search sessions failed: ${resp.status}`);
-  return resp.json();
+  const data: unknown = await resp.json();
+  if (!Array.isArray(data)) throw new Error('search sessions returned an invalid payload');
+  return data as SessionMetaWithProject[];
 }
 
 // Resolve a (short) session id to its full record across all projects, UNCAPPED.
@@ -1750,9 +1936,23 @@ export interface ConfigInfo {
   auto_git_sync?: boolean;
 }
 
+let configSnapshotCache: ConfigInfo | null = null;
+
+/** 返回最近一次成功拉取的全局配置快照（SWR 瞬时首屏渲染用，不阻断后台刷新）。 */
+export function peekConfigCache(): ConfigInfo | null {
+  return configSnapshotCache;
+}
+
+/** 清空配置快照缓存（配置变更 / 重载时调用）。 */
+export function invalidateConfigCache(): void {
+  configSnapshotCache = null;
+}
+
 export async function getConfig(): Promise<ConfigInfo> {
   const resp = await apiFetch('/config', { headers: authHeaders() });
-  return readApiJson<ConfigInfo>(resp);
+  const cfg = await readApiJson<ConfigInfo>(resp);
+  configSnapshotCache = cfg;
+  return cfg;
 }
 
 /** Persist the global language switch. */
@@ -2030,6 +2230,7 @@ export interface ProjectState {
 
 export async function getProject(): Promise<ProjectState> {
   const resp = await apiFetch('/project', { headers: authHeaders() });
+  if (!resp.ok) throw new Error(`get project failed: ${resp.status}`);
   return resp.json();
 }
 
@@ -2074,6 +2275,10 @@ export async function postLiveMcpTrust(): Promise<{ ok: boolean; error?: string 
     method: 'POST',
     headers: authHeaders(),
   });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    return { ok: false, error: (err as any).error || `HTTP ${resp.status}` };
+  }
   return resp.json();
 }
 
@@ -2086,7 +2291,10 @@ export interface SkillInfo {
 
 export async function getSkills(): Promise<SkillInfo[]> {
   const resp = await apiFetch('/skills', { headers: authHeaders() });
-  return resp.json();
+  if (!resp.ok) throw new Error(`get skills failed: ${resp.status}`);
+  const data: unknown = await resp.json();
+  if (!Array.isArray(data)) throw new Error('get skills returned an invalid payload');
+  return data as SkillInfo[];
 }
 
 // --- User-invoked slash commands (custom `commands/*.md`) ---
@@ -2101,7 +2309,10 @@ export interface CommandInfo {
 
 export async function getCommands(): Promise<CommandInfo[]> {
   const resp = await apiFetch('/commands', { headers: authHeaders() });
-  return resp.json();
+  if (!resp.ok) throw new Error(`get commands failed: ${resp.status}`);
+  const data: unknown = await resp.json();
+  if (!Array.isArray(data)) throw new Error('get commands returned an invalid payload');
+  return data as CommandInfo[];
 }
 
 // --- Unified capabilities (MCP servers + skills, GLOBAL + PROJECT scopes) ---
@@ -2574,18 +2785,16 @@ export async function getSession(
   if (opts?.offset != null) q.set('offset', String(opts.offset));
   if (opts?.limit != null) q.set('limit', String(opts.limit));
   if (opts?.afterSeq != null) q.set('after_seq', String(opts.afterSeq));
-  if (opts?.beforeSeq != null) q.set('before_seq', String(opts.beforeSeq));
+  if (opts?.beforeSeq != null && Number.isInteger(opts.beforeSeq) && opts.beforeSeq > 0) {
+    q.set('before_seq', String(opts.beforeSeq));
+  }
   if (opts?.around != null) q.set('around', opts.around);
   if (opts?.turnsOnly) q.set('turns_only', 'true');
   const qs = q.toString();
   const path = `/projects/${projectHash}/sessions/${sessionId}`;
   const requestPath = qs ? `${path}?${qs}` : path;
-  // First paint (`tail`), live deltas (`after_seq`) and the outline-only read must
-  // be FRESH. Reusing a cached detail body via 304 can pin an older outline/window
-  // when the display log changed without bumping the client-visible ETag — the
-  // "only 2-3 turns until I switch sessions" bug. Paged history
-  // (`offset`/`limit`) may still use the conditional cache.
-  const cacheable = opts?.tail == null && opts?.afterSeq == null && opts?.turnsOnly !== true;
+  // 放开 `tail` 首屏窗口的 ETag 条件缓存（与服务端强指纹匹配），同时继续保持增量 `after_seq` 与大纲模式直取最新。
+  const cacheable = opts?.afterSeq == null && opts?.turnsOnly !== true;
   const cached = cacheable ? sessionDetailEtagCache.get(requestPath) : undefined;
   const headers = authHeaders();
   if (cached?.etag) headers['If-None-Match'] = cached.etag;
@@ -2719,103 +2928,114 @@ export type GlobalWireEvent =
 
 const GLOBAL_EVENTS_IDLE_TIMEOUT_MS = 30_000;
 
-/** 跨实例增量流。断线由调用方重连；本函数只在 abort/流关闭时返回。 */
+/** 跨实例增量流。优先复用单条 `/stream/ws`，降级时使用 SSE Leader 选主。 */
 export async function streamGlobalEvents(
   onEvent: (event: GlobalWireEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const streamAbort = new AbortController();
-  const onParentAbort = () => streamAbort.abort();
-  if (signal) {
-    if (signal.aborted) streamAbort.abort();
-    else signal.addEventListener('abort', onParentAbort, { once: true });
-  }
-
-  let lastActivity = Date.now();
-  // 活性看门狗：后端 /events 每 15 秒发送一次 ping 心跳。
-  // 若超过 30 秒没有任何网络数据（含 15s keepalive ping），判定底层 TCP 连接已处于半开假死状态，
-  // 主动 abort 中断当前 reader，促使外部自动重连并触发 Sync 增量校准。
-  const watchdog = setInterval(() => {
-    if (Date.now() - lastActivity > GLOBAL_EVENTS_IDLE_TIMEOUT_MS) {
-      streamAbort.abort();
+  if (canUseStreamMux() && !isMuxFallbackActive()) {
+    try {
+      await muxStreamGlobalEvents(() => currentWebuiToken(), onEvent, signal);
+      return;
+    } catch (err: any) {
+      if (err?.name !== 'MuxUnavailableError') {
+        throw err;
+      }
     }
-  }, 4000);
-  if (typeof (watchdog as any).unref === 'function') {
-    (watchdog as any).unref();
   }
 
-  // 视口唤醒自愈：设备从休眠/熄屏恢复时立即检测是否超时，不等下一次 4s interval tick
-  const checkWakeup = () => {
-    if (typeof document !== 'undefined' && !document.hidden) {
+  await runSseGlobalLeader(onEvent, signal, async (emit, sseSignal) => {
+    const streamAbort = new AbortController();
+    const onParentAbort = () => streamAbort.abort();
+    if (sseSignal.aborted) streamAbort.abort();
+    else sseSignal.addEventListener('abort', onParentAbort, { once: true });
+
+    let lastActivity = Date.now();
+    // 活性看门狗：后端 /events 每 15 秒发送一次 ping 心跳。
+    // 若超过 30 秒没有任何网络数据（含 15s keepalive ping），判定底层 TCP 连接已处于半开假死状态，
+    // 主动 abort 中断当前 reader，促使外部自动重连并触发 Sync 增量校准。
+    const watchdog = setInterval(() => {
       if (Date.now() - lastActivity > GLOBAL_EVENTS_IDLE_TIMEOUT_MS) {
         streamAbort.abort();
       }
+    }, 4000);
+    if (typeof (watchdog as any).unref === 'function') {
+      (watchdog as any).unref();
     }
-  };
-  if (typeof document !== 'undefined') {
-    document.addEventListener('visibilitychange', checkWakeup);
-  }
-  if (typeof window !== 'undefined') {
-    window.addEventListener('focus', checkWakeup);
-    window.addEventListener('online', checkWakeup);
-  }
 
-  let readerCancelHandler: (() => void) | null = null;
-  try {
-    const resp = await apiFetch('/events', { headers: authHeaders(), signal: streamAbort.signal });
-    if (!resp.ok) {
-      const error = new Error(`HTTP ${resp.status} ${resp.statusText}`);
-      // 凭据被拒时重连只会反复 401；交给全局认证遮罩引导用户换 token。
-      if (resp.status === 401) error.name = 'AuthExpiredError';
-      throw error;
-    }
-    const reader = resp.body!.getReader();
-    readerCancelHandler = () => {
-      try {
-        reader.cancel().catch(() => {});
-      } catch {}
-    };
-    streamAbort.signal.addEventListener('abort', readerCancelHandler, { once: true });
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      lastActivity = Date.now();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() ?? '';
-      for (const part of parts) {
-        const dataLine = part.split('\n').find((line) => line.startsWith('data:'));
-        if (!dataLine) continue;
-        const jsonStr = dataLine.slice('data:'.length).trim();
-        if (!jsonStr) continue;
-        try {
-          onEvent(JSON.parse(jsonStr) as GlobalWireEvent);
-        } catch {
-          /* keep-alive / malformed frame */
+    // 视口唤醒自愈：设备从休眠/熄屏恢复时立即检测是否超时，不等下一次 4s interval tick
+    const checkWakeup = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        if (Date.now() - lastActivity > GLOBAL_EVENTS_IDLE_TIMEOUT_MS) {
+          streamAbort.abort();
         }
       }
-    }
-    if (signal?.aborted) {
-      const error = new Error('global events aborted');
-      error.name = 'AbortError';
-      throw error;
-    }
-  } finally {
-    clearInterval(watchdog);
-    if (signal) signal.removeEventListener('abort', onParentAbort);
-    if (readerCancelHandler) {
-      streamAbort.signal.removeEventListener('abort', readerCancelHandler);
-    }
+    };
     if (typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', checkWakeup);
+      document.addEventListener('visibilitychange', checkWakeup);
     }
     if (typeof window !== 'undefined') {
-      window.removeEventListener('focus', checkWakeup);
-      window.removeEventListener('online', checkWakeup);
+      window.addEventListener('focus', checkWakeup);
+      window.addEventListener('online', checkWakeup);
     }
-  }
+
+    let readerCancelHandler: (() => void) | null = null;
+    try {
+      const resp = await apiFetch('/events', { headers: authHeaders(), signal: streamAbort.signal });
+      if (!resp.ok) {
+        const error = new Error(`HTTP ${resp.status} ${resp.statusText}`);
+        // 凭据被拒时重连只会反复 401；交给全局认证遮罩引导用户换 token。
+        if (resp.status === 401) error.name = 'AuthExpiredError';
+        throw error;
+      }
+      const reader = resp.body!.getReader();
+      readerCancelHandler = () => {
+        try {
+          reader.cancel().catch(() => {});
+        } catch {}
+      };
+      streamAbort.signal.addEventListener('abort', readerCancelHandler, { once: true });
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        lastActivity = Date.now();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() ?? '';
+        for (const part of parts) {
+          const dataLine = part.split('\n').find((line) => line.startsWith('data:'));
+          if (!dataLine) continue;
+          const jsonStr = dataLine.slice('data:'.length).trim();
+          if (!jsonStr) continue;
+          try {
+            emit(JSON.parse(jsonStr) as GlobalWireEvent);
+          } catch {
+            /* keep-alive / malformed frame */
+          }
+        }
+      }
+      if (sseSignal.aborted) {
+        const error = new Error('global events aborted');
+        error.name = 'AbortError';
+        throw error;
+      }
+    } finally {
+      clearInterval(watchdog);
+      sseSignal.removeEventListener('abort', onParentAbort);
+      if (readerCancelHandler) {
+        streamAbort.signal.removeEventListener('abort', readerCancelHandler);
+      }
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', checkWakeup);
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', checkWakeup);
+        window.removeEventListener('online', checkWakeup);
+      }
+    }
+  });
 }
 
 /** Sync-mode model switch: notify the daemon immediately when the dropdown
@@ -3420,8 +3640,64 @@ export interface UpgradeDiffsResponse {
   diffs: ConfigDiffItem[];
 }
 
-export async function checkUpdate(channel?: string): Promise<UpdateCheckResponse> {
-  const url = channel ? `/api/update/check?channel=${encodeURIComponent(channel)}` : '/api/update/check';
+export interface BootstrapResponse {
+  project: ProjectState;
+  projects: ProjectInfo[];
+  sessions: SessionMetaWithProject[];
+  sidebar: SidebarProjects;
+  active_chat_ids: string[];
+  runtime_sessions: RuntimeSessionInfo[];
+  approval_mode: ApprovalModeResponse;
+  models: ModelInfo[];
+  health: HealthInfo;
+}
+
+const BOOTSTRAP_CACHE_TTL_MS = 5_000;
+let bootstrapCache: { at: number; data: BootstrapResponse } | null = null;
+let bootstrapInFlight: Promise<BootstrapResponse> | null = null;
+
+export function peekBootstrapCache(): BootstrapResponse | null {
+  if (!bootstrapCache) return null;
+  if (Date.now() - bootstrapCache.at > BOOTSTRAP_CACHE_TTL_MS) return null;
+  return bootstrapCache.data;
+}
+
+export function invalidateBootstrapCache(): void {
+  bootstrapCache = null;
+}
+
+/** 聚合首屏冷启动基础数据（单次请求共享给 App / Sidebar / NotificationDock）。 */
+export async function getBootstrap(opts?: { force?: boolean }): Promise<BootstrapResponse> {
+  if (!opts?.force) {
+    const fresh = peekBootstrapCache();
+    if (fresh) return fresh;
+    if (bootstrapInFlight) return bootstrapInFlight;
+  }
+  const req = (async () => {
+    const resp = await apiFetch('/api/bootstrap', { headers: authHeaders() });
+    if (!resp.ok) throw new Error(`bootstrap failed: ${resp.status}`);
+    const data = (await resp.json()) as BootstrapResponse;
+    bootstrapCache = { at: Date.now(), data };
+    return data;
+  })().finally(() => {
+    if (bootstrapInFlight === req) {
+      bootstrapInFlight = null;
+    }
+  });
+  bootstrapInFlight = req;
+  return req;
+}
+
+export async function checkUpdate(
+  channel?: string,
+  opts?: { summary?: boolean; refresh?: boolean },
+): Promise<UpdateCheckResponse> {
+  const params = new URLSearchParams();
+  if (channel) params.set('channel', channel);
+  if (opts?.summary) params.set('summary', '1');
+  if (opts?.refresh) params.set('refresh', '1');
+  const qs = params.toString();
+  const url = qs ? `/api/update/check?${qs}` : '/api/update/check';
   const resp = await apiFetch(url, {
     headers: authHeaders(),
   });

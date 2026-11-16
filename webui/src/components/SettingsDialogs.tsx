@@ -6,6 +6,8 @@ import { createPortal } from 'preact/compat';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import {
   getConfig,
+  peekConfigCache,
+  invalidateConfigCache,
   ConfigInfo,
   ProviderInfo,
   AccountInfo,
@@ -350,6 +352,7 @@ function AccountFormDialog({
 }
 
 function notifyConfigChange() {
+  invalidateConfigCache();
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('jeikcode:config-reloaded'));
     window.dispatchEvent(new CustomEvent('jeikcode:reload-models'));
@@ -358,8 +361,9 @@ function notifyConfigChange() {
 
 export function ModelConfigView({ onDone }: { onDone?: () => void }) {
   const { t } = useSettings();
-  const [config, setConfig] = useState<ConfigInfo | null>(null);
+  const [config, setConfig] = useState<ConfigInfo | null>(() => peekConfigCache());
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloading, setReloading] = useState(false);
 
   // 折叠状态（按 accountId 控制，默认全部展开）
   const [collapsedAccounts, setCollapsedAccounts] = useState<Record<string, boolean>>({});
@@ -374,8 +378,10 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [deleteAccountTarget, setDeleteAccountTarget] = useState<string | null>(null);
 
-  const reload = (notify = false) =>
-    getConfig()
+  const reload = (notify = false) => {
+    setLoadError(null);
+    setReloading(true);
+    return getConfig()
       .then((cfg) => {
         setConfig(cfg);
         if (notify) {
@@ -386,9 +392,13 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
         const raw = e instanceof Error ? e.message : String(e);
         const auth = /401|unauthorized|access token/i.test(raw);
         setLoadError(auth ? t('settings.authFailed') : raw);
+      })
+      .finally(() => {
+        setReloading(false);
       });
+  };
 
-  useEffect(() => { reload(); }, []);
+  useEffect(() => { void reload(); }, []);
 
   const toggleCollapse = (accId: string) => {
     setCollapsedAccounts((prev) => ({ ...prev, [accId]: !prev[accId] }));
@@ -486,7 +496,19 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
   return (
     <>
       <div class="field-group" style={{ gap: '14px' }}>
-        {loadError && <div class="modal-error">{t('settings.loadFailed')}: {loadError}</div>}
+        {loadError && (
+          <div class="modal-error" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+            <span>{t('settings.loadFailed')}: {loadError}</span>
+            <button
+              type="button"
+              class="btn"
+              disabled={reloading}
+              onClick={() => void reload()}
+            >
+              {t('common.retry')}
+            </button>
+          </div>
+        )}
         {!config && !loadError && <div class="modal-loading">{t('settings.loading')}</div>}
         {config && (
           <>

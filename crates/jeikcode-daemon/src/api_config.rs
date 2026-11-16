@@ -1388,6 +1388,56 @@ pub struct MigrateLegacyResponse {
     pub killed_zombies_count: usize,
 }
 
+/// 判定某进程条目是否属于当前进程自身、当前线程组（TGID）或任意内核/用户态线程。
+///
+/// Linux 上 `sysinfo` 会把 `/proc/<TGID>/task/<TID>` 作为独立条目录入 `sys.processes()`，
+/// 对线程 TID 调用 `kill()` 会向整个线程组发送 SIGKILL 导致自身秒退（Issue #88）。
+fn is_protected_process_entry(
+    pid_u32: u32,
+    is_thread: bool,
+    exe_canon: Option<&std::path::Path>,
+    parent_pid: Option<u32>,
+    my_pid: Option<u32>,
+    self_task_pids: &std::collections::HashSet<u32>,
+    current_exe_canon: Option<&std::path::Path>,
+) -> bool {
+    if is_thread {
+        return true;
+    }
+    if my_pid.is_some_and(|mine| mine == pid_u32) || self_task_pids.contains(&pid_u32) {
+        return true;
+    }
+    if my_pid.is_some_and(|mine| parent_pid == Some(mine)) {
+        return true;
+    }
+    if let (Some(target_exe), Some(self_exe)) = (exe_canon, current_exe_canon) {
+        if target_exe == self_exe {
+            return true;
+        }
+    }
+    false
+}
+
+fn canonical_exe_or_raw(path: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    path.map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+}
+
+fn collect_self_task_pids(sys: &sysinfo::System) -> std::collections::HashSet<u32> {
+    let mut set = std::collections::HashSet::new();
+    let Ok(my_pid) = sysinfo::get_current_pid() else {
+        return set;
+    };
+    set.insert(my_pid.as_u32());
+    if let Some(my_proc) = sys.process(my_pid) {
+        if let Some(tasks) = my_proc.tasks() {
+            for tid in tasks {
+                set.insert(tid.as_u32());
+            }
+        }
+    }
+    set
+}
+
 pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     let mut sys = System::new();
@@ -1397,11 +1447,16 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
         ProcessRefreshKind::everything(),
     );
     let my_pid = sysinfo::get_current_pid().ok().map(|p| p.as_u32());
+    let self_task_pids = collect_self_task_pids(&sys);
+    let current_exe_canon = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
     let mut out = Vec::new();
 
-    // 收集所有当前活跃的桌面壳 PID (jeikcode-desktop)
+    // 收集所有当前活跃的桌面壳 PID (jeikcode-desktop)，仅统计主进程，不把线程计入
     let mut active_desktop_pids = std::collections::HashSet::new();
     for (pid, proc_) in sys.processes() {
+        if proc_.thread_kind().is_some() {
+            continue;
+        }
         let name = proc_.name().to_string_lossy().to_ascii_lowercase();
         if name.contains("desktop") || name.contains("tauri") {
             active_desktop_pids.insert(pid.as_u32());
@@ -1410,7 +1465,17 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
 
     for (pid, proc_) in sys.processes() {
         let pid_u32 = pid.as_u32();
-        if Some(pid_u32) == my_pid {
+        let exe_canon = canonical_exe_or_raw(proc_.exe());
+        let parent_pid = proc_.parent().map(|p| p.as_u32());
+        if is_protected_process_entry(
+            pid_u32,
+            proc_.thread_kind().is_some(),
+            exe_canon.as_deref(),
+            parent_pid,
+            my_pid,
+            &self_task_pids,
+            current_exe_canon.as_deref(),
+        ) {
             continue;
         }
         let name = proc_.name().to_string_lossy().to_ascii_lowercase();
@@ -1450,7 +1515,6 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
         });
 
         // 3. 检查父进程与绑定的桌面壳状态
-        let parent_pid = proc_.parent().map(|p| p.as_u32());
         let desktop_owner_alive = parent_pid
             .is_some_and(|ppid| active_desktop_pids.contains(&ppid))
             || declared_desktop_pid.is_some_and(|dpid| active_desktop_pids.contains(&dpid));
@@ -1483,6 +1547,9 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
 
 pub fn kill_zombie_processes_all() -> usize {
     let zombies = scan_zombie_processes();
+    if zombies.is_empty() {
+        return 0;
+    }
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let mut sys = System::new();
     sys.refresh_processes_specifics(
@@ -1490,9 +1557,26 @@ pub fn kill_zombie_processes_all() -> usize {
         true,
         ProcessRefreshKind::everything(),
     );
+    let my_pid = sysinfo::get_current_pid().ok().map(|p| p.as_u32());
+    let self_task_pids = collect_self_task_pids(&sys);
+    let current_exe_canon = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
     let mut killed = 0;
     for z in zombies {
         if let Some(proc_) = sys.process(Pid::from_u32(z.pid)) {
+            let exe_canon = canonical_exe_or_raw(proc_.exe());
+            let parent_pid = proc_.parent().map(|p| p.as_u32());
+            // 二次硬守卫：发信号前再次核对非自身/非线程/非同可执行文件
+            if is_protected_process_entry(
+                z.pid,
+                proc_.thread_kind().is_some(),
+                exe_canon.as_deref(),
+                parent_pid,
+                my_pid,
+                &self_task_pids,
+                current_exe_canon.as_deref(),
+            ) {
+                continue;
+            }
             if proc_.kill() {
                 killed += 1;
             }
@@ -1501,9 +1585,9 @@ pub fn kill_zombie_processes_all() -> usize {
     killed
 }
 
-pub(crate) async fn get_legacy_status() -> impl IntoResponse {
+fn collect_legacy_status_blocking() -> LegacyStatusResponse {
     let mut legacy_files = Vec::new();
-    let current_exe = std::env::current_exe().ok();
+    let current_exe = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
     if let Some(home) = jeikcode_config::util::real_home_dir() {
         let local_bin = home.join(".local").join("bin");
         if let Ok(entries) = std::fs::read_dir(&local_bin) {
@@ -1515,7 +1599,8 @@ pub(crate) async fn get_legacy_status() -> impl IntoResponse {
                         .and_then(|n| n.to_str())
                         .unwrap_or("")
                         .to_ascii_lowercase();
-                    let is_current = current_exe.as_ref().map_or(false, |c| c == &path);
+                    let path_canon = canonical_exe_or_raw(Some(&path));
+                    let is_current = current_exe.is_some() && current_exe == path_canon;
                     if (name.starts_with("jeikcode") || name.starts_with("atomcode")) && !is_current
                     {
                         legacy_files.push(path.display().to_string());
@@ -1550,59 +1635,84 @@ pub(crate) async fn get_legacy_status() -> impl IntoResponse {
     let has_legacy_files = !legacy_files.is_empty();
     let needs_migration = has_legacy_files || has_dirty_path || zombie_count > 0;
 
-    Json(LegacyStatusResponse {
+    LegacyStatusResponse {
         has_legacy_files,
         legacy_files,
         has_dirty_path,
         zombie_count,
         zombies,
         needs_migration,
-    })
+    }
 }
 
-pub(crate) async fn post_migrate_legacy(
-    Json(payload): Json<MigrateLegacyRequest>,
-) -> impl IntoResponse {
+fn migrate_legacy_blocking(kill_zombies: bool) -> MigrateLegacyResponse {
     let mut cleaned_files_count = 0;
-    let current_exe = std::env::current_exe().ok();
-    if let Some(ref running) = current_exe {
-        if let Some(home) = jeikcode_config::util::real_home_dir() {
-            let local_bin = home.join(".local").join("bin");
-            if let Ok(entries) = std::fs::read_dir(&local_bin) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_ascii_lowercase();
-                        if (name.starts_with("jeikcode") || name.starts_with("atomcode"))
-                            && running != &path
-                        {
-                            if std::fs::remove_file(&path).is_ok() {
-                                cleaned_files_count += 1;
-                            }
+    let current_exe = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
+    if let Some(home) = jeikcode_config::util::real_home_dir() {
+        let local_bin = home.join(".local").join("bin");
+        if let Ok(entries) = std::fs::read_dir(&local_bin) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    let path_canon = canonical_exe_or_raw(Some(&path));
+                    let is_current = current_exe.is_some() && current_exe == path_canon;
+                    if (name.starts_with("jeikcode") || name.starts_with("atomcode")) && !is_current
+                    {
+                        if std::fs::remove_file(&path).is_ok() {
+                            cleaned_files_count += 1;
                         }
                     }
                 }
             }
-            let _ = std::fs::remove_dir(&local_bin);
         }
+        let _ = std::fs::remove_dir(&local_bin);
     }
 
     jeikcode_updater::migrate_legacy_environment();
 
     let mut killed_zombies_count = 0;
-    if payload.kill_zombies {
+    if kill_zombies {
         killed_zombies_count = kill_zombie_processes_all();
     }
 
-    Json(MigrateLegacyResponse {
+    MigrateLegacyResponse {
         success: true,
         cleaned_files_count,
         killed_zombies_count,
-    })
+    }
+}
+
+pub(crate) async fn get_legacy_status() -> impl IntoResponse {
+    let status = tokio::task::spawn_blocking(collect_legacy_status_blocking)
+        .await
+        .unwrap_or(LegacyStatusResponse {
+            has_legacy_files: false,
+            legacy_files: Vec::new(),
+            has_dirty_path: false,
+            zombie_count: 0,
+            zombies: Vec::new(),
+            needs_migration: false,
+        });
+    Json(status)
+}
+
+pub(crate) async fn post_migrate_legacy(
+    Json(payload): Json<MigrateLegacyRequest>,
+) -> impl IntoResponse {
+    let kill_zombies = payload.kill_zombies;
+    let res = tokio::task::spawn_blocking(move || migrate_legacy_blocking(kill_zombies))
+        .await
+        .unwrap_or(MigrateLegacyResponse {
+            success: false,
+            cleaned_files_count: 0,
+            killed_zombies_count: 0,
+        });
+    Json(res)
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -2132,5 +2242,65 @@ mod tests {
         assert!(saved.contains("\"port\": 4096"), "{saved}");
         assert!(saved.contains("later-token"), "{saved}");
         assert!(!saved.contains("no_token"), "{saved}");
+    }
+
+    #[test]
+    fn zombie_guard_protects_self_threads_children_and_same_exe() {
+        let mut self_tasks = std::collections::HashSet::new();
+        self_tasks.insert(226712);
+        self_tasks.insert(226717);
+        let self_exe = std::path::Path::new("/usr/local/bin/jeikcode");
+        let legacy_exe = std::path::Path::new("/home/u/.local/bin/jeikcode");
+
+        // 1. 主进程自身
+        assert!(is_protected_process_entry(
+            226712,
+            false,
+            Some(legacy_exe),
+            Some(1),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
+        // 2. 同线程组工作线程（即使 is_thread=false 也命中 self_tasks）
+        assert!(is_protected_process_entry(
+            226717,
+            false,
+            Some(legacy_exe),
+            Some(226712),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
+        // 3. 任意线程（Linux sysinfo thread_kind().is_some() == true）
+        assert!(is_protected_process_entry(
+            999001,
+            true,
+            Some(legacy_exe),
+            Some(999000),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
+        // 4. 同一可执行文件路径
+        assert!(is_protected_process_entry(
+            300001,
+            false,
+            Some(self_exe),
+            Some(1),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
+        // 5. 真正异路径、非线程、非本进程/子进程的遗留实例才允许判定
+        assert!(!is_protected_process_entry(
+            400001,
+            false,
+            Some(legacy_exe),
+            Some(1),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
     }
 }

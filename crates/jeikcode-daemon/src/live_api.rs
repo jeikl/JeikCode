@@ -3781,7 +3781,7 @@ pub(crate) struct ApprovalModeQuery {
     pub session_id: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub(crate) struct ApprovalModeResp {
     pub ok: bool,
     pub mode: ApprovalMode,

@@ -6,16 +6,7 @@
 // zh 与 en 字典同步添加, MsgKey = keyof typeof zh 类型自动约束一致性。
 // 我们愿意根据再审意见继续优化。
 
-import { vi } from './vi';
-import { zhTw } from './locales/zh-TW';
-import { ja } from './locales/ja';
-import { ko } from './locales/ko';
-import { ru } from './locales/ru';
-import { fr } from './locales/fr';
-import { es } from './locales/es';
-import { de } from './locales/de';
-import { ar } from './locales/ar';
-
+// 非默认语言（vi 及 8 个拓展语种）改为按需动态分包加载，削减首屏 ~650 KB 静态词典体积。
 export type Lang = 'zh' | 'en' | 'vi' | 'zh-TW' | 'ja' | 'ko' | 'ru' | 'fr' | 'es' | 'de' | 'ar';
 export const languageOptions: { value: Lang; label: string }[] = [
   { value: 'en', label: 'English' },
@@ -2371,19 +2362,47 @@ Please prioritize the user's comment intent and identity. If review is not requi
   'gitWebhook.privateKeyEmptyHint': 'Select or enter path to downloaded .pem private key',
 };
 
-export const messages: Record<Lang, Record<MsgKey, string>> = {
+export const messages: Partial<Record<Lang, Record<MsgKey, string>>> & {
+  zh: Record<MsgKey, string>;
+  en: Record<MsgKey, string>;
+} = {
   zh,
   en,
-  vi,
-  'zh-TW': { ...zh, ...zhTw } as Record<MsgKey, string>,
-  ja: { ...en, ...ja } as Record<MsgKey, string>,
-  ko: { ...en, ...ko } as Record<MsgKey, string>,
-  ru: { ...en, ...ru } as Record<MsgKey, string>,
-  fr: { ...en, ...fr } as Record<MsgKey, string>,
-  es: { ...en, ...es } as Record<MsgKey, string>,
-  de: { ...en, ...de } as Record<MsgKey, string>,
-  ar: { ...en, ...ar } as Record<MsgKey, string>,
 };
+
+const localeLoaders: Partial<Record<Lang, () => Promise<Record<MsgKey, string>>>> = {
+  vi: () => import('./vi').then((m) => m.vi as Record<MsgKey, string>),
+  'zh-TW': () => import('./locales/zh-TW').then((m) => ({ ...zh, ...m.zhTw }) as Record<MsgKey, string>),
+  ja: () => import('./locales/ja').then((m) => ({ ...en, ...m.ja }) as Record<MsgKey, string>),
+  ko: () => import('./locales/ko').then((m) => ({ ...en, ...m.ko }) as Record<MsgKey, string>),
+  ru: () => import('./locales/ru').then((m) => ({ ...en, ...m.ru }) as Record<MsgKey, string>),
+  fr: () => import('./locales/fr').then((m) => ({ ...en, ...m.fr }) as Record<MsgKey, string>),
+  es: () => import('./locales/es').then((m) => ({ ...en, ...m.es }) as Record<MsgKey, string>),
+  de: () => import('./locales/de').then((m) => ({ ...en, ...m.de }) as Record<MsgKey, string>),
+  ar: () => import('./locales/ar').then((m) => ({ ...en, ...m.ar }) as Record<MsgKey, string>),
+};
+
+const pendingLocaleLoads = new Map<Lang, Promise<boolean>>();
+
+/** 按需异步加载非默认语种词典，已加载过则立即返回 `false` 避免多余重绘。 */
+export function ensureLocaleLoaded(lang: Lang): Promise<boolean> {
+  if (messages[lang]) return Promise.resolve(false);
+  const loader = localeLoaders[lang];
+  if (!loader) return Promise.resolve(false);
+  const existing = pendingLocaleLoads.get(lang);
+  if (existing) return existing;
+  const task = loader()
+    .then((dict) => {
+      messages[lang] = dict;
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => {
+      pendingLocaleLoads.delete(lang);
+    });
+  pendingLocaleLoads.set(lang, task);
+  return task;
+}
 
 /**
  * 将后端稳定的失败码翻译成当前语言；码未知时返回 null，由调用方回退到原始诊断文本。

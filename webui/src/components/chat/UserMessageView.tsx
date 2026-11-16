@@ -1,3 +1,4 @@
+import { memo } from 'preact/compat';
 import { useState } from 'preact/hooks';
 import type { CanvasRecord as Message } from '../../lib/canvas/records';
 import type { ImageData, ModelInfo } from '../../api';
@@ -24,31 +25,7 @@ async function copyUserMessage(text: string, images?: ImageData[]): Promise<bool
   return copyTextAndImages(text, images);
 }
 
-export function UserMessageView({
-  msg,
-  anchorId,
-  turnNavIdx,
-  searchRef,
-  timeLabel,
-  timeFull,
-  search,
-  isActiveSearchMatch,
-  isEditing,
-  draftText,
-  draftImages,
-  draftModel,
-  onDraftChange,
-  onStartEdit,
-  onCancelEdit,
-  onSaveRewrite,
-  onRollbackSubmit,
-  onDelete,
-  models,
-  currentModel,
-  disabled,
-  escCancelEdit,
-  cwd,
-}: {
+export interface UserMessageViewProps {
   msg: Message;
   anchorId?: string;
   turnNavIdx?: number;
@@ -73,7 +50,52 @@ export function UserMessageView({
   /** When false, ESC must not exit the inline edit. */
   escCancelEdit?: boolean;
   cwd?: string;
-}) {
+}
+
+function userMessagePropsEqual(prev: UserMessageViewProps, next: UserMessageViewProps): boolean {
+  return prev.msg === next.msg
+    && prev.anchorId === next.anchorId
+    && prev.turnNavIdx === next.turnNavIdx
+    && prev.timeLabel === next.timeLabel
+    && prev.timeFull === next.timeFull
+    && prev.search === next.search
+    && prev.isActiveSearchMatch === next.isActiveSearchMatch
+    && prev.isEditing === next.isEditing
+    && prev.draftText === next.draftText
+    && prev.draftImages === next.draftImages
+    && prev.draftModel === next.draftModel
+    && prev.models === next.models
+    && prev.currentModel === next.currentModel
+    && prev.disabled === next.disabled
+    && prev.escCancelEdit === next.escCancelEdit
+    && prev.cwd === next.cwd;
+}
+
+export const UserMessageView = memo(function UserMessageView({
+  msg,
+  anchorId,
+  turnNavIdx,
+  searchRef,
+  timeLabel,
+  timeFull,
+  search,
+  isActiveSearchMatch,
+  isEditing,
+  draftText,
+  draftImages,
+  draftModel,
+  onDraftChange,
+  onStartEdit,
+  onCancelEdit,
+  onSaveRewrite,
+  onRollbackSubmit,
+  onDelete,
+  models,
+  currentModel,
+  disabled,
+  escCancelEdit,
+  cwd,
+}: UserMessageViewProps) {
   const t = useT();
   // 技能/文档型消息默认折叠为一行徽章，点击展开查看原文。
   const text = messageText(msg);
@@ -239,7 +261,7 @@ export function UserMessageView({
       </div>
     </div>
   );
-}
+}, userMessagePropsEqual);
 
 // Status glyph: a check when done, a cross on error, otherwise a spinner that
 // animates while the call is pending / awaiting approval.

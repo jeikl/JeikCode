@@ -5,7 +5,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
-import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getBootstrap, invalidateBootstrapCache, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
 import { mergeSessionRow, onGlobalEvent, removeSessionRows } from '../lib/globalEvents';
 import { deleteSessionCache } from '../lib/sessionCache';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
@@ -577,6 +577,9 @@ export function Sidebar({
   // 旧实现把它当作跨刷新记忆，导致用户点过一次后每次打开都是全量列表、
   // 而「收起」入口被顶到长列表底部，看起来就像折叠功能消失了。
   const [showAllProjects, setShowAllProjects] = useState<Set<string>>(() => new Set());
+  // 展开长项目列表时分批渐进渲染（每档 +60 条），避免数百会话一次性阻塞主线程
+  const SIDEBAR_EXPAND_STEP = 60;
+  const [expandedRenderCap, setExpandedRenderCap] = useState<Record<string, number>>({});
   const [hiddenProjectHashes, setHiddenProjectHashes] = useState<Set<string>>(
     () => new Set(initialSidebarSnapshot?.hidden ?? []),
   );
@@ -739,27 +742,13 @@ export function Sidebar({
       });
   }
 
-  useEffect(() => {
-    let cancelled = false;
-    getHealth()
-      .then((info) => {
-        if (cancelled) return;
-        const running = normalizeAppVersion(info.version);
-        if (running) setAppVersion(running);
-      })
-      .catch(() => {
-        /* keep the Vite-baked fallback */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const coldBootAppliedRef = useRef(false);
 
-  // 刷新指定项目或所有展开项目的会话列表缓存
+  // 刷新指定项目或所有展开项目的会话列表缓存（读取 ref，不再因折叠展开改动回调身份导致 4 连全刷）
   const refreshProjectSessions = useCallback((targetHashes?: string[]) => {
     const hashes = new Set<string>(targetHashes ?? []);
     if (projectHash) hashes.add(projectHash);
-    expandedProjects.forEach((h) => hashes.add(h));
+    expandedProjectsRef.current.forEach((h) => hashes.add(h));
 
     hashes.forEach((hash) => {
       listProjectSessions(hash)
@@ -768,7 +757,7 @@ export function Sidebar({
         })
         .catch(() => {});
     });
-  }, [projectHash, expandedProjects]);
+  }, [projectHash]);
 
   const applySidebarView = useCallback((view: SidebarProjects) => {
     const hidden = new Set(view.hidden);
@@ -788,12 +777,49 @@ export function Sidebar({
     getSidebarProjects().then(applySidebarView).catch(() => {});
   }, [applySidebarView]);
 
-  // ── 纯事件驱动侧栏刷新机制（彻底拔除 5s 无脑定时轮询，释放 CPU 与网络 IO）──
-  // 冷启动单次拉取项目与折叠状态；之后仅在 reloadKey 变更（新建/删除/回合完成/切目录）
-  // 或切回前台时按需触发单次对齐，零定时器空转！
+  // ── 纯事件驱动侧栏刷新机制 ──
+  // 首次冷启动通过 `/api/bootstrap` 一次性喂入 health/projects/sessions/sidebar/active_chat_ids，
+  // 后续 reloadKey 变更或切回前台再按需单独校验。
   useEffect(() => {
     const refresh = () => {
       if (document.hidden) return;
+      if (!coldBootAppliedRef.current) {
+        coldBootAppliedRef.current = true;
+        getBootstrap()
+          .then((boot) => {
+            if (Array.isArray(boot.sessions)) {
+              setSessions(boot.sessions);
+              if (activeSessionId) {
+                const found = boot.sessions.find((s) => s.id === activeSessionId);
+                if (found) onActiveSessionMeta?.(found);
+              }
+              setLoading(false);
+            }
+            if (Array.isArray(boot.projects)) setProjects(boot.projects);
+            if (boot.sidebar) applySidebarView(boot.sidebar);
+            if (Array.isArray(boot.active_chat_ids)) setActiveIds(boot.active_chat_ids);
+            if (boot.health?.version) {
+              const running = normalizeAppVersion(boot.health.version);
+              if (running) setAppVersion(running);
+            }
+            refreshProjectSessions();
+          })
+          .catch(() => {
+            loadSessions(true);
+            refreshProjectSessions();
+            loadSidebar();
+            getActiveChatSessions().then(setActiveIds).catch(() => {});
+            getProjects().then(setProjects).catch(() => setProjects([]));
+            getHealth()
+              .then((info) => {
+                const running = normalizeAppVersion(info.version);
+                if (running) setAppVersion(running);
+              })
+              .catch(() => {});
+          });
+        return;
+      }
+      invalidateBootstrapCache();
       loadSessions(true);
       refreshProjectSessions();
       loadSidebar();
@@ -807,14 +833,13 @@ export function Sidebar({
     };
     document.addEventListener('visibilitychange', onVisibility);
 
-    // 当 reloadKey 变更时（例如回合结束 onTurnDone、删除会话、新建会话触发）即时核验一次
     refresh();
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey, refreshProjectSessions, loadSidebar]);
+  }, [reloadKey, refreshProjectSessions, loadSidebar, applySidebarView]);
 
   // ── 跨实例增量订阅（无轮询、无整表重拉）──
   // 服务端只推“变了什么”（带 payload），这里按 id 就地 upsert/删行并同步失效缓存；
@@ -1002,6 +1027,7 @@ export function Sidebar({
   }, [activeSessionId, activeProjectHash, collapsed, loading, sessions, projectSessionsMap, expandedProjects, projectHash]);
 
   useEffect(() => {
+    if (reloadKey === 0) return;
     getProjects()
       .then(setProjects)
       .catch(() => setProjects([]));
@@ -1118,8 +1144,15 @@ export function Sidebar({
       const next = new Set(prev);
       if (next.has(hash)) {
         next.delete(hash);
+        setExpandedRenderCap((caps) => {
+          if (!(hash in caps)) return caps;
+          const copy = { ...caps };
+          delete copy[hash];
+          return copy;
+        });
       } else {
         next.add(hash);
+        setExpandedRenderCap((caps) => ({ ...caps, [hash]: SIDEBAR_EXPAND_STEP }));
         if (!projectSessionsMap[hash]) {
           listProjectSessions(hash)
             .then((list) => {
@@ -1130,6 +1163,13 @@ export function Sidebar({
       }
       return next;
     });
+  }
+
+  function showMoreWindow(hash: string) {
+    setExpandedRenderCap((caps) => ({
+      ...caps,
+      [hash]: (caps[hash] ?? SIDEBAR_EXPAND_STEP) + SIDEBAR_EXPAND_STEP,
+    }));
   }
 
   function openProjectInSidebar(hash: string) {
@@ -2864,25 +2904,40 @@ export function Sidebar({
                       {isExpanded ? '▾' : '▸'}
                     </span>
                   </div>
-                  {isExpanded && (
-                    <div class="project-sessions-list">
-                      {displayList.filter((s) => projectOwnerById.get(s.id) === p.hash).map(renderItem)}
-                      {folded.canToggle && (
-                        <button
-                          type="button"
-                          class={'project-show-more-btn' + (isShowAll ? ' is-expanded' : '')}
-                          onClick={() => toggleShowAll(p.hash)}
-                        >
-                          <span>{isShowAll ? t('sidebar.showLess') : t('sidebar.showMore')}</span>
-                        </button>
-                      )}
-                      {folded.total === 0 && (
-                        <div class="session-empty" style={{ padding: '6px 12px', fontSize: '11.5px' }}>
-                          {t('sidebar.empty')}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  {isExpanded && (() => {
+                    const ownedSessions = displayList.filter((s) => projectOwnerById.get(s.id) === p.hash);
+                    const cap = expandedRenderCap[p.hash] ?? SIDEBAR_EXPAND_STEP;
+                    const hasMoreWindow = isShowAll && ownedSessions.length > cap;
+                    const windowedSessions = hasMoreWindow ? ownedSessions.slice(0, cap) : ownedSessions;
+                    return (
+                      <div class="project-sessions-list">
+                        {windowedSessions.map(renderItem)}
+                        {hasMoreWindow && (
+                          <button
+                            type="button"
+                            class="project-show-more-btn"
+                            onClick={() => showMoreWindow(p.hash)}
+                          >
+                            <span>{t('sidebar.showMore')}</span>
+                          </button>
+                        )}
+                        {folded.canToggle && (
+                          <button
+                            type="button"
+                            class={'project-show-more-btn' + (isShowAll ? ' is-expanded' : '')}
+                            onClick={() => toggleShowAll(p.hash)}
+                          >
+                            <span>{isShowAll ? t('sidebar.showLess') : t('sidebar.showMore')}</span>
+                          </button>
+                        )}
+                        {folded.total === 0 && (
+                          <div class="session-empty" style={{ padding: '6px 12px', fontSize: '11.5px' }}>
+                            {t('sidebar.empty')}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}

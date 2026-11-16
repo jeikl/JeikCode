@@ -6,14 +6,14 @@
 // lives in one table below, so adding a tab is a single edit.
 
 import { lazy, Suspense } from 'preact/compat';
-import { useEffect, useRef } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { useT } from '../settings';
-import { TerminalPanel } from './TerminalPanel';
-import { PreviewPanel } from './PreviewPanel';
 import type { TurnNavItem } from '../lib/turnNav';
 import type { GitCommitFile, GitCommitItem, GitStatusItem } from '../api';
 
 const GitPanel = lazy(() => import('./GitPanel').then((m) => ({ default: m.GitPanel })));
+const TerminalPanel = lazy(() => import('./TerminalPanel').then((m) => ({ default: m.TerminalPanel })));
+const PreviewPanel = lazy(() => import('./PreviewPanel').then((m) => ({ default: m.PreviewPanel })));
 
 export type RightPanelTab = 'questions' | 'git' | 'terminal' | 'preview';
 
@@ -232,6 +232,20 @@ export function RightInspector({
   const t = useT();
   const title = t(TAB_TITLE_KEY[tab]);
 
+  // 仅当右侧栏真正展开且切到对应标签时才首次挂载，之后保活（避免冷启动拉起 xterm/Git/代码编辑器）
+  const [mountedTabs, setMountedTabs] = useState<Partial<Record<'git' | 'terminal' | 'preview', true>>>(() =>
+    !collapsed && (tab === 'git' || tab === 'terminal' || tab === 'preview') ? { [tab]: true } : {},
+  );
+  useEffect(() => {
+    if (collapsed) return;
+    if (tab === 'git' || tab === 'terminal' || tab === 'preview') {
+      setMountedTabs((prev) => (prev[tab] ? prev : { ...prev, [tab]: true }));
+    }
+  }, [collapsed, tab]);
+  const mountGit = Boolean(mountedTabs.git || (!collapsed && tab === 'git'));
+  const mountTerminal = Boolean(mountedTabs.terminal || (!collapsed && tab === 'terminal'));
+  const mountPreview = Boolean(mountedTabs.preview || (!collapsed && tab === 'preview'));
+
   const tabButton = (id: RightPanelTab) => {
     const active = tab === id;
     const count = counts[id] ?? 0;
@@ -357,26 +371,28 @@ export function RightInspector({
               width: '100%',
             })}
           >
-            <Suspense
-              fallback={
-                <div class="git-empty-state">
-                  <div class="git-spinner" />
-                  <span>{t('git.loading')}</span>
-                </div>
-              }
-            >
-              <GitPanel
-                cwd={git.cwd}
-                sessionId={git.sessionId}
-                refreshTrigger={git.refreshTrigger}
-                onBranchChanged={git.onBranchChanged}
-                onOpenFileDiff={git.onOpenFileDiff}
-                onOpenWorkingDiff={git.onOpenWorkingDiff}
-              />
-            </Suspense>
+            {mountGit && (
+              <Suspense
+                fallback={
+                  <div class="git-empty-state">
+                    <div class="git-spinner" />
+                    <span>{t('git.loading')}</span>
+                  </div>
+                }
+              >
+                <GitPanel
+                  cwd={git.cwd}
+                  sessionId={git.sessionId}
+                  refreshTrigger={git.refreshTrigger}
+                  onBranchChanged={git.onBranchChanged}
+                  onOpenFileDiff={git.onOpenFileDiff}
+                  onOpenWorkingDiff={git.onOpenWorkingDiff}
+                />
+              </Suspense>
+            )}
           </div>
 
-          {/* The terminal keeps its layout box and only toggles visibility: xterm v6
+          {/* The terminal keeps its layout box once mounted and only toggles visibility: xterm v6
               pauses rendering while its container has no layout box and stays blank
               after being shown again. */}
           <div
@@ -392,11 +408,22 @@ export function RightInspector({
             })}
             class={'terminal-panel-slot' + (tab === 'terminal' ? '' : ' is-hidden')}
           >
-            <TerminalPanel
-              cwd={workingDir}
-              active={tab === 'terminal' && !collapsed}
-              onTabsCountChange={onTerminalCountChange}
-            />
+            {mountTerminal && (
+              <Suspense
+                fallback={
+                  <div class="git-empty-state">
+                    <div class="git-spinner" />
+                    <span>{t('settings.loading')}</span>
+                  </div>
+                }
+              >
+                <TerminalPanel
+                  cwd={workingDir}
+                  active={tab === 'terminal' && !collapsed}
+                  onTabsCountChange={onTerminalCountChange}
+                />
+              </Suspense>
+            )}
           </div>
 
           <div
@@ -409,11 +436,22 @@ export function RightInspector({
               width: '100%',
             })}
           >
-            <PreviewPanel
-              cwd={workingDir}
-              onTabsCountChange={onPreviewCountChange}
-              surfaceActive={tab === 'preview' && !collapsed}
-            />
+            {mountPreview && (
+              <Suspense
+                fallback={
+                  <div class="git-empty-state">
+                    <div class="git-spinner" />
+                    <span>{t('settings.loading')}</span>
+                  </div>
+                }
+              >
+                <PreviewPanel
+                  cwd={workingDir}
+                  onTabsCountChange={onPreviewCountChange}
+                  surfaceActive={tab === 'preview' && !collapsed}
+                />
+              </Suspense>
+            )}
           </div>
         </div>
       </aside>

@@ -145,105 +145,123 @@ pub struct GitActionResp {
     pub message: String,
 }
 
+/// 将同步 Git 子进程与文件系统探测统一切入 Tokio blocking 线程池，避免饿死 async worker。
+async fn run_blocking_git<F>(op: F) -> axum::response::Response
+where
+    F: FnOnce() -> axum::response::Response + Send + 'static,
+{
+    tokio::task::spawn_blocking(op).await.unwrap_or_else(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Git worker task failed: {e}"),
+        )
+        .into_response()
+    })
+}
+
 /// POST /git/action
 pub async fn git_action(
     State(_state): State<AppState>,
     Json(req): Json<GitActionReq>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(req.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
-
-    let target = req.target.trim();
-    if target.is_empty() || target.starts_with('-') || target.contains(' ') {
-        return json_error(StatusCode::BAD_REQUEST, "Invalid target").into_response();
-    }
-
-    let output = match req.action.as_str() {
-        "checkout" => git_cmd(&dir).args(["checkout", target]).output(),
-        "create_branch" => {
-            let name = req.name.as_deref().unwrap_or("").trim();
-            if name.is_empty() || name.starts_with('-') || name.contains(' ') {
-                return json_error(StatusCode::BAD_REQUEST, "Invalid branch name").into_response();
-            }
-            git_cmd(&dir).args(["branch", name, target]).output()
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(req.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
+            .into_response();
         }
-        "create_tag" => {
-            let name = req.name.as_deref().unwrap_or("").trim();
-            if name.is_empty() || name.starts_with('-') || name.contains(' ') {
-                return json_error(StatusCode::BAD_REQUEST, "Invalid tag name").into_response();
-            }
-            git_cmd(&dir).args(["tag", name, target]).output()
+
+        let target = req.target.trim();
+        if target.is_empty() || target.starts_with('-') || target.contains(' ') {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid target").into_response();
         }
-        "cherry_pick" => git_cmd(&dir).args(["cherry-pick", target]).output(),
-        "revert" => git_cmd(&dir).args(["revert", "--no-edit", target]).output(),
-        "delete_branch" => {
-            let head_out = git_cmd(&dir)
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .output();
-            if let Ok(ref ho) = head_out {
-                if String::from_utf8_lossy(&ho.stdout).trim() == target {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        "Cannot delete the currently active branch",
-                    )
-                    .into_response();
+
+        let output = match req.action.as_str() {
+            "checkout" => git_cmd(&dir).args(["checkout", target]).output(),
+            "create_branch" => {
+                let name = req.name.as_deref().unwrap_or("").trim();
+                if name.is_empty() || name.starts_with('-') || name.contains(' ') {
+                    return json_error(StatusCode::BAD_REQUEST, "Invalid branch name")
+                        .into_response();
+                }
+                git_cmd(&dir).args(["branch", name, target]).output()
+            }
+            "create_tag" => {
+                let name = req.name.as_deref().unwrap_or("").trim();
+                if name.is_empty() || name.starts_with('-') || name.contains(' ') {
+                    return json_error(StatusCode::BAD_REQUEST, "Invalid tag name").into_response();
+                }
+                git_cmd(&dir).args(["tag", name, target]).output()
+            }
+            "cherry_pick" => git_cmd(&dir).args(["cherry-pick", target]).output(),
+            "revert" => git_cmd(&dir).args(["revert", "--no-edit", target]).output(),
+            "delete_branch" => {
+                let head_out = git_cmd(&dir)
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .output();
+                if let Ok(ref ho) = head_out {
+                    if String::from_utf8_lossy(&ho.stdout).trim() == target {
+                        return json_error(
+                            StatusCode::BAD_REQUEST,
+                            "Cannot delete the currently active branch",
+                        )
+                        .into_response();
+                    }
+                }
+                git_cmd(&dir).args(["branch", "-D", target]).output()
+            }
+            "delete_remote_branch" => {
+                let branch_name = target.strip_prefix("origin/").unwrap_or(target);
+                git_cmd(&dir)
+                    .args(["push", "origin", "--delete", branch_name])
+                    .output()
+            }
+            "rename_branch" => {
+                let name = req.name.as_deref().unwrap_or("").trim();
+                if name.is_empty() || name.starts_with('-') || name.contains(' ') {
+                    return json_error(StatusCode::BAD_REQUEST, "Invalid new branch name")
+                        .into_response();
+                }
+                git_cmd(&dir).args(["branch", "-m", target, name]).output()
+            }
+            "merge_branch" => git_cmd(&dir).args(["merge", target]).output(),
+            "push_branch" => git_cmd(&dir)
+                .args(["push", "-u", "origin", target])
+                .output(),
+            _ => return json_error(StatusCode::BAD_REQUEST, "Unknown action").into_response(),
+        };
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let combined = if stdout.is_empty() { stderr } else { stdout };
+                if out.status.success() {
+                    invalidate_git_cache(&dir);
+                    crate::publish_global(crate::GlobalWireEvent::GitUpdated {
+                        cwd: dir.to_string_lossy().to_string(),
+                        fetch: false,
+                    });
+                    Json(GitActionResp {
+                        success: true,
+                        message: combined.trim().to_string(),
+                    })
+                    .into_response()
+                } else {
+                    json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
                 }
             }
-            git_cmd(&dir).args(["branch", "-D", target]).output()
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to execute action: {e}"),
+            )
+            .into_response(),
         }
-        "delete_remote_branch" => {
-            let branch_name = target.strip_prefix("origin/").unwrap_or(target);
-            git_cmd(&dir)
-                .args(["push", "origin", "--delete", branch_name])
-                .output()
-        }
-        "rename_branch" => {
-            let name = req.name.as_deref().unwrap_or("").trim();
-            if name.is_empty() || name.starts_with('-') || name.contains(' ') {
-                return json_error(StatusCode::BAD_REQUEST, "Invalid new branch name")
-                    .into_response();
-            }
-            git_cmd(&dir).args(["branch", "-m", target, name]).output()
-        }
-        "merge_branch" => git_cmd(&dir).args(["merge", target]).output(),
-        "push_branch" => git_cmd(&dir)
-            .args(["push", "-u", "origin", target])
-            .output(),
-        _ => return json_error(StatusCode::BAD_REQUEST, "Unknown action").into_response(),
-    };
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let combined = if stdout.is_empty() { stderr } else { stdout };
-            if out.status.success() {
-                invalidate_git_cache(&dir);
-                crate::publish_global(crate::GlobalWireEvent::GitUpdated {
-                    cwd: dir.to_string_lossy().to_string(),
-                    fetch: false,
-                });
-                Json(GitActionResp {
-                    success: true,
-                    message: combined.trim().to_string(),
-                })
-                .into_response()
-            } else {
-                json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
-            }
-        }
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to execute action: {e}"),
-        )
-        .into_response(),
-    }
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,130 +456,137 @@ pub async fn get_git_repos(
     State(_state): State<AppState>,
     Query(q): Query<GitQuery>,
 ) -> impl IntoResponse {
-    let base_dir = resolve_target_dir(q.cwd.as_deref());
+    run_blocking_git(move || {
+        let base_dir = resolve_target_dir(q.cwd.as_deref());
 
-    // 内存缓存加速：5分钟内不重复全盘扫描磁盘
-    if let Ok(cache) = get_repos_cache().lock() {
-        if let Some(entry) = cache.get(&base_dir) {
-            if entry.timestamp.elapsed() < Duration::from_secs(300) {
-                return Json(GitReposResponse {
-                    repos: entry.repos.clone(),
-                })
-                .into_response();
+        // 内存缓存加速：5分钟内不重复全盘扫描磁盘
+        if let Ok(cache) = get_repos_cache().lock() {
+            if let Some(entry) = cache.get(&base_dir) {
+                if entry.timestamp.elapsed() < Duration::from_secs(300) {
+                    return Json(GitReposResponse {
+                        repos: entry.repos.clone(),
+                    })
+                    .into_response();
+                }
             }
         }
-    }
 
-    let mut repos = Vec::new();
-    let mut visited_roots = std::collections::HashSet::new();
+        let mut repos = Vec::new();
+        let mut visited_roots = std::collections::HashSet::new();
 
-    // 1. Check if base_dir is inside a git repo
-    let root_out = git_cmd(&base_dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output();
+        // 1. Check if base_dir is inside a git repo
+        let root_out = git_cmd(&base_dir)
+            .args(["rev-parse", "--show-toplevel"])
+            .output();
 
-    let root_repo_path = if let Ok(ref out) = root_out {
-        if out.status.success() {
-            let p_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let p = PathBuf::from(p_str);
-            let canon = p.canonicalize().unwrap_or(p);
-            let canon = jeikcode_capabilities::pathnorm::strip_verbatim_path(&canon);
-            Some(canon)
+        let root_repo_path = if let Ok(ref out) = root_out {
+            if out.status.success() {
+                let p_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let p = PathBuf::from(p_str);
+                let canon = p.canonicalize().unwrap_or(p);
+                let canon = jeikcode_capabilities::pathnorm::strip_verbatim_path(&canon);
+                Some(canon)
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    if let Some(ref root_p) = root_repo_path {
-        visited_roots.insert(root_p.clone());
-        let current_branch = git_cmd(root_p)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
+        if let Some(ref root_p) = root_repo_path {
+            visited_roots.insert(root_p.clone());
+            let current_branch = git_cmd(root_p)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                });
+
+            let name = root_p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "root".to_string());
+
+            repos.push(GitRepoInfo {
+                root: root_p.to_string_lossy().to_string(),
+                name,
+                relative_path: ".".to_string(),
+                current_branch,
+                is_root: true,
             });
 
-        let name = root_p
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "root".to_string());
+            // 2. Check .gitmodules in root repo
+            let gitmodules_file = root_p.join(".gitmodules");
+            if gitmodules_file.exists() {
+                if let Ok(content) = std::fs::read_to_string(&gitmodules_file) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if let Some(sub_path_str) = trimmed.strip_prefix("path = ") {
+                            let sub_path_clean = sub_path_str.trim();
+                            let sub_full = root_p.join(sub_path_clean);
+                            let sub_canon = sub_full.canonicalize().unwrap_or(sub_full);
+                            let sub_canon =
+                                jeikcode_capabilities::pathnorm::strip_verbatim_path(&sub_canon);
+                            if visited_roots.insert(sub_canon.clone()) {
+                                let current_branch = git_cmd(&sub_canon)
+                                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                                    .output()
+                                    .ok()
+                                    .and_then(|o| {
+                                        if o.status.success() {
+                                            Some(
+                                                String::from_utf8_lossy(&o.stdout)
+                                                    .trim()
+                                                    .to_string(),
+                                            )
+                                        } else {
+                                            None
+                                        }
+                                    });
 
-        repos.push(GitRepoInfo {
-            root: root_p.to_string_lossy().to_string(),
-            name,
-            relative_path: ".".to_string(),
-            current_branch,
-            is_root: true,
-        });
+                                let name = sub_canon
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| sub_path_clean.to_string());
 
-        // 2. Check .gitmodules in root repo
-        let gitmodules_file = root_p.join(".gitmodules");
-        if gitmodules_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(&gitmodules_file) {
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if let Some(sub_path_str) = trimmed.strip_prefix("path = ") {
-                        let sub_path_clean = sub_path_str.trim();
-                        let sub_full = root_p.join(sub_path_clean);
-                        let sub_canon = sub_full.canonicalize().unwrap_or(sub_full);
-                        let sub_canon =
-                            jeikcode_capabilities::pathnorm::strip_verbatim_path(&sub_canon);
-                        if visited_roots.insert(sub_canon.clone()) {
-                            let current_branch = git_cmd(&sub_canon)
-                                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                                .output()
-                                .ok()
-                                .and_then(|o| {
-                                    if o.status.success() {
-                                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                                    } else {
-                                        None
-                                    }
+                                repos.push(GitRepoInfo {
+                                    root: sub_canon.to_string_lossy().to_string(),
+                                    name,
+                                    relative_path: sub_path_clean.to_string(),
+                                    current_branch,
+                                    is_root: false,
                                 });
-
-                            let name = sub_canon
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| sub_path_clean.to_string());
-
-                            repos.push(GitRepoInfo {
-                                root: sub_canon.to_string_lossy().to_string(),
-                                name,
-                                relative_path: sub_path_clean.to_string(),
-                                current_branch,
-                                is_root: false,
-                            });
+                            }
                         }
                     }
                 }
             }
+
+            // 3. Scan subdirectories up to depth 3 for nested git repos
+            scan_for_git_repos(root_p, root_p, 1, 3, &mut repos, &mut visited_roots);
+        } else {
+            // Base directory is not a git repo itself, but may contain nested git repos (e.g. monorepo / multi-root workspace)
+            scan_for_git_repos(&base_dir, &base_dir, 1, 3, &mut repos, &mut visited_roots);
         }
 
-        // 3. Scan subdirectories up to depth 3 for nested git repos
-        scan_for_git_repos(root_p, root_p, 1, 3, &mut repos, &mut visited_roots);
-    } else {
-        // Base directory is not a git repo itself, but may contain nested git repos (e.g. monorepo / multi-root workspace)
-        scan_for_git_repos(&base_dir, &base_dir, 1, 3, &mut repos, &mut visited_roots);
-    }
+        if let Ok(mut cache) = get_repos_cache().lock() {
+            cache.insert(
+                base_dir.clone(),
+                ReposCacheEntry {
+                    repos: repos.clone(),
+                    timestamp: Instant::now(),
+                },
+            );
+        }
 
-    if let Ok(mut cache) = get_repos_cache().lock() {
-        cache.insert(
-            base_dir.clone(),
-            ReposCacheEntry {
-                repos: repos.clone(),
-                timestamp: Instant::now(),
-            },
-        );
-    }
-
-    Json(GitReposResponse { repos }).into_response()
+        Json(GitReposResponse { repos }).into_response()
+    })
+    .await
 }
 
 /// Check if the target directory is inside a Git working tree.
@@ -580,120 +605,43 @@ pub async fn get_git_branches(
     State(_state): State<AppState>,
     Query(q): Query<GitQuery>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(q.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return Json(GitBranchesResponse {
-            is_repo: false,
-            repo_root: None,
-            remote_url: None,
-            current: None,
-            local: Vec::new(),
-            remote: Vec::new(),
-        })
-        .into_response();
-    }
-
-    // Get repo root
-    let repo_root = git_cmd(&dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
-
-    // Get remote origin url
-    let remote_url = git_cmd(&dir)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if !url.is_empty() {
-                    Some(url)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        });
-
-    // List branches
-    let branch_output = git_cmd(&dir)
-        .args([
-            "branch",
-            "-a",
-            "--format=%(HEAD)|%(refname)|%(refname:short)",
-        ])
-        .output();
-
-    let mut current_branch = None;
-    let mut local_branches = Vec::new();
-    let mut remote_branches = Vec::new();
-
-    if let Ok(out) = branch_output {
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let parts: Vec<&str> = trimmed.split('|').collect();
-                if parts.len() < 3 {
-                    continue;
-                }
-                let is_head = parts[0].trim() == "*";
-                let full_ref = parts[1].trim();
-                let short_ref = parts[2].trim();
-
-                // Skip symbolic HEADs like origin/HEAD
-                if full_ref.ends_with("/HEAD") || short_ref.ends_with("/HEAD") {
-                    continue;
-                }
-
-                if full_ref.starts_with("refs/heads/") {
-                    let name = short_ref.to_string();
-                    if is_head {
-                        current_branch = Some(name.clone());
-                    }
-                    if !local_branches.contains(&name) {
-                        local_branches.push(name);
-                    }
-                } else if full_ref.starts_with("refs/remotes/") {
-                    let name = short_ref.to_string();
-                    if !remote_branches.contains(&name) {
-                        remote_branches.push(name);
-                    }
-                }
-            }
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(q.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return Json(GitBranchesResponse {
+                is_repo: false,
+                repo_root: None,
+                remote_url: None,
+                current: None,
+                local: Vec::new(),
+                remote: Vec::new(),
+            })
+            .into_response();
         }
-    }
 
-    if current_branch.is_none() {
-        current_branch = git_cmd(&dir)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        // Get repo root
+        let repo_root = git_cmd(&dir)
+            .args(["rev-parse", "--show-toplevel"])
             .output()
             .ok()
             .and_then(|o| {
                 if o.status.success() {
-                    let name = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    if !name.is_empty() {
-                        if name == "HEAD" {
-                            git_cmd(&dir)
-                                .args(["rev-parse", "--short", "HEAD"])
-                                .output()
-                                .ok()
-                                .map(|ho| String::from_utf8_lossy(&ho.stdout).trim().to_string())
-                        } else {
-                            Some(name)
-                        }
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+
+        // Get remote origin url
+        let remote_url = git_cmd(&dir)
+            .args(["config", "--get", "remote.origin.url"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if !url.is_empty() {
+                        Some(url)
                     } else {
                         None
                     }
@@ -701,32 +649,114 @@ pub async fn get_git_branches(
                     None
                 }
             });
-    }
 
-    // If detached HEAD, get short sha
-    if current_branch.is_none() {
-        if let Ok(out) = git_cmd(&dir)
-            .args(["rev-parse", "--short", "HEAD"])
-            .output()
-        {
+        // List branches
+        let branch_output = git_cmd(&dir)
+            .args([
+                "branch",
+                "-a",
+                "--format=%(HEAD)|%(refname)|%(refname:short)",
+            ])
+            .output();
+
+        let mut current_branch = None;
+        let mut local_branches = Vec::new();
+        let mut remote_branches = Vec::new();
+
+        if let Ok(out) = branch_output {
             if out.status.success() {
-                let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !sha.is_empty() {
-                    current_branch = Some(format!("(HEAD detached at {sha})"));
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let parts: Vec<&str> = trimmed.split('|').collect();
+                    if parts.len() < 3 {
+                        continue;
+                    }
+                    let is_head = parts[0].trim() == "*";
+                    let full_ref = parts[1].trim();
+                    let short_ref = parts[2].trim();
+
+                    // Skip symbolic HEADs like origin/HEAD
+                    if full_ref.ends_with("/HEAD") || short_ref.ends_with("/HEAD") {
+                        continue;
+                    }
+
+                    if full_ref.starts_with("refs/heads/") {
+                        let name = short_ref.to_string();
+                        if is_head {
+                            current_branch = Some(name.clone());
+                        }
+                        if !local_branches.contains(&name) {
+                            local_branches.push(name);
+                        }
+                    } else if full_ref.starts_with("refs/remotes/") {
+                        let name = short_ref.to_string();
+                        if !remote_branches.contains(&name) {
+                            remote_branches.push(name);
+                        }
+                    }
                 }
             }
         }
-    }
 
-    Json(GitBranchesResponse {
-        is_repo: true,
-        repo_root,
-        remote_url,
-        current: current_branch,
-        local: local_branches,
-        remote: remote_branches,
+        if current_branch.is_none() {
+            current_branch = git_cmd(&dir)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        let name = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if !name.is_empty() {
+                            if name == "HEAD" {
+                                git_cmd(&dir)
+                                    .args(["rev-parse", "--short", "HEAD"])
+                                    .output()
+                                    .ok()
+                                    .map(|ho| {
+                                        String::from_utf8_lossy(&ho.stdout).trim().to_string()
+                                    })
+                            } else {
+                                Some(name)
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+        }
+
+        // If detached HEAD, get short sha
+        if current_branch.is_none() {
+            if let Ok(out) = git_cmd(&dir)
+                .args(["rev-parse", "--short", "HEAD"])
+                .output()
+            {
+                if out.status.success() {
+                    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !sha.is_empty() {
+                        current_branch = Some(format!("(HEAD detached at {sha})"));
+                    }
+                }
+            }
+        }
+
+        Json(GitBranchesResponse {
+            is_repo: true,
+            repo_root,
+            remote_url,
+            current: current_branch,
+            local: local_branches,
+            remote: remote_branches,
+        })
+        .into_response()
     })
-    .into_response()
+    .await
 }
 
 /// Helper to parse git shortstat output: " 5 files changed, 201 insertions(+), 163 deletions(-)"
@@ -767,6 +797,7 @@ pub async fn get_git_graph(
     State(_state): State<AppState>,
     Query(q): Query<GitQuery>,
 ) -> impl IntoResponse {
+    run_blocking_git(move || {
     let dir = resolve_target_dir(q.cwd.as_deref());
     if !is_git_repo(&dir) {
         return Json(GitGraphResponse {
@@ -972,6 +1003,8 @@ pub async fn get_git_graph(
     }
 
     Json(response).into_response()
+    })
+    .await
 }
 
 /// POST /git/checkout
@@ -979,66 +1012,70 @@ pub async fn git_checkout(
     State(_state): State<AppState>,
     Json(req): Json<GitCheckoutReq>,
 ) -> impl IntoResponse {
-    let branch = req.branch.trim();
-    if branch.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "Branch name cannot be empty").into_response();
-    }
-
-    // Safety checks against branch names with shell injections or flags
-    if branch.starts_with('-')
-        || branch.contains(' ')
-        || branch.contains(';')
-        || branch.contains('&')
-        || branch.contains('|')
-    {
-        return json_error(StatusCode::BAD_REQUEST, "Invalid branch name").into_response();
-    }
-
-    let dir = resolve_target_dir(req.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
-
-    // If branch is remote like origin/feature-a, strip remote prefix if checking out new local branch or let git track
-    let mut target_branch = branch.to_string();
-    if let Some(stripped) = branch.strip_prefix("origin/") {
-        target_branch = stripped.to_string();
-    }
-
-    let output = git_cmd(&dir).args(["checkout", &target_branch]).output();
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let combined = if stdout.is_empty() { stderr } else { stdout };
-
-            if out.status.success() {
-                invalidate_git_cache(&dir);
-                crate::publish_global(crate::GlobalWireEvent::GitUpdated {
-                    cwd: dir.to_string_lossy().to_string(),
-                    fetch: false,
-                });
-                Json(GitCheckoutResp {
-                    success: true,
-                    branch: target_branch,
-                    message: combined.trim().to_string(),
-                })
-                .into_response()
-            } else {
-                json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
-            }
+    run_blocking_git(move || {
+        let branch = req.branch.trim();
+        if branch.is_empty() {
+            return json_error(StatusCode::BAD_REQUEST, "Branch name cannot be empty")
+                .into_response();
         }
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to execute git checkout: {e}"),
-        )
-        .into_response(),
-    }
+
+        // Safety checks against branch names with shell injections or flags
+        if branch.starts_with('-')
+            || branch.contains(' ')
+            || branch.contains(';')
+            || branch.contains('&')
+            || branch.contains('|')
+        {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid branch name").into_response();
+        }
+
+        let dir = resolve_target_dir(req.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
+            .into_response();
+        }
+
+        // If branch is remote like origin/feature-a, strip remote prefix if checking out new local branch or let git track
+        let mut target_branch = branch.to_string();
+        if let Some(stripped) = branch.strip_prefix("origin/") {
+            target_branch = stripped.to_string();
+        }
+
+        let output = git_cmd(&dir).args(["checkout", &target_branch]).output();
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let combined = if stdout.is_empty() { stderr } else { stdout };
+
+                if out.status.success() {
+                    invalidate_git_cache(&dir);
+                    crate::publish_global(crate::GlobalWireEvent::GitUpdated {
+                        cwd: dir.to_string_lossy().to_string(),
+                        fetch: false,
+                    });
+                    Json(GitCheckoutResp {
+                        success: true,
+                        branch: target_branch,
+                        message: combined.trim().to_string(),
+                    })
+                    .into_response()
+                } else {
+                    json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
+                }
+            }
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to execute git checkout: {e}"),
+            )
+            .into_response(),
+        }
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1086,84 +1123,87 @@ pub async fn get_git_commit_detail(
     State(_state): State<AppState>,
     Query(q): Query<GitCommitDetailQuery>,
 ) -> impl IntoResponse {
-    let hash = q.hash.trim();
-    if hash.is_empty() || hash.starts_with('-') || hash.contains(' ') {
-        return json_error(StatusCode::BAD_REQUEST, "Invalid commit hash").into_response();
-    }
+    run_blocking_git(move || {
+        let hash = q.hash.trim();
+        if hash.is_empty() || hash.starts_with('-') || hash.contains(' ') {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid commit hash").into_response();
+        }
 
-    let dir = resolve_target_dir(q.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
+        let dir = resolve_target_dir(q.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
+            .into_response();
+        }
 
-    // 1. Get name-status
-    let status_out = git_cmd(&dir)
-        .args(["diff-tree", "--no-commit-id", "--name-status", "-r", hash])
-        .output();
+        // 1. Get name-status
+        let status_out = git_cmd(&dir)
+            .args(["diff-tree", "--no-commit-id", "--name-status", "-r", hash])
+            .output();
 
-    // 2. Get numstat
-    let numstat_out = git_cmd(&dir)
-        .args(["show", "--numstat", "--format=", hash])
-        .output();
+        // 2. Get numstat
+        let numstat_out = git_cmd(&dir)
+            .args(["show", "--numstat", "--format=", hash])
+            .output();
 
-    let mut numstat_map: std::collections::HashMap<String, (usize, usize)> =
-        std::collections::HashMap::new();
-    if let Ok(ref out) = numstat_out {
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 3 {
-                    let adds = parts[0].parse::<usize>().unwrap_or(0);
-                    let dels = parts[1].parse::<usize>().unwrap_or(0);
-                    let file_path = unquote_git_path(parts[2].trim());
-                    numstat_map.insert(file_path, (adds, dels));
+        let mut numstat_map: std::collections::HashMap<String, (usize, usize)> =
+            std::collections::HashMap::new();
+        if let Ok(ref out) = numstat_out {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    if parts.len() >= 3 {
+                        let adds = parts[0].parse::<usize>().unwrap_or(0);
+                        let dels = parts[1].parse::<usize>().unwrap_or(0);
+                        let file_path = unquote_git_path(parts[2].trim());
+                        numstat_map.insert(file_path, (adds, dels));
+                    }
                 }
             }
         }
-    }
 
-    let mut files = Vec::new();
-    if let Ok(out) = status_out {
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let parts: Vec<&str> = trimmed.split('\t').collect();
-                if parts.len() >= 2 {
-                    let status_char = parts[0].chars().next().unwrap_or('M').to_string();
-                    let file_path = unquote_git_path(parts[1].trim());
-                    let (adds, dels) = numstat_map.get(&file_path).copied().unwrap_or((0, 0));
-                    files.push(GitCommitFile {
-                        path: file_path,
-                        status: status_char,
-                        additions: adds,
-                        deletions: dels,
-                    });
+        let mut files = Vec::new();
+        if let Ok(out) = status_out {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let parts: Vec<&str> = trimmed.split('\t').collect();
+                    if parts.len() >= 2 {
+                        let status_char = parts[0].chars().next().unwrap_or('M').to_string();
+                        let file_path = unquote_git_path(parts[1].trim());
+                        let (adds, dels) = numstat_map.get(&file_path).copied().unwrap_or((0, 0));
+                        files.push(GitCommitFile {
+                            path: file_path,
+                            status: status_char,
+                            additions: adds,
+                            deletions: dels,
+                        });
+                    }
                 }
             }
         }
-    }
 
-    let total_files = files.len();
-    let total_additions = files.iter().map(|f| f.additions).sum();
-    let total_deletions = files.iter().map(|f| f.deletions).sum();
+        let total_files = files.len();
+        let total_additions = files.iter().map(|f| f.additions).sum();
+        let total_deletions = files.iter().map(|f| f.deletions).sum();
 
-    Json(GitCommitDetailResp {
-        hash: hash.to_string(),
-        files,
-        total_files: Some(total_files),
-        total_additions: Some(total_additions),
-        total_deletions: Some(total_deletions),
+        Json(GitCommitDetailResp {
+            hash: hash.to_string(),
+            files,
+            total_files: Some(total_files),
+            total_additions: Some(total_additions),
+            total_deletions: Some(total_deletions),
+        })
+        .into_response()
     })
-    .into_response()
+    .await
 }
 
 /// GET /git/file-diff
@@ -1171,45 +1211,48 @@ pub async fn get_git_file_diff(
     State(_state): State<AppState>,
     Query(q): Query<GitFileDiffQuery>,
 ) -> impl IntoResponse {
-    let hash = q.hash.trim();
-    let file_path = q.path.trim();
+    run_blocking_git(move || {
+        let hash = q.hash.trim();
+        let file_path = q.path.trim();
 
-    if hash.is_empty() || hash.starts_with('-') || hash.contains(' ') {
-        return json_error(StatusCode::BAD_REQUEST, "Invalid commit hash").into_response();
-    }
-    if file_path.is_empty() || file_path.starts_with('-') {
-        return json_error(StatusCode::BAD_REQUEST, "Invalid file path").into_response();
-    }
-
-    let dir = resolve_target_dir(q.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
-
-    let output = git_cmd(&dir)
-        .args(["show", "--format=", hash, "--", file_path])
-        .output();
-
-    match output {
-        Ok(out) => {
-            let diff = String::from_utf8_lossy(&out.stdout).to_string();
-            Json(GitFileDiffResp {
-                hash: hash.to_string(),
-                path: file_path.to_string(),
-                diff,
-            })
-            .into_response()
+        if hash.is_empty() || hash.starts_with('-') || hash.contains(' ') {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid commit hash").into_response();
         }
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to get diff: {e}"),
-        )
-        .into_response(),
-    }
+        if file_path.is_empty() || file_path.starts_with('-') {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid file path").into_response();
+        }
+
+        let dir = resolve_target_dir(q.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
+            .into_response();
+        }
+
+        let output = git_cmd(&dir)
+            .args(["show", "--format=", hash, "--", file_path])
+            .output();
+
+        match output {
+            Ok(out) => {
+                let diff = String::from_utf8_lossy(&out.stdout).to_string();
+                Json(GitFileDiffResp {
+                    hash: hash.to_string(),
+                    path: file_path.to_string(),
+                    diff,
+                })
+                .into_response()
+            }
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get diff: {e}"),
+            )
+            .into_response(),
+        }
+    })
+    .await
 }
 
 // ============================================================================
@@ -1310,116 +1353,120 @@ pub async fn get_git_status(
     State(_state): State<AppState>,
     Query(q): Query<GitQuery>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(q.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return Json(GitStatusResponse {
-            is_repo: false,
-            current_branch: None,
-            tracking_branch: None,
-            ahead: 0,
-            behind: 0,
-            staged: Vec::new(),
-            unstaged: Vec::new(),
-            untracked: Vec::new(),
-        })
-        .into_response();
-    }
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(q.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return Json(GitStatusResponse {
+                is_repo: false,
+                current_branch: None,
+                tracking_branch: None,
+                ahead: 0,
+                behind: 0,
+                staged: Vec::new(),
+                unstaged: Vec::new(),
+                untracked: Vec::new(),
+            })
+            .into_response();
+        }
 
-    let output = git_cmd(&dir)
-        .args(["status", "--porcelain=v1", "-u", "--branch"])
-        .output();
+        let output = git_cmd(&dir)
+            .args(["status", "--porcelain=v1", "-u", "--branch"])
+            .output();
 
-    let mut current_branch = None;
-    let mut tracking_branch = None;
-    let mut ahead = 0;
-    let mut behind = 0;
-    let mut staged = Vec::new();
-    let mut unstaged = Vec::new();
-    let mut untracked = Vec::new();
+        let mut current_branch = None;
+        let mut tracking_branch = None;
+        let mut ahead = 0;
+        let mut behind = 0;
+        let mut staged = Vec::new();
+        let mut unstaged = Vec::new();
+        let mut untracked = Vec::new();
 
-    if let Ok(out) = output {
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                let trimmed = line.trim_end_matches('\r');
-                if trimmed.starts_with("##") {
-                    // Branch info line: ## main...origin/main [ahead 1, behind 2]
-                    let header = trimmed.trim_start_matches('#').trim();
-                    let (branch_part, track_info) = if let Some(bracket_idx) = header.find('[') {
-                        (header[..bracket_idx].trim(), Some(&header[bracket_idx..]))
-                    } else {
-                        (header, None)
-                    };
+        if let Ok(out) = output {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim_end_matches('\r');
+                    if trimmed.starts_with("##") {
+                        // Branch info line: ## main...origin/main [ahead 1, behind 2]
+                        let header = trimmed.trim_start_matches('#').trim();
+                        let (branch_part, track_info) = if let Some(bracket_idx) = header.find('[')
+                        {
+                            (header[..bracket_idx].trim(), Some(&header[bracket_idx..]))
+                        } else {
+                            (header, None)
+                        };
 
-                    if let Some(dots_idx) = branch_part.find("...") {
-                        current_branch = Some(branch_part[..dots_idx].trim().to_string());
-                        tracking_branch = Some(branch_part[dots_idx + 3..].trim().to_string());
-                    } else {
-                        current_branch = Some(branch_part.to_string());
-                    }
-
-                    if let Some(info) = track_info {
-                        if let Some(idx) = info.find("ahead ") {
-                            let rest = &info[idx + 6..];
-                            let num: String =
-                                rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                            ahead = num.parse().unwrap_or(0);
+                        if let Some(dots_idx) = branch_part.find("...") {
+                            current_branch = Some(branch_part[..dots_idx].trim().to_string());
+                            tracking_branch = Some(branch_part[dots_idx + 3..].trim().to_string());
+                        } else {
+                            current_branch = Some(branch_part.to_string());
                         }
-                        if let Some(idx) = info.find("behind ") {
-                            let rest = &info[idx + 7..];
-                            let num: String =
-                                rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                            behind = num.parse().unwrap_or(0);
+
+                        if let Some(info) = track_info {
+                            if let Some(idx) = info.find("ahead ") {
+                                let rest = &info[idx + 6..];
+                                let num: String =
+                                    rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                                ahead = num.parse().unwrap_or(0);
+                            }
+                            if let Some(idx) = info.find("behind ") {
+                                let rest = &info[idx + 7..];
+                                let num: String =
+                                    rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                                behind = num.parse().unwrap_or(0);
+                            }
                         }
+                        continue;
                     }
-                    continue;
-                }
 
-                if trimmed.len() < 4 {
-                    continue;
-                }
-
-                let x = trimmed.as_bytes()[0] as char;
-                let y = trimmed.as_bytes()[1] as char;
-                let file_path = unquote_git_path(trimmed[3..].trim());
-
-                if x == '?' && y == '?' {
-                    untracked.push(GitStatusItem {
-                        path: file_path,
-                        status: "?".to_string(),
-                        staged: false,
-                    });
-                } else {
-                    if x != ' ' {
-                        staged.push(GitStatusItem {
-                            path: file_path.clone(),
-                            status: x.to_string(),
-                            staged: true,
-                        });
+                    if trimmed.len() < 4 {
+                        continue;
                     }
-                    if y != ' ' {
-                        unstaged.push(GitStatusItem {
+
+                    let x = trimmed.as_bytes()[0] as char;
+                    let y = trimmed.as_bytes()[1] as char;
+                    let file_path = unquote_git_path(trimmed[3..].trim());
+
+                    if x == '?' && y == '?' {
+                        untracked.push(GitStatusItem {
                             path: file_path,
-                            status: y.to_string(),
+                            status: "?".to_string(),
                             staged: false,
                         });
+                    } else {
+                        if x != ' ' {
+                            staged.push(GitStatusItem {
+                                path: file_path.clone(),
+                                status: x.to_string(),
+                                staged: true,
+                            });
+                        }
+                        if y != ' ' {
+                            unstaged.push(GitStatusItem {
+                                path: file_path,
+                                status: y.to_string(),
+                                staged: false,
+                            });
+                        }
                     }
                 }
             }
         }
-    }
 
-    Json(GitStatusResponse {
-        is_repo: true,
-        current_branch,
-        tracking_branch,
-        ahead,
-        behind,
-        staged,
-        unstaged,
-        untracked,
+        Json(GitStatusResponse {
+            is_repo: true,
+            current_branch,
+            tracking_branch,
+            ahead,
+            behind,
+            staged,
+            unstaged,
+            untracked,
+        })
+        .into_response()
     })
-    .into_response()
+    .await
 }
 
 /// POST /git/stage
@@ -1427,44 +1474,47 @@ pub async fn git_stage(
     State(_state): State<AppState>,
     Json(req): Json<GitStageReq>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(req.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
-
-    let output = if req.all {
-        git_cmd(&dir).args(["add", "-A"]).output()
-    } else if let Some(ref path) = req.path {
-        git_cmd(&dir).args(["add", "--", path]).output()
-    } else {
-        return json_error(StatusCode::BAD_REQUEST, "Must specify path or all=true")
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(req.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
             .into_response();
-    };
-
-    match output {
-        Ok(out) if out.status.success() => {
-            invalidate_git_cache(&dir);
-            crate::publish_global(crate::GlobalWireEvent::GitUpdated {
-                cwd: dir.to_string_lossy().to_string(),
-                fetch: false,
-            });
-            Json(serde_json::json!({ "success": true })).into_response()
         }
-        Ok(out) => json_error(
-            StatusCode::BAD_REQUEST,
-            String::from_utf8_lossy(&out.stderr).to_string(),
-        )
-        .into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to stage: {e}"),
-        )
-        .into_response(),
-    }
+
+        let output = if req.all {
+            git_cmd(&dir).args(["add", "-A"]).output()
+        } else if let Some(ref path) = req.path {
+            git_cmd(&dir).args(["add", "--", path]).output()
+        } else {
+            return json_error(StatusCode::BAD_REQUEST, "Must specify path or all=true")
+                .into_response();
+        };
+
+        match output {
+            Ok(out) if out.status.success() => {
+                invalidate_git_cache(&dir);
+                crate::publish_global(crate::GlobalWireEvent::GitUpdated {
+                    cwd: dir.to_string_lossy().to_string(),
+                    fetch: false,
+                });
+                Json(serde_json::json!({ "success": true })).into_response()
+            }
+            Ok(out) => json_error(
+                StatusCode::BAD_REQUEST,
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            )
+            .into_response(),
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to stage: {e}"),
+            )
+            .into_response(),
+        }
+    })
+    .await
 }
 
 /// POST /git/unstage
@@ -1472,46 +1522,49 @@ pub async fn git_unstage(
     State(_state): State<AppState>,
     Json(req): Json<GitUnstageReq>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(req.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
-
-    let output = if req.all {
-        git_cmd(&dir).args(["restore", "--staged", "."]).output()
-    } else if let Some(ref path) = req.path {
-        git_cmd(&dir)
-            .args(["restore", "--staged", "--", path])
-            .output()
-    } else {
-        return json_error(StatusCode::BAD_REQUEST, "Must specify path or all=true")
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(req.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
             .into_response();
-    };
-
-    match output {
-        Ok(out) if out.status.success() => {
-            invalidate_git_cache(&dir);
-            crate::publish_global(crate::GlobalWireEvent::GitUpdated {
-                cwd: dir.to_string_lossy().to_string(),
-                fetch: false,
-            });
-            Json(serde_json::json!({ "success": true })).into_response()
         }
-        Ok(out) => json_error(
-            StatusCode::BAD_REQUEST,
-            String::from_utf8_lossy(&out.stderr).to_string(),
-        )
-        .into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to unstage: {e}"),
-        )
-        .into_response(),
-    }
+
+        let output = if req.all {
+            git_cmd(&dir).args(["restore", "--staged", "."]).output()
+        } else if let Some(ref path) = req.path {
+            git_cmd(&dir)
+                .args(["restore", "--staged", "--", path])
+                .output()
+        } else {
+            return json_error(StatusCode::BAD_REQUEST, "Must specify path or all=true")
+                .into_response();
+        };
+
+        match output {
+            Ok(out) if out.status.success() => {
+                invalidate_git_cache(&dir);
+                crate::publish_global(crate::GlobalWireEvent::GitUpdated {
+                    cwd: dir.to_string_lossy().to_string(),
+                    fetch: false,
+                });
+                Json(serde_json::json!({ "success": true })).into_response()
+            }
+            Ok(out) => json_error(
+                StatusCode::BAD_REQUEST,
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            )
+            .into_response(),
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to unstage: {e}"),
+            )
+            .into_response(),
+        }
+    })
+    .await
 }
 
 fn validated_repo_relative_path(raw: &str) -> Result<PathBuf, String> {
@@ -1589,62 +1642,65 @@ pub async fn git_discard(
     State(_state): State<AppState>,
     Json(req): Json<GitDiscardReq>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(req.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(req.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
+            .into_response();
+        }
 
-    let file_path = match validated_repo_relative_path(&req.path) {
-        Ok(path) => path,
-        Err(error) => return json_error(StatusCode::BAD_REQUEST, error).into_response(),
-    };
+        let file_path = match validated_repo_relative_path(&req.path) {
+            Ok(path) => path,
+            Err(error) => return json_error(StatusCode::BAD_REQUEST, error).into_response(),
+        };
 
-    let discard_result = if req.is_untracked {
-        match discard_untracked_path(&dir, &file_path) {
-            Ok(()) => Ok(()),
-            Err(_) => {
-                // 如果 clean 失败，可能文件其实已被 index 跟踪，回退尝试 restore 回退到 HEAD
-                let output = git_cmd_literal_paths(&dir)
-                    .args(["restore", "--staged", "--worktree", "--"])
-                    .arg(&file_path)
-                    .output();
-                match output {
-                    Ok(out) if out.status.success() => Ok(()),
-                    Ok(out) => Err(String::from_utf8_lossy(&out.stderr).to_string()),
-                    Err(e) => Err(format!("Failed to discard changes: {e}")),
+        let discard_result = if req.is_untracked {
+            match discard_untracked_path(&dir, &file_path) {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    // 如果 clean 失败，可能文件其实已被 index 跟踪，回退尝试 restore 回退到 HEAD
+                    let output = git_cmd_literal_paths(&dir)
+                        .args(["restore", "--staged", "--worktree", "--"])
+                        .arg(&file_path)
+                        .output();
+                    match output {
+                        Ok(out) if out.status.success() => Ok(()),
+                        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).to_string()),
+                        Err(e) => Err(format!("Failed to discard changes: {e}")),
+                    }
                 }
             }
-        }
-    } else {
-        // 先尝试恢复暂存区和工作区（无论是否被 git add，彻底回滚到 HEAD）
-        let output = git_cmd_literal_paths(&dir)
-            .args(["restore", "--staged", "--worktree", "--"])
-            .arg(&file_path)
-            .output();
-        match output {
-            Ok(out) if out.status.success() => Ok(()),
-            _ => {
-                // 如果 restore 失败（例如是未跟踪文件但客户端没标 untracked），回退尝试 clean
-                discard_untracked_path(&dir, &file_path)
+        } else {
+            // 先尝试恢复暂存区和工作区（无论是否被 git add，彻底回滚到 HEAD）
+            let output = git_cmd_literal_paths(&dir)
+                .args(["restore", "--staged", "--worktree", "--"])
+                .arg(&file_path)
+                .output();
+            match output {
+                Ok(out) if out.status.success() => Ok(()),
+                _ => {
+                    // 如果 restore 失败（例如是未跟踪文件但客户端没标 untracked），回退尝试 clean
+                    discard_untracked_path(&dir, &file_path)
+                }
             }
-        }
-    };
+        };
 
-    match discard_result {
-        Ok(()) => {
-            invalidate_git_cache(&dir);
-            crate::publish_global(crate::GlobalWireEvent::GitUpdated {
-                cwd: dir.to_string_lossy().to_string(),
-                fetch: false,
-            });
-            Json(serde_json::json!({ "success": true })).into_response()
+        match discard_result {
+            Ok(()) => {
+                invalidate_git_cache(&dir);
+                crate::publish_global(crate::GlobalWireEvent::GitUpdated {
+                    cwd: dir.to_string_lossy().to_string(),
+                    fetch: false,
+                });
+                Json(serde_json::json!({ "success": true })).into_response()
+            }
+            Err(error) => json_error(StatusCode::BAD_REQUEST, error).into_response(),
         }
-        Err(error) => json_error(StatusCode::BAD_REQUEST, error).into_response(),
-    }
+    })
+    .await
 }
 
 /// POST /git/commit
@@ -1652,55 +1708,58 @@ pub async fn git_commit(
     State(_state): State<AppState>,
     Json(req): Json<GitCommitReq>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(req.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
-
-    let message = req.message.trim();
-    if message.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "Commit message cannot be empty")
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(req.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
             .into_response();
-    }
-
-    let mut args = vec!["commit".to_string()];
-    if req.amend {
-        args.push("--amend".to_string());
-    }
-    args.push("-m".to_string());
-    args.push(message.to_string());
-
-    let output = git_cmd(&dir).args(&args).output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            invalidate_git_cache(&dir);
-            crate::publish_global(crate::GlobalWireEvent::GitUpdated {
-                cwd: dir.to_string_lossy().to_string(),
-                fetch: false,
-            });
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            Json(serde_json::json!({
-                "success": true,
-                "message": stdout.trim().to_string(),
-            }))
-            .into_response()
         }
-        Ok(out) => json_error(
-            StatusCode::BAD_REQUEST,
-            String::from_utf8_lossy(&out.stderr).to_string(),
-        )
-        .into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to commit: {e}"),
-        )
-        .into_response(),
-    }
+
+        let message = req.message.trim();
+        if message.is_empty() {
+            return json_error(StatusCode::BAD_REQUEST, "Commit message cannot be empty")
+                .into_response();
+        }
+
+        let mut args = vec!["commit".to_string()];
+        if req.amend {
+            args.push("--amend".to_string());
+        }
+        args.push("-m".to_string());
+        args.push(message.to_string());
+
+        let output = git_cmd(&dir).args(&args).output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                invalidate_git_cache(&dir);
+                crate::publish_global(crate::GlobalWireEvent::GitUpdated {
+                    cwd: dir.to_string_lossy().to_string(),
+                    fetch: false,
+                });
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                Json(serde_json::json!({
+                    "success": true,
+                    "message": stdout.trim().to_string(),
+                }))
+                .into_response()
+            }
+            Ok(out) => json_error(
+                StatusCode::BAD_REQUEST,
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            )
+            .into_response(),
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to commit: {e}"),
+            )
+            .into_response(),
+        }
+    })
+    .await
 }
 
 /// POST /git/push
@@ -1708,58 +1767,61 @@ pub async fn git_push(
     State(_state): State<AppState>,
     Json(req): Json<GitPushReq>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(req.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(req.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
+            .into_response();
+        }
 
-    let mut args = vec!["push".to_string()];
-    if req.set_upstream {
-        args.push("-u".to_string());
-        args.push(req.remote.clone().unwrap_or_else(|| "origin".to_string()));
-        args.push(req.branch.clone().unwrap_or_else(|| "HEAD".to_string()));
-    } else {
-        if let Some(r) = req.remote {
-            args.push(r);
-            if let Some(b) = req.branch {
-                args.push(b);
+        let mut args = vec!["push".to_string()];
+        if req.set_upstream {
+            args.push("-u".to_string());
+            args.push(req.remote.clone().unwrap_or_else(|| "origin".to_string()));
+            args.push(req.branch.clone().unwrap_or_else(|| "HEAD".to_string()));
+        } else {
+            if let Some(r) = req.remote {
+                args.push(r);
+                if let Some(b) = req.branch {
+                    args.push(b);
+                }
             }
         }
-    }
 
-    let output = git_cmd(&dir).args(&args).output();
+        let output = git_cmd(&dir).args(&args).output();
 
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let combined = if stdout.is_empty() { stderr } else { stdout };
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let combined = if stdout.is_empty() { stderr } else { stdout };
 
-            if out.status.success() {
-                invalidate_git_cache(&dir);
-                crate::publish_global(crate::GlobalWireEvent::GitUpdated {
-                    cwd: dir.to_string_lossy().to_string(),
-                    fetch: false,
-                });
-                Json(serde_json::json!({
-                    "success": true,
-                    "message": combined.trim().to_string(),
-                }))
-                .into_response()
-            } else {
-                json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
+                if out.status.success() {
+                    invalidate_git_cache(&dir);
+                    crate::publish_global(crate::GlobalWireEvent::GitUpdated {
+                        cwd: dir.to_string_lossy().to_string(),
+                        fetch: false,
+                    });
+                    Json(serde_json::json!({
+                        "success": true,
+                        "message": combined.trim().to_string(),
+                    }))
+                    .into_response()
+                } else {
+                    json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
+                }
             }
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to push: {e}"),
+            )
+            .into_response(),
         }
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to push: {e}"),
-        )
-        .into_response(),
-    }
+    })
+    .await
 }
 
 /// POST /git/pull
@@ -1767,47 +1829,50 @@ pub async fn git_pull(
     State(_state): State<AppState>,
     Json(req): Json<GitPullReq>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(req.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
-
-    let mut args = vec!["pull".to_string()];
-    if let Some(r) = req.remote {
-        args.push(r);
-        if let Some(b) = req.branch {
-            args.push(b);
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(req.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
+            .into_response();
         }
-    }
 
-    let output = git_cmd(&dir).args(&args).output();
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let combined = if stdout.is_empty() { stderr } else { stdout };
-
-            if out.status.success() {
-                Json(serde_json::json!({
-                    "success": true,
-                    "message": combined.trim().to_string(),
-                }))
-                .into_response()
-            } else {
-                json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
+        let mut args = vec!["pull".to_string()];
+        if let Some(r) = req.remote {
+            args.push(r);
+            if let Some(b) = req.branch {
+                args.push(b);
             }
         }
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to pull: {e}"),
-        )
-        .into_response(),
-    }
+
+        let output = git_cmd(&dir).args(&args).output();
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let combined = if stdout.is_empty() { stderr } else { stdout };
+
+                if out.status.success() {
+                    Json(serde_json::json!({
+                        "success": true,
+                        "message": combined.trim().to_string(),
+                    }))
+                    .into_response()
+                } else {
+                    json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
+                }
+            }
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to pull: {e}"),
+            )
+            .into_response(),
+        }
+    })
+    .await
 }
 
 /// POST /git/fetch
@@ -1815,98 +1880,117 @@ pub async fn git_fetch(
     State(_state): State<AppState>,
     Json(req): Json<GitFetchReq>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(req.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
-
-    // 检查是否有配置 remote。若无 remote（如纯本地 repo），直接返回 success，避免报错
-    let remote_check = git_cmd(&dir).args(["remote"]).output();
-    let has_remote = match remote_check {
-        Ok(ref out) => {
-            out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty()
-        }
-        Err(_) => false,
-    };
-    if !has_remote {
-        return Json(serde_json::json!({
-            "success": true,
-            "message": "No remotes configured",
-            "has_remote": false,
-        }))
-        .into_response();
-    }
-
-    let mut args = vec!["fetch".to_string()];
-    if let Some(r) = req.remote {
-        let trimmed = r.trim().to_string();
-        if !trimmed.is_empty() {
-            args.push(trimmed);
-        } else {
-            args.push("origin".to_string());
-        }
-    } else {
-        // 优先检查当前分支绑定的 remote，若无则默认 origin，若无 origin 再回退 --all，杜绝陈旧失效 remote 拖垮
-        let current_branch_name = git_cmd(&dir)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    if s.is_empty() || s == "HEAD" {
-                        None
-                    } else {
-                        Some(s)
-                    }
-                } else {
-                    None
-                }
-            });
-
-        let tracking_remote = current_branch_name.as_ref().and_then(|b| {
-            git_cmd(&dir)
-                .args(["config", "--get", &format!("branch.{b}.remote")])
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        let r = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if r.is_empty() {
-                            None
-                        } else {
-                            Some(r)
-                        }
-                    } else {
-                        None
-                    }
-                })
-        });
-
-        if let Some(r) = tracking_remote {
-            args.push(r);
-        } else {
-            let has_origin = git_cmd(&dir)
-                .args(["remote", "get-url", "origin"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if has_origin {
-                args.push("origin".to_string());
-            } else {
-                args.push("--all".to_string());
+    // 前置检查同样在 blocking 线程池完成，避免同步子进程阻塞 Tokio async worker
+    let prep = tokio::task::spawn_blocking(
+        move || -> Result<(PathBuf, Vec<String>), axum::response::Response> {
+            let dir = resolve_target_dir(req.cwd.as_deref());
+            if !is_git_repo(&dir) {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "Target directory is not a Git repository",
+                )
+                .into_response());
             }
-        }
-    }
 
-    if req.prune.unwrap_or(true) {
-        args.push("--prune".to_string());
-    }
-    args.push("--tags".to_string());
+            // 检查是否有配置 remote。若无 remote（如纯本地 repo），直接返回 success，避免报错
+            let remote_check = git_cmd(&dir).args(["remote"]).output();
+            let has_remote = match remote_check {
+                Ok(ref out) => {
+                    out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+                }
+                Err(_) => false,
+            };
+            if !has_remote {
+                return Err(Json(serde_json::json!({
+                    "success": true,
+                    "message": "No remotes configured",
+                    "has_remote": false,
+                }))
+                .into_response());
+            }
+
+            let mut args = vec!["fetch".to_string()];
+            if let Some(r) = req.remote {
+                let trimmed = r.trim().to_string();
+                if !trimmed.is_empty() {
+                    args.push(trimmed);
+                } else {
+                    args.push("origin".to_string());
+                }
+            } else {
+                // 优先检查当前分支绑定的 remote，若无则默认 origin，若无 origin 再回退 --all，杜绝陈旧失效 remote 拖垮
+                let current_branch_name = git_cmd(&dir)
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        if o.status.success() {
+                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if s.is_empty() || s == "HEAD" {
+                                None
+                            } else {
+                                Some(s)
+                            }
+                        } else {
+                            None
+                        }
+                    });
+
+                let tracking_remote = current_branch_name.as_ref().and_then(|b| {
+                    git_cmd(&dir)
+                        .args(["config", "--get", &format!("branch.{b}.remote")])
+                        .output()
+                        .ok()
+                        .and_then(|o| {
+                            if o.status.success() {
+                                let r = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                                if r.is_empty() {
+                                    None
+                                } else {
+                                    Some(r)
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                });
+
+                if let Some(r) = tracking_remote {
+                    args.push(r);
+                } else {
+                    let has_origin = git_cmd(&dir)
+                        .args(["remote", "get-url", "origin"])
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+                    if has_origin {
+                        args.push("origin".to_string());
+                    } else {
+                        args.push("--all".to_string());
+                    }
+                }
+            }
+
+            if req.prune.unwrap_or(true) {
+                args.push("--prune".to_string());
+            }
+            args.push("--tags".to_string());
+            Ok((dir, args))
+        },
+    )
+    .await;
+
+    let (dir, args) = match prep {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(early_resp)) => return early_resp,
+        Err(join_err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Git worker task failed: {join_err}"),
+            )
+            .into_response();
+        }
+    };
 
     // 异步执行并加上 20 秒超时控制，避免弱网、鉴权卡死
     let dir_clone = dir.clone();
@@ -1958,58 +2042,61 @@ pub async fn get_git_working_diff(
     State(_state): State<AppState>,
     Query(q): Query<GitWorkingDiffQuery>,
 ) -> impl IntoResponse {
-    let dir = resolve_target_dir(q.cwd.as_deref());
-    if !is_git_repo(&dir) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Target directory is not a Git repository",
-        )
-        .into_response();
-    }
+    run_blocking_git(move || {
+        let dir = resolve_target_dir(q.cwd.as_deref());
+        if !is_git_repo(&dir) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Target directory is not a Git repository",
+            )
+            .into_response();
+        }
 
-    let file_path = q.path.trim();
-    if file_path.is_empty() || file_path.starts_with('-') {
-        return json_error(StatusCode::BAD_REQUEST, "Invalid file path").into_response();
-    }
+        let file_path = q.path.trim();
+        if file_path.is_empty() || file_path.starts_with('-') {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid file path").into_response();
+        }
 
-    let output = if q.staged == Some(true) {
-        git_cmd(&dir)
-            .args(["diff", "--cached", "--", file_path])
-            .output()
-    } else {
-        // Try git diff first
-        let diff_out = git_cmd(&dir).args(["diff", "--", file_path]).output();
-
-        if let Ok(ref out) = diff_out {
-            if out.status.success() && !out.stdout.is_empty() {
-                diff_out
-            } else {
-                // If diff is empty, file might be untracked! Try diff against /dev/null
-                git_cmd(&dir)
-                    .args(["diff", "--no-index", "/dev/null", file_path])
-                    .output()
-            }
+        let output = if q.staged == Some(true) {
+            git_cmd(&dir)
+                .args(["diff", "--cached", "--", file_path])
+                .output()
         } else {
-            diff_out
-        }
-    };
+            // Try git diff first
+            let diff_out = git_cmd(&dir).args(["diff", "--", file_path]).output();
 
-    match output {
-        Ok(out) => {
-            let diff = String::from_utf8_lossy(&out.stdout).to_string();
-            Json(GitFileDiffResp {
-                hash: "working-tree".to_string(),
-                path: file_path.to_string(),
-                diff,
-            })
-            .into_response()
+            if let Ok(ref out) = diff_out {
+                if out.status.success() && !out.stdout.is_empty() {
+                    diff_out
+                } else {
+                    // If diff is empty, file might be untracked! Try diff against /dev/null
+                    git_cmd(&dir)
+                        .args(["diff", "--no-index", "/dev/null", file_path])
+                        .output()
+                }
+            } else {
+                diff_out
+            }
+        };
+
+        match output {
+            Ok(out) => {
+                let diff = String::from_utf8_lossy(&out.stdout).to_string();
+                Json(GitFileDiffResp {
+                    hash: "working-tree".to_string(),
+                    path: file_path.to_string(),
+                    diff,
+                })
+                .into_response()
+            }
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get working diff: {e}"),
+            )
+            .into_response(),
         }
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to get working diff: {e}"),
-        )
-        .into_response(),
-    }
+    })
+    .await
 }
 
 #[cfg(test)]

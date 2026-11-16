@@ -4,7 +4,7 @@
 
 import { createContext, ComponentChildren } from 'preact';
 import { useContext, useEffect, useRef, useState } from 'preact/hooks';
-import { messages, Lang, MsgKey } from './i18n';
+import { messages, ensureLocaleLoaded, Lang, MsgKey } from './i18n';
 import { getConfig, postLanguage, postAutoGitSync } from './api';
 import { Theme, EffectiveTheme, resolveEffectiveTheme } from './lib/theme';
 
@@ -127,6 +127,22 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
   const [updateDead, setUpdateDead] = useState<boolean>(false);
   const [autoGitSync, setAutoGitSyncState] = useState<boolean>(true);
   const [escUndoEnabled, setEscUndoEnabledState] = useState<boolean>(readEscUndo);
+  const [, setLocaleRevision] = useState<number>(0);
+
+  // 若选用按需拆分的非默认语种，后台拉取对应分包并在到达后平滑刷新文案
+  useEffect(() => {
+    let active = true;
+    if (typeof ensureLocaleLoaded === 'function') {
+      ensureLocaleLoaded(lang)
+        .then((loaded) => {
+          if (active && loaded) setLocaleRevision((n) => n + 1);
+        })
+        .catch(() => {});
+    }
+    return () => {
+      active = false;
+    };
+  }, [lang]);
 
   const selectionVersion = useRef(0);
   const pendingSave = useRef(Promise.resolve());
@@ -272,7 +288,8 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
   }, [lang]);
 
   function t(key: MsgKey, params?: TParams): string {
-    const table = messages[lang] ?? messages.en;
+    const fallback = lang === 'zh-TW' ? messages.zh : messages.en;
+    const table = messages[lang] ?? fallback;
     let s = table[key] ?? messages.en[key] ?? key;
     if (params) {
       for (const k of Object.keys(params)) {

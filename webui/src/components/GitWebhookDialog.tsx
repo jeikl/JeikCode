@@ -146,8 +146,8 @@ export interface GitAdapterConfig {
 }
 
 export function getDefaultReviewPrompt(lang?: string): string {
-  if (lang && lang in messages) {
-    return messages[lang as Lang]['gitWebhook.defaultReviewPrompt'];
+  if (lang && lang in messages && messages[lang as Lang]?.['gitWebhook.defaultReviewPrompt']) {
+    return messages[lang as Lang]!['gitWebhook.defaultReviewPrompt'];
   }
   return messages.en['gitWebhook.defaultReviewPrompt'];
 }

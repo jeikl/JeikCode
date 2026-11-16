@@ -716,4 +716,99 @@ test('streamGlobalEvents exits cleanly when signal is aborted', async () => {
   }
 });
 
+test('listSessions throws on non-ok status instead of silently passing error body as list', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 })) as typeof fetch;
+  try {
+    const { listSessions } = await import('./api.ts');
+    await assert.rejects(() => listSessions(), /list sessions failed: 401/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('concurrent identical GET requests deduplicate in-flight fetch calls and clone Response safely', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  let release!: (resp: Response) => void;
+  const gate = new Promise<Response>((resolve) => {
+    release = resolve;
+  });
+  globalThis.fetch = (async () => {
+    fetchCalls += 1;
+    return gate;
+  }) as typeof fetch;
+
+  try {
+    const { listSessions } = await import('./api.ts');
+    const p1 = listSessions();
+    const p2 = listSessions();
+    release(
+      new Response(JSON.stringify([{ id: 's1', name: 'One', working_dir: '/w', project_hash: 'h', created_at: 1, updated_at: 2 }]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const [r1, r2] = await Promise.all([p1, p2]);
+    assert.equal(fetchCalls, 1, 'concurrent identical GETs must share one in-flight fetch');
+    assert.equal(r1[0].id, 's1');
+    assert.equal(r2[0].id, 's1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('checkUpdate passes summary=1 when requested for lightweight badge polling', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = '';
+  globalThis.fetch = (async (url: RequestInfo | URL) => {
+    requestedUrl = String(url);
+    return new Response(
+      JSON.stringify({
+        current_version: 'v7.2.0',
+        latest_version: 'v7.2.1',
+        has_update: true,
+        is_desktop: false,
+        channel: 'stable',
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const { checkUpdate } = await import('./api.ts');
+    await checkUpdate('beta', { summary: true });
+    assert.equal(requestedUrl, '/api/update/check?channel=beta&summary=1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('getModels extracts Bearer token even when pasted into /token=... pathname', async () => {
+  const originalFetch = globalThis.fetch;
+  const previousLocation = globalThis.location;
+  let sentAuth: string | null = null;
+  Object.defineProperty(globalThis, 'location', {
+    value: new URL('http://localhost/token=path-tok-99'),
+    configurable: true,
+  });
+  globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+    sentAuth = new Headers(init?.headers).get('Authorization');
+    return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+
+  try {
+    const { getModels } = await import('./api.ts');
+    await getModels();
+    assert.equal(sentAuth, 'Bearer path-tok-99');
+  } finally {
+    Object.defineProperty(globalThis, 'location', {
+      value: previousLocation,
+      configurable: true,
+    });
+    globalThis.fetch = originalFetch;
+  }
+});
+
 

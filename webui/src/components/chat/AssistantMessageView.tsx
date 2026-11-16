@@ -12,6 +12,7 @@ import { ReasoningBlock } from './ReasoningBlock';
 import { SessionTodoPanel } from './SessionTodoPanel';
 import { ToolGroupView } from './ToolViews';
 import { NoticeCard } from './NoticeCard';
+import { LiveElapsedText } from './LiveElapsedText';
 import { highlightText } from './highlight';
 import { messageHasTools, messageText } from './messageText';
 import type { CanvasRecord as Message } from '../../lib/canvas/records';
@@ -26,6 +27,7 @@ function assistantMessagePropsEqual(prev: any, next: any): boolean {
     && prev.isActiveSearchMatch === next.isActiveSearchMatch
     && prev.timeLabel === next.timeLabel
     && prev.timeFull === next.timeFull
+    && prev.liveAnchorMs === next.liveAnchorMs
     && prev.liveElapsedMs === next.liveElapsedMs
     && prev.turnTotalMs === next.turnTotalMs
     && prev.search === next.search
@@ -49,6 +51,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   searchRef,
   timeLabel,
   timeFull,
+  liveAnchorMs,
   liveElapsedMs,
   turnTotalMs,
   isCompacting,
@@ -68,6 +71,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   searchRef?: (el: HTMLElement | null) => void;
   timeLabel?: string;
   timeFull?: string;
+  liveAnchorMs?: number;
   liveElapsedMs?: number;
   /** User-bubble → this final answer. Only set on the last assistant of the turn. */
   turnTotalMs?: number;
@@ -264,12 +268,16 @@ export const AssistantMessageView = memo(function AssistantMessageView({
             </span>
           </span>
         )}
-        {isLastInTurn && streaming && liveElapsedMs != null && (
-          <span class="msg-time is-live">
-            <span class="msg-turn-elapsed">
-              {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
+        {isLastInTurn && streaming && (
+          liveAnchorMs != null ? (
+            <LiveElapsedText anchorMs={liveAnchorMs} />
+          ) : liveElapsedMs != null ? (
+            <span class="msg-time is-live">
+              <span class="msg-turn-elapsed">
+                {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
+              </span>
             </span>
-          </span>
+          ) : null
         )}
         {msg.readOnly === true && (
           <span class="msg-readonly-badge" title={t('chat.readOnlyArchiveHint')}>

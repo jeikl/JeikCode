@@ -3246,6 +3246,15 @@ impl SessionManager {
         scan_catalog_cached(sessions_root)
     }
 
+    /// 精确定位单个 `(project_bucket, id)` 会话条目，不扫描其他项目桶与无关会话文件。
+    pub fn scan_session_in_bucket(
+        sessions_root: &Path,
+        project_bucket: &str,
+        id: &str,
+    ) -> CatalogScan {
+        scan_single_session_in_bucket(sessions_root, project_bucket, id)
+    }
+
     /// Collapse automatic fork aggregates into one newest logical conversation
     /// row per project. Exact-ID loading and the raw catalog remain unchanged.
     pub fn collapse_fork_lineages(entries: &mut Vec<CatalogEntry>) {
@@ -3944,6 +3953,143 @@ fn scan_catalog_root(sessions_root: &Path) -> CatalogScan {
             .then_with(|| a.id.cmp(&b.id))
             .then_with(|| a.project_bucket.cmp(&b.project_bucket))
     });
+    scan.diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
+    scan
+}
+
+fn scan_single_session_in_bucket(
+    sessions_root: &Path,
+    project_bucket: &str,
+    id: &str,
+) -> CatalogScan {
+    let mut scan = CatalogScan::default();
+    if !valid_project_bucket(project_bucket) || validate_session_id(id).is_err() {
+        return scan;
+    }
+    let bucket_path = sessions_root.join(project_bucket);
+    match fs::symlink_metadata(&bucket_path) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => {
+            scan.diagnostics.push(CatalogDiagnostic {
+                project_bucket: Some(project_bucket.to_string()),
+                path: bucket_path,
+                kind: CatalogDiagnosticKind::UnsafeFile,
+                message: "project bucket is not a directory".into(),
+            });
+            return scan;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return scan,
+        Err(error) => {
+            scan.diagnostics.push(io_catalog_diagnostic(
+                Some(project_bucket.to_string()),
+                bucket_path,
+                error,
+            ));
+            return scan;
+        }
+    }
+
+    let manager = SessionManager::with_root(&bucket_path);
+    let mut sources = CatalogAggregate::default();
+
+    let meta_path = bucket_path.join(format!("{id}.meta"));
+    match fs::symlink_metadata(&meta_path) {
+        Ok(md) if md.file_type().is_file() => match manager.read_meta(id) {
+            Ok(meta) => sources.native = Some(meta),
+            Err(error) => scan.diagnostics.push(catalog_diagnostic_from_error(
+                Some(project_bucket.to_string()),
+                meta_path,
+                error,
+            )),
+        },
+        Ok(_) => scan.diagnostics.push(CatalogDiagnostic {
+            project_bucket: Some(project_bucket.to_string()),
+            path: meta_path,
+            kind: CatalogDiagnosticKind::UnsafeFile,
+            message: "catalog source is not a regular file".into(),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => scan.diagnostics.push(io_catalog_diagnostic(
+            Some(project_bucket.to_string()),
+            meta_path,
+            error,
+        )),
+    }
+
+    let legacy_path = bucket_path.join(format!("{id}.json"));
+    let skip_ui_presentation = id.strip_suffix(".ui").is_some_and(|presentation_id| {
+        ["meta", "snapshot", "jsonl"].iter().any(|ext| {
+            bucket_path
+                .join(format!("{presentation_id}.{ext}"))
+                .symlink_metadata()
+                .is_ok()
+        })
+    });
+    if !skip_ui_presentation {
+        match fs::symlink_metadata(&legacy_path) {
+            Ok(md) if md.file_type().is_file() => {
+                match read_legacy_catalog_meta(&legacy_path, id) {
+                    Ok(meta) => sources.legacy = Some(meta),
+                    Err(error) => scan.diagnostics.push(catalog_diagnostic_from_error(
+                        Some(project_bucket.to_string()),
+                        legacy_path,
+                        error,
+                    )),
+                }
+            }
+            Ok(_) => scan.diagnostics.push(CatalogDiagnostic {
+                project_bucket: Some(project_bucket.to_string()),
+                path: legacy_path,
+                kind: CatalogDiagnosticKind::UnsafeFile,
+                message: "catalog source is not a regular file".into(),
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => scan.diagnostics.push(io_catalog_diagnostic(
+                Some(project_bucket.to_string()),
+                legacy_path,
+                error,
+            )),
+        }
+    }
+
+    if sources.native.is_none() {
+        for suffix in [".snapshot", ".jsonl", ".rewind.txn.json", ".rewind.json"] {
+            let sidecar_path = bucket_path.join(format!("{id}{suffix}"));
+            match fs::symlink_metadata(&sidecar_path) {
+                Ok(md) if md.file_type().is_file() => {
+                    scan.diagnostics.push(CatalogDiagnostic {
+                        project_bucket: Some(project_bucket.to_string()),
+                        path: sidecar_path,
+                        kind: CatalogDiagnosticKind::Corrupt,
+                        message: format!("native session {id:?} has sidecars but no metadata"),
+                    });
+                    break;
+                }
+                Ok(_) => {
+                    scan.diagnostics.push(CatalogDiagnostic {
+                        project_bucket: Some(project_bucket.to_string()),
+                        path: sidecar_path,
+                        kind: CatalogDiagnosticKind::UnsafeFile,
+                        message: "native session sidecar is not a regular file".into(),
+                    });
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    scan.diagnostics.push(io_catalog_diagnostic(
+                        Some(project_bucket.to_string()),
+                        sidecar_path,
+                        error,
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(entry) = catalog_entry(project_bucket.to_string(), id.to_string(), sources) {
+        scan.entries.push(entry);
+    }
     scan.diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
     scan
 }
@@ -8484,5 +8630,29 @@ mod tests {
         let old = r#"{"id":"x","name":"n","working_dir":"/w","created_at":0,"updated_at":0}"#;
         let parsed: SessionMeta = serde_json::from_str(old).unwrap();
         assert!(parsed.protocol_key.is_none());
+    }
+
+    #[test]
+    fn scan_session_in_bucket_locates_exact_id_without_scanning_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proj-a");
+        std::fs::create_dir_all(&project).unwrap();
+        let bucket = SessionManager::project_hash(&project);
+        let mgr = SessionManager::with_root(dir.path().join(&bucket));
+        let meta = SessionMeta::new("target-sess-1", project.to_string_lossy(), 1);
+        mgr.write_meta(&meta).unwrap();
+
+        // 在无关分桶写入坏 JSON：单桶 O(1) 定位不得触碰或因它中断
+        let bad_bucket = dir.path().join("other-bucket-ffff");
+        std::fs::create_dir_all(&bad_bucket).unwrap();
+        std::fs::write(bad_bucket.join("corrupt.meta.json"), b"{bad").unwrap();
+
+        let scan = SessionManager::scan_session_in_bucket(dir.path(), &bucket, "target-sess-1");
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].id, "target-sess-1");
+
+        // 非法路径穿越 id 必须被安全拒绝返回空结果
+        let rejected = SessionManager::scan_session_in_bucket(dir.path(), &bucket, "../escape");
+        assert!(rejected.entries.is_empty());
     }
 }

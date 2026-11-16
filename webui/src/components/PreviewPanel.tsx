@@ -4,6 +4,8 @@ import { modalConfirm } from './ConfirmDialog';
 import { CodeEditorTab } from './CodeEditorTab';
 import { showToast } from './Toast';
 import { parseFilePathAndLines } from '../lib/displayPath';
+import { getSavedPreviewCount, registerPreviewOpenHandler } from '../lib/previewStorage';
+export { getSavedPreviewCount };
 import {
   bumpReloadToken,
   dropEditorTabSnapshot,
@@ -27,20 +29,6 @@ export interface PreviewPanelProps {
   onTabsCountChange?: (count: number) => void;
   /** 面板整体是否可见（折叠 / 切到其它面板标签）：隐藏时不抢焦点，恢复可见时还原滚动。 */
   surfaceActive?: boolean;
-}
-
-export function getSavedPreviewCount(projectCwd?: string): number {
-  if (typeof window === 'undefined' || !window.localStorage) return 0;
-  try {
-    const normCwd = (projectCwd || 'default').replace(/\\/g, '/').toLowerCase();
-    const storageKeyTabs = `jeikcode:right_preview_tabs:${normCwd}`;
-    const saved = localStorage.getItem(storageKeyTabs);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) return parsed.length;
-    }
-  } catch {}
-  return 0;
 }
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp']);
@@ -252,25 +240,14 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
     [cwd],
   );
 
-  // 监听全局打开预览事件
+  // 监听全局打开预览事件并消费懒加载前暂存的打开请求
   useEffect(() => {
-    const handleOpenFileEvent = (
-      e: CustomEvent<{
-        filePath: string;
-        fileName?: string;
-        fileStatus?: string;
-        startLine?: number;
-        endLine?: number;
-      }>,
-    ) => {
-      if (e.detail?.filePath) {
-        openTab(e.detail);
+    const unregister = registerPreviewOpenHandler((detail) => {
+      if (detail?.filePath) {
+        openTab(detail);
       }
-    };
-    window.addEventListener('jeikcode:preview:open_file', handleOpenFileEvent as EventListener);
-    return () => {
-      window.removeEventListener('jeikcode:preview:open_file', handleOpenFileEvent as EventListener);
-    };
+    });
+    return unregister;
   }, [openTab]);
 
   // 关闭标签：有未保存修改时先确认，避免静默丢草稿。

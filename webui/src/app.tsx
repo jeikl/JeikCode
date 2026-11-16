@@ -37,10 +37,50 @@ const SystemSettingsDialog = lazy(() => import('./components/SystemSettingsDialo
 /** 每个懒加载弹窗独占一个 Suspense 边界：共享边界时，一次 import 解析后的
  *  retry 会连带重渲染仍 pending 的兄弟 lazy 组件，Preact 在分离子树上可能把
  *  抛出的 Promise 变成 unhandled rejection（控制台 “Uncaught (in promise) Promise”）。 */
-function LazyBoundary({ children }: { children: ComponentChildren }) {
-  return <Suspense fallback={null}>{children}</Suspense>;
+function LazyBoundary({
+  children,
+  fallback = null,
+}: {
+  children: ComponentChildren;
+  fallback?: ComponentChildren;
+}) {
+  return <Suspense fallback={fallback}>{children}</Suspense>;
+}
+
+/** 点击设置/模型配置时立即呈现可交互弹窗骨架，杜绝 `fallback={null}` 导致点击后弹窗“凭空消失”。 */
+function SettingsModalFallback({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  return (
+    <div
+      class="modal-overlay system-settings-modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div class="modal-card modal-card-lg system-settings-card" onClick={(e) => e.stopPropagation()}>
+        <div class="modal-header system-settings-header">
+          <div class="system-settings-header-title">
+            <span class="system-settings-header-icon" aria-hidden="true">⚙️</span>
+            <h3>{t('settings.systemSettings')}</h3>
+          </div>
+          <button
+            type="button"
+            class="modal-close btn btn-ghost"
+            onClick={onClose}
+            aria-label={t('common.dismiss')}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal-loading" style={{ padding: '48px 24px' }}>{t('settings.loading')}</div>
+      </div>
+    </div>
+  );
 }
 import {
+  getBootstrap,
   getProject,
   getConfig,
   getModels,
@@ -390,44 +430,55 @@ export function App() {
     typeof window !== 'undefined' ? window.innerWidth : 1200
   );
 
-  // ── 活跃会话运行态（蓝圈圈）幂等校准：每 12 秒与后端权威 active_chats 列表对齐一次，彻底消灭幽灵转圈卡死 ──
+  // ── 活跃会话运行态（蓝圈圈）幂等校准：每 12 秒与后端权威 active_chats 列表对齐一次（后台隐藏页静默让渡）──
   useEffect(() => {
     let cancelled = false;
-    const reconcileRunning = () => {
+    const applyActiveIds = (serverActiveIds: string[]) => {
+      if (cancelled) return;
+      setLiveRunningIds((prev) => {
+        if (prev.size === 0 && serverActiveIds.length === 0) return prev;
+        const next = new Set<string>();
+        for (const id of serverActiveIds) {
+          next.add(id);
+        }
+        if (prev.size === next.size && [...prev].every((id) => next.has(id))) {
+          return prev;
+        }
+        return next;
+      });
+    };
+
+    const reconcileRunning = (skipIfHidden = true) => {
+      if (skipIfHidden && typeof document !== 'undefined' && document.hidden) return;
       getActiveChatSessions()
-        .then((serverActiveIds) => {
-          if (cancelled) return;
-          setLiveRunningIds((prev) => {
-            if (prev.size === 0 && serverActiveIds.length === 0) return prev;
-            const next = new Set<string>();
-            for (const id of serverActiveIds) {
-              next.add(id);
-            }
-            if (prev.size === next.size && [...prev].every((id) => next.has(id))) {
-              return prev;
-            }
-            return next;
-          });
-        })
+        .then(applyActiveIds)
         .catch(() => {});
     };
 
-    reconcileRunning();
-    const timer = window.setInterval(reconcileRunning, 12000);
+    // 首次冷启动复用聚合 `/api/bootstrap`
+    getBootstrap()
+      .then((boot) => applyActiveIds(boot.active_chat_ids ?? []))
+      .catch(() => reconcileRunning(false));
+
+    const timer = window.setInterval(() => reconcileRunning(true), 12000);
+    const onVisible = () => {
+      if (!document.hidden) reconcileRunning(false);
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, []);
 
   // 断点续传游标的纪元 = daemon 实例身份。重启后 `session_seq` 从 0 重算，
   // 旧游标必须作废，否则新一轮长过旧游标后，服务端只补 `seq > 旧游标` 的帧，
   // 当前回合前半段（开场提问、最初思考与工具）被静默跳过。
-  // 静默重启（崩溃 / 重启机器）不会触发升级弹层的 reload，所以这里持续轮询：
-  // 纪元一变，旧游标立即失效，下一次重连走全量幂等补发。
   useEffect(() => {
     let cancelled = false;
-    const syncEpoch = () => {
+    const syncEpoch = (skipIfHidden = true) => {
+      if (skipIfHidden && typeof document !== 'undefined' && document.hidden) return;
       getHealth()
         .then((info) => {
           if (!cancelled) setStreamEpoch(info.instance_id ?? null);
@@ -436,20 +487,25 @@ export function App() {
           /* health 不可用：保持上一个已知纪元；从未拿到过则游标一律视为无效 */
         });
     };
-    syncEpoch();
-    const timer = window.setInterval(syncEpoch, 15000);
+    getBootstrap()
+      .then((boot) => {
+        if (!cancelled) setStreamEpoch(boot.health?.instance_id ?? null);
+      })
+      .catch(() => syncEpoch(false));
+    const timer = window.setInterval(() => syncEpoch(true), 15000);
     // 手机回前台 / 网络恢复往往正是重连前一瞬：先校准纪元，避免带着旧游标发起补发。
     const onVisible = () => {
-      if (!document.hidden) syncEpoch();
+      if (!document.hidden) syncEpoch(false);
     };
-    window.addEventListener('focus', syncEpoch);
-    window.addEventListener('online', syncEpoch);
+    const onWake = () => syncEpoch(false);
+    window.addEventListener('focus', onWake);
+    window.addEventListener('online', onWake);
     document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
-      window.removeEventListener('focus', syncEpoch);
-      window.removeEventListener('online', syncEpoch);
+      window.removeEventListener('focus', onWake);
+      window.removeEventListener('online', onWake);
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, []);
@@ -864,12 +920,14 @@ export function App() {
     setSidebarOpen((o) => !o);
   }
 
-  // Seed cwd from /project on mount（恢复会话时以会话目录为准，故只在仍为空时填充）
+  // Seed cwd from /api/bootstrap (回退 /project)
   useEffect(() => {
     let cancelled = false;
-    getProject()
+    getBootstrap()
+      .then((boot) => boot.project)
+      .catch(() => getProject())
       .then((p) => {
-        if (cancelled) return;
+        if (cancelled || !p) return;
         if (p.working_dir) setCwd((c) => c || p.working_dir);
         if (p.project_hash) setProjectHash((h) => h || p.project_hash!);
       })
@@ -877,13 +935,55 @@ export function App() {
         // Ignore; cwd stays empty
       });
 
-    // 自动静默检测版本更新（遵循用户选定的通道，有新版本时点亮绿色向上箭头）
+    const UPDATE_COOLDOWN_KEY = 'jeikcode_update_cooldown_v1';
+    const UPDATE_COOLDOWN_MS = 5 * 60 * 1000;
+    const UPDATE_BC_NAME = 'jeikcode_update_info_bc';
+    let updateChannel: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel === 'function') {
+        updateChannel = new BroadcastChannel(UPDATE_BC_NAME);
+        updateChannel.onmessage = (e) => {
+          if (!cancelled && e.data?.info) {
+            setUpdateInfo(e.data.info as UpdateCheckResponse);
+          }
+        };
+      }
+    } catch {}
+
+    // 自动静默检测版本更新：使用 `?summary=1` + 5 分钟跨标签页共享冷却窗口
     const fetchLatestUpdate = () => {
       if (cancelled || updateDeadRef.current) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
       const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
-      checkUpdate(savedChannel)
+      const chKey = savedChannel || 'default';
+      try {
+        const raw = localStorage.getItem(UPDATE_COOLDOWN_KEY);
+        if (raw) {
+          const cached = JSON.parse(raw) as { at?: number; channel?: string; info?: UpdateCheckResponse };
+          if (
+            cached.channel === chKey &&
+            typeof cached.at === 'number' &&
+            Date.now() - cached.at < UPDATE_COOLDOWN_MS
+          ) {
+            if (cached.info && !cancelled) setUpdateInfo(cached.info);
+            return;
+          }
+        }
+        // 先行抢占窗口期，避免多标签页同时聚焦连发多次
+        localStorage.setItem(UPDATE_COOLDOWN_KEY, JSON.stringify({ at: Date.now(), channel: chKey }));
+      } catch {}
+
+      checkUpdate(savedChannel, { summary: true })
         .then((res) => {
-          if (!cancelled) setUpdateInfo(res);
+          if (cancelled) return;
+          setUpdateInfo(res);
+          try {
+            localStorage.setItem(
+              UPDATE_COOLDOWN_KEY,
+              JSON.stringify({ at: Date.now(), channel: chKey, info: res }),
+            );
+            updateChannel?.postMessage({ info: res });
+          } catch {}
         })
         .catch(() => {});
     };
@@ -906,10 +1006,17 @@ export function App() {
       fetchConfigUpgrade();
     }, 1500);
 
+    // 4 秒空闲预热设置/模型配置弹窗分包，防止点击模型配置时临时拉取卡顿消失
+    const preloadSettingsTimer = setTimeout(() => {
+      if (cancelled) return;
+      void import('./components/SystemSettingsDialog').catch(() => {});
+      void import('./components/SettingsDialogs').catch(() => {});
+    }, 4000);
+
     // 每 15 分钟后台自动静默检测一次，保持更新时效性
     const updateInterval = setInterval(fetchLatestUpdate, 15 * 60 * 1000);
 
-    // 窗口重新获得焦点时静默检测一次（防止开着网页期间发布了新版未及时同步）
+    // 窗口重新获得焦点时走同一 5 分钟共享冷却检查
     const onWindowFocus = () => {
       fetchLatestUpdate();
     };
@@ -918,8 +1025,12 @@ export function App() {
     return () => {
       cancelled = true;
       clearTimeout(updateTimer);
+      clearTimeout(preloadSettingsTimer);
       clearInterval(updateInterval);
       window.removeEventListener('focus', onWindowFocus);
+      try {
+        updateChannel?.close();
+      } catch {}
     };
   }, []);
 
@@ -1974,22 +2085,22 @@ export function App() {
         />
       )}
       {settingsSection === 'theme' && (
-        <LazyBoundary>
+        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
           <ThemeDialog onClose={() => setSettingsSection(null)} />
         </LazyBoundary>
       )}
       {settingsSection === 'language' && (
-        <LazyBoundary>
+        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
           <LanguageDialog onClose={() => setSettingsSection(null)} />
         </LazyBoundary>
       )}
       {settingsSection === 'model' && (
-        <LazyBoundary>
+        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
           <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
         </LazyBoundary>
       )}
       {settingsSection === 'system' && (
-        <LazyBoundary>
+        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
           <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
         </LazyBoundary>
       )}

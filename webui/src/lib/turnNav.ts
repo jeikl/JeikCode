@@ -399,9 +399,9 @@ export function canLoadOlder(input: {
 }): boolean {
   if (!input.hasOlder) return false;
   // `hasOlder` 已经是身份对账的结果（首行 seq 之后是否还有更早的行）。
-  // 只要它成立，就一定有办法翻页：有 offset 用 offset，没 offset 用 before_seq。
+  // 只要它成立，就一定有办法翻页：有 offset 用 offset，没 offset 用真实整数 before_seq。
   if (Number.isFinite(input.offset) && input.offset > 0) return true;
-  return typeof input.headSeq === 'number' && Number.isFinite(input.headSeq) && input.headSeq > 0;
+  return typeof input.headSeq === 'number' && Number.isInteger(input.headSeq) && input.headSeq > 0;
 }
 
 /**

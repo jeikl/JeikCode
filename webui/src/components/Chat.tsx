@@ -77,7 +77,7 @@ const STEER_NATURAL_DRAIN_GRACE_MS = 1500;
  * （subscribe_live_with_replay），把已画完的正文/思考再落一遍。
  */
 const WATCH_REATTACH_AFTER_HIDDEN_MS = 60000;
-import { postChatPrompt, stopChat, postChatSteer, admitChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatRuntime, getChatPending, watchChatSession, SSEEvent, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, ApprovalMode, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, getCommands, CommandInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, claimChatQueue, releaseChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, admitChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatRuntime, getChatPending, watchChatSession, SSEEvent, getSessionFreshness, SessionDetail, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, ApprovalMode, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, getCommands, CommandInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, claimChatQueue, releaseChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
 import { pullSession } from '../lib/sessionPull';
 import { InlineBubbleEditor } from './InlineBubbleEditor';
 import {
@@ -165,8 +165,8 @@ import { onSoftRefresh } from '../lib/appRefresh';
 
 // 动态懒加载非首屏必需的重型 Git / Diff 面板，削减初始 JS 主包体积，加速桌面端冷启动与弱网访问
 import { dropEditorTabSnapshot, mainEditorStateKey } from '../lib/editorTabState';
-import { getSavedTerminalCount } from './TerminalPanel';
-import { getSavedPreviewCount } from './PreviewPanel';
+import { dispatchOrQueueTerminalCommand, getSavedTerminalCount } from '../lib/terminalStorage';
+import { ensurePreviewOpenQueue, getSavedPreviewCount } from '../lib/previewStorage';
 import { RightInspector, isRightPanelTab, type RightPanelTab } from './RightInspectorPanel';
 import {
   fetchGitFileDiff,
@@ -599,7 +599,6 @@ export function Chat({
    *  stop (send-now while the turn is running) deliberately does NOT set this. */
   const terminalSeenBySessionRef = useRef<Set<string>>(new Set());
   const terminalAtBySessionRef = useRef<Map<string, number>>(new Map());
-  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const STEER_STORAGE_PREFIX = 'jeikcode:pending_steers:';
   const CLOCK_STORAGE_PREFIX = 'jeikcode:turn_clock:';
@@ -947,13 +946,6 @@ export function Chat({
   const chatRecoveryRef = useRef<ChatRecoveryState>('ready');
   chatRecoveryRef.current = chatRecovery;
   const recoveryPolicy = chatRecoveryPolicy(chatRecovery);
-
-  useEffect(() => {
-    if (!busy || turnStartedAt == null) return;
-    setNowMs(Date.now());
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [busy, turnStartedAt]);
 
   function transitionChatRecovery(event: ChatRecoveryEvent): ChatRecoveryState {
     const next = reduceChatRecovery(chatRecoveryRef.current, event);
@@ -5837,6 +5829,10 @@ export function Chat({
         if (isDuplicateUser) {
           continue;
         }
+        const authenticSeq =
+          typeof msg.seq === 'number' && Number.isInteger(msg.seq) && msg.seq >= 0
+            ? msg.seq
+            : undefined;
         loaded.push({
           role: 'user',
           parts: [{ kind: 'text', text: visible }],
@@ -5848,6 +5844,7 @@ export function Chat({
           // P0: the server's display-order seq is the ONLY order key. `sourceIndex`
           // stays as a pagination cursor for older daemons that do not send seq.
           seq: msg.seq,
+          ...(authenticSeq !== undefined ? { serverSeq: authenticSeq } : {}),
           turnId: msg.turn_id,
           id: msg.id,
           clientInputId: msg.client_input_id,
@@ -5863,6 +5860,10 @@ export function Chat({
           // 刷新后重新投影会永久粘在最新回答下面。压缩边界等真正的持久
           // 通知不匹配这些重试文案，必须保留。
           if (text && !isTransientAdvisoryText(text)) {
+            const authenticSeq =
+              typeof msg.seq === 'number' && Number.isInteger(msg.seq) && msg.seq >= 0
+                ? msg.seq
+                : undefined;
             // 诊断/压缩标记是只读通知，不是模型回答：必须落成 system 行。
             // 旧实现把它伪装成 assistant 行，刷新后看起来就像回答正文的一部分。
             loaded.push({
@@ -5873,6 +5874,7 @@ export function Chat({
               sourceIndex,
               sourceIndexAuthority: 'disk',
               seq: msg.seq,
+              ...(authenticSeq !== undefined ? { serverSeq: authenticSeq } : {}),
             });
           }
           continue;
@@ -5922,6 +5924,10 @@ export function Chat({
             sessionTodoList = foldTodoToolCall(sessionTodoList, tc.name, rawArgs) ?? [];
           }
         }
+        const authenticSeq =
+          typeof msg.seq === 'number' && Number.isInteger(msg.seq) && msg.seq >= 0
+            ? msg.seq
+            : undefined;
         loaded.push({
           role: 'assistant',
           parts,
@@ -5930,6 +5936,7 @@ export function Chat({
           sourceIndex,
           sourceIndexAuthority: 'disk',
           seq: msg.seq,
+          ...(authenticSeq !== undefined ? { serverSeq: authenticSeq } : {}),
           turnId: msg.turn_id,
           id: msg.id,
           readOnly,
@@ -6387,6 +6394,7 @@ export function Chat({
 
   // 监听全局切右侧面板 Tab 事件 (如 AI 画布点击文件链接自动切至 preview 眼睛标签并展开)
   useEffect(() => {
+    ensurePreviewOpenQueue();
     const handleSwitchRightTab = (e: CustomEvent<string>) => {
       const tab = e.detail;
       if (isRightPanelTab(tab)) {
@@ -6508,8 +6516,10 @@ export function Chat({
 
   // Git refresh trigger (incremented when turn finishes, branch switches,
   // or a tool that can change the worktree / index has just finished).
+  const isRightPanelVisible = !rightPanelCollapsed;
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0);
   const scheduleGitRefresh = (immediate = false) => {
+    if (!isRightPanelVisible || rightPanelTab !== 'git') return;
     gitStore.scheduleRefresh(effectiveWorkingDir, { immediate });
     setGitRefreshTrigger((n) => n + 1);
   };
@@ -6535,17 +6545,17 @@ export function Chat({
     };
   }, [effectiveWorkingDir, cwd]);
 
-  // 订阅项目全局 Git 状态，计算未提交代码更改数量（对齐提问历史角标）
+  // 订阅项目全局 Git 状态（仅在展开 Git 面板时触发冷启动主动刷新）
   const [gitProjectState, setGitProjectState] = useState<GitProjectState>(() =>
     gitStore.getState(effectiveWorkingDir),
   );
   useEffect(() => {
     setGitProjectState(gitStore.getState(effectiveWorkingDir));
-    if (effectiveWorkingDir) {
+    if (effectiveWorkingDir && isRightPanelVisible && rightPanelTab === 'git') {
       gitStore.scheduleRefresh(effectiveWorkingDir, { immediate: true });
     }
     return gitStore.subscribe(effectiveWorkingDir, setGitProjectState);
-  }, [effectiveWorkingDir]);
+  }, [effectiveWorkingDir, isRightPanelVisible, rightPanelTab]);
 
   const gitChangedCount = useMemo(() => {
     if (!gitProjectState || !gitProjectState.gitStatus) return 0;
@@ -6626,8 +6636,6 @@ export function Chat({
     if (isResizingRef.current) return;
     stageRef.current?.style.setProperty('--right-panel-width', `${rightPanelWidth}px`);
   });
-
-  const isRightPanelVisible = !rightPanelCollapsed;
 
   // Open Diff Tabs (VSCode style tabs for inspecting commit file diffs)
   const [internalDiffTabs, setInternalDiffTabs] = useState<OpenDiffTab[]>([]);
@@ -6920,6 +6928,12 @@ export function Chat({
       if (typeof row.seq === 'number') return row.seq;
     }
     return undefined;
+  }
+
+  /** 首行真实的后端整数 Display seq；绝不读取本地插值小数，也不越过旧历史头行错取后排 seq。 */
+  function oldestAuthenticServerSeq(rows: Array<{ serverSeq?: number }>): number | undefined {
+    const s = rows[0]?.serverSeq;
+    return typeof s === 'number' && Number.isInteger(s) && s > 0 ? s : undefined;
   }
 
   function nextOutlineOrdinal(): number {
@@ -7765,7 +7779,7 @@ export function Chat({
     // 偏移量可能已经归零（画布头部就在会话开头），但只要首行带服务端 seq，
     // 仍可用 `before_seq` 真正往前翻。旧实现直接 return，于是「向上展开」变成
     // 一个点了没反应的幽灵按钮。
-    const headSeqNow = messagesRef.current[0]?.seq;
+    const headSeqNow = oldestAuthenticServerSeq(messagesRef.current);
     if (!canLoadOlder({ hasOlder: true, offset: historyOffsetRef.current, headSeq: headSeqNow })) return;
     // Loading history is reader intent: stop the bottom-follow and keep the
     // pre-prepend reading anchor instead of letting the 350ms initial settle
@@ -7841,19 +7855,33 @@ export function Chat({
     const prevTop = root?.scrollTop ?? 0;
     const beforeLen = messagesRef.current.length;
     try {
-      // Prefer the identity-first cursor. `seq` comes from the server and is
-      // stable across pinned/paged windows; fall back to offset for old daemons.
-      const headSeq = messagesRef.current[0]?.seq;
-      let detail = headSeq != null && headSeq > 0
-        ? await pullSession({ projectHash, sessionId: id, mode: 'older', beforeSeq: headSeq, limit: page })
-        : await pullSession({ projectHash, sessionId: id, mode: 'older', offset: nextOffset, limit: page });
+      // 只把真实后端整数 `serverSeq` 当作 `before_seq` 游标；若失败或未翻出内容且存在历史 offset，自动回退按 offset 翻页
+      const headServerSeq = oldestAuthenticServerSeq(messagesRef.current);
+      let detail: SessionDetail | null = null;
+      if (headServerSeq !== undefined) {
+        try {
+          detail = await pullSession({
+            projectHash,
+            sessionId: id,
+            mode: 'older',
+            beforeSeq: headServerSeq,
+            limit: page,
+          });
+        } catch {
+          if (!(prevOffset > 0)) throw new Error('before_seq failed without offset fallback');
+          detail = null;
+        }
+      }
+      if (!detail) {
+        detail = await pullSession({ projectHash, sessionId: id, mode: 'older', offset: nextOffset, limit: page });
+      }
       if (
         activeIdRef.current !== id ||
         sessionGenerationRef.current !== generation
       ) return;
       let older = sessionMessagesToDisplay(detail.messages, detail.offset ?? nextOffset);
       // 若按 beforeSeq 没拉到消息，但已知上一轮历史 offset 仍大于首问，说明首行 seq 游标存在偏差，自动回退按 offset 补翻一次！
-      if (older.length === 0 && headSeq != null && prevOffset > 0) {
+      if (older.length === 0 && headServerSeq !== undefined && prevOffset > 0) {
         detail = await pullSession({ projectHash, sessionId: id, mode: 'older', offset: nextOffset, limit: page });
         if (
           activeIdRef.current !== id ||
@@ -8410,15 +8438,7 @@ export function Chat({
           onConfirm: async () => {
             setRightPanelCollapsed(false);
             setRightPanelTab('terminal');
-            requestAnimationFrame(() => {
-              window.dispatchEvent(
-                new CustomEvent('jeikcode:terminal:run_command', {
-                  detail: {
-                    command: 'jeikcode init --force',
-                  },
-                })
-              );
-            });
+            dispatchOrQueueTerminalCommand('jeikcode init --force');
           },
         });
       },
@@ -13642,8 +13662,87 @@ export function Chat({
   const canPageOlder = canLoadOlder({
     hasOlder,
     offset: historyOffsetRef.current,
-    headSeq: messages[0]?.seq,
+    headSeq: oldestAuthenticServerSeq(messages),
   });
+
+  // 按轮次一次性缓存复制正文映射与最后助手位置索引（O(N) 一次扫描），避免流式分片或状态变化时重复全量拼接
+  const { turnLastTexts, turnAllTexts, lastInTurnSet } = useMemo(() => {
+    const lastTexts = new Map<number, string>();
+    const allTexts = new Map<number, string>();
+    const lastInTurn = new Set<number>();
+
+    let start = -1;
+    let textParts: string[] = [];
+    let fallbackParts: string[] = [];
+    let lastToolName: string | null = null;
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role === 'assistant') {
+        if (start < 0) start = i;
+        for (const p of messages[i].parts) {
+          if (p.kind === 'text' && p.text.trim()) {
+            textParts.push(p.text);
+          } else if (p.kind === 'tool' && p.tool?.name) {
+            lastToolName = p.tool.name;
+          }
+        }
+        const raw = messageFullText(messages[i]);
+        if (raw) fallbackParts.push(raw);
+      } else if (messages[i].role === 'user') {
+        if (start >= 0) {
+          const targetList = textParts.length > 0 ? textParts : fallbackParts;
+          let lastText = targetList.length > 0 ? targetList[targetList.length - 1] : '';
+          if (targetList.length >= 2 && lastToolName && isTodoTool(lastToolName)) {
+            const post = targetList[targetList.length - 1];
+            const pre = targetList[targetList.length - 2];
+            const isAsymmetric =
+              pre.trim().length > post.trim().length &&
+              (pre.trim().length >= 150 || pre.trim().length >= post.trim().length * 2);
+            if (isAsymmetric) lastText = pre;
+          }
+          const allText = targetList.join('\n\n');
+          for (let j = start; j < i; j++) {
+            lastTexts.set(j, lastText);
+            allTexts.set(j, allText);
+          }
+          start = -1;
+          textParts = [];
+          fallbackParts = [];
+          lastToolName = null;
+        }
+      }
+    }
+    if (start >= 0) {
+      const targetList = textParts.length > 0 ? textParts : fallbackParts;
+      let lastText = targetList.length > 0 ? targetList[targetList.length - 1] : '';
+      if (targetList.length >= 2 && lastToolName && isTodoTool(lastToolName)) {
+        const post = targetList[targetList.length - 1];
+        const pre = targetList[targetList.length - 2];
+        const isAsymmetric =
+          pre.trim().length > post.trim().length &&
+          (pre.trim().length >= 150 || pre.trim().length >= post.trim().length * 2);
+        if (isAsymmetric) lastText = pre;
+      }
+      const allText = targetList.join('\n\n');
+      for (let j = start; j < messages.length; j++) {
+        lastTexts.set(j, lastText);
+        allTexts.set(j, allText);
+      }
+    }
+
+    let seenNonSystemAfter: string | undefined = undefined;
+    for (let k = messages.length - 1; k >= 0; k--) {
+      if (messages[k].role === 'assistant') {
+        if (seenNonSystemAfter === undefined || seenNonSystemAfter === 'user') {
+          lastInTurn.add(k);
+        }
+      }
+      if (messages[k].role !== 'system') {
+        seenNonSystemAfter = messages[k].role;
+      }
+    }
+
+    return { turnLastTexts: lastTexts, turnAllTexts: allTexts, lastInTurnSet: lastInTurn };
+  }, [messages]);
 
   return (
     <>
@@ -13714,91 +13813,6 @@ export function Chat({
         })()}
 
         {(() => {
-          // Pre-compute per-turn text for assistant messages: collect all text
-          // from consecutive assistant messages between two user messages, so
-          // the copy button can copy the entire LLM turn (not just one chunk).
-          // system messages are transparent — they don't end an assistant turn.
-          const turnTexts = new Map<number, string>();
-          // 计算每个回合的文本（区分最后回答与全部正文），供复制按钮使用。
-          const turnLastTexts = new Map<number, string>();
-          const turnAllTexts = new Map<number, string>();
-          {
-            let start = -1;
-            let textParts: string[] = [];
-            let fallbackParts: string[] = [];
-            let lastToolName: string | null = null;
-            for (let i = 0; i < messages.length; i++) {
-              if (messages[i].role === 'assistant') {
-                if (start < 0) start = i;
-                for (const p of messages[i].parts) {
-                  if (p.kind === 'text' && p.text.trim()) {
-                    textParts.push(p.text);
-                  } else if (p.kind === 'tool' && p.tool?.name) {
-                    lastToolName = p.tool.name;
-                  }
-                }
-                const raw = messageFullText(messages[i]);
-                if (raw) fallbackParts.push(raw);
-              } else if (messages[i].role === 'user') {
-                // Only a user message ends the current assistant turn.
-                if (start >= 0) {
-                  const targetList = textParts.length > 0 ? textParts : fallbackParts;
-                  let lastText = targetList.length > 0 ? targetList[targetList.length - 1] : '';
-                  // Todo 打勾拦截智能回锚（防误杀严密判定）：
-                  // 1. 本轮以 TodoWrite 工具收尾；
-                  // 2. 打勾前正文长度严格大于打勾后；
-                  // 3. 打勾前正文达到实质性规模（>= 150 字符）或字数是后者的 2 倍以上。
-                  if (targetList.length >= 2 && lastToolName && isTodoTool(lastToolName)) {
-                    const post = targetList[targetList.length - 1];
-                    const pre = targetList[targetList.length - 2];
-                    const isAsymmetric = pre.trim().length > post.trim().length && (pre.trim().length >= 150 || pre.trim().length >= post.trim().length * 2);
-                    if (isAsymmetric) {
-                      lastText = pre;
-                    }
-                  }
-                  const allText = targetList.join('\n\n');
-                  for (let j = start; j < i; j++) {
-                    turnLastTexts.set(j, lastText);
-                    turnAllTexts.set(j, allText);
-                  }
-                  start = -1;
-                  textParts = [];
-                  fallbackParts = [];
-                  lastToolName = null;
-                }
-              }
-              // role === 'system': transparent — do not flush the turn.
-            }
-            // Flush the last turn
-            if (start >= 0) {
-              const targetList = textParts.length > 0 ? textParts : fallbackParts;
-              let lastText = targetList.length > 0 ? targetList[targetList.length - 1] : '';
-              if (targetList.length >= 2 && lastToolName && isTodoTool(lastToolName)) {
-                const post = targetList[targetList.length - 1];
-                const pre = targetList[targetList.length - 2];
-                const isAsymmetric = pre.trim().length > post.trim().length && (pre.trim().length >= 150 || pre.trim().length >= post.trim().length * 2);
-                if (isAsymmetric) {
-                  lastText = pre;
-                }
-              }
-              const allText = targetList.join('\n\n');
-              for (let j = start; j < messages.length; j++) {
-                turnLastTexts.set(j, lastText);
-                turnAllTexts.set(j, allText);
-              }
-            }
-          }
-
-          // Helper: skip system messages when looking for the "next role".
-          // Needed so a trailing system notice doesn't hide the copy button
-          // on the real last AI reply of the turn.
-          function nextNonSystemRole(from: number): string | undefined {
-            for (let k = from; k < messages.length; k++) {
-              if (messages[k].role !== 'system') return messages[k].role;
-            }
-            return undefined;
-          }
-
           return visibleMessages.map(({ msg, origIdx }, idx) => {
             const isLast = idx === lastVisibleIdx;
             const setMatchRef = (el: HTMLElement | null) => { matchRefs.current[origIdx] = el; };
@@ -13907,26 +13921,20 @@ export function Chat({
             // a turn gets the copy button, so one user turn → one copy button.
             // 用 origIdx(原数组索引)查 turnTexts 与判断 isLastInTurn,
             // 因为这两者是基于完整 messages 序列算的。
-            const nextRole = nextNonSystemRole(origIdx + 1);
-            const isLastInTurn = nextRole === 'user' || nextRole === undefined;
+            const isLastInTurn = lastInTurnSet.has(origIdx);
             const userTs = precedingUserTs(messages, origIdx);
-            // Live bubble: wall-clock from this turn's user send → now.
-            // Intermediate tool results / thinking must not restart the clock.
+            // Live bubble: anchor passed down to leaf timer component.
             const currentSidForRow = sessionId ?? activeIdRef.current ?? '';
             const isCompactingRow =
               isCompacting || (!!currentSidForRow && compactingSessionsRef.current.has(currentSidForRow));
-            const liveFromUser =
+            const liveAnchor =
               isLastInTurn && busy && isLast
-                ? turnDurationMs(
-                    resolveLiveElapsedAnchor({
-                      compacting: isCompactingRow,
-                      compactionStartedAt,
-                      turnStartedAt,
-                      userTs,
-                      now: nowMs,
-                    }),
-                    nowMs,
-                  )
+                ? resolveLiveElapsedAnchor({
+                    compacting: isCompactingRow,
+                    compactionStartedAt,
+                    turnStartedAt,
+                    userTs,
+                  })
                 : undefined;
             const doneTotal = isLastInTurn && !busy
               ? turnTotalElapsedMs(userTs, msg.ts, msg.elapsedMs)
@@ -13945,7 +13953,7 @@ export function Chat({
                 searchRef={setMatchRef}
                 timeLabel={isLastInTurn ? timeLabel : undefined}
                 timeFull={isLastInTurn ? timeFull : undefined}
-                liveElapsedMs={liveFromUser}
+                liveAnchorMs={liveAnchor}
                 turnTotalMs={doneTotal}
                 isCompacting={isCompactingRow}
                 search={search}
@@ -13984,20 +13992,22 @@ export function Chat({
             lastRole,
           });
           if (!mode) return null;
-          const lastUserTs = [...messages].reverse().find((m) => m.role === 'user')?.ts;
-          const statusElapsedMs = busy
-            ? turnDurationMs(
-                resolveLiveElapsedAnchor({
-                  compacting: isCompactingCurrent,
-                  compactionStartedAt,
-                  turnStartedAt,
-                  userTs: lastUserTs,
-                  now: nowMs,
-                }),
-                nowMs,
-              )
+          let lastUserTs: number | undefined = undefined;
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'user') {
+              lastUserTs = messages[i].ts;
+              break;
+            }
+          }
+          const statusAnchor = busy
+            ? resolveLiveElapsedAnchor({
+                compacting: isCompactingCurrent,
+                compactionStartedAt,
+                turnStartedAt,
+                userTs: lastUserTs,
+              })
             : undefined;
-          return <StatusRow mode={mode} liveElapsedMs={statusElapsedMs} />;
+          return <StatusRow mode={mode} liveAnchorMs={statusAnchor} />;
         })()}
 
         {/* 排队中的消息：执行中输入、待当前回合结束后自动发送，卡片下方提供立即发送、转向、取消按钮。 */}

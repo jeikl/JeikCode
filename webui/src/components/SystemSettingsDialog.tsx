@@ -24,7 +24,9 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
   const { t, escUndoEnabled, setEscUndoEnabled } = useSettings();
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab || 'models');
   const [closeAction, setCloseAction] = useState<'ask' | 'tray' | 'quit'>('ask');
-  const [loading, setLoading] = useState(true);
+  const [desktopLoaded, setDesktopLoaded] = useState(false);
+  const [aboutLoaded, setAboutLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [appVersion, setAppVersion] = useState(bakedAppVersion());
@@ -38,12 +40,16 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
     { key: 'about', labelKey: 'settings.tabAbout', defaultLabel: '关于与版本', icon: 'ℹ️' },
   ];
 
+  // 仅当用户切换到桌面设置页签时再拉取，打开模型配置时零多余请求
   useEffect(() => {
+    if (activeTab !== 'desktop' || desktopLoaded) return;
     let cancelled = false;
+    setLoading(true);
     getDesktopSettings()
       .then((res) => {
-        if (!cancelled && res.close_action) {
-          setCloseAction(res.close_action);
+        if (!cancelled) {
+          if (res.close_action) setCloseAction(res.close_action);
+          setDesktopLoaded(true);
         }
       })
       .finally(() => {
@@ -53,21 +59,23 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeTab, desktopLoaded]);
 
   useEffect(() => {
+    if (activeTab !== 'about' || aboutLoaded) return;
     let cancelled = false;
     getHealth()
       .then((info) => {
         if (cancelled) return;
         const running = normalizeAppVersion(info.version);
         if (running) setAppVersion(running);
+        setAboutLoaded(true);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeTab, aboutLoaded]);
 
   async function handleSaveDesktopSettings() {
     if (saving) return;

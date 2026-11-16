@@ -25,6 +25,8 @@ export interface CanvasRecord {
   kind?: RecordKind;
   /** 会话内单调顺序号。旧行可能缺失，由 `normalizeCanvas` 从 sourceIndex 派生。 */
   seq?: number;
+  /** 后端真实下发的整数 Display seq（仅作 `before_seq` 分页游标，绝不写入本地插值小数）。 */
+  serverSeq?: number;
 
   role: 'user' | 'assistant' | 'system';
   parts: MsgPart[];

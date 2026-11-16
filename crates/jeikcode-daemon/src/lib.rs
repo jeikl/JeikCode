@@ -7211,24 +7211,41 @@ fn is_system_temp_dir(path: &std::path::Path) -> bool {
     false
 }
 
-/// List all projects (scans sessions directory)
+/// List all projects (scans sessions directory once)
 fn list_projects() -> std::io::Result<Vec<ProjectInfo>> {
     let sessions_root = NativeSessionManager::sessions_root();
     let scan = catalog_scan_in_root(&sessions_root)?;
     let active = active_catalog_location(&scan.entries);
-    list_projects_in_root(&sessions_root, active.as_ref())
+    Ok(list_projects_from_entries(
+        &sessions_root,
+        scan.entries,
+        active.as_ref(),
+    ))
 }
 
+#[cfg(test)]
 fn list_projects_in_root(
     sessions_root: &std::path::Path,
     active: Option<&jeikcode_capabilities::session::CatalogLocation>,
 ) -> std::io::Result<Vec<ProjectInfo>> {
     let scan = catalog_scan_in_root(sessions_root)?;
+    Ok(list_projects_from_entries(
+        sessions_root,
+        scan.entries,
+        active,
+    ))
+}
+
+fn list_projects_from_entries(
+    sessions_root: &std::path::Path,
+    raw_entries: Vec<jeikcode_capabilities::session::CatalogEntry>,
+    active: Option<&jeikcode_capabilities::session::CatalogLocation>,
+) -> Vec<ProjectInfo> {
     let mut by_project_entries = std::collections::BTreeMap::<
         String,
         Vec<jeikcode_capabilities::session::CatalogEntry>,
     >::new();
-    for entry in scan.entries {
+    for entry in raw_entries {
         if is_system_temp_dir(&entry.working_dir) {
             continue;
         }
@@ -7281,7 +7298,7 @@ fn list_projects_in_root(
         });
     }
     projects.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
-    Ok(projects)
+    projects
 }
 
 /// 根据项目哈希查找关联的项目工作目录
@@ -7466,22 +7483,39 @@ where
 
 /// List sessions for a project
 fn list_sessions(project_hash: &str) -> std::io::Result<Vec<SessionSummary>> {
-    let scan = catalog_scan_in_root(&NativeSessionManager::sessions_root())?;
+    let sessions_root = NativeSessionManager::sessions_root();
+    let scan = catalog_scan_in_root(&sessions_root)?;
     let active = active_catalog_location(&scan.entries);
-    list_sessions_in_root(
-        &NativeSessionManager::sessions_root(),
+    Ok(list_sessions_from_entries(
+        &sessions_root,
+        scan.entries,
         project_hash,
         active.as_ref(),
-    )
+    ))
 }
 
+#[cfg(test)]
 fn list_sessions_in_root(
     sessions_root: &std::path::Path,
     project_hash: &str,
     active: Option<&jeikcode_capabilities::session::CatalogLocation>,
 ) -> std::io::Result<Vec<SessionSummary>> {
-    let mut entries: Vec<_> = catalog_scan_in_root(sessions_root)?
-        .entries
+    let scan = catalog_scan_in_root(sessions_root)?;
+    Ok(list_sessions_from_entries(
+        sessions_root,
+        scan.entries,
+        project_hash,
+        active,
+    ))
+}
+
+fn list_sessions_from_entries(
+    sessions_root: &std::path::Path,
+    raw_entries: Vec<jeikcode_capabilities::session::CatalogEntry>,
+    project_hash: &str,
+    active: Option<&jeikcode_capabilities::session::CatalogLocation>,
+) -> Vec<SessionSummary> {
+    let mut entries: Vec<_> = raw_entries
         .into_iter()
         .filter(|entry| {
             entry.project_bucket == project_hash
@@ -7490,25 +7524,43 @@ fn list_sessions_in_root(
         .collect();
     NativeSessionManager::collapse_fork_lineages(&mut entries);
     crate::legacy_convert::repair_catalog_names_for_display_in_root(sessions_root, &mut entries);
-    Ok(entries
+    entries
         .iter()
         .map(catalog_entry_to_session_summary)
-        .collect())
+        .collect()
 }
 
 /// List all sessions across all projects
 fn list_all_sessions() -> std::io::Result<Vec<SessionMetaWithProject>> {
-    let scan = catalog_scan_in_root(&NativeSessionManager::sessions_root())?;
+    let sessions_root = NativeSessionManager::sessions_root();
+    let scan = catalog_scan_in_root(&sessions_root)?;
     let active = active_catalog_location(&scan.entries);
-    list_all_sessions_in_root(&NativeSessionManager::sessions_root(), active.as_ref())
+    Ok(list_all_sessions_from_entries(
+        &sessions_root,
+        scan.entries,
+        active.as_ref(),
+    ))
 }
 
+#[cfg(test)]
 fn list_all_sessions_in_root(
     sessions_root: &std::path::Path,
     active: Option<&jeikcode_capabilities::session::CatalogLocation>,
 ) -> std::io::Result<Vec<SessionMetaWithProject>> {
-    let mut entries: Vec<_> = catalog_scan_in_root(sessions_root)?
-        .entries
+    let scan = catalog_scan_in_root(sessions_root)?;
+    Ok(list_all_sessions_from_entries(
+        sessions_root,
+        scan.entries,
+        active,
+    ))
+}
+
+fn list_all_sessions_from_entries(
+    sessions_root: &std::path::Path,
+    raw_entries: Vec<jeikcode_capabilities::session::CatalogEntry>,
+    active: Option<&jeikcode_capabilities::session::CatalogLocation>,
+) -> Vec<SessionMetaWithProject> {
+    let mut entries: Vec<_> = raw_entries
         .into_iter()
         .filter(|entry| catalog_entry_is_visible(sessions_root, entry, active))
         .collect();
@@ -7516,7 +7568,7 @@ fn list_all_sessions_in_root(
     // Bound snapshot hydration to the same newest-50 surface the API returns.
     entries.truncate(50);
     crate::legacy_convert::repair_catalog_names_for_display_in_root(sessions_root, &mut entries);
-    Ok(entries.iter().map(catalog_entry_with_project).collect())
+    entries.iter().map(catalog_entry_with_project).collect()
 }
 
 /// Resolve a (possibly short) session id to its full record by scanning bucket
@@ -7627,6 +7679,22 @@ async fn serve_webui_index(
                     return response;
                 }
             }
+        }
+    }
+    webui::serve_webui(uri).await
+}
+
+/// SPA 静态资源回退：同时纠正用户误输入的 `/token=<value>` 路径，重定向为 `/?token=<value>` 触发正常交接鉴权。
+async fn serve_webui_fallback(uri: axum::http::Uri) -> axum::response::Response {
+    if let Some(raw_token) = uri.path().strip_prefix("/token=") {
+        let trimmed = raw_token.trim().trim_matches('/');
+        if !trimmed.is_empty()
+            && trimmed
+                .chars()
+                .all(|c| !c.is_whitespace() && c != '?' && c != '#')
+        {
+            return axum::response::Redirect::temporary(&format!("/?token={trimmed}"))
+                .into_response();
         }
     }
     webui::serve_webui(uri).await
@@ -7898,7 +7966,7 @@ async fn get_project_sessions(Path(hash): Path<String>) -> impl IntoResponse {
 /// only a short id and must find which project bucket owns it without the
 /// 50-session cap of `/sessions`.
 async fn resolve_session(Path(id): Path<String>) -> impl IntoResponse {
-    match resolve_session_by_id(&id) {
+    match run_session_catalog_io(move || resolve_session_by_id(&id)).await {
         Ok(Some(s)) => Json(s).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, Json("Session not found")).into_response(),
         Err(e) => {
@@ -8026,7 +8094,7 @@ async fn get_session_freshness(
 const SESSION_DETAIL_WARN_BYTES: usize = 8 * 1024 * 1024;
 
 /// Stable, dependency-free ETag for a JSON response body.
-fn response_etag(bytes: &[u8]) -> String {
+pub(crate) fn response_etag(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -8171,20 +8239,60 @@ async fn get_session_detail(
     Query(query): Query<SessionDetailQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    let active_ids = state.active_chats.active_session_ids().await;
+    let turn_running = active_ids.iter().any(|sid| sid == &id)
+        || crate::native_live::live_running_session_id().as_deref() == Some(id.as_str())
+        || jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+            .live_turn_session_ids()
+            .iter()
+            .any(|sid| sid == &id);
+    let current_operation = if turn_running {
+        state
+            .active_chats
+            .admitted_user_for_session(&id)
+            .await
+            .and_then(|user| user.client_input_id)
+    } else {
+        None
+    };
+    let daemon_instance_id = state.daemon_instance_id.to_string();
+
+    tokio::task::spawn_blocking(move || {
+        build_session_detail_response(
+            &hash,
+            &id,
+            &query,
+            &headers,
+            turn_running,
+            current_operation,
+            &daemon_instance_id,
+        )
+    })
+    .await
+    .unwrap_or_else(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to load session: {e}")),
+        )
+            .into_response()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_session_detail_response(
+    hash: &str,
+    id: &str,
+    query: &SessionDetailQuery,
+    headers: &HeaderMap,
+    turn_running: bool,
+    current_operation: Option<String>,
+    daemon_instance_id: &str,
+) -> axum::response::Response {
+    let hash = hash.to_string();
+    let id = id.to_string();
     match crate::legacy_convert::load_catalog_session_view_in_project(&hash, &id) {
         Ok(Some(session)) => {
             let _ = crate::native_live::take_session_draft(&id);
-            let turn_running = state
-                .active_chats
-                .active_session_ids()
-                .await
-                .iter()
-                .any(|sid| sid == &id)
-                || crate::native_live::live_running_session_id().as_deref() == Some(id.as_str())
-                || jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                    .live_turn_session_ids()
-                    .iter()
-                    .any(|sid| sid == &id);
             let display_manager =
                 NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(&hash));
             let snapshot_last_turn = session
@@ -8195,15 +8303,6 @@ async fn get_session_detail(
                 .map(|stat| stat.turn_id)
                 .max()
                 .unwrap_or(0);
-            let current_operation = if turn_running {
-                state
-                    .active_chats
-                    .admitted_user_for_session(&id)
-                    .await
-                    .and_then(|user| user.client_input_id)
-            } else {
-                None
-            };
             // First-paint `tail=N`: use the v4 offset index to seek directly into
             // the tail. Only for an idle, settled v4 session; running sessions need
             // the snapshot-tail overlay and keep the full read path.
@@ -8500,7 +8599,7 @@ async fn get_session_detail(
                 origin: session.meta.origin,
                 todos,
                 todos_revision,
-                daemon_instance_id: state.daemon_instance_id.to_string(),
+                daemon_instance_id: daemon_instance_id.to_string(),
             };
             session_detail_response(&headers, detail)
         }
@@ -8538,7 +8637,7 @@ async fn get_session_detail(
                 origin: jeikcode_capabilities::session::SessionOrigin::Manual,
                 todos: Vec::new(),
                 todos_revision: 0,
-                daemon_instance_id: state.daemon_instance_id.to_string(),
+                daemon_instance_id: daemon_instance_id.to_string(),
             };
             session_detail_response(&headers, detail)
         }
@@ -9785,6 +9884,151 @@ async fn get_all_sessions() -> impl IntoResponse {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(msg)).into_response()
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct BootstrapResponse {
+    project: ProjectStateResponse,
+    projects: Vec<ProjectInfo>,
+    sessions: Vec<SessionMetaWithProject>,
+    sidebar: sidebar_projects::SidebarView,
+    active_chat_ids: Vec<String>,
+    runtime_sessions: Vec<RuntimeSessionRow>,
+    approval_mode: live_api::ApprovalModeResp,
+    models: Vec<ModelInfo>,
+    health: HealthResponse,
+}
+
+async fn collect_active_chat_ids(state: &AppState) -> Vec<String> {
+    use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
+    use std::collections::HashSet;
+
+    let mut ids: HashSet<String> = state
+        .active_chats
+        .active_session_ids()
+        .await
+        .into_iter()
+        .collect();
+    if let Some(live_id) = crate::native_live::live_running_session_id() {
+        ids.insert(live_id);
+    }
+    for id in SessionRuntimeRegistry::global().live_turn_session_ids() {
+        ids.insert(id);
+    }
+    for id in crate::controller_running_session_ids() {
+        ids.insert(id);
+    }
+    for id in crate::compaction_running_session_ids() {
+        ids.insert(id);
+    }
+    ids.into_iter().collect()
+}
+
+fn collect_runtime_session_rows() -> Vec<RuntimeSessionRow> {
+    use jeikcode_coding::session_runtime_registry::{RuntimeActivity, SessionRuntimeRegistry};
+
+    fn activity_label(activity: RuntimeActivity) -> &'static str {
+        match activity {
+            RuntimeActivity::Starting => "starting",
+            RuntimeActivity::Ready => "ready",
+            RuntimeActivity::Running => "running",
+            RuntimeActivity::WaitingApproval => "waiting_approval",
+            RuntimeActivity::WaitingUserInput => "waiting_user_input",
+            RuntimeActivity::Reconfiguring => "reconfiguring",
+            RuntimeActivity::Stopping => "stopping",
+            RuntimeActivity::Stopped => "stopped",
+            RuntimeActivity::Failed => "failed",
+        }
+    }
+
+    SessionRuntimeRegistry::global()
+        .list_all()
+        .into_iter()
+        .map(|entry| RuntimeSessionRow {
+            session_id: entry.session_id,
+            working_dir: entry.working_dir.to_string_lossy().into_owned(),
+            activity: activity_label(entry.activity).to_string(),
+            last_terminal: entry.last_terminal,
+            terminal_seq: entry.terminal_seq,
+        })
+        .collect()
+}
+
+/// GET /api/bootstrap — 聚合首屏冷启动必需基础数据（单次请求 + 单次 catalog 扫描），大幅压低首屏并发数。
+async fn bootstrap_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let catalog_fut = run_session_catalog_io(|| {
+        let sessions_root = NativeSessionManager::sessions_root();
+        let scan = catalog_scan_in_root(&sessions_root)?;
+        let active = active_catalog_location(&scan.entries);
+        let projects =
+            list_projects_from_entries(&sessions_root, scan.entries.clone(), active.as_ref());
+        let sessions =
+            list_all_sessions_from_entries(&sessions_root, scan.entries, active.as_ref());
+        Ok((projects, sessions))
+    });
+
+    let config_sidebar_fut = tokio::task::spawn_blocking(|| {
+        let sidebar = sidebar_projects::snapshot();
+        let models = Config::load(&Config::default_path())
+            .map(|c| models_from_config(&c))
+            .unwrap_or_default();
+        let runtime_rows = collect_runtime_session_rows();
+        let binary_hash = executable_sha256();
+        (sidebar, models, runtime_rows, binary_hash)
+    });
+
+    let project_fut = async {
+        let proj = state.project.read().await;
+        ProjectStateResponse {
+            working_dir: proj.working_dir.clone(),
+            previous_dir: proj.previous_dir.clone(),
+            recent_dirs: proj.recent_dirs.clone(),
+            name: proj.name.clone(),
+            project_hash: hash_path(&proj.working_dir),
+        }
+    };
+
+    let (catalog_res, cfg_res, project, active_chat_ids) = tokio::join!(
+        catalog_fut,
+        config_sidebar_fut,
+        project_fut,
+        collect_active_chat_ids(&state),
+    );
+
+    let (projects, sessions) = catalog_res.unwrap_or_default();
+    let (sidebar, models, runtime_sessions, binary_hash) = cfg_res.unwrap_or_else(|_| {
+        (
+            sidebar_projects::SidebarView {
+                hidden: Vec::new(),
+                pinned: Vec::new(),
+            },
+            Vec::new(),
+            Vec::new(),
+            "unknown",
+        )
+    });
+
+    Json(BootstrapResponse {
+        project,
+        projects,
+        sessions,
+        sidebar,
+        active_chat_ids,
+        runtime_sessions,
+        approval_mode: live_api::ApprovalModeResp {
+            ok: true,
+            mode: live_api::live_session_approval_mode(None),
+            global: live_api::live_global_mode_enabled(),
+        },
+        models,
+        health: HealthResponse {
+            status: "ok",
+            version: env!("CARGO_PKG_VERSION"),
+            service: "jeikcode-daemon",
+            binary_hash,
+            instance_id: state.daemon_instance_id.to_string(),
+        },
+    })
 }
 
 /// POST /sessions - Create a new session
@@ -16021,13 +16265,20 @@ struct ChatWatchQuery {
 ///
 /// Emits the same `ChatEvent` JSON SSE frames as `POST /chat`, so the WebUI can
 /// stream progress for OpenAI/API-started turns instead of only polling history.
-async fn chat_watch(
-    State(state): State<AppState>,
-    axum::extract::Query(q): axum::extract::Query<ChatWatchQuery>,
-) -> axum::response::Response {
+struct PreparedChatWatch {
+    session_id: String,
+    head_json: Vec<String>,
+    rx: mpsc::UnboundedReceiver<(u64, ChatEvent)>,
+    operation_id: Option<String>,
+}
+
+async fn prepare_chat_watch(
+    state: &AppState,
+    q: &ChatWatchQuery,
+) -> Result<PreparedChatWatch, axum::response::Response> {
     let session_id = q.session_id.trim().to_string();
     if session_id.is_empty() {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiError {
                 success: false,
@@ -16036,7 +16287,7 @@ async fn chat_watch(
                 retryable: Some(false),
             }),
         )
-            .into_response();
+            .into_response());
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<(u64, ChatEvent)>();
@@ -16285,10 +16536,7 @@ async fn chat_watch(
         }
     }
 
-    let active_conns = state.active_connections.clone();
-    active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let head_session_id = session_id.clone();
-    let live_session_id = session_id.clone();
     // Client correlation id of the running turn (= persisted user message id).
     // Stamped on terminal frames so a late terminal for a displaced turn is
     // ignorable by the reattached browser.
@@ -16297,7 +16545,6 @@ async fn chat_watch(
         .admitted_user_for_session(&session_id)
         .await
         .and_then(|user| user.client_input_id);
-    let live_operation_id = watch_operation_id.clone();
     // live 与 replay 共用同一个 session 级 seq；replay 布尔只描述送达路径。
     // 前端按 seq 只应用一次，live 追加、replay 替换。
     let replay_len = replay_head.len();
@@ -16314,11 +16561,34 @@ async fn chat_watch(
             )
         }))
         .collect();
-    let head_stream = futures::stream::iter(head_json).map(|json| {
+    Ok(PreparedChatWatch {
+        session_id,
+        head_json,
+        rx,
+        operation_id: watch_operation_id,
+    })
+}
+
+/// GET /chat/watch?session_id=… — reattach to a turn owned by another client (SSE fallback).
+async fn chat_watch(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ChatWatchQuery>,
+) -> axum::response::Response {
+    let prepared = match prepare_chat_watch(&state, &q).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+
+    let active_conns = state.active_connections.clone();
+    active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let live_session_id = prepared.session_id.clone();
+    let live_operation_id = prepared.operation_id.clone();
+
+    let head_stream = futures::stream::iter(prepared.head_json).map(|json| {
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json))
     });
 
-    let live_stream = UnboundedReceiverStream::new(rx).map(move |(seq, event)| {
+    let live_stream = UnboundedReceiverStream::new(prepared.rx).map(move |(seq, event)| {
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
             chat_watch_frame_json(
                 &event,
@@ -16352,6 +16622,193 @@ async fn chat_watch(
         axum::http::HeaderValue::from_static("no"),
     );
     resp
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum StreamWsClientCmd {
+    Watch {
+        session_id: String,
+        #[serde(default)]
+        standby: bool,
+        #[serde(default)]
+        after_seq: Option<i64>,
+        #[serde(default)]
+        client_id: Option<String>,
+    },
+    Unwatch {
+        session_id: String,
+    },
+    Ping,
+}
+
+fn wrap_chat_ws_frame(session_id_json: &str, raw_event_json: &str) -> String {
+    format!(r#"{{"channel":"chat","session_id":{session_id_json},"event":{raw_event_json}}}"#)
+}
+
+/// GET /stream/ws — 单连接 WebSocket 多路复用通道，同时承载 `/events` 全局事件与按需 `watch/unwatch` 的会话流。
+///
+/// 彻底摆脱 HTTP/1.1 同源 6 连接上限导致的请求排队卡死。
+async fn stream_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_stream_ws_socket(socket, state))
+}
+
+async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: AppState) {
+    use axum::extract::ws::Message as WsMessage;
+    use futures::{SinkExt, StreamExt};
+
+    let active_conns = state.active_connections.clone();
+    active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _conn_guard = SseConnectionGuard(active_conns);
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<WsMessage>();
+
+    let writer_task = tokio::spawn(async move {
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                maybe_msg = out_rx.recv() => {
+                    match maybe_msg {
+                        Some(msg) => {
+                            if ws_sender.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    if ws_sender.send(WsMessage::Ping(Vec::new())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // 启动全局增量事件转发（首帧与 /events 一致推送 sync）
+    let global_out = out_tx.clone();
+    let global_task = tokio::spawn(async move {
+        let _ = global_out.send(WsMessage::Text(
+            r#"{"channel":"global","event":{"type":"sync"}}"#.to_string(),
+        ));
+        let mut rx = global_events().subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if let Ok(ev_json) = serde_json::to_string(&event) {
+                        let frame = format!(r#"{{"channel":"global","event":{ev_json}}}"#);
+                        if global_out.send(WsMessage::Text(frame)).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let mut watch_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut watch_gen_counter: u64 = 0;
+
+    while let Some(Ok(msg)) = ws_receiver.next().await {
+        match msg {
+            WsMessage::Text(text) => {
+                let Ok(cmd) = serde_json::from_str::<StreamWsClientCmd>(&text) else {
+                    continue;
+                };
+                match cmd {
+                    StreamWsClientCmd::Ping => {
+                        let _ = out_tx.send(WsMessage::Text(r#"{"channel":"pong"}"#.to_string()));
+                    }
+                    StreamWsClientCmd::Unwatch { session_id } => {
+                        let sid = session_id.trim();
+                        if let Some(handle) = watch_tasks.remove(sid) {
+                            handle.abort();
+                        }
+                    }
+                    StreamWsClientCmd::Watch {
+                        session_id,
+                        standby,
+                        after_seq,
+                        client_id,
+                    } => {
+                        let sid = session_id.trim().to_string();
+                        if sid.is_empty() {
+                            continue;
+                        }
+                        if let Some(prev) = watch_tasks.remove(&sid) {
+                            prev.abort();
+                        }
+                        watch_gen_counter = watch_gen_counter.wrapping_add(1);
+                        let q = ChatWatchQuery {
+                            session_id: sid.clone(),
+                            standby,
+                            after_seq,
+                            client_id,
+                        };
+                        match prepare_chat_watch(&state, &q).await {
+                            Ok(mut prepared) => {
+                                let sid_json = serde_json::to_string(&prepared.session_id)
+                                    .unwrap_or_else(|_| "\"\"".to_string());
+                                for head in &prepared.head_json {
+                                    let frame = wrap_chat_ws_frame(&sid_json, head);
+                                    if out_tx.send(WsMessage::Text(frame)).is_err() {
+                                        break;
+                                    }
+                                }
+                                let pump_out = out_tx.clone();
+                                let live_sid = prepared.session_id.clone();
+                                let live_op_id = prepared.operation_id.clone();
+                                let handle = tokio::spawn(async move {
+                                    while let Some((seq, event)) = prepared.rx.recv().await {
+                                        let ev_json = chat_watch_frame_json(
+                                            &event,
+                                            &live_sid,
+                                            Some(seq),
+                                            false,
+                                            live_op_id.as_deref(),
+                                        );
+                                        let frame = wrap_chat_ws_frame(&sid_json, &ev_json);
+                                        if pump_out.send(WsMessage::Text(frame)).is_err() {
+                                            return;
+                                        }
+                                    }
+                                    let ended = format!(
+                                        r#"{{"channel":"chat","session_id":{sid_json},"ended":true}}"#
+                                    );
+                                    let _ = pump_out.send(WsMessage::Text(ended));
+                                });
+                                watch_tasks.insert(sid, handle);
+                            }
+                            Err(_) => {
+                                let sid_json = serde_json::to_string(&sid)
+                                    .unwrap_or_else(|_| "\"\"".to_string());
+                                let ended = format!(
+                                    r#"{{"channel":"chat","session_id":{sid_json},"ended":true,"error":"invalid_session"}}"#
+                                );
+                                let _ = out_tx.send(WsMessage::Text(ended));
+                            }
+                        }
+                    }
+                }
+            }
+            WsMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    for (_, handle) in watch_tasks {
+        handle.abort();
+    }
+    global_task.abort();
+    writer_task.abort();
 }
 
 /// POST /chat/stop - Stop a running chat session
@@ -19022,34 +19479,7 @@ async fn chat_steer(
 
 /// GET /chat/active - Return list of session IDs currently generating
 async fn active_chat_sessions(State(state): State<AppState>) -> impl IntoResponse {
-    use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
-    use std::collections::HashSet;
-
-    let mut ids: HashSet<String> = state
-        .active_chats
-        .active_session_ids()
-        .await
-        .into_iter()
-        .collect();
-    if let Some(live_id) = crate::native_live::live_running_session_id() {
-        ids.insert(live_id);
-    }
-    // Registry `Starting` / handle-less rows are view subscriptions (GET /live
-    // `subscribe_or_empty`, InputAccepted before bind). They are not occupancy —
-    // including them made WebUI keep a stop square and sidebar spinner after the
-    // background turn had already finished, then rehydrate on every session switch.
-    for id in SessionRuntimeRegistry::global().live_turn_session_ids() {
-        ids.insert(id);
-    }
-    // `/loop` / `/goal` 在两次唤醒之间没有执行中的回合，但控制器还挂着：
-    // 对客户端而言这也是「正在干活」，否则按钮会在两轮之间闪回发送态。
-    for id in crate::controller_running_session_ids() {
-        ids.insert(id);
-    }
-    for id in crate::compaction_running_session_ids() {
-        ids.insert(id);
-    }
-    Json(ids.into_iter().collect::<Vec<_>>())
+    Json(collect_active_chat_ids(&state).await)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -19162,7 +19592,7 @@ async fn chat_runtime(
     .into_response()
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct RuntimeSessionRow {
     session_id: String,
     working_dir: String,
@@ -19358,34 +19788,7 @@ async fn get_notify_focus() -> impl IntoResponse {
 
 /// GET /runtime/sessions — live runners with activity (OpenCode-style registry view).
 async fn runtime_sessions() -> impl IntoResponse {
-    use jeikcode_coding::session_runtime_registry::{RuntimeActivity, SessionRuntimeRegistry};
-
-    fn activity_label(activity: RuntimeActivity) -> &'static str {
-        match activity {
-            RuntimeActivity::Starting => "starting",
-            RuntimeActivity::Ready => "ready",
-            RuntimeActivity::Running => "running",
-            RuntimeActivity::WaitingApproval => "waiting_approval",
-            RuntimeActivity::WaitingUserInput => "waiting_user_input",
-            RuntimeActivity::Reconfiguring => "reconfiguring",
-            RuntimeActivity::Stopping => "stopping",
-            RuntimeActivity::Stopped => "stopped",
-            RuntimeActivity::Failed => "failed",
-        }
-    }
-
-    let rows: Vec<RuntimeSessionRow> = SessionRuntimeRegistry::global()
-        .list_all()
-        .into_iter()
-        .map(|entry| RuntimeSessionRow {
-            session_id: entry.session_id,
-            working_dir: entry.working_dir.to_string_lossy().into_owned(),
-            activity: activity_label(entry.activity).to_string(),
-            last_terminal: entry.last_terminal,
-            terminal_seq: entry.terminal_seq,
-        })
-        .collect();
-    Json(rows)
+    Json(collect_runtime_session_rows())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -22191,7 +22594,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         // does the one-time-token → HttpOnly-cookie handoff (CWE-598); the
         // fallback serves SPA routes/assets and never carries a token.
         .route("/", axum::routing::get(serve_webui_index))
-        .fallback(webui::serve_webui);
+        .fallback(serve_webui_fallback);
 
     // 受保护路由：所有数据/API 端点。仅 webui 模式（enforce_token=true）强制 token 鉴权；
     // 独立 daemon/VSCode（enforce_token=false）中间件直接放行（见 auth_token.rs）。
@@ -22304,6 +22707,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/chat/pending", get(chat_pending))
         // Reattach to a turn started by another client (OpenAI API / another tab).
         .route("/chat/watch", get(chat_watch))
+        .route("/stream/ws", get(stream_ws_handler))
+        .route("/api/bootstrap", get(bootstrap_handler))
         // 跨实例增量推送（会话行/活动/待交互卡片）——所有实例共用的唯一全局信道。
         // 经 helper 挂载：与路由级测试共用同一份定义。
         .merge(with_global_events_route(Router::<AppState>::new()))
@@ -28425,5 +28830,18 @@ mod client_identity_tests {
         annotate_client_input_ids_with(&mut rows, &map);
         assert_eq!(rows[0].client_input_id.as_deref(), Some("client-steer-1"));
         assert_eq!(rows[1].client_input_id, None);
+    }
+
+    #[tokio::test]
+    async fn token_path_fallback_redirects_to_query_token() {
+        let uri: axum::http::Uri = "/token=abc-123-xyz".parse().unwrap();
+        let resp = serve_webui_fallback(uri).await;
+        assert!(resp.status().is_redirection());
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/?token=abc-123-xyz")
+        );
     }
 }

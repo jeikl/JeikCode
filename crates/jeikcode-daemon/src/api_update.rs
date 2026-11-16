@@ -1,13 +1,16 @@
 use anyhow::Result;
 use axum::{
     extract::{Query, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::AppState;
 use jeikcode_coding::config_sync::{
@@ -46,6 +49,12 @@ impl UpdateChannel {
 pub struct UpdateCheckQuery {
     #[serde(default)]
     pub channel: Option<String>,
+    /// 轻量角标检查模式：跳过庞大的全量历史版本与更新说明正文，响应压至 < 1 KB
+    #[serde(default)]
+    pub summary: Option<bool>,
+    /// 强制穿透进程内 TTL 缓存（供用户手动点击“检查更新”时即时拉取最新）
+    #[serde(default)]
+    pub refresh: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -401,33 +410,79 @@ async fn resolve_desktop_installer_url(version: &str) -> Option<String> {
     }
 }
 
-/// GET /api/update/check
-pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoResponse {
-    let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let is_desktop = is_desktop_environment();
-    let channel = match query.channel.as_deref() {
-        Some("beta") => UpdateChannel::Beta,
-        Some("stable") => UpdateChannel::Stable,
-        _ => UpdateChannel::default(),
-    };
+const UPDATE_CHECK_CACHE_TTL: Duration = Duration::from_secs(600);
 
-    // 离线/内网隔离模式下，直接返回当前版本且无新版，绝不产生外网探测请求
-    if jeikcode_config::config::offline::is_offline_active()
-        || jeikcode_config::config::runtime_state::is_dead()
-    {
-        return Json(UpdateCheckResponse {
-            current_version: current_version.clone(),
-            latest_version: current_version,
-            has_update: false,
-            is_desktop,
-            release_notes: None,
-            download_url: None,
-            released_at: None,
-            channel: channel.as_str().to_string(),
-            versions: Vec::new(),
-        });
+#[derive(Clone)]
+struct CachedUpdateCheck {
+    fetched_at: Instant,
+    response: UpdateCheckResponse,
+}
+
+fn update_check_cache() -> &'static tokio::sync::Mutex<HashMap<(u8, bool), CachedUpdateCheck>> {
+    static CACHE: OnceLock<tokio::sync::Mutex<HashMap<(u8, bool), CachedUpdateCheck>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
+fn update_check_inflight_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn project_update_response(
+    mut resp: UpdateCheckResponse,
+    summary_only: bool,
+) -> UpdateCheckResponse {
+    if summary_only {
+        resp.release_notes = None;
+        resp.versions.clear();
     }
+    resp
+}
 
+fn build_update_check_http_response(
+    headers: &HeaderMap,
+    payload: UpdateCheckResponse,
+) -> axum::response::Response {
+    let body = match serde_json::to_vec(&payload) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let etag = crate::response_etag(&body);
+    let not_modified = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',').any(|cand| {
+                let cand = cand.trim();
+                cand == "*"
+                    || cand == etag
+                    || cand.strip_prefix("W/").is_some_and(|weak| weak == etag)
+            })
+        });
+    if not_modified {
+        let mut resp = StatusCode::NOT_MODIFIED.into_response();
+        if let Ok(val) = HeaderValue::from_str(&etag) {
+            resp.headers_mut().insert(header::ETAG, val);
+        }
+        return resp;
+    }
+    let mut resp = axum::response::Response::new(axum::body::Body::from(body));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    if let Ok(val) = HeaderValue::from_str(&etag) {
+        resp.headers_mut().insert(header::ETAG, val);
+    }
+    resp
+}
+
+async fn fetch_uncached_update_check(
+    channel: UpdateChannel,
+    is_desktop: bool,
+    current_version: String,
+) -> UpdateCheckResponse {
     let client = create_update_client();
 
     let mut latest_version = String::new();
@@ -522,7 +577,7 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
     let has_update =
         !latest_version.is_empty() && compare_versions(&latest_version, &current_version);
 
-    Json(UpdateCheckResponse {
+    UpdateCheckResponse {
         current_version,
         latest_version,
         has_update,
@@ -532,7 +587,90 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
         released_at,
         channel: channel.as_str().to_string(),
         versions,
-    })
+    }
+}
+
+/// GET /api/update/check
+pub async fn check_update(
+    headers: HeaderMap,
+    Query(query): Query<UpdateCheckQuery>,
+) -> impl IntoResponse {
+    let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let is_desktop = is_desktop_environment();
+    let channel = match query.channel.as_deref() {
+        Some("beta") => UpdateChannel::Beta,
+        Some("stable") => UpdateChannel::Stable,
+        _ => UpdateChannel::default(),
+    };
+    let summary_only = query.summary.unwrap_or(false);
+    let force_refresh = query.refresh.unwrap_or(false);
+
+    // 离线/内网隔离模式下，直接返回当前版本且无新版，绝不产生外网探测请求
+    if jeikcode_config::config::offline::is_offline_active()
+        || jeikcode_config::config::runtime_state::is_dead()
+    {
+        return build_update_check_http_response(
+            &headers,
+            UpdateCheckResponse {
+                current_version: current_version.clone(),
+                latest_version: current_version,
+                has_update: false,
+                is_desktop,
+                release_notes: None,
+                download_url: None,
+                released_at: None,
+                channel: channel.as_str().to_string(),
+                versions: Vec::new(),
+            },
+        );
+    }
+
+    let cache_key = (
+        match channel {
+            UpdateChannel::Stable => 0u8,
+            UpdateChannel::Beta => 1u8,
+        },
+        is_desktop,
+    );
+
+    if !force_refresh {
+        let guard = update_check_cache().lock().await;
+        if let Some(hit) = guard.get(&cache_key) {
+            if hit.fetched_at.elapsed() < UPDATE_CHECK_CACHE_TTL {
+                return build_update_check_http_response(
+                    &headers,
+                    project_update_response(hit.response.clone(), summary_only),
+                );
+            }
+        }
+    }
+
+    // 单飞合并：多标签页同时打开时只放行一次外部 release 请求，其余等待复用结果
+    let _inflight = update_check_inflight_lock().lock().await;
+    if !force_refresh {
+        let guard = update_check_cache().lock().await;
+        if let Some(hit) = guard.get(&cache_key) {
+            if hit.fetched_at.elapsed() < UPDATE_CHECK_CACHE_TTL {
+                return build_update_check_http_response(
+                    &headers,
+                    project_update_response(hit.response.clone(), summary_only),
+                );
+            }
+        }
+    }
+
+    let fresh = fetch_uncached_update_check(channel, is_desktop, current_version).await;
+    if !fresh.latest_version.is_empty() {
+        update_check_cache().lock().await.insert(
+            cache_key,
+            CachedUpdateCheck {
+                fetched_at: Instant::now(),
+                response: fresh.clone(),
+            },
+        );
+    }
+
+    build_update_check_http_response(&headers, project_update_response(fresh, summary_only))
 }
 
 /// GET /api/update/status
@@ -1010,5 +1148,42 @@ mod tests {
         assert_eq!(highest_beta.unwrap().tag_name, "v7.2.4-beta.5");
         let highest_stable = find_highest_release(&releases, UpdateChannel::Stable);
         assert_eq!(highest_stable.unwrap().tag_name, "v7.2.4");
+    }
+
+    #[test]
+    fn test_summary_projection_and_etag_304() {
+        let full = UpdateCheckResponse {
+            current_version: "v7.2.0".to_string(),
+            latest_version: "v7.2.1".to_string(),
+            has_update: true,
+            is_desktop: false,
+            release_notes: Some("Long release notes body".to_string()),
+            download_url: Some("https://example.invalid/app.bin".to_string()),
+            released_at: Some("2026-11-16T00:00:00Z".to_string()),
+            channel: "stable".to_string(),
+            versions: vec![UpdateVersionEntry {
+                version: "v7.2.1".to_string(),
+                notes: Some("note".to_string()),
+                released_at: None,
+            }],
+        };
+        let summary = project_update_response(full.clone(), true);
+        assert!(summary.release_notes.is_none());
+        assert!(summary.versions.is_empty());
+        assert!(summary.has_update);
+
+        let first = build_update_check_http_response(&HeaderMap::new(), summary.clone());
+        assert_eq!(first.status(), StatusCode::OK);
+        let etag = first
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .expect("update response must carry ETag")
+            .to_string();
+
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&etag).unwrap());
+        let cached = build_update_check_http_response(&req_headers, summary);
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
     }
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { getModels, ModelInfo, postLiveReasoningEffort, probeUpstreamModel } from '../api';
+import { getBootstrap, getModels, ModelInfo, postLiveReasoningEffort, probeUpstreamModel } from '../api';
 import { useT } from '../settings';
 import { MsgKey } from '../i18n';
 import { modelAliasLabel } from '../lib/modelLabel';
@@ -212,23 +212,34 @@ export function ModelSelector({
       });
   };
 
+  const onDefaultChangeRef = useRef(onDefaultChange);
+  onDefaultChangeRef.current = onDefaultChange;
+
   useEffect(() => {
     let active = true;
+    const applyModels = (next: ModelInfo[]) => {
+      if (!active) return;
+      if (!areModelsEqual(modelsRef.current, next)) {
+        setModels(next);
+        const defaultModel = next.find((model) => model.is_default) ?? next[0];
+        if (defaultModel) onDefaultChangeRef.current?.(defaultModel.provider);
+      }
+    };
     const fetchLatest = () => {
-      getModels()
-        .then((next) => {
-          if (!active) return;
-          if (!areModelsEqual(modelsRef.current, next)) {
-            setModels(next);
-            const defaultModel = next.find((model) => model.is_default) ?? next[0];
-            if (defaultModel) onDefaultChange?.(defaultModel.provider);
-          }
-        })
-        .catch(() => {});
+      getModels().then(applyModels).catch(() => {});
     };
 
-    // 冷启动拉取一次模型列表
-    fetchLatest();
+    // 冷启动优先复用共享的 `/api/bootstrap`，避免额外并发 `/models`
+    getBootstrap()
+      .then((boot) => {
+        if (!active) return;
+        if (Array.isArray(boot.models) && boot.models.length > 0) {
+          applyModels(boot.models);
+        } else {
+          fetchLatest();
+        }
+      })
+      .catch(() => fetchLatest());
 
     // 联动：当 jeikcode_config (reload) 或外部触发重载时静默刷新一次，彻底杜绝无脑 2s 轮询！
     const onReload = () => fetchLatest();
@@ -240,7 +251,7 @@ export function ModelSelector({
       window.removeEventListener('jeikcode:config-reloaded', onReload);
       window.removeEventListener('jeikcode:reload-models', onReload);
     };
-  }, [onDefaultChange]);
+  }, []);
 
   // 当弹窗展开时，按需静默同步一次模型列表
   useEffect(() => {
