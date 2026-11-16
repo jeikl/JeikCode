@@ -5335,16 +5335,19 @@ export function Chat({
       if (cancelled || busy || !curHash) return;
       try {
         const projectSessions = await listProjectSessions(curHash);
-        const candidates = (projectSessions || []).slice(0, 5);
+        // 只预热轻量会话：大会话首屏本身就有几十~上百 KB，后台预取会与
+        // 用户正在切换的大上下文抢磁盘/网络，正是“来回切很卡”的来源之一。
+        const candidates = (projectSessions || [])
+          .filter((cand) => cand.id !== sessionId && (cand.message_count ?? 0) <= 120)
+          .slice(0, 2);
         for (const cand of candidates) {
           if (cancelled || busy) break;
-          if (cand.id === sessionId) continue;
           if (messageCacheRef.current.has(cand.id)) continue;
           const existing = await getSessionCache(curHash, cand.id);
           if (existing) continue;
 
-          // 随机 5~10 秒延迟加载一个，防网络与 I/O 拥塞
-          const delay = 5000 + Math.random() * 5000;
+          // 随机 8~15 秒延迟加载一个，且永远不预取大会话。
+          const delay = 8000 + Math.random() * 7000;
           await new Promise((r) => setTimeout(r, delay));
           if (cancelled || busy) break;
 

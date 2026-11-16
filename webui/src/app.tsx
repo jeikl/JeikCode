@@ -88,7 +88,6 @@ import {
   resolveSession,
   createSession,
   getSession,
-  getActiveChatSessions,
   getChatPending,
   getHealth,
   checkUpdate,
@@ -231,6 +230,13 @@ export function App() {
         }
         // 运行圈圈 / 完成对勾同源：全局 activity 广播携带内核权威终态。
         if (event.type === 'activity') {
+          setLiveRunningIds((prev) => {
+            const next = new Set(prev);
+            if (event.running) next.add(event.session_id);
+            else next.delete(event.session_id);
+            if (prev.size === next.size && [...prev].every((id) => next.has(id))) return prev;
+            return next;
+          });
           setJustCompletedIds((prev) =>
             nextCompletedBadgeIds(prev, {
               sessionId: event.session_id,
@@ -390,19 +396,9 @@ export function App() {
   const [configDiffs, setConfigDiffs] = useState<ConfigDiffItem[] | null>(null);
 
   useEffect(() => {
-    // 软刷新：不重挂任何组件，只让侧栏/运行态重新对账；
-    // 焦点、滚动位置、展开状态与终端连接全部原地保留。
+    // 软刷新：不重挂任何组件，只让侧栏重新对账；运行态由全局 activity 事件维护。
     return onSoftRefresh(() => {
       setSessionListVersion((v) => v + 1);
-      getActiveChatSessions()
-        .then((ids) => {
-          setLiveRunningIds((prev) => {
-            const next = new Set(ids);
-            if (prev.size === next.size && [...prev].every((id) => next.has(id))) return prev;
-            return next;
-          });
-        })
-        .catch(() => {});
     });
   }, []);
 
@@ -430,17 +426,14 @@ export function App() {
     typeof window !== 'undefined' ? window.innerWidth : 1200
   );
 
-  // ── 活跃会话运行态（蓝圈圈）幂等校准：每 12 秒与后端权威 active_chats 列表对齐一次（后台隐藏页静默让渡）──
+  // ── 活跃会话运行态（蓝圈圈）：冷启动用一次 bootstrap；后续完全由全局 activity 事件驱动 ──
   useEffect(() => {
     let cancelled = false;
     const applyActiveIds = (serverActiveIds: string[]) => {
       if (cancelled) return;
       setLiveRunningIds((prev) => {
         if (prev.size === 0 && serverActiveIds.length === 0) return prev;
-        const next = new Set<string>();
-        for (const id of serverActiveIds) {
-          next.add(id);
-        }
+        const next = new Set<string>(serverActiveIds);
         if (prev.size === next.size && [...prev].every((id) => next.has(id))) {
           return prev;
         }
@@ -448,27 +441,12 @@ export function App() {
       });
     };
 
-    const reconcileRunning = (skipIfHidden = true) => {
-      if (skipIfHidden && typeof document !== 'undefined' && document.hidden) return;
-      getActiveChatSessions()
-        .then(applyActiveIds)
-        .catch(() => {});
-    };
-
-    // 首次冷启动复用聚合 `/api/bootstrap`
+    // 首次冷启动复用聚合 `/api/bootstrap`；不轮询 `/chat/active`。
     getBootstrap()
       .then((boot) => applyActiveIds(boot.active_chat_ids ?? []))
-      .catch(() => reconcileRunning(false));
-
-    const timer = window.setInterval(() => reconcileRunning(true), 12000);
-    const onVisible = () => {
-      if (!document.hidden) reconcileRunning(false);
-    };
-    document.addEventListener('visibilitychange', onVisible);
+      .catch(() => {});
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisible);
     };
   }, []);
 
@@ -492,19 +470,15 @@ export function App() {
         if (!cancelled) setStreamEpoch(boot.health?.instance_id ?? null);
       })
       .catch(() => syncEpoch(false));
-    const timer = window.setInterval(() => syncEpoch(true), 15000);
-    // 手机回前台 / 网络恢复往往正是重连前一瞬：先校准纪元，避免带着旧游标发起补发。
+    // 只在回前台 / 网络恢复这类边沿校准纪元；不设置周期轮询。
     const onVisible = () => {
       if (!document.hidden) syncEpoch(false);
     };
     const onWake = () => syncEpoch(false);
-    window.addEventListener('focus', onWake);
     window.addEventListener('online', onWake);
     document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
-      window.removeEventListener('focus', onWake);
       window.removeEventListener('online', onWake);
       document.removeEventListener('visibilitychange', onVisible);
     };
@@ -2023,18 +1997,6 @@ export function App() {
             restoring={restoring}
             onTurnDone={() => {
               setSessionListVersion((v) => v + 1);
-              // 回合完成时，立即主动校准本地 liveRunningIds，确保清除残留的旋转菊花
-              getActiveChatSessions()
-                .then((ids) => {
-                  setLiveRunningIds((prev) => {
-                    const next = new Set<string>();
-                    for (const id of prev) {
-                      if (ids.includes(id)) next.add(id);
-                    }
-                    return next;
-                  });
-                })
-                .catch(() => {});
             }}
             onTurnRunningChange={(id, running) => {
               if (!id) return;

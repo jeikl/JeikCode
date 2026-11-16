@@ -3585,6 +3585,9 @@ impl SessionManager {
 struct CachedCatalog {
     sig: u64,
     scan: Arc<CatalogScan>,
+    /// Wall-clock guard so repeated list/detail requests within the same second
+    /// don't each walk the whole sessions tree just to recompute the signature.
+    checked_at: std::time::Instant,
 }
 
 fn catalog_cache() -> &'static Mutex<HashMap<PathBuf, CachedCatalog>> {
@@ -3660,13 +3663,32 @@ fn catalog_signature(sessions_root: &Path) -> u64 {
 /// — it saves the read + JSON-parse of every `*.meta`, not the directory walk.
 /// Index-level (single-read) speed would need a persisted recency index.
 fn scan_catalog_cached(sessions_root: &Path) -> CatalogScan {
-    let sig = catalog_signature(sessions_root);
+    // Production: a very short reuse window absorbs the multi-tab/multi-request
+    // burst on session switches without hiding a new session for long. Tests use
+    // zero so writes are observed immediately.
+    #[cfg(not(test))]
+    const CACHE_REUSE: std::time::Duration = std::time::Duration::from_millis(750);
+    #[cfg(test)]
+    const CACHE_REUSE: std::time::Duration = std::time::Duration::ZERO;
+
     {
         let cache = catalog_cache()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = cache.get(sessions_root) {
+            if cached.checked_at.elapsed() < CACHE_REUSE {
+                return (*cached.scan).clone();
+            }
+        }
+    }
+    let sig = catalog_signature(sessions_root);
+    {
+        let mut cache = catalog_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.get_mut(sessions_root) {
             if cached.sig == sig {
+                cached.checked_at = std::time::Instant::now();
                 return (*cached.scan).clone();
             }
         }
@@ -3679,7 +3701,11 @@ fn scan_catalog_cached(sessions_root: &Path) -> CatalogScan {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(
             sessions_root.to_path_buf(),
-            CachedCatalog { sig, scan: arc },
+            CachedCatalog {
+                sig,
+                scan: arc,
+                checked_at: std::time::Instant::now(),
+            },
         );
     scan
 }

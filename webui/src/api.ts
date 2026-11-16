@@ -422,6 +422,37 @@ const DEFAULT_API_TIMEOUT_MS = 15_000;
 const LEGACY_API_TIMEOUT_MS = 25_000;
 const inFlightGets = new Map<string, Promise<Response>>();
 
+/** Short-lived GET cache for bootstrap/sidebar metadata. Event-driven state
+ *  (activity, config_reload, session mutations) remains authoritative; this
+ *  only absorbs duplicate mount effects and rapid tab/session switches. */
+const getCache = new Map<string, { expiresAt: number; response: Response }>();
+
+function getCacheTtlMs(input: RequestInfo | URL): number {
+  const path = requestPathname(input);
+  if (path === '/api/bootstrap') return 2_000;
+  if (path === '/projects/sidebar') return 3_000;
+  if (path === '/projects') return 5_000;
+  if (path === '/sessions') return 3_000;
+  if (path === '/models') return 30_000;
+  if (path === '/chat/active') return 3_000;
+  if (path === '/health') return 5_000;
+  if (path === '/config') return 10_000;
+  if (path === '/capabilities' || path === '/mcp/status') return 5_000;
+  if (path === '/runtime/sessions') return 3_000;
+  if (path === '/chat/runtime' || path === '/chat/queue') return 1_000;
+  if (/^\/projects\/[^/]+\/sessions$/.test(path)) return 10_000;
+  return 0;
+}
+
+/** Invalidate cached GETs after a mutation or an authoritative event. */
+export function invalidateApiGetCache(): void {
+  for (const key of [...getCache.keys()]) {
+    if (key.includes('/projects') || key.includes('/sessions') || key.includes('/chat')) {
+      getCache.delete(key);
+    }
+  }
+}
+
 function requestUrlString(input: RequestInfo | URL): string {
   return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
 }
@@ -532,10 +563,22 @@ async function executeApiFetch(input: RequestInfo | URL, init: RequestInit = {})
 
 async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   if (!canDedupeGetRequest(input, init)) {
-    return executeApiFetch(input, init);
+    const res = await executeApiFetch(input, init);
+    if ((init.method ?? 'GET').toUpperCase() !== 'GET' && res.ok) {
+      // `seen` only clears a badge; it does not change the session list.
+      // Invalidating on every session switch would defeat the short TTL cache.
+      if (!requestPathname(input).endsWith('/seen')) invalidateApiGetCache();
+    }
+    return res;
   }
   const headers = buildHeaders(init);
   const key = `${requestUrlString(input)}|${headers.get('Authorization') ?? ''}|${headers.get('If-None-Match') ?? ''}`;
+  const ttl = getCacheTtlMs(input);
+  if (ttl > 0) {
+    const cached = getCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cloneResponseSafe(cached.response);
+    if (cached) getCache.delete(key);
+  }
   const existing = inFlightGets.get(key);
   if (existing) {
     const shared = await existing;
@@ -546,6 +589,9 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promi
   });
   inFlightGets.set(key, pending);
   const res = await pending;
+  if (ttl > 0 && res.ok && res.status === 200) {
+    getCache.set(key, { expiresAt: Date.now() + ttl, response: cloneResponseSafe(res) });
+  }
   return cloneResponseSafe(res);
 }
 
