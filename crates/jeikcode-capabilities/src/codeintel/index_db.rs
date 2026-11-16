@@ -555,6 +555,7 @@ mod tests {
             len: 100,
             nodes: vec![node],
             calls: Vec::new(),
+            parse_failed: false,
         };
 
         db.sync_incremental(999, &[(test_file.clone(), unit.clone())], &[], &graph)
@@ -573,6 +574,7 @@ mod tests {
             len: 50,
             nodes: unit.nodes.clone(),
             calls: Vec::new(),
+            parse_failed: false,
         };
         db.upsert_units(&[(test_file.clone(), updated)], &[])
             .expect("upsert_units");

@@ -48,6 +48,9 @@ long_bash_command_keyword = []  # 长任务关键词列表（如 ["build", "test
 - `include_logs=true`：独立打开 grep 的日志内容（默认 false，与 `include_ignored` 独立）；glob 默认包含日志路径。
 - `include_sensitive=true`：打开敏感凭据路径；Build/AcceptEdits/Plan 弹审核，Auto 自动继续。
 - `read` 的显式路径不套 ignore；敏感路径统一走 `SensitivePathGate`。
+- ignore 来源与优先级：全局 `~/.jeikcode` < 项目根 < 项目 `.jeikcode`；项目规则覆盖全局。`.codegraphignore.graph` 是独立的敏感门，`include_ignored=true` 绝不能打开它；项目噪音规则也不能用 `!` 重开敏感路径。
+- 图谱索引与 grep/glob 共用同一套 ignore policy，但 profile 不同：图谱还遵循 `.gitignore`，grep/glob 为保持全面检索**故意不应用** `.gitignore`。图谱的 warm/编辑路径同样检查 ignore；改 ignore 规则会通过指纹使图谱/查询缓存失效。
+- 嵌套 `.codegraphignore` / `.graph` 由 deep policy 加载：子目录规则覆盖父级；搜索与全量图谱索引使用 deep policy。`.env*`、密钥、`.ssh`、`.jeikcode/auth.toml` 等硬敏感基线独立于 `.graph`，`.graph` 缺失时仍生效。
 
 ---
 

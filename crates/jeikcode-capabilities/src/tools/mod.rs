@@ -478,12 +478,28 @@ pub(crate) fn path_in_upload_store(path: &Path) -> bool {
     })
 }
 
-fn apply_skip_dirs(builder: &mut WalkBuilder, include_ignored: bool, include_logs: bool) {
+fn apply_skip_dirs(
+    builder: &mut WalkBuilder,
+    include_ignored: bool,
+    include_logs: bool,
+    policy: Option<std::sync::Arc<crate::ignore_policy::IgnorePolicy>>,
+    include_sensitive: bool,
+) {
     builder.filter_entry(move |e| {
         // The root entry being searched (depth 0) must never be pruned by name,
         // even if the caller explicitly targeted a directory named e.g. "target" or "node_modules".
         if e.depth() == 0 {
             return true;
+        }
+        // The policy is rooted at the WORKSPACE, not the search subdirectory.
+        // This is what makes `grep path=src` honor `<workspace>/.jeikcode/*`.
+        if let Some(policy) = policy.as_ref() {
+            if !include_sensitive && policy.is_sensitive(e.path()) {
+                return false;
+            }
+            if !include_ignored && policy.is_noise_ignored(e.path()) {
+                return false;
+            }
         }
         if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             if let Some(name) = e.file_name().to_str() {
@@ -504,37 +520,6 @@ fn apply_skip_dirs(builder: &mut WalkBuilder, include_ignored: bool, include_log
         }
         true
     });
-}
-
-fn add_codegraph_ignores(builder: &mut WalkBuilder) {
-    builder
-        .add_custom_ignore_filename(".codegraphignore")
-        .add_custom_ignore_filename(".codegraignore");
-    let global_config = crate::paths::config_dir();
-    let global_ignore1 = global_config.join(".codegraphignore");
-    if global_ignore1.is_file() {
-        builder.add_ignore(global_ignore1);
-    }
-    let global_ignore2 = global_config.join(".codegraignore");
-    if global_ignore2.is_file() {
-        builder.add_ignore(global_ignore2);
-    }
-}
-
-/// Sensitive credential paths are excluded by default. `include_ignored` never
-/// exposes them; `include_sensitive=true` is approval-gated (Build prompts,
-/// Auto continues). Explicit reads use the same `SensitivePathGate` rules.
-fn add_sensitive_ignores(builder: &mut WalkBuilder) {
-    builder
-        .add_custom_ignore_filename(".codegraphignore.graph")
-        .add_custom_ignore_filename(".codegraignore.graph");
-    let global_config = crate::paths::config_dir();
-    for name in [".codegraphignore.graph", ".codegraignore.graph"] {
-        let path = global_config.join(name);
-        if path.is_file() {
-            builder.add_ignore(path);
-        }
-    }
 }
 
 fn gitignore_off_walk(root: &Path) -> WalkBuilder {
@@ -563,6 +548,7 @@ fn gitignore_off_walk(root: &Path) -> WalkBuilder {
 /// they are gitignored. `visit` returns `false` to stop early (deadline / cap).
 pub(crate) fn for_each_project_entry(
     root: &Path,
+    policy_root: &Path,
     hidden: bool,
     include_ignored: bool,
     include_logs: bool,
@@ -572,11 +558,21 @@ pub(crate) fn for_each_project_entry(
     let mut seen = HashSet::<PathBuf>::new();
     let mut stopped = false;
 
-    let mut run = |mut builder: WalkBuilder, scan_ignored: bool, scan_logs: bool| {
+    let mut run = |mut builder: WalkBuilder,
+                   scan_ignored: bool,
+                   scan_logs: bool,
+                   policy: Option<Arc<crate::ignore_policy::IgnorePolicy>>,
+                   scan_sensitive: bool| {
         if stopped {
             return;
         }
-        apply_skip_dirs(&mut builder, scan_ignored, scan_logs);
+        apply_skip_dirs(
+            &mut builder,
+            scan_ignored,
+            scan_logs,
+            policy,
+            scan_sensitive,
+        );
         let mut loop_count = 0usize;
         for entry in builder.build().flatten() {
             if !seen.insert(entry.path().to_path_buf()) {
@@ -599,9 +595,19 @@ pub(crate) fn for_each_project_entry(
 
     let in_store = path_in_upload_store(root);
     if in_store {
-        run(gitignore_off_walk(root), true, true);
+        run(gitignore_off_walk(root), true, true, None, true);
         return;
     }
+
+    // A scoped search (`grep path=src`) must still use the workspace-level
+    // `.jeikcode` / global policy. Only an explicitly outside-workspace root falls
+    // back to itself, so project rules never leak onto an unrelated tree.
+    let policy_base = if root.starts_with(policy_root) {
+        policy_root
+    } else {
+        root
+    };
+    let policy = Arc::new(crate::ignore_policy::IgnorePolicy::load_deep(policy_base));
 
     // If the caller explicitly targeted a directory inside or under a skip-listed path
     // (e.g. `node_modules/@lobehub/icons` or `target/doc`), disable the codegraph
@@ -610,7 +616,10 @@ pub(crate) fn for_each_project_entry(
     let root_in_skip_dir = root
         .components()
         .any(|c| c.as_os_str().to_str().map(is_skip_dir).unwrap_or(false));
-    let codegraph_ignore_active = !include_ignored && !root_in_skip_dir;
+    // An explicit search rooted inside a default skip dir (e.g. `path=target/doc`)
+    // must still work. This also relaxes policy noise rules for that explicit root;
+    // sensitive rules remain gated separately.
+    let allow_noise = include_ignored || root_in_skip_dir;
 
     let mut main = WalkBuilder::new(root);
     // Search visibility is NOT VCS visibility: `.gitignore`, `.ignore`,
@@ -621,26 +630,21 @@ pub(crate) fn for_each_project_entry(
         .git_global(false)
         .git_exclude(false)
         .ignore(false);
-    // Sensitive rules are default-on. `include_sensitive=true` is approval-gated
-    // (SearchScopeGate): Build prompts, Auto auto-approves.
-    if !include_sensitive {
-        add_sensitive_ignores(&mut main);
-    }
-    // The shipped/user noise list is applied AS A WHOLE on purpose: its dir rules
-    // (`obj/`, `bin/Debug/`, …) and its file-level negations (`!bin/*.js`,
-    // `!src/bin/`) only work together — filtering it down to "dirs only" hides
-    // `bin/` and with it the negations that rescue `bin/cli.js` (see
-    // `shipped_ignore_keeps_source_bins_in_glob`). Consequently the list itself must
-    // never hide files an explicit search is asked for; that is why `.env*` was
-    // removed from the asset (it silently hid `.env.local` from `glob`/`grep`).
-    if codegraph_ignore_active {
-        add_codegraph_ignores(&mut main);
-    }
-    run(main, include_ignored, include_logs);
+    // Sensitive and noise rules are enforced by the shared policy filter below.
+    // Do NOT add them as WalkBuilder ignore files: WalkBuilder would prune a path
+    // before policy could apply a project/nested `!` re-include, and its patterns
+    // are relative to the search root rather than the workspace root.
+    run(
+        main,
+        allow_noise,
+        include_logs,
+        Some(policy),
+        include_sensitive,
+    );
 
     let store = root.join(USER_UPLOAD_STORE_DIR);
     if store.is_dir() {
-        run(gitignore_off_walk(&store), true, true);
+        run(gitignore_off_walk(&store), true, true, None, true);
     }
 }
 
@@ -650,40 +654,15 @@ pub(crate) fn for_each_project_entry(
 pub(crate) struct SearchVisibilityHint {
     /// Files hidden by the user-toggleable `.codegraphignore` noise list.
     pub noise: Vec<PathBuf>,
+    /// Source file that produced the highest-precedence noise decision.
+    pub noise_source: Option<PathBuf>,
     /// Log files hidden by the grep default log policy. `include_logs` opens them.
     pub logs: Vec<PathBuf>,
     /// Credential files hidden by the sensitive list. They are available only
     /// through the approval-gated `include_sensitive` switch (or explicit `read`).
     pub sensitive: Vec<PathBuf>,
-}
-
-/// Build a matcher from the project/global search ignore files. The builder base
-/// must be the directory relative paths are matched against.
-fn search_ignore_matcher(base: &Path, sensitive: bool) -> Option<ignore::gitignore::Gitignore> {
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(base);
-    let cfg = crate::paths::config_dir();
-    let names: &[&str] = if sensitive {
-        &[".codegraphignore.graph", ".codegraignore.graph"]
-    } else {
-        &[".codegraphignore", ".codegraignore"]
-    };
-    let mut added = false;
-    for name in names {
-        for path in [
-            base.join(name),
-            base.join(".jeikcode").join(name),
-            cfg.join(name),
-        ] {
-            if path.is_file() {
-                let _ = builder.add(&path);
-                added = true;
-            }
-        }
-    }
-    if !added {
-        return None;
-    }
-    builder.build().ok()
+    /// Source file that produced the highest-precedence sensitive decision.
+    pub sensitive_source: Option<PathBuf>,
 }
 
 /// Collect a few files under `root` that the current search filters hide.
@@ -691,6 +670,7 @@ fn search_ignore_matcher(base: &Path, sensitive: bool) -> Option<ignore::gitigno
 /// zero-match response.
 pub(crate) fn search_visibility_hint(
     root: &Path,
+    policy_root: &Path,
     include_sensitive: bool,
     include_logs: bool,
     matches_noise: impl Fn(&Path) -> bool,
@@ -703,19 +683,12 @@ pub(crate) fn search_visibility_hint(
     if path_in_upload_store(root) {
         return hint;
     }
-    let base = if meta.is_dir() {
-        root.to_path_buf()
+    let policy_base = if root.starts_with(policy_root) {
+        policy_root
     } else {
-        root.parent().unwrap_or(root).to_path_buf()
+        root
     };
-    let noise = search_ignore_matcher(&base, false);
-    let sensitive = search_ignore_matcher(&base, true);
-    // grep excludes logs even when no ignore file exists, so it still needs the
-    // log-candidate walk. glob includes logs by default and can skip the walk
-    // when there is no ignore file to explain.
-    if noise.is_none() && sensitive.is_none() && include_logs {
-        return hint;
-    }
+    let policy = crate::ignore_policy::IgnorePolicy::load_deep(policy_base);
 
     let deadline = Instant::now() + Duration::from_millis(400);
     let mut builder = WalkBuilder::new(root);
@@ -726,7 +699,7 @@ pub(crate) fn search_visibility_hint(
         .git_exclude(false)
         .ignore(false);
     // Scan everything non-hard so ignored/sensitive candidates are discoverable.
-    apply_skip_dirs(&mut builder, true, true);
+    apply_skip_dirs(&mut builder, true, true, None, true);
 
     for entry in builder.build().flatten() {
         if Instant::now() >= deadline {
@@ -742,14 +715,15 @@ pub(crate) fn search_visibility_hint(
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        let rel = path.strip_prefix(&base).unwrap_or(path);
         let is_sensitive = !include_sensitive
-            && (sensitive
-                .as_ref()
-                .is_some_and(|gi| gi.matched_path_or_any_parents(rel, false).is_ignore())
-                || sensitive_path::path_is_sensitive(path));
+            && (policy.is_sensitive(path) || sensitive_path::path_is_sensitive(path));
         if is_sensitive {
             if hint.sensitive.len() < 5 {
+                if hint.sensitive_source.is_none() {
+                    hint.sensitive_source = policy
+                        .explain(path, crate::ignore_policy::VisibilityProfile::Search)
+                        .map(|(_, source)| source);
+                }
                 hint.sensitive.push(path.to_path_buf());
             }
             continue;
@@ -767,13 +741,13 @@ pub(crate) fn search_visibility_hint(
             }
             continue;
         }
-        if let Some(gi) = &noise {
-            if gi.matched_path_or_any_parents(rel, false).is_ignore()
-                && hint.noise.len() < 5
-                && matches_noise(path)
-            {
-                hint.noise.push(path.to_path_buf());
+        if policy.is_noise_ignored(path) && hint.noise.len() < 5 && matches_noise(path) {
+            if hint.noise_source.is_none() {
+                hint.noise_source = policy
+                    .explain(path, crate::ignore_policy::VisibilityProfile::Search)
+                    .map(|(_, source)| source);
             }
+            hint.noise.push(path.to_path_buf());
         }
     }
     hint

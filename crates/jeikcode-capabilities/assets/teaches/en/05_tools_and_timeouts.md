@@ -43,6 +43,9 @@ Short commands undergo health checks at every `silent_kill_secs`: pager/REPL/ful
 - `include_logs=true` independently opens grep log contents (default false, independent from `include_ignored`); glob includes log paths by default.
 - `include_sensitive=true` opens sensitive credential paths; Build/AcceptEdits/Plan prompt, Auto continues.
 - `read` does not apply the ignore filter to an explicit path; sensitive paths go through `SensitivePathGate`.
+- Ignore sources and precedence: global `~/.jeikcode` < project root < project `.jeikcode`; project rules override global. `.codegraphignore.graph` is a separate hard sensitive gate: `include_ignored=true` can never open it, and a project noise `!` cannot re-open a sensitive path.
+- The graph index and grep/glob share one ignore policy but use different profiles: graph indexing also follows `.gitignore`; grep/glob intentionally do **not** apply `.gitignore` to preserve comprehensive search. The graph warm/edit paths also enforce ignore rules, and editing an ignore file invalidates the graph/query cache via its fingerprint.
+- Nested `.codegraphignore` / `.graph` files are loaded by the deep policy: child rules override parent rules; search and full graph indexing use the deep policy. The hard sensitive baseline (`.env*`, keys, `.ssh`, `.jeikcode/auth.toml`, etc.) is independent of `.graph`, so it still holds when that file is missing.
 
 ---
 

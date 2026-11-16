@@ -12,8 +12,8 @@
 
 use super::bilingual_nlp::{
     calculate_lexical_similarity, calculate_text_similarity, derive_project_name_tokens,
-    parse_bilingual_query_with_thesaurus, parse_field_qualified_query, DynamicThesaurus,
-    ParsedQuery, SearchTokens,
+    is_generic_ident_fragment, parse_bilingual_query_with_thesaurus, parse_field_qualified_query,
+    parse_query_intents, DynamicThesaurus, ParsedQuery, SearchTokens,
 };
 use super::graph::{CodeGraph, EdgeKind, SymbolId, SymbolKind, SymbolNode};
 use super::index::CodeIndex;
@@ -46,6 +46,11 @@ const FOLD_AFTER_LINES: usize = 40;
 const FOLD_HEAD_LINES: usize = 20;
 const FOLD_TAIL_LINES: usize = 10;
 
+/// Per-intent RRF: how many symbols participate in each intent's ranking.
+const INTENT_TOP_K: usize = 200;
+/// How many files each intent contributes to the grouped intent-hits table.
+const INTENT_TOP_FILES: usize = 5;
+
 /// Thread-safe session-level sent code ranges to avoid duplicate context bloat.
 static SESSION_SENT_SPANS: std::sync::LazyLock<RwLock<HashMap<String, Vec<(usize, usize)>>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -53,51 +58,48 @@ static SESSION_SENT_SPANS: std::sync::LazyLock<RwLock<HashMap<String, Vec<(usize
 pub struct CodeExploreTool {
     index: Arc<CodeIndex>,
     thesaurus: Arc<RwLock<DynamicThesaurus>>,
+    /// Directory signature used to make project/global thesaurus hot-reload
+    /// idempotent. `u64::MAX` forces the first query to build a fresh snapshot.
+    thesaurus_sig: Arc<RwLock<u64>>,
 }
 
-/// Process-wide query-result cache, keyed by (graph fingerprint, query, scope,
-/// max_files, bm25_enabled, concept_enabled). Stores the **body only** — never
-/// Performance / Index Status. Those two lines are rewritten on every call
-/// from this request's wall-clock and `last_stats`. Caching the full Markdown
-/// used to freeze "增量补丁（重解析 2）" and the first-hit millisecond
-/// snapshot across identical queries.
-static QUERY_RESULT_CACHE: std::sync::LazyLock<
-    RwLock<std::collections::HashMap<(u64, String, String, usize, bool, bool), String>>,
-> = std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+/// Process-wide query-result cache key.
+///
+/// `graph_revision` and `thesaurus_revision` are mandatory: a fast-patched file
+/// or a hot-reloaded dictionary changes the answer without changing the walk
+/// fingerprint, and the old key returned a stale body. `root` prevents two
+/// workspaces with coincidentally equal fingerprints from sharing an entry.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct QueryCacheKey {
+    schema: u16,
+    root: String,
+    graph_revision: u64,
+    thesaurus_revision: u64,
+    ignore_revision: u64,
+    query: String,
+    scope: String,
+    max_files: usize,
+    bm25_enabled: bool,
+    concept_enabled: bool,
+    intent_enabled: bool,
+    candidates_enabled: bool,
+}
+
+const QUERY_CACHE_SCHEMA: u16 = 2;
+
+/// Process-wide query-result cache, keyed by [`QueryCacheKey`]. Stores the
+/// **body only** — never Performance / Index Status. Those two lines are
+/// rewritten on every call from this request's wall-clock and `last_stats`.
+static QUERY_RESULT_CACHE: std::sync::LazyLock<RwLock<HashMap<QueryCacheKey, String>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 const QUERY_CACHE_MAX_ENTRIES: usize = 128;
 
-#[allow(clippy::too_many_arguments)]
-fn query_cache_get(
-    fingerprint: u64,
-    query: &str,
-    scope: &str,
-    max_files: usize,
-    bm25_enabled: bool,
-    concept_enabled: bool,
-) -> Option<String> {
+fn query_cache_get(key: &QueryCacheKey) -> Option<String> {
     let guard = QUERY_RESULT_CACHE.read().unwrap();
-    guard
-        .get(&(
-            fingerprint,
-            query.to_string(),
-            scope.to_string(),
-            max_files,
-            bm25_enabled,
-            concept_enabled,
-        ))
-        .cloned()
+    guard.get(key).cloned()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn query_cache_insert(
-    fingerprint: u64,
-    query: &str,
-    scope: &str,
-    max_files: usize,
-    bm25_enabled: bool,
-    concept_enabled: bool,
-    output: String,
-) {
+fn query_cache_insert(key: QueryCacheKey, output: String) {
     let mut guard = QUERY_RESULT_CACHE.write().unwrap();
     if guard.len() >= QUERY_CACHE_MAX_ENTRIES {
         // Simple FIFO eviction: drop the oldest entry.
@@ -105,17 +107,7 @@ fn query_cache_insert(
             guard.remove(&oldest);
         }
     }
-    guard.insert(
-        (
-            fingerprint,
-            query.to_string(),
-            scope.to_string(),
-            max_files,
-            bm25_enabled,
-            concept_enabled,
-        ),
-        strip_diagnostic_headers(&output),
-    );
+    guard.insert(key, strip_diagnostic_headers(&output));
 }
 
 fn is_diagnostic_header(line: &str) -> bool {
@@ -211,22 +203,61 @@ fn query_cache_clear() {
 
 impl CodeExploreTool {
     pub fn new(index: Arc<CodeIndex>) -> Self {
-        let mut dt = DynamicThesaurus::new();
+        // Embedded defaults are loaded here; user/global/project dictionaries
+        // are loaded lazily on the first execute and rebuilt only when their
+        // directory signature changes.
+        let dt = DynamicThesaurus::new();
         // Fork channel bootstrap: on first run, seed the user config dir with
         // this fork's bundled thesaurus + builtin-tools list. Idempotent —
         // existing files are not overwritten here. Bundled-file updates,
         // including `.codegraphignore`, are offered by config sync as checked diffs.
         seed_fork_defaults();
-        // Load default user-level thesaurus from ~/.jeikcode/thesaurus (or JEIKCODE_HOME)
-        let global_thesaurus = crate::paths::config_dir().join("thesaurus");
-        if global_thesaurus.is_dir() {
-            dt.load_from_dir(&global_thesaurus);
-        }
         Self {
             index,
             thesaurus: Arc::new(RwLock::new(dt)),
+            thesaurus_sig: Arc::new(RwLock::new(u64::MAX)),
         }
     }
+}
+
+/// Signature of the thesaurus `.txt/.dict/.md` files: path + mtime + len.
+/// A changed dictionary must invalidate both the in-memory snapshot and the
+/// query-result cache; unchanged directories are a cheap read_dir + stat.
+fn thesaurus_dir_signature(dirs: &[PathBuf]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut files: Vec<(PathBuf, u128, u64)> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !matches!(ext, "txt" | "dict" | "md") {
+                continue;
+            }
+            let md = std::fs::metadata(&path).ok();
+            let mtime = md
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let len = md.as_ref().map(|m| m.len()).unwrap_or(0);
+            files.push((path, mtime, len));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (path, mtime, len) in files {
+        path.hash(&mut h);
+        mtime.hash(&mut h);
+        len.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Seed this fork's bundled defaults (thesaurus dictionaries + builtin-tools
@@ -388,6 +419,18 @@ struct ScoredSymbol {
     doc_score: f64,
     inline_score: f64,
     graph_mass: f64,
+    /// Per-intent evidence, aligned with `parse_query_intents` order. Empty for
+    /// single-intent queries. Used for RRF reranking and intent-group rendering.
+    intent_evidence: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct IntentHit {
+    intent_index: usize,
+    intent: String,
+    rank: usize,
+    symbol: String,
+    score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -395,6 +438,8 @@ struct FileCandidate {
     file: PathBuf,
     top_score: f64,
     symbols: Vec<ScoredSymbol>,
+    /// Best per-intent hits for this file; empty for single-intent queries.
+    intent_hits: Vec<IntentHit>,
 }
 
 /// Discovers independent subproject roots in a workspace (directories containing
@@ -507,16 +552,6 @@ impl Tool for CodeExploreTool {
             }),
         );
 
-        // Load project-specific thesaurus from `.jeikcode/thesaurus`
-        {
-            let project_thesaurus_dir = root.join(".jeikcode").join("thesaurus");
-            if project_thesaurus_dir.is_dir() {
-                if let Ok(mut th) = self.thesaurus.write() {
-                    th.load_from_dir(&project_thesaurus_dir);
-                }
-            }
-        }
-
         let parsed_query = parse_field_qualified_query(&a.query);
         let project_tokens = derive_project_name_tokens(&root);
         let search_text = if parsed_query.clean_text.is_empty() {
@@ -524,10 +559,38 @@ impl Tool for CodeExploreTool {
         } else {
             &parsed_query.clean_text
         };
+        // Rollout kill switches. Both participate in the cache key so toggling
+        // one mid-session cannot serve a body computed with the other mode.
+        let intent_enabled = std::env::var("JEIKCODE_EXPLORE_INTENT").as_deref() != Ok("0");
+        let candidates_enabled = std::env::var("JEIKCODE_EXPLORE_CANDIDATES").as_deref() != Ok("0");
 
-        let thesaurus_guard = self.thesaurus.read().unwrap();
-        let query_tokens = parse_bilingual_query_with_thesaurus(search_text, &thesaurus_guard);
-        drop(thesaurus_guard);
+        // Hot-reload thesaurus: rebuild only when a file changed. `reload_from_dirs`
+        // starts from embedded defaults, so repeated queries cannot append duplicate
+        // rules (the old execute path did that on every call).
+        let global_thesaurus_dir = crate::paths::config_dir().join("thesaurus");
+        let project_thesaurus_dir = root.join(".jeikcode").join("thesaurus");
+        let mut thesaurus_dirs = vec![global_thesaurus_dir];
+        if project_thesaurus_dir != thesaurus_dirs[0] {
+            thesaurus_dirs.push(project_thesaurus_dir);
+        }
+        let thesaurus_sig = thesaurus_dir_signature(&thesaurus_dirs);
+        let (query_tokens, query_intents, thesaurus_revision) = {
+            let mut sig_guard = self.thesaurus_sig.write().unwrap();
+            let mut th = self.thesaurus.write().unwrap();
+            if *sig_guard != thesaurus_sig {
+                th.reload_from_dirs(&thesaurus_dirs);
+                *sig_guard = thesaurus_sig;
+            }
+            let revision = th.revision();
+            let tokens = parse_bilingual_query_with_thesaurus(search_text, &th);
+            let intents = parse_query_intents(search_text, &th);
+            (tokens, intents, revision)
+        };
+        let query_intents = if intent_enabled {
+            query_intents
+        } else {
+            vec![query_tokens.clone()]
+        };
 
         let t0 = std::time::Instant::now();
 
@@ -555,25 +618,33 @@ impl Tool for CodeExploreTool {
             return ok(super::no_codegraph_tool_guidance().to_string());
         }
 
-        // Query-result cache: look up AFTER get_scoped (fingerprint + last_stats
+        // Query-result cache: look up AFTER get_scoped (the graph revision
         // must reflect this restat) but BEFORE scoring / rendering. HIT skips
-        // the 34万-symbol scan. Diagnostic headers are never cached — they are
+        // the workspace scan. Diagnostic headers are never cached — they are
         // rewritten from this request's wall-clock and last_stats.
-        let fp = self.index.fingerprint(&root).unwrap_or(0);
         let scope_key = scope_path
             .as_deref()
             .map(|s| s.display().to_string())
             .unwrap_or_default();
-        let bm25_enabled = std::env::var("JEIKCODE_EXPLORE_BM25").as_deref() == Ok("1");
+        let bm25_enabled = std::env::var("JEIKCODE_EXPLORE_BM25").as_deref() != Ok("0");
         let concept_enabled = std::env::var("JEIKCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
-        if let Some(cached_body) = query_cache_get(
-            fp,
-            &a.query,
-            &scope_key,
+        let graph_revision = self.index.graph_revision(&root).unwrap_or(0);
+        let ignore_revision = crate::ignore_policy::IgnorePolicy::load(&root).fingerprint();
+        let cache_key = QueryCacheKey {
+            schema: QUERY_CACHE_SCHEMA,
+            root: root.display().to_string(),
+            graph_revision,
+            thesaurus_revision,
+            ignore_revision,
+            query: a.query.clone(),
+            scope: scope_key,
             max_files,
             bm25_enabled,
             concept_enabled,
-        ) {
+            intent_enabled,
+            candidates_enabled,
+        };
+        if let Some(cached_body) = query_cache_get(&cache_key) {
             let t_retrieval = Duration::ZERO;
             let t_render = Duration::ZERO;
             let total_cost = t0.elapsed();
@@ -598,21 +669,48 @@ impl Tool for CodeExploreTool {
 
         // Step 1: Score all symbols in the workspace.
         let t_retrieval_start = std::time::Instant::now();
-        // Opt-in BM25 lexical recall (JEIKCODE_EXPLORE_BM25=1): surface naming-plain
-        // core files (run_loop.rs / turn.rs / tool_calls.rs) that the semantic-anchor
-        // gate would otherwise drop before scoring.
+        // Candidate pruning for large graphs. Each intent contributes its own
+        // postings intersection; if any intent cannot be pruned, fall back to
+        // the full scan (precision over speed). Small graphs return None.
+        let candidate_index = if candidates_enabled {
+            self.index.get_candidate_index(&root)
+        } else {
+            None
+        };
+        let mut candidate_ids: Option<HashSet<SymbolId>> =
+            candidate_index.as_ref().and_then(|index| {
+                let mut union: HashSet<SymbolId> = HashSet::new();
+                for intent in &query_intents {
+                    match index.candidates(&graph, intent, scope_path.as_deref()) {
+                        Some(ids) => union.extend(ids),
+                        None => return None,
+                    }
+                }
+                // A small candidate set means the postings likely missed a
+                // comment-only business term; fall back to the full scan rather
+                // than trading recall for a few milliseconds. Broad queries
+                // (hundreds+ candidates) still get the pruning win.
+                (union.len() >= 128).then_some(union)
+            });
+        if let Some(ids) = candidate_ids.as_mut() {
+            ids.extend(self.index.candidate_pending_ids(&root));
+        }
+        // IDF/BM25 lexical recall is on by default. `JEIKCODE_EXPLORE_BM25=0`
+        // is the kill switch; when the candidate index is active it is scoped to
+        // the same bounded candidate set as the scorer.
         let bm25_scores: HashMap<SymbolId, f64> = {
-            let enabled = std::env::var("JEIKCODE_EXPLORE_BM25").as_deref() == Ok("1");
+            let enabled = std::env::var("JEIKCODE_EXPLORE_BM25").as_deref() != Ok("0");
             if enabled {
                 // 复用 CodeIndex 缓存的 IDF 统计: 首次从 stats.v1.json 加载/
                 // 构建后落盘, 之后每次查询(含所有共享该索引的会话)零重算。
                 if let Some(stats) = self.index.get_idf_stats(&root) {
-                    super::retrieval::bm25_search(
+                    super::retrieval::bm25_search_with_candidates(
                         &graph,
                         &stats,
                         &query_tokens,
                         scope_path.as_deref(),
                         64,
+                        candidate_ids.as_ref(),
                     )
                     .into_iter()
                     .map(|h| (h.node_id, h.score))
@@ -643,15 +741,17 @@ impl Tool for CodeExploreTool {
         } else {
             None
         };
-        let scored_files = score_workspace_symbols(
+        let scored_files = score_workspace_symbols_multi(
             &graph,
             &query_tokens,
+            &query_intents,
             &parsed_query,
             &project_tokens,
             scope_path.as_deref(),
             &bm25_scores,
             &query_concept_vec,
             concept_vectors.as_deref(),
+            candidate_ids.as_ref(),
         );
 
         if scored_files.is_empty() {
@@ -788,15 +888,7 @@ impl Tool for CodeExploreTool {
             (total_cost, t_index, t_retrieval, t_render),
             cache_status.as_ref(),
         );
-        query_cache_insert(
-            fp,
-            &a.query,
-            &scope_key,
-            max_files,
-            bm25_enabled,
-            concept_enabled,
-            output.clone(),
-        );
+        query_cache_insert(cache_key, output.clone());
 
         log_explore_outcome(
             &root,
@@ -886,6 +978,20 @@ fn count_disk_source_files(path: &Path) -> (usize, HashSet<String>) {
 }
 
 /// Check whether a symbol or its surrounding comments have a genuine semantic/lexical anchor to the query.
+fn has_cjk_anchor(tokens: &SearchTokens, text: &str) -> bool {
+    // Full query segments are the strongest anchor. For longer Chinese phrases
+    // a 3-char n-gram is also accepted (partial phrase recall), but a shared
+    // 2-char suffix such as "喜报" must not promote an unrelated sibling.
+    tokens
+        .cjk_segments
+        .iter()
+        .any(|segment| segment.chars().count() >= 2 && text.contains(segment))
+        || tokens
+            .cjk_phrases
+            .iter()
+            .any(|phrase| phrase.chars().count() >= 3 && text.contains(phrase))
+}
+
 fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
     let node_name_lower = node.name.to_ascii_lowercase();
     let query_lower = tokens.raw_query.to_ascii_lowercase();
@@ -898,7 +1004,7 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
         return true;
     }
 
-    let is_single_identifier = tokens.cjk_phrases.is_empty()
+    let is_single_identifier = tokens.cjk_segments.is_empty()
         && !tokens.raw_query.contains(' ')
         && (!tokens.code_identifiers.is_empty() || tokens.words.len() <= 4);
 
@@ -955,17 +1061,19 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
         }
     }
 
-    // 3. Bilingual expanded domain terms in symbol name
+    // 3. Bilingual expanded domain terms in symbol name.
+    // Soft (generic suffix) expansions are recall-only and must never anchor.
     if tokens
-        .expanded_terms
+        .hard_expanded_terms
         .iter()
-        .any(|term| node_name_lower.contains(term))
+        .any(|term| term.len() >= 3 && node_name_lower.contains(term))
     {
         return true;
     }
 
-    // 4. CJK phrases in symbol name
-    if tokens.cjk_phrases.iter().any(|p| node.name.contains(p)) {
+    // 4. Full CJK segments (or >=3-char phrases) in symbol name. A shared
+    // 2-char suffix like "喜报" is not enough to make a sibling module genuine.
+    if has_cjk_anchor(tokens, &node.name) {
         return true;
     }
 
@@ -987,8 +1095,11 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
     // 6. Check docstring
     if let Some(doc) = &node.docstring {
         let doc_lower = doc.to_ascii_lowercase();
-        if tokens.cjk_phrases.iter().any(|p| doc.contains(p))
-            || tokens.expanded_terms.iter().any(|t| doc_lower.contains(t))
+        if has_cjk_anchor(tokens, doc)
+            || tokens
+                .hard_expanded_terms
+                .iter()
+                .any(|t| doc_lower.contains(t))
         {
             return true;
         }
@@ -1005,8 +1116,11 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
     // 7. Check inline comments
     for c in &node.inline_comments {
         let c_lower = c.to_ascii_lowercase();
-        if tokens.cjk_phrases.iter().any(|p| c.contains(p))
-            || tokens.expanded_terms.iter().any(|t| c_lower.contains(t))
+        if has_cjk_anchor(tokens, c)
+            || tokens
+                .hard_expanded_terms
+                .iter()
+                .any(|t| c_lower.contains(t))
         {
             return true;
         }
@@ -1023,8 +1137,11 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
     // 8. Check structured comments
     for sc in &node.comments {
         let sc_lower = sc.text.to_ascii_lowercase();
-        if tokens.cjk_phrases.iter().any(|p| sc.text.contains(p))
-            || tokens.expanded_terms.iter().any(|t| sc_lower.contains(t))
+        if has_cjk_anchor(tokens, &sc.text)
+            || tokens
+                .hard_expanded_terms
+                .iter()
+                .any(|t| sc_lower.contains(t))
         {
             return true;
         }
@@ -1033,11 +1150,11 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
     // 9. Check SQL predicates and string literals
     for sql in &node.sql_predicates {
         let sql_lower = sql.raw_clause.to_ascii_lowercase();
-        if tokens
-            .cjk_phrases
-            .iter()
-            .any(|p| sql.raw_clause.contains(p))
-            || tokens.expanded_terms.iter().any(|t| sql_lower.contains(t))
+        if has_cjk_anchor(tokens, &sql.raw_clause)
+            || tokens
+                .hard_expanded_terms
+                .iter()
+                .any(|t| sql_lower.contains(t))
             || tokens
                 .words
                 .iter()
@@ -1048,8 +1165,11 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
     }
     for lit in &node.string_literals {
         let lit_lower = lit.to_ascii_lowercase();
-        if tokens.cjk_phrases.iter().any(|p| lit.contains(p))
-            || tokens.expanded_terms.iter().any(|t| lit_lower.contains(t))
+        if has_cjk_anchor(tokens, lit)
+            || tokens
+                .hard_expanded_terms
+                .iter()
+                .any(|t| lit_lower.contains(t))
             || tokens
                 .words
                 .iter()
@@ -1060,6 +1180,114 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
     }
 
     false
+}
+
+/// Cheap per-intent evidence for RRF. This deliberately uses lexical/text
+/// similarity only (no kind/graph weights) so multi-intent reranking cannot
+/// override the main scorer's domain priors. It runs only on symbols that
+/// already passed the main relevance gate.
+fn intent_evidence_for_node(tokens: &SearchTokens, node: &SymbolNode) -> f64 {
+    let name_lex = calculate_lexical_similarity(tokens, &node.name);
+    let name = if name_lex > 0.0 {
+        calculate_text_similarity(tokens, &node.name)
+    } else {
+        0.0
+    };
+    let mut doc = 0.0f64;
+    let mut branch = 0.0f64;
+    let mut inline = 0.0f64;
+    if let Some(d) = &node.docstring {
+        doc = doc.max(calculate_lexical_similarity(tokens, d));
+    }
+    for c in &node.inline_comments {
+        inline = inline.max(calculate_lexical_similarity(tokens, c));
+    }
+    for sc in &node.comments {
+        let sim = calculate_lexical_similarity(tokens, &sc.text);
+        match sc.scope {
+            super::graph::CommentScope::BranchInline { .. } => branch = branch.max(sim),
+            super::graph::CommentScope::Docstring | super::graph::CommentScope::MethodHeader => {
+                doc = doc.max(sim)
+            }
+            super::graph::CommentScope::PropertyDoc | super::graph::CommentScope::PlainInline => {
+                inline = inline.max(sim)
+            }
+        }
+    }
+    let mut sql = 0.0f64;
+    for predicate in &node.sql_predicates {
+        sql = sql.max(calculate_lexical_similarity(tokens, &predicate.raw_clause));
+        for field in &predicate.target_fields {
+            sql = sql.max(calculate_lexical_similarity(tokens, field));
+        }
+    }
+    for lit in &node.string_literals {
+        sql = sql.max(calculate_lexical_similarity(tokens, lit));
+    }
+    (name * 0.20 + doc * 0.25 + branch * 0.30 + sql * 0.20 + inline * 0.05).min(100.0)
+}
+
+/// Apply per-intent RRF to the scored symbols and return per-file intent hits.
+///
+/// A symbol that is top-ranked in one intent gets the full contribution of
+/// that intent; a symbol matching several intents accumulates contributions.
+/// There is no global 0.55x penalty for serving only one module. The RRF result
+/// is used as a mild tie-breaker so the main combined score stays stable.
+fn apply_intent_rrf(
+    scored: &mut [(PathBuf, ScoredSymbol)],
+    intents: &[SearchTokens],
+) -> HashMap<PathBuf, Vec<IntentHit>> {
+    let mut hits_by_file: HashMap<PathBuf, Vec<IntentHit>> = HashMap::new();
+    if intents.len() < 2 || scored.is_empty() {
+        return hits_by_file;
+    }
+
+    let mut rrf_sum = vec![0.0f64; scored.len()];
+    for (intent_index, intent) in intents.iter().enumerate() {
+        let mut ranked: Vec<(usize, f64)> = scored
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, (_, symbol))| {
+                let evidence = symbol
+                    .intent_evidence
+                    .get(intent_index)
+                    .copied()
+                    .unwrap_or(0.0);
+                (evidence > 1.0).then_some((idx, evidence))
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(INTENT_TOP_K);
+
+        let mut seen_files: HashSet<PathBuf> = HashSet::new();
+        for (rank, (idx, evidence)) in ranked.iter().enumerate() {
+            rrf_sum[*idx] += 1.0 / (60.0 + rank as f64);
+            let file = &scored[*idx].0;
+            if seen_files.len() < INTENT_TOP_FILES && seen_files.insert(file.clone()) {
+                hits_by_file
+                    .entry(file.clone())
+                    .or_default()
+                    .push(IntentHit {
+                        intent_index,
+                        intent: intent.raw_query.clone(),
+                        rank: rank + 1,
+                        symbol: scored[*idx].1.node.name.clone(),
+                        score: *evidence,
+                    });
+            }
+        }
+    }
+
+    // Normalize by the maximum possible RRF (rank 0 in every intent). The
+    // resulting factor is [0.95, 1.15]: multi-intent evidence breaks ties
+    // without letting an aggregator outrank the best single-domain module.
+    let max_rrf = intents.len() as f64 / 60.0;
+    for (idx, (_, symbol)) in scored.iter_mut().enumerate() {
+        let norm = (rrf_sum[idx] / max_rrf).min(1.0);
+        symbol.total_score *= 0.95 + 0.20 * norm;
+    }
+
+    hits_by_file
 }
 
 /// Score all symbols across files using multi-field similarity & graph topology.
@@ -1079,6 +1307,32 @@ fn score_workspace_symbols(
     bm25_scores: &HashMap<SymbolId, f64>,
     query_concept_vec: &[f32],
     concept_vectors: Option<&std::collections::HashMap<SymbolId, Vec<f32>>>,
+) -> Vec<FileCandidate> {
+    score_workspace_symbols_multi(
+        graph,
+        tokens,
+        std::slice::from_ref(tokens),
+        parsed_query,
+        project_tokens,
+        scope,
+        bm25_scores,
+        query_concept_vec,
+        concept_vectors,
+        None,
+    )
+}
+
+fn score_workspace_symbols_multi(
+    graph: &CodeGraph,
+    tokens: &SearchTokens,
+    intents: &[SearchTokens],
+    parsed_query: &ParsedQuery,
+    project_tokens: &HashSet<String>,
+    scope: Option<&Path>,
+    bm25_scores: &HashMap<SymbolId, f64>,
+    query_concept_vec: &[f32],
+    concept_vectors: Option<&std::collections::HashMap<SymbolId, Vec<f32>>>,
+    candidate_ids: Option<&HashSet<SymbolId>>,
 ) -> Vec<FileCandidate> {
     let bm25_max = bm25_scores.values().copied().fold(0.0f64, f64::max);
     let name_filters_lower: Vec<String> = parsed_query
@@ -1134,9 +1388,10 @@ fn score_workspace_symbols(
     let nodes: Vec<&SymbolNode> = scoped_files
         .iter()
         .flat_map(|(_, ids)| ids.iter().filter_map(|id| graph.nodes.get(id)))
+        .filter(|node| candidate_ids.is_none_or(|ids| ids.contains(&node.id)))
         .collect();
 
-    let scored: Vec<(PathBuf, ScoredSymbol)> = {
+    let mut scored: Vec<(PathBuf, ScoredSymbol)> = {
         let job = || {
             nodes
                 .into_par_iter()
@@ -1174,6 +1429,14 @@ fn score_workspace_symbols(
                     };
                     let mut name_bonus = 0.0;
                     let node_name_lower = node.name.to_ascii_lowercase();
+                    // A hard dictionary term that equals the physical symbol is the
+                    // strongest possible business-language bridge. Generic/soft
+                    // suffix matches stay candidate-only and never get this boost.
+                    let hard_expansion_exact = tokens.hard_expanded_terms.iter().any(|term| {
+                        term.len() >= 3
+                            && !is_generic_ident_fragment(term)
+                            && node_name_lower == *term
+                    });
 
                     if tokens.raw_query.eq_ignore_ascii_case(&node.name) {
                         name_bonus += 100.0;
@@ -1191,11 +1454,20 @@ fn score_workspace_symbols(
                             };
                         }
                     }
-                    if tokens.expanded_terms.iter().any(|term| {
+                    if hard_expansion_exact {
+                        name_bonus += 45.0;
+                    } else if tokens.hard_expanded_terms.iter().any(|term| {
                         term.len() >= 8
                             && (node_name_lower == *term || node_name_lower.contains(term))
                     }) {
                         name_bonus += 30.0;
+                    } else if tokens
+                        .soft_expanded_terms
+                        .iter()
+                        .any(|term| term.len() >= 8 && node_name_lower.contains(term))
+                    {
+                        // Generic suffix expansion: candidate recall only.
+                        name_bonus += 6.0;
                     }
                     if project_tokens.contains(&node_name_lower)
                         && !tokens.raw_query.eq_ignore_ascii_case(&node.name)
@@ -1257,17 +1529,19 @@ fn score_workspace_symbols(
                         .raw_query
                         .chars()
                         .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
-                    let has_thesaurus = !tokens.expanded_terms.is_empty();
+                    // Exact-lookup mode is a property of the query shape, not of
+                    // whether the thesaurus fired. An expanded identifier is a
+                    // recall aid; it must not silently switch a precise symbol
+                    // lookup into comment-weighted natural-language mode.
                     let is_exact_code_query = !has_cjk
-                        && !has_thesaurus
-                        && (tokens
+                        && tokens.code_identifiers.len() == 1
+                        && !tokens.raw_query.contains(' ')
+                        && tokens
                             .code_identifiers
-                            .iter()
-                            .any(|id| id.eq_ignore_ascii_case(&tokens.raw_query))
-                            || (tokens.code_identifiers.len() == 1
-                                && !tokens.raw_query.contains(' ')));
+                            .first()
+                            .is_some_and(|id| tokens.raw_query.eq_ignore_ascii_case(id));
 
-                    let text_match = if is_exact_code_query {
+                    let text_match = if is_exact_code_query || hard_expansion_exact {
                         (name_sim + name_bonus) * 0.70
                             + doc_sim * 0.15
                             + branch_comment_sim * 0.05
@@ -1329,6 +1603,7 @@ fn score_workspace_symbols(
                     };
                     // Exact identifier / field lookup: definition sites must beat popular helpers.
                     let exact_ident = tokens.raw_query.eq_ignore_ascii_case(&node.name)
+                        || hard_expansion_exact
                         || tokens
                             .code_identifiers
                             .iter()
@@ -1351,7 +1626,7 @@ fn score_workspace_symbols(
                     }
 
                     let active_bonus = if node.metrics.is_active_logic {
-                        if is_exact_code_query {
+                        if is_exact_code_query || hard_expansion_exact {
                             let b = (node.metrics.branch_count as f64 * 1.0).min(5.0);
                             let s = if node.metrics.has_sql_or_qs { 5.0 } else { 0.0 };
                             b + s
@@ -1403,6 +1678,14 @@ fn score_workspace_symbols(
                         .max(0.0);
 
                     if raw_score >= 10.0 || (has_strong_anchor && raw_score >= 5.0) {
+                        let intent_evidence = if intents.len() > 1 {
+                            intents
+                                .iter()
+                                .map(|intent| intent_evidence_for_node(intent, node))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         Some((
                             node.file.clone(),
                             ScoredSymbol {
@@ -1412,6 +1695,7 @@ fn score_workspace_symbols(
                                 doc_score: doc_sim.max(branch_comment_sim),
                                 inline_score: plain_inline_sim.max(sql_sim),
                                 graph_mass,
+                                intent_evidence,
                             },
                         ))
                     } else {
@@ -1427,6 +1711,9 @@ fn score_workspace_symbols(
     };
 
     // Merge parallel hits into per-file buckets.
+    // Multi-intent queries get a per-intent RRF rerank on the already-scored
+    // symbols. This is a bounded O(hits × intents) pass, not another scan.
+    let mut intent_hits_by_file = apply_intent_rrf(&mut scored, intents);
     let mut file_map: HashMap<PathBuf, Vec<ScoredSymbol>> = HashMap::new();
     for (file, sym) in scored {
         file_map.entry(file).or_default().push(sym);
@@ -1479,9 +1766,10 @@ fn score_workspace_symbols(
         };
 
         candidates.push(FileCandidate {
-            file,
+            file: file.clone(),
             top_score: adjusted_score,
             symbols: syms,
+            intent_hits: intent_hits_by_file.remove(&file).unwrap_or_default(),
         });
     }
 
@@ -2595,6 +2883,40 @@ fn fold_snippet(
 
 /// Render formatted explore output: catalog is exhaustive and cheap; evidence is
 /// layer-diverse and hard-capped. Omissions are ready-to-fire tool calls.
+/// Render the per-intent top files for a multi-intent query. The main table is
+/// still a single global ranking; this section guarantees each intent's actual
+/// module is visible instead of being buried by keyword-density aggregators.
+fn render_intent_hits(candidates: &[FileCandidate], root: &Path) -> Vec<String> {
+    let mut rows: Vec<(usize, usize, &IntentHit, &Path)> = Vec::new();
+    for fc in candidates {
+        for hit in &fc.intent_hits {
+            rows.push((hit.intent_index, hit.rank, hit, fc.file.as_path()));
+        }
+    }
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    rows.sort_by_key(|(intent_index, rank, _, _)| (*intent_index, *rank));
+    rows.truncate(24);
+
+    let mut out = Vec::new();
+    out.push("### 🎯 INTENT HITS (multi-intent query)".to_string());
+    out.push("| Intent | # | File | Symbol | Score |".to_string());
+    out.push("| :--- | ---: | :--- | :--- | ---: |".to_string());
+    for (_, rank, hit, file) in rows {
+        out.push(format!(
+            "| `{}` | {} | `{}` | `{}` | {:.1} |",
+            hit.intent,
+            rank,
+            rel_disp(file, root),
+            hit.symbol,
+            hit.score
+        ));
+    }
+    out.push(String::new());
+    out
+}
+
 fn render_explore_output(
     graph: &CodeGraph,
     root: &Path,
@@ -2812,6 +3134,11 @@ fn render_explore_output(
     let coverage_idx = out.len();
     out.extend(card);
     out.push("".to_string());
+
+    let intent_section = render_intent_hits(candidates, root);
+    if !intent_section.is_empty() {
+        out.extend(intent_section);
+    }
 
     let ident_hits = collect_identifier_hits(graph, tokens, scope);
     if !ident_hits.is_empty() {
@@ -3245,10 +3572,12 @@ mod tests {
                 doc_score: 0.0,
                 inline_score: 0.0,
                 graph_mass: 1.0,
+                intent_evidence: Vec::new(),
             })
             .collect();
         // 6 symbols in one file → per-file cap (4) omits 2.
         let candidates = vec![FileCandidate {
+            intent_hits: Vec::new(),
             file,
             top_score: 50.0,
             symbols,
@@ -3309,6 +3638,7 @@ mod tests {
                 ..Default::default()
             };
             candidates.push(FileCandidate {
+                intent_hits: Vec::new(),
                 file: node.file.clone(),
                 top_score: 50.0,
                 symbols: vec![ScoredSymbol {
@@ -3318,6 +3648,7 @@ mod tests {
                     doc_score: 0.0,
                     inline_score: 0.0,
                     graph_mass: 1.0,
+                    intent_evidence: Vec::new(),
                 }],
             });
         }
@@ -3524,6 +3855,7 @@ mod tests {
         }
 
         let candidates = vec![FileCandidate {
+            intent_hits: Vec::new(),
             file: target_file,
             top_score: 240.0,
             symbols: vec![ScoredSymbol {
@@ -3533,6 +3865,7 @@ mod tests {
                 doc_score: 0.0,
                 inline_score: 0.0,
                 graph_mass: 10.0,
+                intent_evidence: Vec::new(),
             }],
         }];
 
@@ -3580,6 +3913,7 @@ mod tests {
         };
         graph.add_symbol(node.clone());
         let candidates = vec![FileCandidate {
+            intent_hits: Vec::new(),
             file: node.file.clone(),
             top_score: 240.0,
             symbols: vec![ScoredSymbol {
@@ -3589,6 +3923,7 @@ mod tests {
                 doc_score: 0.0,
                 inline_score: 0.0,
                 graph_mass: 10.0,
+                intent_evidence: Vec::new(),
             }],
         }];
         let root = PathBuf::from(".");
@@ -3639,6 +3974,7 @@ mod tests {
             ..Default::default()
         };
         let func_candidates = vec![FileCandidate {
+            intent_hits: Vec::new(),
             file: func_node.file.clone(),
             top_score: 240.0,
             symbols: vec![ScoredSymbol {
@@ -3648,6 +3984,7 @@ mod tests {
                 doc_score: 0.0,
                 inline_score: 0.0,
                 graph_mass: 10.0,
+                intent_evidence: Vec::new(),
             }],
         }];
         let no_contract = render_explore_output(
@@ -3722,6 +4059,7 @@ mod tests {
         graph.add_symbol(far_node.clone());
 
         let candidates = vec![FileCandidate {
+            intent_hits: Vec::new(),
             file: hit_node.file.clone(),
             top_score: 240.0,
             symbols: vec![ScoredSymbol {
@@ -3731,6 +4069,7 @@ mod tests {
                 doc_score: 0.0,
                 inline_score: 0.0,
                 graph_mass: 10.0,
+                intent_evidence: Vec::new(),
             }],
         }];
         let root = PathBuf::from(".");
@@ -3798,6 +4137,7 @@ mod tests {
         graph.add_symbol(out_of_scope_node.clone());
 
         let candidates = vec![FileCandidate {
+            intent_hits: Vec::new(),
             file: in_scope_node.file.clone(),
             top_score: 240.0,
             symbols: vec![ScoredSymbol {
@@ -3807,6 +4147,7 @@ mod tests {
                 doc_score: 0.0,
                 inline_score: 0.0,
                 graph_mass: 10.0,
+                intent_evidence: Vec::new(),
             }],
         }];
         let root = PathBuf::from(".");
@@ -4086,6 +4427,7 @@ mod tests {
             doc_score: 0.0,
             inline_score: 0.0,
             graph_mass: 1.0,
+            intent_evidence: Vec::new(),
         }
     }
 
@@ -4257,6 +4599,7 @@ mod tests {
                 10,
             );
             cands.push(FileCandidate {
+                intent_hits: Vec::new(),
                 file: n.file.clone(),
                 top_score: 150.0,
                 symbols: vec![scored(n, 150.0)],
@@ -4270,6 +4613,7 @@ mod tests {
             26,
         );
         cands.push(FileCandidate {
+            intent_hits: Vec::new(),
             file: ctl.file.clone(),
             top_score: 80.0,
             symbols: vec![scored(ctl, 80.0)],
@@ -4282,6 +4626,7 @@ mod tests {
             30,
         );
         cands.push(FileCandidate {
+            intent_hits: Vec::new(),
             file: xml.file.clone(),
             top_score: 55.0,
             symbols: vec![scored(xml, 55.0)],
@@ -4333,6 +4678,7 @@ mod tests {
             },
         );
         let candidates = vec![FileCandidate {
+            intent_hits: Vec::new(),
             file: hit.file.clone(),
             top_score: 200.0,
             symbols: vec![scored(hit, 200.0)],
@@ -4467,6 +4813,267 @@ mod tests {
             candidates[0].top_score > 60.0,
             "Core SQL score must be > 60, was {}",
             candidates[0].top_score
+        );
+    }
+
+    #[test]
+    fn query_cache_key_distinguishes_graph_and_thesaurus_revisions() {
+        let base = QueryCacheKey {
+            schema: QUERY_CACHE_SCHEMA,
+            root: "root".into(),
+            graph_revision: 1,
+            thesaurus_revision: 1,
+            ignore_revision: 1,
+            query: "q".into(),
+            scope: String::new(),
+            max_files: 12,
+            bm25_enabled: true,
+            concept_enabled: false,
+            intent_enabled: true,
+            candidates_enabled: true,
+        };
+        let mut graph_changed = base.clone();
+        graph_changed.graph_revision = 2;
+        assert_ne!(base, graph_changed);
+        let mut thesaurus_changed = base.clone();
+        thesaurus_changed.thesaurus_revision = 2;
+        assert_ne!(base, thesaurus_changed);
+    }
+
+    #[test]
+    fn golden_business_queries_rank_correct_symbols() {
+        use super::super::bilingual_nlp::{
+            parse_bilingual_query_with_thesaurus, parse_field_qualified_query, parse_query_intents,
+            DynamicThesaurus,
+        };
+        use super::super::graph::{AstMetrics, CommentScope, StructuredComment, Visibility};
+
+        fn golden_node(
+            id: u64,
+            name: &str,
+            file: &str,
+            doc: &str,
+            branch: &str,
+            kind: SymbolKind,
+        ) -> SymbolNode {
+            SymbolNode {
+                id,
+                name: name.into(),
+                kind,
+                visibility: Visibility::Public,
+                file: PathBuf::from(file),
+                start_line: 1,
+                end_line: 20,
+                signature: None,
+                docstring: (!doc.is_empty()).then(|| doc.to_string()),
+                inline_comments: vec![],
+                comments: vec![StructuredComment {
+                    text: branch.to_string(),
+                    scope: CommentScope::BranchInline {
+                        branch_kind: "if_condition".into(),
+                    },
+                    line: 5,
+                }],
+                sql_predicates: vec![],
+                string_literals: vec![],
+                metrics: AstMetrics {
+                    cyclomatic_complexity: 3,
+                    branch_count: 2,
+                    has_sql_or_qs: false,
+                    is_pure_dto: false,
+                    is_active_logic: true,
+                },
+            }
+        }
+
+        let mut graph = CodeGraph::new();
+        graph.add_symbol(golden_node(
+            1,
+            "PersonMLZTXibao",
+            "backend/Ailai.Dingtalk/PersonMLZTXibao.cs",
+            "个人美莱转推喜报：生成海报并推送到钉钉。",
+            "美莱转推喜报海报",
+            SymbolKind::Class,
+        ));
+        graph.add_symbol(golden_node(
+            2,
+            "PersonMLZTService",
+            "backend/Ailai.Dingtalk/PersonMLZTService.cs",
+            "Personal retweet service.",
+            "Personal retweet flow.",
+            SymbolKind::Class,
+        ));
+        graph.add_symbol(golden_node(
+            3,
+            "DepQZXibao",
+            "backend/Ailai.Dingtalk/DepQZXibao.cs",
+            "Render the pre-position poster for the campaign.",
+            "Render poster image.",
+            SymbolKind::Class,
+        ));
+        graph.add_symbol(golden_node(
+            4,
+            "DacuXibao",
+            "backend/Ailai.Dingtalk/DacuXibao.cs",
+            "双11 大促喜报海报：按单价与销量计算目标并生成喜报。",
+            "双11 大促喜报 海报",
+            SymbolKind::Class,
+        ));
+        graph.add_symbol(golden_node(
+            5,
+            "BaiwanXibao",
+            "backend/Ailai.Dingtalk/BaiwanXibao.cs",
+            "Target calculator for campaign performance.",
+            "Target = unit price * sales volume",
+            SymbolKind::Class,
+        ));
+        graph.add_symbol(golden_node(
+            6,
+            "PersonXibao",
+            "backend/Ailai.Dingtalk/PersonXibao.cs",
+            "双11 个人喜报海报：汇总个人业绩并生成海报。",
+            "双11 喜报 海报",
+            SymbolKind::Class,
+        ));
+        graph.add_symbol(golden_node(
+            7,
+            "PerformanceTtsBroadcastService",
+            "backend/Ailai.Statistics/PerformanceTtsBroadcastService.cs",
+            "双11 业绩语音播报：把统计中心的业绩数据转成 TTS 播报。",
+            "双11 语音播报 业绩 TTS",
+            SymbolKind::Class,
+        ));
+        graph.add_symbol(golden_node(
+            8,
+            "Double11Board",
+            "webui/src/views/Double11Board.tsx",
+            "双11 商品 大促 战报 看板。",
+            "双11 商品 大促 战报 看板",
+            SymbolKind::Function,
+        ));
+        graph.add_symbol(golden_node(
+            9,
+            "AilaiProductInfoService",
+            "backend/Ailai.Order/AilaiProductInfoService.cs",
+            "双11 商品大促 促销中心：商品价格、库存、优惠券。",
+            "双11 商品 促销 大促 库存 优惠券",
+            SymbolKind::Class,
+        ));
+
+        let mut dt = DynamicThesaurus::default();
+        dt.parse_and_append(
+            "美莱转推, 美莱转推喜报 = personmlztxibao, mlzt\n\
+             部门前置喜报, 前置喜报 = depqzxibao, depqz\n\
+             百万喜报, 百万战报 = baiwanxibao, baiwan\n\
+             大促喜报 = dacuxibao\n",
+        );
+
+        let score = |query: &str| -> Vec<FileCandidate> {
+            let tokens = parse_bilingual_query_with_thesaurus(query, &dt);
+            let intents = parse_query_intents(query, &dt);
+            let parsed = parse_field_qualified_query(query);
+            score_workspace_symbols_multi(
+                &graph,
+                &tokens,
+                &intents,
+                &parsed,
+                &HashSet::new(),
+                None,
+                &HashMap::new(),
+                &[],
+                None,
+                None,
+            )
+        };
+        let top_file = |query: &str| -> String {
+            score(query)
+                .first()
+                .and_then(|c| c.file.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+
+        assert_eq!(
+            top_file("部门前置喜报"),
+            "DepQZXibao.cs",
+            "longest-match thesaurus must rank the QZ class first"
+        );
+        assert_eq!(
+            top_file("百万喜报"),
+            "BaiwanXibao.cs",
+            "百万喜报 must bridge to BaiwanXibao"
+        );
+        assert_eq!(
+            top_file("大促喜报"),
+            "DacuXibao.cs",
+            "大促喜报 must bridge to DacuXibao"
+        );
+        assert_eq!(
+            top_file("美莱转推喜报"),
+            "PersonMLZTXibao.cs",
+            "美莱转推喜报 must rank the MLZT poster class first"
+        );
+
+        // Without the dictionary, the class with a Chinese comment is still
+        // recoverable, while the English-only pinyin service stays absent. This
+        // is the baseline the thesaurus is meant to bridge — not replace.
+        let no_dt = DynamicThesaurus::default();
+        let no_tokens = parse_bilingual_query_with_thesaurus("美莱转推喜报", &no_dt);
+        let no_intents = parse_query_intents("美莱转推喜报", &no_dt);
+        let no_parsed = parse_field_qualified_query("美莱转推喜报");
+        let no_candidates = score_workspace_symbols_multi(
+            &graph,
+            &no_tokens,
+            &no_intents,
+            &no_parsed,
+            &HashSet::new(),
+            None,
+            &HashMap::new(),
+            &[],
+            None,
+            None,
+        );
+        assert!(
+            no_candidates
+                .first()
+                .is_some_and(|c| c.file.ends_with("PersonMLZTXibao.cs")),
+            "comment-backed symbol must still lead without a dictionary: {:?}",
+            no_candidates
+                .iter()
+                .map(|c| (&c.file, c.top_score))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !no_candidates
+                .iter()
+                .any(|c| c.file.ends_with("PersonMLZTService.cs")),
+            "English-only pinyin service must not be a lexical hit without a dictionary"
+        );
+
+        // Multi-intent: the global ranking may still be dominated by the
+        // keyword-dense aggregator, but every intent group must expose the
+        // module that actually implements it.
+        let multi = score("Double11 双11 喜报 语音播报");
+        let mut intent_files: HashMap<usize, Vec<String>> = HashMap::new();
+        for candidate in &multi {
+            for hit in &candidate.intent_hits {
+                intent_files
+                    .entry(hit.intent_index)
+                    .or_default()
+                    .push(candidate.file.to_string_lossy().into_owned());
+            }
+        }
+        assert!(
+            intent_files.values().any(|files| files
+                .iter()
+                .any(|f| f.contains("DacuXibao") || f.contains("PersonXibao"))),
+            "喜报 intent must expose a Xibao module: {intent_files:?}"
+        );
+        assert!(
+            intent_files.values().any(|files| files
+                .iter()
+                .any(|f| f.contains("PerformanceTtsBroadcastService"))),
+            "语音播报 intent must expose the TTS service: {intent_files:?}"
         );
     }
 
