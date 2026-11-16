@@ -21,6 +21,44 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.2-beta.0 (2026-11-17)
+
+**This beta eliminates WebUI multi-tab stalls, connection pool exhaustion, modal hangs, and legacy-migration daemon self-termination (#88). It multiplexes live streams over a single WebSocket, lazy-loads the right inspector and extra language packs, isolates blocking backend IO onto worker threads, and aggregates cold-start metadata loading.**
+
+- **[Stability & Issue #88] Safe legacy migration and auth recovery**:
+  - Added Linux TGID, thread-group, child-process, and executable-path guards in legacy zombie process cleanup so migration never kills the running daemon itself (#88), with timeout bounds, error banners, and dismiss/retry controls in the modal.
+  - Redirected `/token=<value>` paths to the canonical `/?token=<value>` authentication flow and guarded collection endpoints against non-OK/non-array payloads.
+  - Fixed the "Load older messages" decimal cursor (`before_seq=0.953`) 400 failure by strictly separating authentic server integer `serverSeq` cursors and falling back to offset pagination.
+
+- **[Connectivity & Responsiveness] Multiplexed streaming and instant model settings**:
+  - Added a single multiplexed `/stream/ws` channel carrying both global events and on-demand session watches (with SSE leader election and hidden-tab standby pausing as fallback), freeing HTTP/1.1 connection slots across multi-tab sessions.
+  - Made right inspector panels (Terminal, Git, Preview) genuinely lazy-mount only when opened, allowed closing all terminals to zero, and stopped unnecessary cold-start Git subprocess refreshes.
+  - Fixed model configuration dialogs disappearing and stalling on "Loading..." by rendering an immediate modal frame, preloading settings chunks when idle, adding SWR config caching, deferring unrelated settings requests, and adding a 15s default request timeout.
+
+- **[Performance & Payload] Startup aggregation, backend isolation, and lighter bundles**:
+  - Added aggregated `/api/bootstrap` startup loading, in-flight `GET` deduplication, stabilized model-selector callbacks, decoupled sidebar folder expansion from full reloads, cached update checks with lightweight `?summary=1` and ETag support, and re-enabled `tail` ETag caching.
+  - Moved Git handlers, process scans, and session resolution/detail loading into blocking worker threads, deduplicated catalog directory scans, and switched session lookup to single-bucket access.
+  - Extracted the 1-second timer out of the root chat component, memoized turn-text aggregation and user message views, skipped DOM parsing for image-free markdown blocks, windowed large expanded sidebar lists, and code-split non-default language packs.
+
+---
+
+**本次 beta 集中解决 WebUI 多标签卡顿、HTTP/1.1 连接池拥堵、弹窗失灵以及旧版环境迁移导致服务端进程自毁（#88）的问题，通过单连接 WebSocket 多路复用、检查器与多语言包按需懒加载、后端阻塞操作线程隔离及冷启动元数据聚合，大幅提升页面流畅度与稳定性。**
+
+- **[稳定性与 #88 修复] 迁移防护与鉴权/分页兜底**：
+  - 修复 Linux 下迁移扫描误杀自身线程组的缺陷（#88），保护同进程组、子进程及当前可执行文件路径，并为迁移弹窗补齐超时、错误提示与关闭/重试交互。
+  - 修复误输入 `/token=<value>` 路径后的鉴权引导并补全列表类接口状态码与数组校验，消除未登录时的页面崩溃。
+  - 修复大话窗「向上展开历史」发出小数游标导致 400 卡死的问题，严格区分后端真实整数分页游标并在异常时自动回退偏移分页。
+
+- **[连接架构与交互响应] 单链路实时复用与配置弹窗秒开**：
+  - 新增并接入统一实时复用通道，多标签页共享与会话监听不再挤占 6 条 HTTP/1.1 连接槽，降级模式下支持跨标签页选主与后台标签暂停。
+  - 将右侧 Terminal、Git 与 Preview 检查器彻底改为打开时按需挂载，允许关闭至 0 个终端，移除折叠态与落地页的冗余终端和 Git 初始化开销。
+  - 消除点击「模型配置」后弹窗空白消失与久等卡在加载中的现象，提供即时弹窗骨架、后台空闲预热、配置缓存秒开、按页签按需请求及 15 秒默认请求超时控制。
+
+- **[性能与体积优化] 首屏聚合、后端阻塞隔离与主线程瘦身**：
+  - 推出冷启动 `/api/bootstrap` 聚合接口与并发 `GET` 单飞去重，优化侧栏与模型选择器钩子依赖，为版本检查补全服务端 TTL 缓存、`?summary=1` 轻量摘要与前端冷却共享，并恢复首屏历史尾页 ETag 条件缓存。
+  - 将全线 Git 操作、进程扫描与会话检索读盘迁移至阻塞线程池，合并重复目录扫描并支持单分桶直查会话详情。
+  - 剥离顶层 1 秒计时器重渲染、缓存回复文本与用户气泡组件、对无图消息跳过解析器、对长会话列表分批渐进展开，并将扩展语种词典移出主包按需加载。
+
 ## v7.5.1 (2026-11-16)
 
 **This stable release consolidates the entire 7.5.1 beta line. It aligns the OpenAI-, Responses-, and Anthropic-compatible endpoints with the WebUI session model, keeps steer and user rows stable through folds and session switches, unifies code-graph/search ignore handling, restores files that could remain missing from `code_explore`, improves Chinese/English retrieval, combines todo plan/update, and adds a permanent update kill switch.**
