@@ -50,11 +50,44 @@ pub struct UpdateCheckQuery {
     #[serde(default)]
     pub channel: Option<String>,
     /// 轻量角标检查模式：跳过庞大的全量历史版本与更新说明正文，响应压至 < 1 KB
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool")]
     pub summary: Option<bool>,
     /// 强制穿透进程内 TTL 缓存（供用户手动点击“检查更新”时即时拉取最新）
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool")]
     pub refresh: Option<bool>,
+}
+
+/// Query strings come from multiple clients: the WebUI sends `summary=1`,
+/// while API clients may send `true`. Accept both without making the endpoint
+/// return 400 for a valid boolean intent.
+fn de_opt_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Boolish {
+        Bool(bool),
+        Int(u8),
+        Str(String),
+    }
+    match Option::<Boolish>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Boolish::Bool(v)) => Ok(Some(v)),
+        Some(Boolish::Int(0)) => Ok(Some(false)),
+        Some(Boolish::Int(1)) => Ok(Some(true)),
+        Some(Boolish::Int(v)) => Err(D::Error::custom(format!(
+            "expected 0/1 boolean, got {v}"
+        ))),
+        Some(Boolish::Str(v)) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(Some(true)),
+            "0" | "false" | "no" | "off" => Ok(Some(false)),
+            other => Err(D::Error::custom(format!(
+                "expected 0/1/true/false boolean, got {other:?}"
+            ))),
+        },
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -1050,6 +1083,25 @@ pub fn register_update_routes(router: Router<AppState>) -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_check_query_accepts_numeric_and_text_booleans() {
+        let numeric = Query::<UpdateCheckQuery>::try_from_uri(
+            &"/api/update/check?summary=1&refresh=0".parse().unwrap(),
+        )
+        .expect("numeric boolean query")
+        .0;
+        assert_eq!(numeric.summary, Some(true));
+        assert_eq!(numeric.refresh, Some(false));
+
+        let textual = Query::<UpdateCheckQuery>::try_from_uri(
+            &"/api/update/check?summary=true&refresh=false".parse().unwrap(),
+        )
+        .expect("textual boolean query")
+        .0;
+        assert_eq!(textual.summary, Some(true));
+        assert_eq!(textual.refresh, Some(false));
+    }
 
     #[test]
     fn test_compare_versions() {
