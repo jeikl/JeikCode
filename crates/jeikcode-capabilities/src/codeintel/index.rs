@@ -1706,6 +1706,13 @@ fn heal_empty_code_units(units: &mut HashMap<PathBuf, FileUnit>) {
     }
 }
 
+/// A persisted graph is only reusable when it covers every persisted unit.
+/// A crash/partial write can save a new unit without refreshing the graph blob;
+/// reusing that graph would make the new file invisible until touch/init.
+fn graph_covers_units(units: &HashMap<PathBuf, FileUnit>, graph: &CodeGraph) -> bool {
+    !units.is_empty() && units.keys().all(|p| graph.file_mtimes.contains_key(p))
+}
+
 /// Re-key an in-memory unit map so lookups never miss due to slash / drive
 /// letter drift (the classic "every file looks dirty → reparse 1297 files").
 fn rekey_units(units: &mut HashMap<PathBuf, FileUnit>) {
@@ -3663,10 +3670,11 @@ impl CodeIndex {
             if units.is_empty() {
                 if let Some(disk) = load_disk_cache(&root) {
                     let disk_fp = disk.walk_fp;
-                    let disk_graph_ok = disk.graph.node_count() > 0;
-                    let disk_graph = disk.graph;
                     let mut loaded = units_from_disk(disk.units);
                     heal_empty_code_units(&mut loaded);
+                    let disk_graph_ok =
+                        disk.graph.node_count() > 0 && graph_covers_units(&loaded, &disk.graph);
+                    let disk_graph = disk.graph;
                     if !loaded.is_empty() {
                         let n_files = loaded.len();
                         let (mut walked_known, missing) =
@@ -4355,6 +4363,25 @@ export function CouponPanel() {
             !g.find_by_name("brand_new").is_empty(),
             "existing non-empty codegraph must still ingest new files incrementally"
         );
+    }
+
+    #[test]
+    fn graph_blob_must_cover_all_units() {
+        let file = PathBuf::from("src/new.rs");
+        let units = HashMap::from([(
+            file.clone(),
+            FileUnit {
+                mtime_ns: 1,
+                len: 1,
+                nodes: Vec::new(),
+                calls: Vec::new(),
+                parse_failed: false,
+            },
+        )]);
+        let mut graph = CodeGraph::new();
+        assert!(!graph_covers_units(&units, &graph));
+        graph.file_mtimes.insert(file, 0);
+        assert!(graph_covers_units(&units, &graph));
     }
 
     #[test]
