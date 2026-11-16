@@ -1692,6 +1692,20 @@ fn units_from_disk(units: HashMap<String, FileUnit>) -> HashMap<PathBuf, FileUni
         .collect()
 }
 
+/// Migrate legacy empty tombstones created before `parse_failed` existed.
+/// A disk-loaded unit with no nodes/calls for a non-empty, supported code file
+/// may have been produced by a transient read/parse failure; retry it once.
+fn heal_empty_code_units(units: &mut HashMap<PathBuf, FileUnit>) {
+    for (path, unit) in units.iter_mut() {
+        if unit.parse_failed || unit.len == 0 || !unit.nodes.is_empty() || !unit.calls.is_empty() {
+            continue;
+        }
+        if Lang::detect(path).is_some_and(|lang| lang.is_indexed()) {
+            unit.parse_failed = true;
+        }
+    }
+}
+
 /// Re-key an in-memory unit map so lookups never miss due to slash / drive
 /// letter drift (the classic "every file looks dirty → reparse 1297 files").
 fn rekey_units(units: &mut HashMap<PathBuf, FileUnit>) {
@@ -3652,6 +3666,7 @@ impl CodeIndex {
                     let disk_graph_ok = disk.graph.node_count() > 0;
                     let disk_graph = disk.graph;
                     let mut loaded = units_from_disk(disk.units);
+                    heal_empty_code_units(&mut loaded);
                     if !loaded.is_empty() {
                         let n_files = loaded.len();
                         let (mut walked_known, missing) =
@@ -4339,6 +4354,33 @@ export function CouponPanel() {
         assert!(
             !g.find_by_name("brand_new").is_empty(),
             "existing non-empty codegraph must still ingest new files incrementally"
+        );
+    }
+
+    #[test]
+    fn legacy_empty_code_unit_is_healed_on_load() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("legacy.rs");
+        std::fs::write(&file, "pub fn legacy_recovered() {}\n").unwrap();
+        let md = std::fs::metadata(&file).unwrap();
+        let unit = FileUnit {
+            mtime_ns: md
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            len: md.len(),
+            nodes: Vec::new(),
+            calls: Vec::new(),
+            parse_failed: false,
+        };
+        let mut units = HashMap::from([(file.clone(), unit)]);
+        heal_empty_code_units(&mut units);
+        assert!(units.get(&file).unwrap().parse_failed);
+        assert!(
+            restat_one(&file, units.get(&file).unwrap(), None, None).is_err(),
+            "healed legacy tombstone must be retried"
         );
     }
 
