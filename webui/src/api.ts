@@ -1745,6 +1745,7 @@ export interface ConfigInfo {
   language?: string;
   /** Whether to display the GitHub repository logo in the UI. Defaults to true. */
   github_logo?: boolean;
+  update_dead?: boolean;
   /** Agent 执行完会改动分支/引用/远端的 git 命令后，是否自动向所有会话广播 Git 刷新。默认 true。 */
   auto_git_sync?: boolean;
 }

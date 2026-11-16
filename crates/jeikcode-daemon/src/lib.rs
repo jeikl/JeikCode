@@ -153,6 +153,7 @@ pub(crate) struct ConfigResponse {
     pub language: String,
     /// Whether to display the GitHub repository logo in the UI.
     pub github_logo: bool,
+    pub update_dead: bool,
     /// Agent 执行完会改动分支/引用/远端的 git 命令后，是否自动向该项目全部会话广播 Git 刷新。
     pub auto_git_sync: bool,
 }

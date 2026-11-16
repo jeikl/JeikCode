@@ -2809,6 +2809,9 @@ fn execute_slash_command_impl(
             renderer.flush();
         }
         "update" | "upgrade" => {
+            if jeikcode_config::config::runtime_state::is_dead() {
+                return Ok(());
+            }
             // Sub-dispatch: `/upgrade`, `/upgrade rollback`, `/upgrade --force`, `/upgrade set <url>`, `/upgrade get`, `/upgrade reset`.
             // Keep parsing deliberately tolerant — users type these things
             // with assorted capitalization and whitespace; a command that

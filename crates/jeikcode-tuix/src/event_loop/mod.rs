@@ -23255,6 +23255,8 @@ pub(crate) fn build_status(state: &UiState, ctx: &LoopCtx) -> crate::render::Sta
             crate::i18n::t(hint_msg).into_owned(),
             crate::render::HintSeverity::Info,
         ))
+    } else if jeikcode_config::config::runtime_state::is_dead() {
+        None
     } else if let Some(v) = ctx.update_hint.lock().ok().and_then(|g| g.clone()) {
         let text = if jeikcode_updater::is_package_managed() {
             crate::i18n::t(crate::i18n::Msg::StatusUpgradeHintPm { version: &v }).into_owned()

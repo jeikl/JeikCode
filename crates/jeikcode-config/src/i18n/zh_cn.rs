@@ -1189,7 +1189,7 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         }
         Msg::CliAboutTelemetry => "遥测控制".into(),
         Msg::CliAboutPlugin => "管理技能/命令插件".into(),
-        Msg::CliAboutUninstall => "卸载 JeikCode。无参数时交互询问是否保留用户配置；simple 只删程序；all 全部删除。详细教程：https://jeikcode.top/zh/guide/updates.html".into(),
+        Msg::CliAboutUninstall => "卸载 JeikCode。无参数时交互询问是否保留用户配置；simple 只删程序；all 全部删除。".into(),
         Msg::CliAboutSetup => "重新初始化 JeikCode 环境与内置配置到 ~/.jeikcode/".into(),
         Msg::CliAboutHooks => "管理钩子（列表、测试、启用/禁用）".into(),
         Msg::CliAboutHooksList => "列出所有已加载钩子及其状态".into(),

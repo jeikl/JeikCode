@@ -102,7 +102,7 @@ function rememberedSessionToMeta(
 
 export function App() {
   const t = useT();
-  const { theme, setTheme, lang, setLang } = useSettings();
+  const { theme, setTheme, lang, setLang, updateDead } = useSettings();
   // 刷新恢复优先级：URL 里的短 id（可分享/可直达）> 本浏览器上次选中的完整会话 id。
   // 跨设备/无痕冷启动两者都没有，才真正回到新建落地页。
   const urlSessionRef = useRef<string | null>(readSessionIdFromUrl());
@@ -338,6 +338,14 @@ export function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [showUpdateDialog, setShowUpdateDialog] = useState(false);
+  const updateDeadRef = useRef(false);
+  useEffect(() => {
+    updateDeadRef.current = updateDead;
+    if (updateDead) {
+      setUpdateInfo(null);
+      setShowUpdateDialog(false);
+    }
+  }, [updateDead]);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [configDiffs, setConfigDiffs] = useState<ConfigDiffItem[] | null>(null);
 
@@ -871,7 +879,7 @@ export function App() {
 
     // 自动静默检测版本更新（遵循用户选定的通道，有新版本时点亮绿色向上箭头）
     const fetchLatestUpdate = () => {
-      if (cancelled) return;
+      if (cancelled || updateDeadRef.current) return;
       const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
       checkUpdate(savedChannel)
         .then((res) => {
@@ -916,6 +924,7 @@ export function App() {
   }, []);
 
   const openUpdateDialogWithFreshCheck = () => {
+    if (updateDeadRef.current) return;
     setShowUpdateDialog(true);
     const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
     checkUpdate(savedChannel)
@@ -924,6 +933,7 @@ export function App() {
   };
 
   const handleManualCheckUpdate = async () => {
+    if (updateDeadRef.current) return;
     setIsCheckingUpdate(true);
     try {
       const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
@@ -1645,18 +1655,20 @@ export function App() {
             </div>
 
             {/* 桌面端外显：软件更新 */}
-            <button
-              type="button"
-              class={`top-nav-btn top-nav-desktop-action top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
-              onClick={openUpdateDialogWithFreshCheck}
-              title={updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}
-              aria-label={t('update.modalTitle')}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <line x1="12" y1="19" x2="12" y2="5" />
-                <polyline points="5 12 12 5 19 12" />
-              </svg>
-            </button>
+            {!updateDead && (
+              <button
+                type="button"
+                class={`top-nav-btn top-nav-desktop-action top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
+                onClick={openUpdateDialogWithFreshCheck}
+                title={updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}
+                aria-label={t('update.modalTitle')}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <line x1="12" y1="19" x2="12" y2="5" />
+                  <polyline points="5 12 12 5 19 12" />
+                </svg>
+              </button>
+            )}
 
             {/* 主题切换（桌面外显，极窄或手机收纳） */}
             <button
@@ -1758,7 +1770,7 @@ export function App() {
             <div class="top-nav-more-wrap" ref={topNavMoreRef}>
               <button
                 type="button"
-                class={'top-nav-btn top-nav-more-btn' + (updateInfo?.has_update ? ' has-update-dot' : '')}
+                class={'top-nav-btn top-nav-more-btn' + (!updateDead && updateInfo?.has_update ? ' has-update-dot' : '')}
                 onClick={() => setTopNavMoreOpen((o) => !o)}
                 title={t('sidebar.itemMenu')}
                 aria-label={t('sidebar.itemMenu')}
@@ -1793,21 +1805,23 @@ export function App() {
                     <RemoteAccessControl />
                   </div>
 
-                  <button
-                    type="button"
-                    class="top-nav-more-item"
-                    onClick={() => {
-                      setTopNavMoreOpen(false);
-                      openUpdateDialogWithFreshCheck();
-                    }}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <line x1="12" y1="19" x2="12" y2="5" />
-                      <polyline points="5 12 12 5 19 12" />
-                    </svg>
-                    <span>{updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}</span>
-                    {updateInfo?.has_update && <span class="update-more-badge">NEW</span>}
-                  </button>
+                  {!updateDead && (
+                    <button
+                      type="button"
+                      class="top-nav-more-item"
+                      onClick={() => {
+                        setTopNavMoreOpen(false);
+                        openUpdateDialogWithFreshCheck();
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="19" x2="12" y2="5" />
+                        <polyline points="5 12 12 5 19 12" />
+                      </svg>
+                      <span>{updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}</span>
+                      {updateInfo?.has_update && <span class="update-more-badge">NEW</span>}
+                    </button>
+                  )}
 
                   <button
                     type="button"
@@ -1999,7 +2013,7 @@ export function App() {
           }}
         />
       )}
-      {showUpdateDialog && (
+      {!updateDead && showUpdateDialog && (
         <LazyBoundary>
           <UpdateDialog
             info={updateInfo}

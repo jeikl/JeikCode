@@ -76,6 +76,7 @@ pub(crate) fn config_response(config: &Config) -> ConfigResponse {
         .unwrap_or_default()
         .language_key()
         .to_string();
+    let update_dead = jeikcode_config::config::runtime_state::is_dead();
     ConfigResponse {
         path: Config::default_path(),
         default_provider: default_selection,
@@ -83,7 +84,8 @@ pub(crate) fn config_response(config: &Config) -> ConfigResponse {
         providers,
         accounts,
         language,
-        github_logo: config.github_logo,
+        github_logo: config.github_logo && !update_dead,
+        update_dead,
         auto_git_sync: config.auto_git_sync,
     }
 }

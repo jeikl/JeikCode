@@ -1212,7 +1212,7 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         }
         Msg::CliAboutTelemetry => "Telemetry controls".into(),
         Msg::CliAboutPlugin => "Manage skill/command plugins".into(),
-        Msg::CliAboutUninstall => "Uninstall JeikCode. With no arguments, ask whether to keep user configuration. `simple` removes only the program. `all` removes everything. Tutorial: https://jeikcode.top/guide/updates.html".into(),
+        Msg::CliAboutUninstall => "Uninstall JeikCode. With no arguments, ask whether to keep user configuration. `simple` removes only the program. `all` removes everything.".into(),
         Msg::CliAboutSetup => "Re-initialize JeikCode environment and bundled configurations to ~/.jeikcode/".into(),
         Msg::CliAboutHooks => "Manage hooks (list, test, enable/disable)".into(),
         Msg::CliAboutHooksList => "List all loaded hooks with their status".into(),

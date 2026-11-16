@@ -31,6 +31,10 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
+fn updates_disabled() -> bool {
+    jeikcode_config::config::runtime_state::is_dead()
+}
+
 /// Version manifest URL for self-update. A function rather than a const because
 /// the address follows the deployment profile; see `jeikcode_config::endpoints`.
 ///
@@ -792,6 +796,9 @@ async fn fetch_release_pages(
 /// Full GitHub release row for one tag. Used to repair announcements that the
 /// edge cache truncated instead of downloading every release page.
 pub async fn fetch_release_by_tag(tag: &str) -> Result<ListedRelease> {
+    if updates_disabled() {
+        bail!("updates are disabled");
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         bail!("cannot fetch release notes in offline mode");
     }
@@ -828,6 +835,9 @@ async fn fetch_release_by_tag_with_client(
 /// long announcement. Truncated tags are repaired individually by tag so a
 /// long changelog does not force a full release-page download.
 pub async fn list_releases() -> Result<Vec<ListedRelease>> {
+    if updates_disabled() {
+        return Ok(vec![]);
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         return Ok(vec![]);
     }
@@ -878,6 +888,9 @@ pub async fn list_releases() -> Result<Vec<ListedRelease>> {
 
 /// Releases directly from GitHub, returning empty vec in offline mode.
 pub async fn list_releases_from_github() -> Result<Vec<ListedRelease>> {
+    if updates_disabled() {
+        return Ok(vec![]);
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         return Ok(vec![]);
     }
@@ -935,6 +948,9 @@ pub fn channel_for_tag(tag: &str) -> UpdateChannel {
 
 /// `latest.json` published next to one tag's binaries.
 pub async fn fetch_manifest_for_tag(version: &str) -> Result<Manifest> {
+    if updates_disabled() {
+        bail!("updates are disabled");
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         bail!("cannot fetch update manifest in offline mode");
     }
@@ -953,6 +969,9 @@ pub async fn fetch_manifest_for_tag(version: &str) -> Result<Manifest> {
 /// `releases/latest`; beta picks the highest prerelease tag and loads that
 /// tag's `latest.json` (prereleases are never `/releases/latest`).
 pub async fn fetch_manifest_for_channel(channel: UpdateChannel) -> Result<Manifest> {
+    if updates_disabled() {
+        bail!("updates are disabled");
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         bail!("cannot fetch update manifest in offline mode");
     }
@@ -2220,6 +2239,9 @@ pub fn restart_process_with_config(
 
 /// Fetch and parse `Manifest` from a specific manifest URL.
 pub async fn fetch_manifest_from_url(url: &str) -> Result<Manifest> {
+    if updates_disabled() {
+        bail!("updates are disabled");
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         bail!("cannot fetch update manifest in offline mode");
     }
@@ -2673,6 +2695,12 @@ pub async fn run_upgrade_with_manifest(
             anyhow!(PACKAGE_MANAGED),
         ));
     }
+    if updates_disabled() {
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::Other,
+            anyhow!("updates are disabled"),
+        ));
+    }
     let current_version = current_version.as_str();
     let target = detect_target().ok_or_else(|| {
         UpgradeFailure::new(
@@ -2719,6 +2747,14 @@ pub async fn run_upgrade_with_manifest(
     let url = binary_url(&manifest.version, target);
     let download = download_path(&exe);
     download_and_verify(&url, &entry.sha256, entry.size, &download, &tx).await?;
+
+    if updates_disabled() {
+        let _ = std::fs::remove_file(&download);
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::Other,
+            anyhow!("updates are disabled"),
+        ));
+    }
 
     let _ = tx.send(UpgradeEvent::Replacing);
     replace_binary(&download, &exe)
@@ -2989,7 +3025,7 @@ pub async fn prepare_deferred_upgrade(
     if is_package_managed() {
         return Ok(None);
     }
-    if jeikcode_config::config::offline::is_offline_active() {
+    if jeikcode_config::config::offline::is_offline_active() || updates_disabled() {
         return Ok(None);
     }
     let target = detect_target().ok_or_else(|| {
@@ -3039,6 +3075,11 @@ pub async fn prepare_deferred_upgrade(
     let url = binary_url(&manifest.version, target);
     download_and_verify(&url, &entry.sha256, entry.size, &staged_path, &tx).await?;
 
+    if updates_disabled() {
+        let _ = std::fs::remove_file(&staged_path);
+        return Ok(None);
+    }
+
     let pending = PendingUpgrade {
         version: manifest.version.clone(),
         staged_path: staged_path.clone(),
@@ -3068,7 +3109,7 @@ pub async fn prepare_deferred_upgrade(
 /// compared to installing a corrupted binary.
 /// In `distro-pm` builds this is a no-op returning `Ok(None)`.
 pub fn apply_pending_upgrade() -> Result<Option<AppliedUpgrade>> {
-    if is_package_managed() {
+    if is_package_managed() || updates_disabled() {
         return Ok(None);
     }
     let mut pending = match read_pending() {
@@ -3245,6 +3286,9 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
 /// toggle between last-two versions without redownloading.
 /// In `distro-pm` builds this returns immediately with an error carrying `PACKAGE_MANAGED` (upgrades are the package manager's job).
 pub fn run_rollback() -> Result<RollbackSummary> {
+    if updates_disabled() {
+        return Err(anyhow!("updates are disabled"));
+    }
     if is_package_managed() {
         return Err(anyhow!(PACKAGE_MANAGED));
     }

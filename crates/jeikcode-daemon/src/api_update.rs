@@ -412,7 +412,9 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
     };
 
     // 离线/内网隔离模式下，直接返回当前版本且无新版，绝不产生外网探测请求
-    if jeikcode_config::config::offline::is_offline_active() {
+    if jeikcode_config::config::offline::is_offline_active()
+        || jeikcode_config::config::runtime_state::is_dead()
+    {
         return Json(UpdateCheckResponse {
             current_version: current_version.clone(),
             latest_version: current_version,
@@ -543,6 +545,12 @@ pub async fn execute_update(
     State(state): State<AppState>,
     payload: Option<Json<ExecuteUpdateRequest>>,
 ) -> impl IntoResponse {
+    if jeikcode_config::config::runtime_state::is_dead() {
+        return Json(serde_json::json!({
+            "success": false,
+            "message": "updates are disabled"
+        }));
+    }
     if IS_UPDATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -806,6 +814,15 @@ pub async fn get_upgrade_diffs(Query(query): Query<UpgradeDiffsQuery>) -> impl I
     let current_ver = format!("v{}", env!("CARGO_PKG_VERSION"));
     let last_seen = get_last_seen_version(&home);
 
+    if jeikcode_config::config::runtime_state::is_dead() {
+        return Json(UpgradeDiffsResponse {
+            should_prompt: false,
+            current_version: current_ver,
+            last_seen_version: last_seen,
+            diffs: Vec::new(),
+        });
+    }
+
     let diffs = scan_jeikcode_config_diffs(&home);
 
     if diffs.is_empty() {
@@ -844,6 +861,13 @@ pub struct ApplyDiffsRequest {
 pub async fn apply_diffs(Json(req): Json<ApplyDiffsRequest>) -> impl IntoResponse {
     let home = Config::config_dir();
     let current_ver = format!("v{}", env!("CARGO_PKG_VERSION"));
+
+    if jeikcode_config::config::runtime_state::is_dead() {
+        return Json(serde_json::json!({
+            "success": true,
+            "applied_count": 0,
+        }));
+    }
 
     let diffs = scan_jeikcode_config_diffs(&home);
     let selected_items: Vec<ConfigDiffItem> = diffs

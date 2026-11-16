@@ -652,6 +652,64 @@ fn is_dev_mode() -> bool {
         || std::env::var_os("JEIKCODE_DEV").is_some()
 }
 
+const UPDATE_COMMAND_ALIASES: &[&str] = &[
+    "upgrade",
+    "update",
+    "updat",
+    "up",
+    "down",
+    "downgrade",
+    "rollback",
+    "list",
+    "__sync_config",
+];
+
+fn option_takes_value(name: &str) -> bool {
+    matches!(
+        name,
+        "--provider"
+            | "--model"
+            | "--lang"
+            | "--config"
+            | "--seed-config"
+            | "-C"
+            | "--dir"
+            | "-p"
+            | "--prompt"
+            | "--prompt-file"
+            | "--host"
+            | "--hosts"
+            | "--port"
+            | "--token"
+    )
+}
+
+fn argv_first_positional(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            return iter.next().map(String::as_str);
+        }
+        if arg.starts_with('-') {
+            let name = arg.split_once('=').map(|(n, _)| n).unwrap_or(arg.as_str());
+            if !arg.contains('=') && option_takes_value(name) {
+                let _ = iter.next();
+            }
+            continue;
+        }
+        return Some(arg.as_str());
+    }
+    None
+}
+
+fn argv_is_update_invocation(args: &[String]) -> bool {
+    argv_first_positional(args).is_some_and(|cmd| {
+        UPDATE_COMMAND_ALIASES
+            .iter()
+            .any(|alias| cmd.eq_ignore_ascii_case(alias))
+    })
+}
+
 /// Peek `auto_update` from the user config **before** clap/config load.
 ///
 /// `apply_pending_upgrade` runs at process start — historically it ignored
@@ -663,6 +721,9 @@ fn is_dev_mode() -> bool {
 /// overwrites that freeze the TUI. Only an explicit `auto_update = true`
 /// enables staged upgrades.
 fn config_auto_update_enabled() -> bool {
+    if jeikcode_config::config::runtime_state::is_dead() {
+        return false;
+    }
     let path = Config::default_path();
     let Ok(raw) = std::fs::read_to_string(path) else {
         return false;
@@ -789,7 +850,8 @@ fn build_i18n_command() -> clap::Command {
     let cmd = cmd
         .mut_subcommand("status", |s| s.about(t(Msg::CliAboutStatus).into_owned()))
         .mut_subcommand("upgrade", |s| {
-            s.about(t(Msg::CliAboutUpgrade).into_owned())
+            s.hide(true)
+                .about(t(Msg::CliAboutUpgrade).into_owned())
                 .mut_arg("force", |a| {
                     a.help(t(Msg::CliHelpUpgradeForce).into_owned())
                 })
@@ -798,13 +860,15 @@ fn build_i18n_command() -> clap::Command {
                 .mut_arg("main", |a| a.help(t(Msg::CliHelpUpgradeMain).into_owned()))
         })
         .mut_subcommand("list", |s| {
-            s.about(t(Msg::CliAboutList).into_owned())
+            s.hide(true)
+                .about(t(Msg::CliAboutList).into_owned())
                 .mut_arg("channel", |a| {
                     a.help(t(Msg::CliHelpListChannel).into_owned())
                 })
         })
         .mut_subcommand("down", |s| {
-            s.about(t(Msg::CliAboutDown).into_owned())
+            s.hide(true)
+                .about(t(Msg::CliAboutDown).into_owned())
                 .mut_arg("channel", |a| {
                     a.help(t(Msg::CliHelpDownChannel).into_owned())
                 })
@@ -814,7 +878,7 @@ fn build_i18n_command() -> clap::Command {
                 .mut_arg("yes", |a| a.help(t(Msg::CliHelpUpgradeYes).into_owned()))
         })
         .mut_subcommand("rollback", |s| {
-            s.about(t(Msg::CliAboutRollback).into_owned())
+            s.hide(true).about(t(Msg::CliAboutRollback).into_owned())
         })
         .mut_subcommand("mcp", |s| s.about(t(Msg::CliAboutMcp).into_owned()))
         .mut_subcommand("daemon", |s| s.about(t(Msg::CliAboutDaemon).into_owned()))
@@ -846,7 +910,9 @@ fn build_i18n_command() -> clap::Command {
 /// up `pending.json` and apply. Silent: stdout/stderr are already /dev/null
 /// (see `spawn_detached_upgrade_prep`), so any output would be discarded.
 async fn run_prepare_upgrade_worker() -> i32 {
-    if jeikcode_config::config::offline::is_offline_active() {
+    if jeikcode_config::config::offline::is_offline_active()
+        || jeikcode_config::config::runtime_state::is_dead()
+    {
         return 0;
     }
     let current = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -873,7 +939,9 @@ async fn run_prepare_upgrade_worker() -> i32 {
 /// the cancel-on-exit problem we're trying to solve). If spawning fails we
 /// just drop the error; auto-upgrade is best-effort.
 fn spawn_detached_upgrade_prep() {
-    if jeikcode_config::config::offline::is_offline_active() {
+    if jeikcode_config::config::offline::is_offline_active()
+        || jeikcode_config::config::runtime_state::is_dead()
+    {
         return;
     }
     let exe = match std::env::current_exe() {
@@ -940,7 +1008,7 @@ fn invoked_cli_name() -> &'static str {
 }
 
 #[derive(Parser)]
-#[command(name = "jeikcode", version = VERSION, about = "AI coding assistant in your terminal")]
+#[command(name = "jeikcode", version = VERSION, about = "AI coding assistant in your terminal", disable_help_subcommand = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -1004,7 +1072,7 @@ struct Cli {
     /// local development so a
     /// fresh `cargo run` build isn't silently overwritten by the
     /// released binary.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     dev: bool,
 
     /// Disable telemetry for this invocation.
@@ -1061,6 +1129,8 @@ enum UpgradeAction {
     Get,
     /// Reset update source to official default
     Reset,
+    #[command(hide = true)]
+    Dead,
     /// Roll back to the previous version (.bak on disk)
     Rollback,
     /// Latest beta, or one beta version (`jeikcode up beta [VERSION]`)
@@ -1093,13 +1163,14 @@ enum Commands {
     /// Show current provider / leftover-auth status
     Status,
     /// List historical versions (`jeikcode list`, `jeikcode list main`, `jeikcode list beta`)
+    #[command(hide = true)]
     List {
         /// Channel: main (default, stable) or beta
         #[arg(default_value = "main")]
         channel: String,
     },
     /// Upgrade jeikcode in-place (aliases: update, updat, up)
-    #[command(alias = "update", alias = "updat", alias = "up")]
+    #[command(alias = "update", alias = "updat", alias = "up", hide = true)]
     Upgrade {
         /// Reinstall even when already on the latest version
         #[arg(short = 'f', long, global = true)]
@@ -1120,7 +1191,7 @@ enum Commands {
     },
     /// Install a specific release, including an older one
     /// (`jeikcode down main v7.2.3`, `jeikcode down beta v7.2.4-beta.8`)
-    #[command(alias = "downgrade")]
+    #[command(alias = "downgrade", hide = true)]
     Down {
         /// Channel: main or beta
         channel: String,
@@ -1143,6 +1214,7 @@ enum Commands {
         auto: bool,
     },
     /// Roll back to the previous version (swap with .bak on disk)
+    #[command(hide = true)]
     Rollback,
     /// Manage MCP server entries in `.mcp.json` (similar to `claude mcp add`)
     #[command(subcommand)]
@@ -1661,6 +1733,11 @@ fn main() {
         return;
     }
 
+    let argv: Vec<String> = std::env::args().collect();
+    if jeikcode_config::config::runtime_state::is_dead() && argv_is_update_invocation(&argv) {
+        std::process::exit(0);
+    }
+
     // Successor after an in-place WebUI/serve upgrade waits here until the
     // old process has exited and released the listen port.
     jeikcode_updater::wait_for_predecessor_if_requested();
@@ -1997,6 +2074,13 @@ async fn run(inherited_token: Option<String>) -> Result<i32> {
     // If so, render the i18n-localised help via our custom Command and exit.
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
+        if argv_is_update_invocation(&args) {
+            let mut help_cmd = build_i18n_command();
+            let mut out = std::io::stdout();
+            let _ = help_cmd.write_help(&mut out);
+            let _ = std::io::Write::flush(&mut out);
+            std::process::exit(0);
+        }
         let help_cmd = build_i18n_command();
         help_cmd
             .try_get_matches_from(std::env::args_os())
@@ -2775,6 +2859,7 @@ async fn run(inherited_token: Option<String>) -> Result<i32> {
             // `prepare_deferred_upgrade` would no-op anyway.
             if config.auto_update
                 && !jeikcode_config::config::offline::is_offline_active()
+                && !jeikcode_config::config::runtime_state::is_dead()
                 && !is_running_as_backup()
                 && !cli.dev
                 && !jeikcode_updater::is_package_managed()
@@ -3762,7 +3847,12 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
             }
             Ok(())
         }
-        Commands::List { channel } => run_list_cli(channel).await,
+        Commands::List { channel } => {
+            if jeikcode_config::config::runtime_state::is_dead() {
+                return Ok(());
+            }
+            run_list_cli(channel).await
+        }
         Commands::Upgrade {
             force,
             yes,
@@ -3770,6 +3860,12 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
             main,
             action,
         } => {
+            if matches!(&action, Some(UpgradeAction::Dead)) {
+                return handle_update_dead(yes);
+            }
+            if jeikcode_config::config::runtime_state::is_dead() {
+                return Ok(());
+            }
             let (channel, version) = match &action {
                 Some(UpgradeAction::Beta { version }) => {
                     (jeikcode_updater::UpdateChannel::Beta, version.clone())
@@ -3789,6 +3885,7 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
                 }
                 Some(UpgradeAction::Reset) => handle_upgrade_reset(),
                 Some(UpgradeAction::Rollback) => run_rollback_cli(),
+                Some(UpgradeAction::Dead) => Ok(()),
                 Some(
                     UpgradeAction::Beta { .. }
                     | UpgradeAction::Main { .. }
@@ -3802,10 +3899,18 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
             version,
             yes,
         } => {
+            if jeikcode_config::config::runtime_state::is_dead() {
+                return Ok(());
+            }
             let channel = parse_cli_channel(&channel)?;
             run_upgrade_cli(true, yes, channel, Some(version)).await
         }
-        Commands::Rollback => run_rollback_cli(),
+        Commands::Rollback => {
+            if jeikcode_config::config::runtime_state::is_dead() {
+                return Ok(());
+            }
+            run_rollback_cli()
+        }
         Commands::Ghimg { status } => handle_ghimg(status),
         Commands::Uninstall {
             preset,
@@ -4688,10 +4793,60 @@ fn notify_daemon_config_reload() {
     }
 }
 
+fn handle_update_dead(assume_yes: bool) -> Result<()> {
+    if jeikcode_config::config::runtime_state::is_dead() {
+        return Ok(());
+    }
+    let store = jeikcode_config::ConfigStore::default_store();
+    let snapshot = store.read().ok();
+    let lang = snapshot
+        .as_ref()
+        .and_then(|s| s.config.language)
+        .unwrap_or_default()
+        .language_key();
+    let is_zh = lang.starts_with("zh");
+    let is_vi = lang.starts_with("vi");
+    if !assume_yes {
+        if is_zh {
+            print!("确认永久关闭所有更新通道？输入 yes 继续：");
+        } else if is_vi {
+            print!("Xác nhận tắt vĩnh viễn mọi kênh cập nhật? Nhập yes để tiếp tục: ");
+        } else {
+            print!("Permanently disable all update channels? Type yes to continue: ");
+        }
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() {
+            return Ok(());
+        }
+        let answer = answer.trim();
+        if !(answer.eq_ignore_ascii_case("yes")
+            || answer == "确认"
+            || answer == "确定"
+            || answer == "確定")
+        {
+            return Ok(());
+        }
+    }
+    jeikcode_config::config::runtime_state::set_dead()?;
+    let _ = store.update(|cfg| {
+        cfg.auto_update = false;
+        cfg.github_logo = false;
+        Ok(())
+    });
+    let _ = std::fs::remove_dir_all(jeikcode_updater::staged_dir());
+    if let Ok(exe) = jeikcode_updater::current_exe_path() {
+        let _ = std::fs::remove_file(jeikcode_updater::backup_path(&exe));
+    }
+    notify_daemon_config_reload();
+    Ok(())
+}
+
 fn handle_ghimg(status: Option<String>) -> Result<()> {
     let store = jeikcode_config::ConfigStore::default_store();
     let snapshot = store.read()?;
-    let current_state = snapshot.config.github_logo;
+    let current_state =
+        snapshot.config.github_logo && !jeikcode_config::config::runtime_state::is_dead();
 
     let lang = snapshot.config.language.unwrap_or_default().language_key();
     let is_zh = lang.starts_with("zh");
@@ -4754,6 +4909,10 @@ fn handle_ghimg(status: Option<String>) -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    if target_enabled && jeikcode_config::config::runtime_state::is_dead() {
+        return Ok(());
+    }
 
     store.update(|cfg| {
         cfg.github_logo = target_enabled;

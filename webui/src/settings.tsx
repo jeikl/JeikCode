@@ -24,6 +24,7 @@ interface SettingsCtx {
   setLang: (l: Lang) => Promise<void>;
   t: (key: MsgKey, params?: TParams) => string;
   githubLogo: boolean;
+  updateDead: boolean;
   /** Agent 执行 git 变更命令后是否自动同步/刷新（来自 /config，默认开启）。 */
   autoGitSync: boolean;
   setAutoGitSync: (v: boolean) => Promise<void>;
@@ -123,6 +124,7 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
   const [effectiveTheme, setEffectiveTheme] = useState<EffectiveTheme>(() => resolveEffectiveTheme(readTheme()));
   const [lang, setLangState] = useState<Lang>(readLang);
   const [githubLogo, setGithubLogo] = useState<boolean>(true);
+  const [updateDead, setUpdateDead] = useState<boolean>(false);
   const [autoGitSync, setAutoGitSyncState] = useState<boolean>(true);
   const [escUndoEnabled, setEscUndoEnabledState] = useState<boolean>(readEscUndo);
 
@@ -141,6 +143,9 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
         if (typeof cfg.github_logo === 'boolean') {
           setGithubLogo(cfg.github_logo);
         }
+        if (typeof cfg.update_dead === 'boolean') {
+          setUpdateDead(cfg.update_dead);
+        }
         if (typeof cfg.auto_git_sync === 'boolean') {
           setAutoGitSyncState(cfg.auto_git_sync);
         }
@@ -157,6 +162,9 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
         }
         if (typeof cfg.github_logo === 'boolean') {
           setGithubLogo(cfg.github_logo);
+        }
+        if (typeof cfg.update_dead === 'boolean') {
+          setUpdateDead(cfg.update_dead);
         }
         if (typeof cfg.auto_git_sync === 'boolean') {
           setAutoGitSyncState(cfg.auto_git_sync);
@@ -276,7 +284,7 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
 
   return (
     <Ctx.Provider
-      value={{ theme, effectiveTheme, setTheme: setThemeState, lang, setLang, t, githubLogo, autoGitSync, setAutoGitSync, escUndoEnabled, setEscUndoEnabled }}
+      value={{ theme, effectiveTheme, setTheme: setThemeState, lang, setLang, t, githubLogo, updateDead, autoGitSync, setAutoGitSync, escUndoEnabled, setEscUndoEnabled }}
     >
       {children}
     </Ctx.Provider>

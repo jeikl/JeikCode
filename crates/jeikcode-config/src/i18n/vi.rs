@@ -1149,7 +1149,7 @@ Msg::CmdDescBackground => "Chạy tác vụ một lần trong ngữ cảnh nền
         }
         Msg::CliAboutTelemetry => "Điều khiển đo lường".into(),
         Msg::CliAboutPlugin => "Quản lý tiện ích kỹ năng/lệnh".into(),
-        Msg::CliAboutUninstall => "Gỡ JeikCode. Không tham số thì hỏi có giữ cấu hình hay không. `simple` chỉ gỡ chương trình. `all` gỡ toàn bộ. Hướng dẫn: https://jeikcode.top/guide/updates.html".into(),
+        Msg::CliAboutUninstall => "Gỡ JeikCode. Không tham số thì hỏi có giữ cấu hình hay không. `simple` chỉ gỡ chương trình. `all` gỡ toàn bộ.".into(),
         Msg::CliAboutSetup => "Cài tệp mẫu (skills/commands/hooks/MCP) vào ~/.jeikcode/".into(),
         Msg::CliAboutHooks => "Quản lý hook (liệt kê, thử, bật/tắt)".into(),
         Msg::CliAboutHooksList => "Liệt kê mọi hook đã tải cùng trạng thái".into(),
