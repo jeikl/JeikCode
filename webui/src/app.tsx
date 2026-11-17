@@ -91,6 +91,7 @@ import {
   getChatPending,
   getActiveChatSessions,
   getHealth,
+  invalidateApiGetCache,
   checkUpdate,
   fetchUpgradeDiffs,
   postSessionSeen,
@@ -201,6 +202,16 @@ export function App() {
   useEffect(
     () =>
       onGlobalEvent((event) => {
+        // Remote mutations/rewinds/deletes must invalidate metadata GET caches;
+        // TTL alone can serve a stale project/session list after a rewind.
+        if (
+          event.type === 'session_mutated' ||
+          event.type === 'session_deleted' ||
+          event.type === 'session_upsert' ||
+          event.type === 'display_appended'
+        ) {
+          invalidateApiGetCache();
+        }
         if (event.type === 'sync') {
           const reconnect = ++globalSyncCountRef.current > 1;
           if (sessionId) {
