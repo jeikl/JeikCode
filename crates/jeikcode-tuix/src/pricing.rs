@@ -10,6 +10,9 @@
 /// Unknown models get a conservative (1.0, 3.0) fallback so cost tracking
 /// never silently returns zero for a billable model.
 pub fn cost_per_million(model: &str) -> (f64, f64) {
+    if let Some((input, output)) = list_price(model).and_then(|p| Some((p.input?, p.output?))) {
+        return (input, output);
+    }
     let m = model.to_lowercase();
     // Claude
     if m.contains("opus") {
@@ -65,6 +68,13 @@ pub fn cost_per_million(model: &str) -> (f64, f64) {
     }
 }
 
+/// The provider's list price for an exact Anthropic, OpenAI or Gemini model id
+/// (dated snapshots and `provider/` prefixes included), from `llm-prices`.
+/// Every row there cites the pricing page it was read from and the date.
+fn list_price(model: &str) -> Option<&'static llm_prices::Price> {
+    llm_prices::lookup(model).filter(|p| matches!(p.provider, "anthropic" | "openai" | "google"))
+}
+
 /// Calculate cost in USD from token counts and model name.
 pub fn calculate_cost(
     model: &str,
@@ -73,8 +83,11 @@ pub fn calculate_cost(
     cached_tokens: usize,
 ) -> f64 {
     let (input_price, output_price) = cost_per_million(model);
-    // Cached tokens are typically 90% cheaper (Anthropic) or free (OpenAI)
-    let cached_price = input_price * 0.1;
+    // The listed cache-read price when there is one (0.5x input on gpt-4o,
+    // 0.05x on Claude Opus 5.5); otherwise 90% off input.
+    let cached_price = list_price(model)
+        .and_then(|p| p.cache_read)
+        .unwrap_or(input_price * 0.1);
 
     let input_cost = (prompt_tokens as f64 / 1_000_000.0) * input_price;
     let cached_cost = (cached_tokens as f64 / 1_000_000.0) * cached_price;
@@ -138,6 +151,28 @@ mod tests {
         // input: 1000 * 3.0/1M, cached: 800 * 0.3/1M, output: 500 * 15.0/1M
         let expected = 1000.0 * 3.0 / 1e6 + 800.0 * 0.3 / 1e6 + 500.0 * 15.0 / 1e6;
         assert!((cost - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn current_models_use_their_list_price() {
+        // These used to hit the family arms: every Opus at $15/$75, every Haiku
+        // at $0.25/$1.25, o3 at $10/$40, and GPT-5 models at the $1/$3 fallback.
+        assert_eq!(cost_per_million("claude-opus-4-6"), (5.0, 25.0));
+        assert_eq!(cost_per_million("claude-opus-5-5"), (4.0, 20.0));
+        assert_eq!(cost_per_million("claude-haiku-4-5-20251001"), (1.0, 5.0));
+        assert_eq!(cost_per_million("claude-sonnet-5-5"), (2.0, 10.0));
+        assert_eq!(cost_per_million("o3"), (2.0, 8.0));
+        assert_eq!(cost_per_million("gpt-5.5"), (5.0, 30.0));
+        assert_eq!(cost_per_million("openai/gpt-5.4-mini"), (0.75, 4.5));
+        // Ids outside the table keep the existing arms.
+        assert_eq!(cost_per_million("claude-opus-9-preview"), (15.0, 75.0));
+    }
+
+    #[test]
+    fn cached_tokens_use_the_listed_cache_read_price() {
+        // gpt-4o lists cached input at $1.25 (half of input), not 10%.
+        let cost = calculate_cost("gpt-4o", 0, 0, 1_000_000);
+        assert!((cost - 1.25).abs() < 1e-10);
     }
 
     #[test]
