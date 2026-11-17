@@ -89,6 +89,7 @@ import {
   createSession,
   getSession,
   getChatPending,
+  getActiveChatSessions,
   getHealth,
   checkUpdate,
   fetchUpgradeDiffs,
@@ -201,6 +202,7 @@ export function App() {
     () =>
       onGlobalEvent((event) => {
         if (event.type === 'sync') {
+          const reconnect = ++globalSyncCountRef.current > 1;
           if (sessionId) {
             void getChatPending(sessionId)
               .then((p: any) => {
@@ -212,6 +214,16 @@ export function App() {
                   return cur;
                 });
               })
+              .catch(() => {});
+          }
+          // A reconnect may have missed activity/health while the socket was down.
+          // Reconcile once on this edge; never fall back to periodic polling.
+          if (reconnect) {
+            void getActiveChatSessions()
+              .then((ids) => setLiveRunningIds(new Set(ids)))
+              .catch(() => {});
+            void getHealth()
+              .then((info) => setStreamEpoch(info.instance_id ?? null))
               .catch(() => {});
           }
           return;
@@ -309,6 +321,8 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionListVersion, setSessionListVersion] = useState(0);
   const [liveRunningIds, setLiveRunningIds] = useState<Set<string>>(() => new Set());
+  /** First global sync is already covered by bootstrap; later syncs are reconnects. */
+  const globalSyncCountRef = useRef(0);
   /**
    * 刚完成、还没被点开看过的会话（侧栏绿色对勾）。
    *

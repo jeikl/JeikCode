@@ -2210,6 +2210,8 @@ export function Chat({
   // 当前 Chat 正在显示的会话 id。用于区分「外部切换会话(需重置+加载历史)」
   // 与「本次新建会话首条消息完成后自己拿到的 id(不应重置)」。
   const activeIdRef = useRef<string | null>(null);
+  /** First sync is the initial attach; later syncs are reconnects that may have missed events. */
+  const globalSyncCountRef = useRef(0);
   // Distinguish async work from A -> B -> A session switches. Comparing only
   // the session id would let the first A's late active-check/cancel result
   // mutate the replacement A view.
@@ -3792,9 +3794,28 @@ export function Chat({
     () =>
       onGlobalEvent((event) => {
         if (event.type === 'sync') {
+          const reconnect = ++globalSyncCountRef.current > 1;
           const sid = activeIdRef.current;
           if (sid) {
             restorePendingInteractive(sid, sessionGenerationRef.current);
+            if (reconnect) {
+              const hash =
+                projectHashBySessionRef.current.get(sid) || viewedProjectHashRef.current;
+              if (hash) {
+                // A missed terminal event can leave busy=true forever. Read the
+                // one-shot runtime authority, then reconcile the disk tail once.
+                void getChatRuntime(sid)
+                  .then((runtime) => {
+                    if (activeIdRef.current !== sid) return;
+                    if (!serverRuntimeRunning(runtime)) {
+                      busyRef.current = false;
+                      setBusy(false);
+                    }
+                    scheduleDeferredReconcile(hash, sid, 0);
+                  })
+                  .catch(() => scheduleDeferredReconcile(hash, sid, 0));
+              }
+            }
           }
           return;
         }
