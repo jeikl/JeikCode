@@ -7253,7 +7253,7 @@ fn list_projects_from_entries(
             continue;
         }
         by_project_entries
-            .entry(entry.project_bucket.clone())
+            .entry(NativeSessionManager::project_hash(&entry.working_dir))
             .or_default()
             .push(entry);
     }
@@ -7394,7 +7394,7 @@ fn catalog_entry_with_project(
     entry: &jeikcode_capabilities::session::CatalogEntry,
 ) -> SessionMetaWithProject {
     SessionMetaWithProject {
-        project_hash: entry.project_bucket.clone(),
+        project_hash: NativeSessionManager::project_hash(&entry.working_dir),
         meta: catalog_entry_to_session_summary(entry),
     }
 }
@@ -7518,7 +7518,8 @@ fn list_sessions_from_entries(
     let mut entries: Vec<_> = raw_entries
         .into_iter()
         .filter(|entry| {
-            entry.project_bucket == project_hash
+            let entry_hash = NativeSessionManager::project_hash(&entry.working_dir);
+            (entry_hash == project_hash || entry.project_bucket == project_hash)
                 && catalog_entry_is_visible(sessions_root, entry, active)
         })
         .collect();
@@ -7951,14 +7952,59 @@ async fn get_projects() -> impl IntoResponse {
 }
 
 /// GET /projects/:hash/sessions - List sessions for a project
-async fn get_project_sessions(Path(hash): Path<String>) -> impl IntoResponse {
+async fn get_project_sessions(Path(hash): Path<String>, headers: HeaderMap) -> impl IntoResponse {
     match run_session_catalog_io(move || list_sessions(&hash)).await {
-        Ok(sessions) => Json(sessions).into_response(),
+        Ok(sessions) => json_response_with_etag(&headers, &sessions),
         Err(e) => {
             let msg = format!("Failed to list sessions: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(msg)).into_response()
         }
     }
+}
+
+/// ETag/304 wrapper for list endpoints. The body is serialized once; a matching
+/// If-None-Match returns an empty 304 so switching sessions does not re-download
+/// a 26KB project list on every click.
+fn json_response_with_etag<T: Serialize>(
+    headers: &HeaderMap,
+    value: &T,
+) -> axum::response::Response {
+    let body = match serde_json::to_vec(value) {
+        Ok(body) => body,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    };
+    let etag = response_etag(&body);
+    let not_modified = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*"
+                    || candidate == etag
+                    || candidate
+                        .strip_prefix("W/")
+                        .is_some_and(|weak| weak == etag)
+            })
+        });
+    if not_modified {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        if let Ok(value) = HeaderValue::from_str(&etag) {
+            response.headers_mut().insert(header::ETAG, value);
+        }
+        return response;
+    }
+    let mut response = body.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&etag) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    response
 }
 
 /// GET /sessions/resolve/:id - Resolve a (short or full) session id to its full
@@ -22901,6 +22947,19 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .layer(cors_layer())
         .layer(compression_layer());
     let _ = router_slot.set(app.clone());
+
+    // Warm the lightweight update badge cache before the first browser poll.
+    tokio::spawn(async move {
+        api_update::prewarm_update_check().await;
+    });
+    // Warm the session catalog in the blocking pool so first WebUI bootstrap
+    // does not pay the O(N) directory scan on the request path.
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(|| {
+            let _ = NativeSessionManager::scan_all();
+        })
+        .await;
+    });
 
     // Spawn idle timeout watchdog task
     spawn_idle_timeout_task(

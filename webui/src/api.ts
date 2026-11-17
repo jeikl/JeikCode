@@ -421,6 +421,10 @@ function parseTokenInput(raw: string): string {
 const DEFAULT_API_TIMEOUT_MS = 15_000;
 const LEGACY_API_TIMEOUT_MS = 25_000;
 const inFlightGets = new Map<string, Promise<Response>>();
+const projectSessionsEtagCache = new Map<
+  string,
+  { etag: string; rows: SessionMetaWithProject[] }
+>();
 
 /** Short-lived GET cache for bootstrap/sidebar metadata. Event-driven state
  *  (activity, config_reload, session mutations) remains authoritative; this
@@ -451,6 +455,7 @@ export function invalidateApiGetCache(): void {
       getCache.delete(key);
     }
   }
+  projectSessionsEtagCache.clear();
 }
 
 function requestUrlString(input: RequestInfo | URL): string {
@@ -1736,13 +1741,22 @@ export async function listSessions(): Promise<SessionMetaWithProject[]> {
 // The endpoint returns bare SessionMeta; every row is in `projectHash`, so we
 // stamp it back on for the client's project-scoped dedup/filter.
 export async function listProjectSessions(projectHash: string): Promise<SessionMetaWithProject[]> {
+  const cached = projectSessionsEtagCache.get(projectHash);
+  const headers = {
+    ...authHeaders(),
+    ...(cached ? { 'If-None-Match': cached.etag } : {}),
+  };
   const resp = await apiFetch(`/projects/${encodeURIComponent(projectHash)}/sessions`, {
-    headers: authHeaders(),
+    headers,
   });
+  if (resp.status === 304 && cached) return cached.rows;
   if (!resp.ok) throw new Error(`list project sessions failed: ${resp.status}`);
   const list: unknown = await resp.json();
   if (!Array.isArray(list)) throw new Error('list project sessions returned an invalid payload');
-  return (list as SessionMeta[]).map((m) => ({ ...m, project_hash: projectHash }));
+  const rows = (list as SessionMeta[]).map((m) => ({ ...m, project_hash: projectHash }));
+  const etag = resp.headers.get('ETag');
+  if (etag) projectSessionsEtagCache.set(projectHash, { etag, rows });
+  return rows;
 }
 
 /**

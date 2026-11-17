@@ -208,14 +208,14 @@ pub struct CatalogLocation {
     pub project_bucket: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatalogPresence {
     LegacyOnly,
     NativeOnly,
     Both,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogEntry {
     pub id: String,
     pub name: String,
@@ -236,7 +236,7 @@ pub struct CatalogEntry {
     pub presence: CatalogPresence,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatalogDiagnosticKind {
     Io,
     InvalidId,
@@ -246,7 +246,7 @@ pub enum CatalogDiagnosticKind {
     Corrupt,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogDiagnostic {
     pub project_bucket: Option<String>,
     pub path: PathBuf,
@@ -254,7 +254,7 @@ pub struct CatalogDiagnostic {
     pub message: String,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CatalogScan {
     pub entries: Vec<CatalogEntry>,
     pub diagnostics: Vec<CatalogDiagnostic>,
@@ -3590,6 +3590,41 @@ struct CachedCatalog {
     checked_at: std::time::Instant,
 }
 
+/// On-disk snapshot of the same scan. It is only reused when the cheap
+/// `catalog_signature` still matches, so rewind/delete/edit cannot silently
+/// serve a stale catalog after a restart.
+#[derive(Serialize, Deserialize)]
+struct DiskCatalog {
+    sig: u64,
+    scan: CatalogScan,
+}
+
+fn catalog_index_path(sessions_root: &Path) -> PathBuf {
+    sessions_root.join(".catalog-index.json")
+}
+
+fn load_disk_catalog(sessions_root: &Path, sig: u64) -> Option<CatalogScan> {
+    let bytes = fs::read(catalog_index_path(sessions_root)).ok()?;
+    let disk: DiskCatalog = serde_json::from_slice(&bytes).ok()?;
+    (disk.sig == sig).then_some(disk.scan)
+}
+
+fn save_disk_catalog(sessions_root: &Path, sig: u64, scan: &CatalogScan) {
+    let path = catalog_index_path(sessions_root);
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let Ok(bytes) = serde_json::to_vec(&DiskCatalog {
+        sig,
+        scan: scan.clone(),
+    }) else {
+        return;
+    };
+    if fs::write(&tmp, bytes).is_ok() {
+        // Windows rename does not replace an existing file.
+        let _ = fs::remove_file(&path);
+        let _ = fs::rename(&tmp, &path);
+    }
+}
+
 fn catalog_cache() -> &'static Mutex<HashMap<PathBuf, CachedCatalog>> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedCatalog>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -3660,8 +3695,10 @@ fn catalog_signature(sessions_root: &Path) -> u64 {
 /// one cache. Callers are unchanged — this is a transparent speedup.
 ///
 /// NOTE: a hit still pays the `catalog_signature` walk (O(N `stat`s), NOT O(1))
-/// — it saves the read + JSON-parse of every `*.meta`, not the directory walk.
-/// Index-level (single-read) speed would need a persisted recency index.
+/// — it saves the read + JSON-parse of every `*.meta`, and now can also reuse a
+/// signature-validated on-disk snapshot across process restarts. Rewind/delete/
+/// edit changes mtime or size, so the snapshot self-invalidates; no TTL-only
+/// stale catalog is ever served.
 fn scan_catalog_cached(sessions_root: &Path) -> CatalogScan {
     // Production: a very short reuse window absorbs the multi-tab/multi-request
     // burst on session switches without hiding a new session for long. Tests use
@@ -3693,8 +3730,25 @@ fn scan_catalog_cached(sessions_root: &Path) -> CatalogScan {
             }
         }
     }
+    // Cross-process/restart reuse. Signature matching means file additions,
+    // deletions, rewind edits, or length changes all invalidate this snapshot.
+    if let Some(disk) = load_disk_catalog(sessions_root, sig) {
+        catalog_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                sessions_root.to_path_buf(),
+                CachedCatalog {
+                    sig,
+                    scan: Arc::new(disk.clone()),
+                    checked_at: std::time::Instant::now(),
+                },
+            );
+        return disk;
+    }
     // Miss: the lock is intentionally NOT held across the (slow) scan.
     let scan = scan_catalog_root(sessions_root);
+    save_disk_catalog(sessions_root, sig, &scan);
     let arc = Arc::new(scan.clone());
     catalog_cache()
         .lock()

@@ -704,6 +704,47 @@ pub async fn check_update(
     build_update_check_http_response(&headers, project_update_response(fresh, summary_only))
 }
 
+/// Warm the update check cache once at server startup so the first WebUI badge
+/// request is a local cache hit instead of a 2~7s GitHub round trip.
+pub async fn prewarm_update_check() {
+    if jeikcode_config::config::runtime_state::is_dead()
+        || jeikcode_config::config::offline::is_offline_active()
+    {
+        return;
+    }
+    let channel = UpdateChannel::default();
+    let is_desktop = is_desktop_environment();
+    let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let cache_key = (
+        match channel {
+            UpdateChannel::Stable => 0u8,
+            UpdateChannel::Beta => 1u8,
+        },
+        is_desktop,
+    );
+    if let Some(hit) = update_check_cache().lock().await.get(&cache_key) {
+        if hit.fetched_at.elapsed() < UPDATE_CHECK_CACHE_TTL {
+            return;
+        }
+    }
+    let _inflight = update_check_inflight_lock().lock().await;
+    if let Some(hit) = update_check_cache().lock().await.get(&cache_key) {
+        if hit.fetched_at.elapsed() < UPDATE_CHECK_CACHE_TTL {
+            return;
+        }
+    }
+    let fresh = fetch_uncached_update_check(channel, is_desktop, current_version).await;
+    if !fresh.latest_version.is_empty() {
+        update_check_cache().lock().await.insert(
+            cache_key,
+            CachedUpdateCheck {
+                fetched_at: Instant::now(),
+                response: fresh,
+            },
+        );
+    }
+}
+
 /// GET /api/update/status
 pub async fn get_status() -> impl IntoResponse {
     Json(get_update_status())
