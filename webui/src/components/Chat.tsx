@@ -1088,6 +1088,8 @@ export function Chat({
       refreshQueuedFromServer(sid);
       return;
     }
+    if (next.length === 0 && queueEmptyWriteInFlightRef.current.has(sid)) return;
+    if (next.length === 0) queueEmptyWriteInFlightRef.current.add(sid);
     void saveChatQueue(
       sid,
       next.map(serializeQueuedCard) as QueuedMessageApiItem[],
@@ -1103,7 +1105,10 @@ export function Chat({
           for (const key of inFlightKeys) localUnsyncedQueueIdsRef.current.delete(key);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (next.length === 0) queueEmptyWriteInFlightRef.current.delete(sid);
+      });
   }
 
   function setQueuedLocal(next: QueuedMessage[]) {
@@ -1641,6 +1646,8 @@ export function Chat({
   const todoStampBySessionRef = useRef(new Map<string, RevisionStamp>());
   /** Last queue revision observed from `/chat/queue`; guards stale whole-list writes. */
   const queueRevisionBySessionRef = useRef(new Map<string, number>());
+  /** Coalesce empty whole-list clears fired by duplicate mount effects. */
+  const queueEmptyWriteInFlightRef = useRef<Set<string>>(new Set());
   const activeTodosBySessionRef = useRef<Map<string, TodoItem[]>>(new Map());
   // 每个会话一份实时清单。revision 是总线上最后一次 todo 调用，重放同一调用不会改文档。
   const todoLiveBySessionRef = useRef<Map<string, LiveTodoDocument>>(new Map());

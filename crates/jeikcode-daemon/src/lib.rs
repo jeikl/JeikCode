@@ -17499,6 +17499,17 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
             if base != current {
                 let map = get_session_queues_map().await;
                 let items = map.read().await.get(&sid).cloned().unwrap_or_default();
+                // An empty whole-list write is a no-op when the server queue is
+                // already empty. Returning 409 here only creates console noise
+                // and a redundant merge request from every newly opened tab.
+                if req.items.is_empty() && items.is_empty() {
+                    return Json(serde_json::json!({
+                        "success": true,
+                        "revision": current,
+                        "items": [],
+                    }))
+                    .into_response();
+                }
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({
