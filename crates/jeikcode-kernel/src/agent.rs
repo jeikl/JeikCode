@@ -5,8 +5,8 @@ use crate::hook::{
     Continuation, ContinuationKind, ContinuationVisibility, HookChain, LifecycleHooks, TurnCtx,
 };
 use crate::message::{
-    CompactTrigger, CompactionStrategy, CompactionView, Conversation, ImageContent, Message,
-    MessageMeta, NoCompaction, SessionSnapshot, SNAPSHOT_VERSION, TURN_DIAGNOSTIC_ORIGIN,
+    CompactReport, CompactTrigger, CompactionStrategy, CompactionView, Conversation, ImageContent,
+    Message, MessageMeta, NoCompaction, SessionSnapshot, SNAPSHOT_VERSION, TURN_DIAGNOSTIC_ORIGIN,
 };
 use crate::middleware::{AfterOutcome, BeforeOutcome, ToolMiddleware};
 use crate::provider::{ChatOptions, LlmProvider};
@@ -658,11 +658,6 @@ pub fn wire_output_budget_for_prompt(
     budget.min(remaining.max(1)).max(1)
 }
 
-/// The input WATERMARK budget — the denominator of every pressure decision: the window
-/// minus [`OUTPUT_WATERMARK_BUFFER`] (no output term at all). Auto-compaction, the pre-send
-/// guard and the `CompactionView` handed to the strategy are all sized against THIS, so the
-/// declared output budget cannot influence when context pressure is acted on — real context
-/// is only ever measured by the provider-reported usage (or the byte estimate as fallback).
 /// Conservative wire estimate for mounted tool schemas so mid-turn auto-compaction
 /// and pre-send overflow guards match actual provider prompt tokens (where ~50 tool
 /// schemas add tens of thousands of tokens).
@@ -679,6 +674,11 @@ fn estimate_tool_defs_tokens(tools: &[crate::tool::ToolDef]) -> u64 {
     ((byte_count / 4) as u64).max(1)
 }
 
+/// The input WATERMARK budget — the denominator of every pressure decision: the window
+/// minus [`OUTPUT_WATERMARK_BUFFER`] (no output term at all). Auto-compaction, the pre-send
+/// guard and the `CompactionView` handed to the strategy are all sized against THIS, so the
+/// declared output budget cannot influence when context pressure is acted on — real context
+/// is only ever measured by the provider-reported usage (or the byte estimate as fallback).
 fn input_watermark_budget(window: u32) -> u32 {
     window.saturating_sub(OUTPUT_WATERMARK_BUFFER.min(window / 4))
 }
@@ -741,6 +741,15 @@ fn midturn_auto_utilization(
     }
     let utilization = estimated_prompt as f32 / limit as f32;
     (utilization >= threshold).then_some(utilization)
+}
+
+/// Whether a mid-turn Auto pass may run again later in the SAME turn.
+/// Only a pass that actually REMOVED history (drain+summary) re-arms; a stub-only
+/// rewrite bumps `cache_epoch` without deleting any message, and a refused/no-op
+/// pass returns `None`. Both must latch for the rest of the turn — re-running a stub
+/// per round would rewrite the provider-cached prefix every round.
+fn midturn_auto_should_rearm(report: Option<CompactReport>) -> bool {
+    report.is_some_and(|report| report.committed && report.removed > 0)
 }
 
 /// Classification of a single tool call for the three-phase tool loop.
@@ -1553,7 +1562,7 @@ impl RunningAgent {
             return;
         }
         attempted_stages[stage] = true;
-        self.run_compaction(convo, trigger).await;
+        let _ = self.run_compaction(convo, trigger).await;
     }
 
     /// Run one compaction: build a read-only `CompactionView` over the current
@@ -1566,7 +1575,16 @@ impl RunningAgent {
     /// is confined to an inner block that ends BEFORE the `&mut convo.apply_plan`
     /// call — so the strategy may await without holding a borrow across the mutable
     /// apply.
-    async fn run_compaction(&self, convo: &mut Conversation, trigger: CompactTrigger) {
+    ///
+    /// Returns the applied [`CompactReport`], or `None` when a committed plan could
+    /// not be checkpointed/applied (nothing changed on the live conversation).
+    /// Callers use `committed && removed > 0` to tell a real drain+summary apart
+    /// from a stub-only rewrite or a refused/no-op pass.
+    async fn run_compaction(
+        &self,
+        convo: &mut Conversation,
+        trigger: CompactTrigger,
+    ) -> Option<CompactReport> {
         let trigger_for_event = trigger.clone(); // `trigger` is moved into the view below
         let floor = convo.sacred_floor();
         // Raw prompt tokens from the most recent assistant meta (default 0 if none yet).
@@ -1633,7 +1651,7 @@ impl RunningAgent {
                         "committed compaction did not produce a candidate",
                     ),
                 });
-                return;
+                return None;
             };
             let candidate_snapshot = self.capture_snapshot(candidate);
             if let Some(checkpoint) = &self.compaction_checkpoint {
@@ -1642,7 +1660,7 @@ impl RunningAgent {
                         trigger: trigger_for_event,
                         error,
                     });
-                    return;
+                    return None;
                 }
             }
             snapshot = Some(candidate_snapshot);
@@ -1658,6 +1676,7 @@ impl RunningAgent {
             committed: report.committed,
             snapshot,
         });
+        Some(report)
     }
     async fn session_loop(self, mut cmd_rx: UnboundedReceiver<AgentCommand>) {
         let mut convo = match &self.resume {
@@ -1802,7 +1821,8 @@ impl RunningAgent {
                 // any auto threshold. `apply_plan` still refuses a net-loss/no-op
                 // plan (no epoch burn).
                 AgentCommand::Compact { focus } => {
-                    self.run_compaction(&mut convo, CompactTrigger::Manual { focus })
+                    let _ = self
+                        .run_compaction(&mut convo, CompactTrigger::Manual { focus })
                         .await;
                 }
                 AgentCommand::SendMessage { text, images } => {
@@ -1965,7 +1985,7 @@ impl RunningAgent {
         // append-only on the compacted history. NEVER fired inside run_turn's round
         // loop (that would reopen the within-turn cache break).
         if let Some(trigger) = self.should_compact(convo) {
-            self.run_compaction(convo, trigger).await;
+            let _ = self.run_compaction(convo, trigger).await;
         }
         // CANCEL = UNDO: remember the history length BEFORE this turn's user
         // message is pushed, so a cancelled turn can roll all the way back to here —
@@ -2274,7 +2294,8 @@ impl RunningAgent {
                 // A mid-turn /compact runs HERE — the turn boundary, the documented
                 // cache-safe trigger point.
                 AgentCommand::Compact { focus } => {
-                    self.run_compaction(convo, CompactTrigger::Manual { focus })
+                    let _ = self
+                        .run_compaction(convo, CompactTrigger::Manual { focus })
                         .await;
                 }
                 AgentCommand::CancelSteer { text, message_id } => {
@@ -2741,9 +2762,12 @@ impl RunningAgent {
             // grok-build all check the context threshold before EVERY model call,
             // not only at task boundaries. Do the same with the gentle `Auto`
             // strategy (recent-window kept verbatim, old span drained+summarized)
-            // instead of waiting for the 100% overflow ladder. Runs at most once
-            // per turn: if it cannot shrink (single huge input), the emergency
-            // block below still owns the hard backstop.
+            // instead of waiting for the 100% overflow ladder. A pass re-arms a
+            // later round ONLY when it actually removed history (drain+summary);
+            // a stub rewrite or a refused/no-op pass latches for the rest of the
+            // turn (stub-only passes exist to protect the prefix cache). If it
+            // cannot shrink (single huge input), the emergency block below still
+            // owns the hard backstop.
             if !midturn_auto_attempted {
                 let window = self.provider.context_window();
                 let messages_tokens: u64 = messages
@@ -2770,13 +2794,15 @@ impl RunningAgent {
                         sacred_floor: convo.sacred_floor(),
                     };
                     if self.compaction.will_summarize(&view) {
-                        let epoch_before = convo.cache_epoch;
-                        self.run_compaction(convo, CompactTrigger::Auto { utilization })
+                        let report = self
+                            .run_compaction(convo, CompactTrigger::Auto { utilization })
                             .await;
-                        // Latch only when compaction could not commit; when a
-                        // committed pass relieved pressure, allow subsequent rounds
-                        // in a very long turn to compact again if history regrows.
-                        if convo.cache_epoch == epoch_before {
+                        // Re-arm only when the pass actually REMOVED history
+                        // (drain+summary). `cache_epoch` alone is insufficient: an
+                        // in-place stub rewrite also bumps the epoch while leaving
+                        // every message in place, so keying on it would rewrite the
+                        // prefix (and bust the provider cache) on every round.
+                        if !midturn_auto_should_rearm(report) {
                             midturn_auto_attempted = true;
                         }
                         messages = convo.model_history();
@@ -2823,7 +2849,8 @@ impl RunningAgent {
                     && attempts < MAX_OVERFLOW_ATTEMPTS
                 {
                     let before = est(&convo.messages);
-                    self.run_compaction(convo, CompactTrigger::Overflow { attempt: attempts })
+                    let _ = self
+                        .run_compaction(convo, CompactTrigger::Overflow { attempt: attempts })
                         .await;
                     attempts += 1;
                     if est(&convo.messages) >= before {
@@ -2969,13 +2996,14 @@ impl RunningAgent {
                     self.rt.emit(AgentEvent::Warning(format!(
                         "context overflow on round {round} (attempt {overflow_attempt}); compacting and retrying"
                     )));
-                    self.run_compaction(
-                        convo,
-                        CompactTrigger::Overflow {
-                            attempt: overflow_attempt,
-                        },
-                    )
-                    .await;
+                    let _ = self
+                        .run_compaction(
+                            convo,
+                            CompactTrigger::Overflow {
+                                attempt: overflow_attempt,
+                            },
+                        )
+                        .await;
                     overflow_attempt += 1;
                     round -= 1; // a RETRY of the same logical round, not a new one
                     continue;
@@ -6924,9 +6952,40 @@ mod provider_message_pairing_tests {
 #[cfg(test)]
 mod output_budget_tests {
     use super::{
-        input_watermark_budget, midturn_auto_utilization, wire_output_budget,
-        wire_output_budget_for_prompt, DEFAULT_OUTPUT_BUDGET, DEFAULT_REQUEST_MAX_TOKENS,
+        input_watermark_budget, midturn_auto_should_rearm, midturn_auto_utilization,
+        wire_output_budget, wire_output_budget_for_prompt, DEFAULT_OUTPUT_BUDGET,
+        DEFAULT_REQUEST_MAX_TOKENS,
     };
+
+    #[test]
+    fn midturn_auto_rearms_only_when_history_was_removed() {
+        use crate::message::CompactReport;
+
+        let report = |committed: bool, removed: usize| CompactReport {
+            epoch_before: 1,
+            epoch_after: 2,
+            removed,
+            bytes_before: 1_000,
+            bytes_after: 400,
+            committed,
+        };
+        assert!(
+            midturn_auto_should_rearm(Some(report(true, 3))),
+            "a real drain+summary must re-arm later rounds"
+        );
+        assert!(
+            !midturn_auto_should_rearm(Some(report(true, 0))),
+            "a stub-only rewrite must latch for the rest of the turn"
+        );
+        assert!(
+            !midturn_auto_should_rearm(Some(report(false, 0))),
+            "a refused/no-op pass must latch"
+        );
+        assert!(
+            !midturn_auto_should_rearm(None),
+            "a failed apply must latch"
+        );
+    }
 
     #[test]
     fn midturn_auto_compaction_uses_the_task_boundary_threshold() {
