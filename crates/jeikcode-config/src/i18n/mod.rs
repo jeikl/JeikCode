@@ -264,6 +264,11 @@ pub fn format_agent_retry_progress(attempt: u32, max: u32) -> String {
     t(Msg::AgentRetryProgress { attempt, max }).into_owned()
 }
 
+/// 已产生部分回复后流超时（终态）。
+pub fn format_agent_stream_timeout_partial_response() -> String {
+    t(Msg::AgentStreamTimeoutPartialResponse).into_owned()
+}
+
 pub fn format_stream_read_reset_hint() -> String {
     t(Msg::StreamReadResetHint).into_owned()
 }

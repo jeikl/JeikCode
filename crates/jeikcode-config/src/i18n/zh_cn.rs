@@ -1362,6 +1362,8 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
             format!("连接中断,正在自动重连(最多 {max} 次),已保留当前输出…").into(),
         Msg::AgentRetryProgress { attempt, max } =>
             format!("连接中断,已保留当前输出,重试 {attempt}/{max} 次").into(),
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "流在已产生部分回复后超时；已保留部分回复，可继续。".into(),
         Msg::StreamReadResetHint =>
             "此错误常见于公司网络或代理环境,请检查代理/VPN/防火墙设置后重试。".into(),
         Msg::StreamReadDetailsPrefix => "详情: ".into(),

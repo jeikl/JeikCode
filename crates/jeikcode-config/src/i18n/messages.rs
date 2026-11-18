@@ -1768,6 +1768,8 @@ pub enum Msg<'a> {
         attempt: u32,
         max: u32,
     },
+    /// 已产生部分回复后流超时：保留部分内容，回合以超时结束。
+    AgentStreamTimeoutPartialResponse,
     /// Context-pressure advisory before a request that is at/over the watermark.
     AgentOverWindow {
         estimate_k: u32,

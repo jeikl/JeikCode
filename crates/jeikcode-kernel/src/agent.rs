@@ -3229,7 +3229,8 @@ impl RunningAgent {
                             retry_this_round = true;
                             break;
                         }
-                        let msg = "stream timeout after partial response; partial response preserved".to_string();
+                        let msg =
+                            i18n::format_agent_stream_timeout_partial_response();
                         self.hooks.on_error(&msg).await;
                         self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
                         Self::persist_turn_diagnostic(convo, &msg);

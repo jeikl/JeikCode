@@ -1281,6 +1281,7 @@ Msg::CmdDescBackground => "Chạy tác vụ một lần trong ngữ cảnh nền
         | Msg::StreamReadInterrupted
         | Msg::AgentAutoRetry { .. }
         | Msg::AgentRetryProgress { .. }
+        | Msg::AgentStreamTimeoutPartialResponse
         | Msg::StreamReadResetHint
         | Msg::StreamReadDetailsPrefix => super::en::en(msg),
     }
