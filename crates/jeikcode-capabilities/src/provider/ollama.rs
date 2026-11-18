@@ -169,16 +169,9 @@ impl LlmProvider for OllamaProvider {
         .await?;
 
         let s = async_stream::stream! {
-            // A body that dies before replay-sensitive output reaches the consumer is
-            // safe to redo wholesale. Metadata may repeat; content and tool data may not.
-            // 1 initial open + up to 2 transparent reopens — a gateway resetting
-            // connections under load can drop more than one attempt before a
-            // healthy backend answers.
-            const MAX_STREAM_ATTEMPTS: u32 = 6;
-            let mut stream_attempt = 1u32;
-            let mut reconnect_attempts = 0u32;
-            let mut resp = resp;
-            'reopen: loop {
+            // 重试调度已统一到内核；本层只发一次流并上报失败分类。
+            let resp = resp;
+            loop {
                 let mut dec = OllamaNdjsonDecoder::new();
                 let mut emitted_replay_sensitive = false;
                 let mut pending_metadata = Vec::new();
@@ -189,6 +182,7 @@ impl LlmProvider for OllamaProvider {
                         Err(_elapsed) => {
                             yield StreamEvent::Error(ProviderError {
                                 retryable: false,
+                                resumable: true,
                                 message: "stream idle timeout".to_string(),
                                 ..Default::default()
                             });
@@ -211,27 +205,15 @@ impl LlmProvider for OllamaProvider {
                             return;
                         }
                         Ok(Some(Err(e))) => {
-                            if !emitted_replay_sensitive && stream_attempt < MAX_STREAM_ATTEMPTS {
-                                reconnect_attempts += 1;
-                                // Brief, esc-interruptible backoff before reopening so an
-                                // immediate retry does not slam a gateway resetting under load.
-                                tokio::time::sleep(retry::compute_backoff(stream_attempt, &policy)).await;
-                                if let Ok(fresh) = open_stream(&client, &url, &body, &api_key, &session_id, &policy, rate_limit_retry_owner, open_timeout).await {
-                                    stream_attempt += 1;
-                                    resp = fresh;
-                                    continue 'reopen;
-                                }
-                            }
                             yield StreamEvent::Error(ProviderError {
                                 retryable: false,
+                                resumable: true,
                                 message: retry::stream_read_error_message(
                                     &e,
                                     if emitted_replay_sensitive {
                                         retry::StreamReadRecovery::PartialResponse
                                     } else {
-                                        retry::StreamReadRecovery::RetryExhausted {
-                                            attempts: reconnect_attempts,
-                                        }
+                                        retry::StreamReadRecovery::Interrupted
                                     },
                                 ),
                                 ..Default::default()
@@ -329,6 +311,7 @@ async fn open_stream(
                         .unwrap_or_else(|| truncate_msg(&text));
                     return Err(ProviderError {
                         retryable: retry::is_retryable_status(code),
+                        resumable: false,
                         message: super::friendly_http_error(code, &detail),
                         http_status: Some(code),
                         code: None,
@@ -577,6 +560,7 @@ impl OllamaNdjsonDecoder {
         if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
             out.push(StreamEvent::Error(ProviderError {
                 retryable: false,
+                resumable: false,
                 message: format!("provider error: {}", truncate_msg(err)),
                 http_status: None,
                 code: None,
@@ -989,164 +973,7 @@ mod tests {
         assert!(matches!(ev.last().unwrap(), StreamEvent::Done { .. }));
     }
 
-    // ---- mid-stream re-open (v1 parity) ----
-
-    /// Fully consume one HTTP request (headers + Content-Length body) so the
-    /// client's `send()` always completes before the mock responds.
-    fn read_http_request(s: &mut std::net::TcpStream) {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let mut tmp = [0u8; 1024];
-        loop {
-            let n = match s.read(&mut tmp) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => n,
-            };
-            buf.extend_from_slice(&tmp[..n]);
-            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
-                let clen = headers
-                    .lines()
-                    .find_map(|l| l.strip_prefix("content-length:"))
-                    .and_then(|v| v.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                let mut remaining = clen.saturating_sub(buf.len() - (pos + 4));
-                while remaining > 0 {
-                    match s.read(&mut tmp) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => remaining = remaining.saturating_sub(n),
-                    }
-                }
-                return;
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn midstream_eof_before_any_event_reopens_and_succeeds() {
-        use std::io::Write;
-        use std::net::TcpListener;
-
-        // Connection #1 opens a chunked 200 then drops before any chunk; with
-        // nothing delivered the provider must transparently re-open, and #2 serves
-        // a valid NDJSON body.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let handle = std::thread::spawn(move || {
-            let (mut s1, _) = listener.accept().unwrap();
-            read_http_request(&mut s1);
-            s1.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n",
-            )
-            .unwrap();
-            s1.flush().unwrap();
-            drop(s1);
-
-            let (mut s2, _) = listener.accept().unwrap();
-            read_http_request(&mut s2);
-            let body = "{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":false}\n{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"eval_count\":1}\n";
-            s2.write_all(
-                format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{body}")
-                    .as_bytes(),
-            )
-            .unwrap();
-            s2.flush().unwrap();
-            drop(s2);
-        });
-
-        let cfg = OllamaConfig::new(format!("http://127.0.0.1:{port}"), "llama-test");
-        let provider = OllamaProvider::new(cfg).unwrap();
-
-        let stream = provider
-            .chat_stream(&[Message::user("hi")], &[], &ChatOptions::default())
-            .await
-            .expect("open should succeed");
-        let events: Vec<StreamEvent> = stream.collect().await;
-
-        let has_error = events.iter().any(|e| matches!(e, StreamEvent::Error(_)));
-        assert!(
-            !has_error,
-            "must not surface a mid-stream error after a clean re-open: {events:?}"
-        );
-        let text: String = events
-            .iter()
-            .filter_map(|e| match e {
-                StreamEvent::TextDelta(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            text, "ok",
-            "should deliver the re-opened response: {events:?}"
-        );
-
-        let _ = handle.join();
-    }
-
-    #[tokio::test]
-    async fn midstream_reset_twice_before_any_event_reopens_until_success() {
-        use std::io::Write;
-        use std::net::TcpListener;
-
-        // Connections #1 and #2 both drop before any chunk; #3 serves a valid
-        // NDJSON body. A single reopen would surface an error after #2 — the
-        // provider must reopen twice and deliver only #3's response.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let handle = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut s, _) = listener.accept().unwrap();
-                read_http_request(&mut s);
-                s.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n",
-                )
-                .unwrap();
-                s.flush().unwrap();
-                drop(s);
-            }
-            let (mut s3, _) = listener.accept().unwrap();
-            read_http_request(&mut s3);
-            let body = "{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":false}\n{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"eval_count\":1}\n";
-            s3.write_all(
-                format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{body}")
-                    .as_bytes(),
-            )
-            .unwrap();
-            s3.flush().unwrap();
-            drop(s3);
-        });
-
-        let mut cfg = OllamaConfig::new(format!("http://127.0.0.1:{port}"), "llama-test");
-        cfg.retry.base_delay = std::time::Duration::from_millis(1);
-        cfg.retry.max_delay = std::time::Duration::from_millis(2);
-        let provider = OllamaProvider::new(cfg).unwrap();
-
-        let stream = provider
-            .chat_stream(&[Message::user("hi")], &[], &ChatOptions::default())
-            .await
-            .expect("open should succeed");
-        let events: Vec<StreamEvent> = stream.collect().await;
-
-        assert!(
-            !events.iter().any(|e| matches!(e, StreamEvent::Error(_))),
-            "two pre-event resets must be ridden through transparently: {events:?}"
-        );
-        let text: String = events
-            .iter()
-            .filter_map(|e| match e {
-                StreamEvent::TextDelta(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            text, "ok",
-            "should deliver the third (successful) response: {events:?}"
-        );
-
-        let _ = handle.join();
-    }
+    // ---- mid-stream failures ----
 
     /// Capture the first request's head, then answer 200 + close so `chat_stream`
     /// resolves and the stream ends on EOF.

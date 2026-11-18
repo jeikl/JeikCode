@@ -1382,7 +1382,11 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::StreamReadRetryExhausted { attempts } =>
             format!("Network connection interrupted: remote host closed or reset connection, reconnect failed after {attempts} attempts. You can retry.").into(),
         Msg::StreamReadPartialResponse =>
-            "Response interrupted: not auto-replayed to prevent duplicated output or tool execution; safe partial response preserved, you can continue.".into(),
+            "Response interrupted: the safe partial response was preserved, you can continue.".into(),
+        Msg::StreamReadInterrupted =>
+            "Network connection interrupted: remote host closed or reset connection. You can retry.".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("Connection dropped; reconnecting automatically (up to {max} attempts), current output preserved…").into(),
         Msg::StreamReadResetHint =>
             "This error is common in corporate network or proxy environments; please check proxy/VPN/firewall settings.".into(),
         Msg::StreamReadDetailsPrefix => "Details: ".into(),

@@ -250,6 +250,15 @@ pub fn format_stream_read_partial_response() -> String {
     t(Msg::StreamReadPartialResponse).into_owned()
 }
 
+pub fn format_stream_read_interrupted() -> String {
+    t(Msg::StreamReadInterrupted).into_owned()
+}
+
+/// 统一重试提示：一次故障只发一条，后续重试静默。
+pub fn format_agent_auto_retry(max: u32) -> String {
+    t(Msg::AgentAutoRetry { max }).into_owned()
+}
+
 pub fn format_stream_read_reset_hint() -> String {
     t(Msg::StreamReadResetHint).into_owned()
 }

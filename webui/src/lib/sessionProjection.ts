@@ -1551,6 +1551,19 @@ export function paintAssistantNotice<T extends ProjectionMessage>(
   id?: string,
 ): T[] {
   if (!text) return messages;
+  // 身份优先：同一条通知（同 id）只存在一行。重试提示被终态详情改写时，
+  // 原地替换文本，而不是追加第二张卡。
+  if (id) {
+    const existing = messages.findIndex((message) => message.id === id);
+    if (existing >= 0) {
+      const current = messages[existing]!;
+      const already = current.parts.some((part) => part.kind === 'notice' && part.text === text);
+      if (already) return messages;
+      const next = messages.slice();
+      next[existing] = { ...current, parts: [{ kind: 'notice', text }] } as unknown as T;
+      return next;
+    }
+  }
   // 只在**末尾连续区域**去重，不能全局去重：
   // 全局 `some` 会让一条历史 notice 永远占着画布（它已被写进缓存），
   // 而它的 seq 落在当时那一轮之后、后续每一轮之前 —— 视觉上就是

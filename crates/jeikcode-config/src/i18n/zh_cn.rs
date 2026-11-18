@@ -1355,7 +1355,11 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::StreamReadRetryExhausted { attempts } =>
             format!("网络连接中断:远端关闭或重置了连接,自动重连 {attempts} 次后仍失败,可重试。").into(),
         Msg::StreamReadPartialResponse =>
-            "响应中断:为避免重复输出或工具执行,未自动重放;已保留可安全保存的部分回复,可继续。".into(),
+            "响应中断:已保留可安全保存的部分回复,可继续。".into(),
+        Msg::StreamReadInterrupted =>
+            "网络连接中断:远端关闭或重置了连接,可重试。".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("连接中断,正在自动重连(最多 {max} 次),已保留当前输出…").into(),
         Msg::StreamReadResetHint =>
             "此错误常见于公司网络或代理环境,请检查代理/VPN/防火墙设置后重试。".into(),
         Msg::StreamReadDetailsPrefix => "详情: ".into(),

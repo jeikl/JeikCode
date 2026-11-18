@@ -9679,10 +9679,24 @@ export function Chat({
             const noticeAnchor =
               event.message_id ??
               (doneSid ? turnUserAnchorBySessionRef.current.get(doneSid) : undefined);
-            pushNoticeToLastAssistant(
-              t('chat.incomplete', { msg: terminal.detail }),
-              noticeAnchor,
-            );
+            // 已经用同一条详情提示过的故障（重试卡片已被终态改写）不再补一张
+            // “回合未完成”，否则一次故障会出现两张卡。
+            const alreadyExplained =
+              !!terminal.detail &&
+              messagesRef.current.some((message) =>
+                message.parts.some(
+                  (part) =>
+                    part.kind === 'notice' &&
+                    !!part.text &&
+                    part.text.includes(terminal.detail),
+                ),
+              );
+            if (!alreadyExplained) {
+              pushNoticeToLastAssistant(
+                t('chat.incomplete', { msg: terminal.detail }),
+                noticeAnchor,
+              );
+            }
           }
           transitionChatRecovery({ type: 'authoritative_terminal' });
           localTurnSessionsRef.current.delete(event.session_id);

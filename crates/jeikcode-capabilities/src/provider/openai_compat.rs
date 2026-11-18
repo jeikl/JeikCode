@@ -533,14 +533,10 @@ impl LlmProvider for OpenAiCompatProvider {
             // connection under load (surfaces as "error decoding response body" /
             // "unexpected EOF during chunk size line"). Once replay-sensitive output
             // has been emitted, retry would duplicate it, so the error is surfaced.
-            // 1 initial open + up to 2 transparent reopens. A gateway resetting
-            // connections under load can drop more than one attempt before a
-            // healthy backend answers, so a single reopen is not enough.
-            const MAX_STREAM_ATTEMPTS: u32 = 6;
-            let mut stream_attempt = 1u32;
-            let mut reconnect_attempts = 0u32;
-            let mut resp = resp;
-            'reopen: loop {
+            // 重试调度已统一到内核（`jeikcode_kernel::retry`）：本层只发一次流，
+            // 失败时重建连接池并把失败分类上报，不再自己 sleep / 重放。
+            let resp = resp;
+            {
                 let mut dec = SseDecoder::new();
                 let mut emitted_replay_sensitive = false;
                 let mut pending_metadata = Vec::new();
@@ -553,6 +549,7 @@ impl LlmProvider for OpenAiCompatProvider {
                             // have reached the consumer), so not retryable.
                             yield StreamEvent::Error(ProviderError {
                                 retryable: false,
+                                resumable: true,
                                 message: "stream idle timeout".to_string(),
                                 ..Default::default()
                             });
@@ -575,54 +572,30 @@ impl LlmProvider for OpenAiCompatProvider {
                             return;
                         }
                         Ok(Some(Err(e))) => {
-                            // No replay-sensitive output reached the consumer yet → re-open
-                            // the whole request transparently (bounded by MAX_STREAM_ATTEMPTS).
-                            if !emitted_replay_sensitive && stream_attempt < MAX_STREAM_ATTEMPTS {
-                                reconnect_attempts += 1;
-                                // Brief backoff so an immediate reopen does not slam a
-                                // gateway that is resetting under load. Bounded and
-                                // esc-interruptible: the kernel races the whole
-                                // stream.next() against cancellation, so a sleep here is
-                                // cancelled with the turn.
-                                tokio::time::sleep(retry::compute_backoff(stream_attempt, &policy)).await;
-                                // A body that died mid-read on a half-closed pooled socket
-                                // is the canonical poisoned-pool trigger. Rebuild BEFORE the
-                                // reopen so its FIRST attempt gets a fresh (empty) pool instead
-                                // of re-grabbing the dead socket. Both the transient-transport
-                                // class and a TLS record-corruption alert (BadRecordMac/DecryptError)
-                                // poison the pool this way; a logical/decode failure isn't cured by a
-                                // new pool. (The reopened `open_stream` additionally escalates to
-                                // managed TLS-1.2 on its first OPEN-path corruption.)
-                                if retry::is_stale_connection_error(&e)
-                                    || retry::chain_has_tls_corruption(&e)
-                                {
-                                    if let Err(rebuild_error) = client.rebuild(
-                                        jeikcode_config::tls::should_cap_url(&url),
-                                    ) {
-                                        yield StreamEvent::Error(rebuild_error);
-                                        return;
-                                    }
+                            // A body that died mid-read on a half-closed pooled socket is
+                            // the canonical poisoned-pool trigger: rebuild so the kernel's
+                            // next attempt gets a fresh (empty) pool instead of re-grabbing
+                            // the dead socket. TLS record corruption poisons it the same way;
+                            // a logical/decode failure isn't cured by a new pool.
+                            if retry::is_stale_connection_error(&e)
+                                || retry::chain_has_tls_corruption(&e)
+                            {
+                                if let Err(rebuild_error) = client.rebuild(
+                                    jeikcode_config::tls::should_cap_url(&url),
+                                ) {
+                                    yield StreamEvent::Error(rebuild_error);
+                                    return;
                                 }
-                                if let Ok(fresh) =
-                                    open_stream(&client, &url, &body_bytes, &signer, &api_key, &session_id, &policy, rate_limit_retry_owner, open_timeout).await
-                                {
-                                    stream_attempt += 1;
-                                    resp = fresh;
-                                    continue 'reopen;
-                                }
-                                // Re-open failed: fall through and surface the
-                                // original mid-stream error below.
                             }
                             yield StreamEvent::Error(ProviderError {
                                 retryable: false,
+                                resumable: true,
                                 message: retry::stream_read_error_message(
                                     &e,
                                     if emitted_replay_sensitive {
                                         retry::StreamReadRecovery::PartialResponse
                                     } else {
-                                        retry::StreamReadRecovery::RetryExhausted {
-                                            attempts: reconnect_attempts,
-                                        }
+                                        retry::StreamReadRecovery::Interrupted
                                     },
                                 ),
                                 ..Default::default()
@@ -807,6 +780,7 @@ async fn open_stream(
                     let provider_code = envelope.as_ref().and_then(provider_error_code);
                     return Err(ProviderError {
                         retryable: retry::is_retryable_status(code),
+                        resumable: false,
                         message: super::friendly_http_error(code, &detail),
                         http_status: Some(code),
                         code: provider_code,
@@ -1586,6 +1560,7 @@ impl SseDecoder {
         if let Some(err) = &chunk.error {
             out.push(StreamEvent::Error(ProviderError {
                 retryable: false,
+                resumable: false,
                 message: format!("provider error: {}", parse_error_obj(err)),
                 http_status: None,
                 code: error_code(err),
@@ -3752,21 +3727,17 @@ mod tests {
         }
     }
 
+    /// 中流断连后由**内核**统一重试：适配器只发一次流，并把失败标记为
+    /// `resumable`（可续写），不再自己偷偷重开。
     #[tokio::test]
-    async fn midstream_eof_before_any_event_reopens_and_succeeds() {
+    async fn midstream_eof_before_any_event_surfaces_a_resumable_error() {
         use std::io::Write;
         use std::net::TcpListener;
 
-        // Mock gateway: connection #1 opens a chunked 200 then drops the socket
-        // before sending any chunk — reproducing the reported
-        // "unexpected EOF during chunk size line". Because NOTHING reached the
-        // consumer, the provider must transparently re-open (v1 parity); the
-        // caller then sees only the successful connection #2 response.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let handle = std::thread::spawn(move || {
-            // #1: chunked 200, then abrupt close with no chunk → mid-stream EOF.
             let (mut s1, _) = listener.accept().unwrap();
             read_http_request(&mut s1);
             s1.write_all(
@@ -3775,18 +3746,6 @@ mod tests {
             .unwrap();
             s1.flush().unwrap();
             drop(s1);
-
-            // #2: a complete, close-delimited SSE body.
-            let (mut s2, _) = listener.accept().unwrap();
-            read_http_request(&mut s2);
-            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
-            s2.write_all(
-                format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}")
-                    .as_bytes(),
-            )
-            .unwrap();
-            s2.flush().unwrap();
-            drop(s2);
         });
 
         let cfg = OpenAiCompatConfig::new("k", format!("http://127.0.0.1:{port}"), "glm-test");
@@ -3798,159 +3757,22 @@ mod tests {
             .expect("open should succeed");
         let events: Vec<StreamEvent> = stream.collect().await;
 
-        let has_error = events.iter().any(|e| matches!(e, StreamEvent::Error(_)));
+        let err = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Error(err) => Some(err),
+                _ => None,
+            })
+            .expect("a mid-stream drop must surface as an error");
         assert!(
-            !has_error,
-            "must not surface a mid-stream error after a clean re-open: {events:?}"
+            err.resumable && !err.retryable,
+            "the kernel owns the retry; the adapter must mark it resumable: {err:?}"
         );
-        let text: String = events
-            .iter()
-            .filter_map(|e| match e {
-                StreamEvent::TextDelta(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            text, "ok",
-            "should deliver the re-opened response: {events:?}"
-        );
-
-        let _ = handle.join();
-    }
-
-    #[tokio::test]
-    async fn abandoned_attempt_metadata_is_not_emitted_after_reopen() {
-        use std::io::Write;
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let handle = std::thread::spawn(move || {
-            let (mut stale, _) = listener.accept().unwrap();
-            read_http_request(&mut stale);
-            let payload =
-                "data: {\"id\":\"resp_stale\",\"model\":\"model-stale\",\"choices\":[]}\n\n";
-            stale
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
-                )
-                .unwrap();
-            stale
-                .write_all(format!("{:x}\r\n{payload}\r\n", payload.len()).as_bytes())
-                .unwrap();
-            stale.flush().unwrap();
-            drop(stale);
-
-            let (mut fresh, _) = listener.accept().unwrap();
-            read_http_request(&mut fresh);
-            let body = "data: {\"id\":\"resp_fresh\",\"model\":\"model-fresh\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
-            fresh
-                .write_all(
-                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}")
-                        .as_bytes(),
-                )
-                .unwrap();
-            fresh.flush().unwrap();
-        });
-
-        let mut cfg = OpenAiCompatConfig::new("k", format!("http://127.0.0.1:{port}"), "glm-test");
-        cfg.retry.base_delay = std::time::Duration::from_millis(1);
-        cfg.retry.max_delay = std::time::Duration::from_millis(2);
-        let provider = OpenAiCompatProvider::new(cfg).unwrap();
-        let events: Vec<StreamEvent> = provider
-            .chat_stream(&[Message::user("hi")], &[], &ChatOptions::default())
-            .await
-            .unwrap()
-            .collect()
-            .await;
-
-        let ids: Vec<&str> = events
-            .iter()
-            .filter_map(|event| match event {
-                StreamEvent::ResponseId(id) => Some(id.as_str()),
-                _ => None,
-            })
-            .collect();
-        let models: Vec<&str> = events
-            .iter()
-            .filter_map(|event| match event {
-                StreamEvent::ResponseModel(model) => Some(model.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(ids, vec!["resp_fresh"]);
-        assert_eq!(models, vec!["model-fresh"]);
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::Error(_))));
-
-        let _ = handle.join();
-    }
-
-    #[tokio::test]
-    async fn midstream_reset_twice_before_any_event_reopens_until_success() {
-        use std::io::Write;
-        use std::net::TcpListener;
-
-        // A gateway resetting connections under load can drop MORE than one
-        // attempt before a healthy backend answers. Connections #1 and #2 both
-        // open a chunked 200 then close before any chunk (nothing reached the
-        // consumer); #3 serves a complete body. With a single reopen this would
-        // surface an error after #2 — the provider must reopen twice and deliver
-        // only #3's response.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let handle = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut s, _) = listener.accept().unwrap();
-                read_http_request(&mut s);
-                s.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
-                )
-                .unwrap();
-                s.flush().unwrap();
-                drop(s);
-            }
-            let (mut s3, _) = listener.accept().unwrap();
-            read_http_request(&mut s3);
-            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
-            s3.write_all(
-                format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}")
-                    .as_bytes(),
-            )
-            .unwrap();
-            s3.flush().unwrap();
-            drop(s3);
-        });
-
-        let mut cfg = OpenAiCompatConfig::new("k", format!("http://127.0.0.1:{port}"), "glm-test");
-        // Keep the inter-reopen backoff negligible so the test is fast.
-        cfg.retry.base_delay = std::time::Duration::from_millis(1);
-        cfg.retry.max_delay = std::time::Duration::from_millis(2);
-        let provider = OpenAiCompatProvider::new(cfg).unwrap();
-
-        let stream = provider
-            .chat_stream(&[Message::user("hi")], &[], &ChatOptions::default())
-            .await
-            .expect("open should succeed");
-        let events: Vec<StreamEvent> = stream.collect().await;
-
         assert!(
-            !events.iter().any(|e| matches!(e, StreamEvent::Error(_))),
-            "two pre-event resets must be ridden through transparently: {events:?}"
-        );
-        let text: String = events
-            .iter()
-            .filter_map(|e| match e {
-                StreamEvent::TextDelta(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            text, "ok",
-            "should deliver the third (successful) response: {events:?}"
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(_))),
+            "nothing was delivered before the drop: {events:?}"
         );
 
         let _ = handle.join();
@@ -4147,6 +3969,7 @@ mod tests {
     fn is_reasoning_effort_rejection_matches_only_the_field_400() {
         let mk = |code: u16, msg: &str| ProviderError {
             retryable: false,
+            resumable: false,
             message: msg.into(),
             http_status: Some(code),
             code: None,

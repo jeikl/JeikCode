@@ -21,7 +21,7 @@ use jeikcode_kernel::event::{AgentCommand, AgentEvent};
 use jeikcode_kernel::stream::StreamEvent;
 use jeikcode_kernel::testkit::{
     ApprovalMiddleware, EchoTool, MockProvider, RecorderHook, RiskyWriteTool, ScriptedProvider,
-    SilentStreamProvider, StallThenProvider,
+    StallThenProvider,
 };
 use jeikcode_kernel::tool::{ToolCall, ToolRegistry};
 use std::sync::Arc;
@@ -53,12 +53,9 @@ fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
 // ── (1a) STREAM TIMEOUT → RECONNECT → RECOVER ────────────────────────────────
 //
 // FIRST stream opens then PENDS FOREVER (idle stall); the SECOND succeeds. With
-// `.stream_timeout(50ms)` the idle-timeout fires, the kernel RECONNECTS (codex
-// parity, up to MAX_STREAM_RETRIES=5) — re-issuing the round from history with
-// backoff — and recovers. We assert a `reconnecting` Warning is emitted AND the
-// turn completes SUCCESSFULLY (success path runs; NO error). Core guarantee: a
-// single mid-stream stall no longer kills the turn.
-#[tokio::test]
+// `.stream_timeout(50ms)` the idle-timeout fires, the kernel retries on the
+// unified ladder and recovers. Virtual time keeps the ladder instant.
+#[tokio::test(start_paused = true)]
 async fn stream_timeout_reconnects_then_recovers() {
     let reg = ToolRegistry::new();
     let provider = Arc::new(StallThenProvider::new(
@@ -87,7 +84,9 @@ async fn stream_timeout_reconnects_then_recovers() {
         let mut completed = false;
         while let Some(ev) = handle.events.recv().await {
             match ev {
-                AgentEvent::Warning(m) if m.contains("reconnecting") => saw_reconnect = true,
+                AgentEvent::Warning(m) if m.contains("reconnecting") || m.contains("自动重连") => {
+                    saw_reconnect = true
+                }
                 AgentEvent::Error { message, .. } => error_msg = Some(message),
                 AgentEvent::TurnComplete { .. } => {
                     completed = true;
@@ -122,11 +121,11 @@ async fn stream_timeout_reconnects_then_recovers() {
 
 // ── (1b) STREAM TIMEOUT → EXHAUST RETRIES → CLEAN-FAIL ───────────────────────
 //
-// PENDS FOREVER on every attempt. The kernel reconnects MAX_STREAM_RETRIES=5
-// times (with backoff), then clean-fails: on_error + Error (mentions timeout) +
-// TurnComplete — never looping forever, never a bogus success. Slower than (1a)
-// because it walks the full backoff ladder, so it gets a generous guard.
-#[tokio::test]
+// PENDS FOREVER on every attempt. The kernel walks the unified ladder (9
+// attempts) then clean-fails: on_error + Error (mentions timeout) +
+// TurnComplete — never looping forever, never a bogus success. Virtual time
+// keeps the full 83s ladder instant.
+#[tokio::test(start_paused = true)]
 async fn stream_timeout_exhausts_retries_then_fails() {
     let reg = ToolRegistry::new();
     let provider = Arc::new(StallThenProvider::new(100, vec![]));
@@ -143,14 +142,16 @@ async fn stream_timeout_exhausts_retries_then_fails() {
 
     handle.commands.send(send("go")).unwrap();
 
-    // Guard >> the full backoff ladder (200+400+800+1600+3200 ≈ 6.2s) + 6× 50ms.
-    let (reconnects, error_msg, completed) = tokio::time::timeout(Duration::from_secs(15), async {
-        let mut reconnects = 0;
+    // Virtual time: the unified ladder (0+1+2+2+3+10+15+20+30s) auto-advances.
+    let (notices, error_msg, completed) = tokio::time::timeout(Duration::from_secs(120), async {
+        let mut notices = 0;
         let mut error_msg: Option<String> = None;
         let mut completed = false;
         while let Some(ev) = handle.events.recv().await {
             match ev {
-                AgentEvent::Warning(m) if m.contains("reconnecting") => reconnects += 1,
+                AgentEvent::Warning(m) if m.contains("reconnecting") || m.contains("自动重连") => {
+                    notices += 1
+                }
                 AgentEvent::Error { message, .. } => error_msg = Some(message),
                 AgentEvent::TurnComplete { .. } => {
                     completed = true;
@@ -159,7 +160,7 @@ async fn stream_timeout_exhausts_retries_then_fails() {
                 _ => {}
             }
         }
-        (reconnects, error_msg, completed)
+        (notices, error_msg, completed)
     })
     .await
     .expect("exhausted retries must clean-fail within the guard, not loop forever");
@@ -168,10 +169,7 @@ async fn stream_timeout_exhausts_retries_then_fails() {
         completed,
         "after exhausting retries the turn must clean-fail with TurnComplete"
     );
-    assert_eq!(
-        reconnects, 5,
-        "must reconnect exactly MAX_STREAM_RETRIES=5 times before failing"
-    );
+    assert_eq!(notices, 1, "一次故障只弹一条提示（后续重试静默）");
     assert!(
         error_msg.as_deref().is_some_and(|m| m.contains("timeout")),
         "the exhausted timeout must surface as an Error mentioning 'timeout'; got {error_msg:?}"
@@ -252,9 +250,12 @@ async fn response_id_heartbeat_does_not_reset_ttft() {
 
     assert!(completed);
     assert!(
-        error_msg
-            .as_deref()
-            .is_some_and(|m| m.contains("首token") || m.contains("延迟")),
+        error_msg.as_deref().is_some_and(|m| {
+            m.contains("首token")
+                || m.contains("延迟")
+                || m.contains("first token")
+                || m.contains("latency")
+        }),
         "TTFT must surface a first-token error; got {error_msg:?}"
     );
 }

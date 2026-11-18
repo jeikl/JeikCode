@@ -120,6 +120,24 @@ first_token_timeout_retries = 3 # 首 Token 超时后自动重试次数
 
 环境变量覆盖：`JEIKCODE_CONNECT_TIMEOUT_SECS`、`JEIKCODE_OPEN_TIMEOUT_SECS`、`JEIKCODE_TTFT_SECS`（或 `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS`）、`JEIKCODE_TRANSITION_SECS`、`JEIKCODE_STREAMING_SECS`（或 `JEIKCODE_STREAM_TIMEOUT_SECS`）。内容钟为 `0` 表示关闭该档。SSE ping / `ResponseId` / `Usage` 不重置内容滑动窗口。
 
+### 自动重试（统一阶梯）
+
+所有瞬时故障共用一条退避阶梯：`0、1、2、2、3、10、15、20、30` 秒（最多 9 次）。故障类型只决定「最多用到第几格」与「怎么重试」：
+
+| 故障 | 次数上限 | 动作 |
+| :--- | :---: | :--- |
+| 建连 / 响应头失败（5xx、408、425、传输类） | 9 | 整请求重发 |
+| 流中途断连（已出正文/思考） | 9 | 保留已输出内容，新气泡接着写 |
+| 流中途断连（工具片段未拼完） | 9 | 丢掉半成品调用，保留之前的完整内容后接着写 |
+| 流空闲超时 | 9 | 有内容则接着写，无内容则整请求重发 |
+| 首 Token 超时 | `first_token_timeout_retries`（默认 6） | 整请求重发 |
+| 空响应 / 只返回思考 / 格式异常 | 6 | 整请求重发 |
+| 限流 429 | 5 | 按服务端 reset 时间等待 |
+| 上下文溢出 | 3 | 先压缩再重发 |
+| 输出被长度截断 | 2 | 继续生成（不是失败） |
+
+一次故障只弹一条提示：首次重试时提示，后续静默；预算耗尽时同一条提示原地改写为终态详情。401/403、400、余额/审核/模型不存在、解析失败、用户取消、策略拒绝一律不重试。
+
 ---
 
 ## 6. 子代理并发控制 (`[subagent]`)

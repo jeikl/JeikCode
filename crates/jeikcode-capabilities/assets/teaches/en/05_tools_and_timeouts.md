@@ -115,6 +115,24 @@ first_token_timeout_retries = 3 # Automatic retry attempts upon first token time
 
 Environment variable overrides: `JEIKCODE_CONNECT_TIMEOUT_SECS`, `JEIKCODE_OPEN_TIMEOUT_SECS`, `JEIKCODE_TTFT_SECS` (or `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS`), `JEIKCODE_TRANSITION_SECS`, `JEIKCODE_STREAMING_SECS` (or `JEIKCODE_STREAM_TIMEOUT_SECS`). Setting to `0` disables that specific timeout stage. SSE ping, `ResponseId`, and `Usage` do not reset the content sliding window.
 
+### Automatic retries (unified ladder)
+
+Every transient failure shares one backoff ladder: `0, 1, 2, 2, 3, 10, 15, 20, 30` seconds (up to 9 attempts). The failure kind only decides the cap and the action:
+
+| Failure | Cap | Action |
+| :--- | :---: | :--- |
+| Connect / response-header failure (5xx, 408, 425, transport) | 9 | Resend the whole request |
+| Mid-stream drop (text/reasoning already emitted) | 9 | Keep the output and continue in a new bubble |
+| Mid-stream drop while a tool call is being assembled | 9 | Drop the unfinished call, keep the complete prefix, continue |
+| Stream idle timeout | 9 | Continue when output exists, otherwise resend |
+| First-token timeout | `first_token_timeout_retries` (default 6) | Resend the whole request |
+| Empty response / reasoning-only / malformed | 6 | Resend the whole request |
+| Rate limit 429 | 5 | Wait for the server reset window |
+| Context overflow | 3 | Compact, then resend |
+| Output truncated by length cap | 2 | Continue generating (not a failure) |
+
+One notice per incident: it appears on the first retry, stays silent afterwards, and is rewritten in place with the terminal detail once the budget is exhausted. 401/403, 400, balance/moderation/model-not-found, decode failures, user cancellation, and policy denials are never retried.
+
 ---
 
 ## 6. Subagent Concurrency (`[subagent]`)

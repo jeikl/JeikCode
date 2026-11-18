@@ -1759,6 +1759,10 @@ pub enum Msg<'a> {
         attempt: u32,
         max: u32,
     },
+    /// 统一重试：一次故障只弹一次，后续重试静默。
+    AgentAutoRetry {
+        max: u32,
+    },
     /// Context-pressure advisory before a request that is at/over the watermark.
     AgentOverWindow {
         estimate_k: u32,
@@ -1845,6 +1849,8 @@ pub enum Msg<'a> {
     },
     /// Stream read interrupted mid-response, preserving partial output to avoid replay.
     StreamReadPartialResponse,
+    /// Stream read interrupted before any output; a neutral lead for the retry engine.
+    StreamReadInterrupted,
     /// OS error 10054 (connection reset) proxy hint.
     StreamReadResetHint,
     /// Details prefix.

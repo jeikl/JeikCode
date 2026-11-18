@@ -1278,6 +1278,8 @@ Msg::CmdDescBackground => "Chạy tác vụ một lần trong ngữ cảnh nền
         | Msg::AgentStatusUnauthorized
         | Msg::StreamReadRetryExhausted { .. }
         | Msg::StreamReadPartialResponse
+        | Msg::StreamReadInterrupted
+        | Msg::AgentAutoRetry { .. }
         | Msg::StreamReadResetHint
         | Msg::StreamReadDetailsPrefix => super::en::en(msg),
     }

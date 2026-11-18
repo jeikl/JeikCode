@@ -399,7 +399,7 @@ async fn cancel_reason() {
 }
 
 // ── A stream timeout ends with StopReason::Timeout ───────────────────────────
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn timeout_reason() {
     let reg = ToolRegistry::new();
     let provider = Arc::new(jeikcode_kernel::testkit::SilentStreamProvider::new(vec![
@@ -414,10 +414,9 @@ async fn timeout_reason() {
         .spawn();
     handle.commands.send(send("go")).unwrap();
 
-    // Guard >> OUTER_GUARD: a stream idle-timeout now RECONNECTS up to
-    // MAX_STREAM_RETRIES=5 (exponential backoff ≈6.2s) before clean-failing, so
-    // the whole ladder must fit inside this longer guard.
-    let reason = tokio::time::timeout(Duration::from_secs(15), async {
+    // Virtual time: a partial-response stall now walks the unified ladder
+    // (0+1+2+2+3+10+15+20+30s) before clean-failing with Timeout.
+    let reason = tokio::time::timeout(Duration::from_secs(120), async {
         let mut reason: Option<StopReason> = None;
         while let Some(ev) = handle.events.recv().await {
             if let AgentEvent::TurnComplete { reason: r } = ev {

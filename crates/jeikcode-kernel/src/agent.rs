@@ -11,6 +11,7 @@ use crate::message::{
 use crate::middleware::{AfterOutcome, BeforeOutcome, ToolMiddleware};
 use crate::provider::{ChatOptions, LlmProvider};
 use crate::request::RequestCtx;
+use crate::retry::{self, RetryClass, RetryEngine, RetryStep};
 use crate::stream::{StreamEvent, TokenUsage};
 use crate::tool::{MountedTools, ProgressSink, ToolCall, ToolContext, ToolResult};
 use futures::StreamExt;
@@ -120,12 +121,12 @@ const MAX_OVERFLOW_ATTEMPTS: u8 = 3;
 /// waits) so the user perceives a retry is happening AND a fresh connection gets
 /// a real chance to recover (the stale keep-alive class). NON-retryable errors
 /// (auth / 400 / balance) never enter this path — they fail fast.
-const MAX_PROVIDER_RETRIES: u32 = 6;
+// OPEN 重试次数统一由 `RetryClass::OpenTransient::cap()`（9）决定，不再单独计数。
 /// Max mid-stream RECONNECTS after a stream idle-timeout before failing the turn
 /// (codex parity: 5). Each reconnect re-issues the SAME round from history
 /// (partial output discarded), with exponential backoff. Distinct from
 /// `MAX_PROVIDER_RETRIES` (which covers failures at OPEN, before any token).
-const MAX_STREAM_RETRIES: u32 = 6;
+// 流空闲重试次数统一由 `RetryClass::Stall::cap()`（9）决定，不再单独计数。
 
 /// Max round re-issues after a FIRST-TOKEN timeout (model hasn't emitted ANY
 /// token within `first_token_timeout`). Each retry opens a FRESH connection and
@@ -401,35 +402,6 @@ fn strip_leading_parameter_tail(input: &str) -> (String, bool) {
     (input[tail_start..].to_string(), true)
 }
 
-/// Short, human reason for the visible "retrying" advisory. Branches on the
-/// STRUCTURED fields (`http_status`) where possible, falling back to a coarse
-/// message sniff for transport errors that carry no status. Mirrors v1's
-/// `public_error_reason` but only for the transient (retryable) classes — the
-/// only ones that reach the retry notice.
-fn retry_reason(e: &crate::stream::ProviderError) -> String {
-    match e.http_status {
-        Some(429) => i18n::format_agent_status_rate_limited(),
-        Some(504) => format!(
-            "{} (HTTP 504)",
-            i18n::format_agent_status_response_timeout()
-        ),
-        Some(code @ (500 | 502 | 503 | 529)) => {
-            format!(
-                "{} (HTTP {code})",
-                i18n::format_agent_status_upstream_unavailable()
-            )
-        }
-        _ => {
-            let m = e.message.to_ascii_lowercase();
-            if m.contains("timeout") || m.contains("timed out") {
-                i18n::format_agent_status_response_timeout()
-            } else {
-                i18n::format_agent_status_connection_failed()
-            }
-        }
-    }
-}
-
 /// Best-effort parse of a "try again in N seconds" hint from a provider error
 /// message (some OpenAI-compatible gateways embed it on a 429). Returns None
 /// when no such hint is found — the host hook is the authoritative reset source;
@@ -495,28 +467,6 @@ fn is_terminal_rate_limit(e: &crate::stream::ProviderError) -> bool {
     ]
     .iter()
     .any(|needle| message.contains(needle))
-}
-
-/// Seconds to wait before resending an empty completion.
-///
-/// Empty and malformed responses use 1,1,2,2,3. A thinking-only completion (reasoning
-/// streamed, no text and no tool call) retries the first time immediately; the same
-/// sequence starts on the following attempt.
-fn empty_retry_wait_secs(thinking_only: bool, empty_retries: u32) -> u64 {
-    let n = if thinking_only {
-        empty_retries.saturating_sub(1)
-    } else {
-        empty_retries
-    };
-    match n {
-        0 => 0,
-        1 => 1,
-        2 => 2,
-        3 => 3,
-        4 => 5,
-        5 => 8,
-        _ => 12,
-    }
 }
 
 /// Build the user-facing message shown when the empty-response retry budget is
@@ -2319,6 +2269,15 @@ impl RunningAgent {
         self.rt.emit(AgentEvent::TurnComplete { reason });
     }
 
+    /// 统一重试提示：同一次故障只在第一次重试时弹一条，后续重试静默。
+    fn emit_retry_notice(&self, step: &RetryStep, max: u32) {
+        if !step.first {
+            return;
+        }
+        self.rt
+            .emit(AgentEvent::Warning(i18n::format_agent_auto_retry(max)));
+    }
+
     /// Persist only the replay-safe, fully assembled portion of a failed stream.
     /// `ToolCallDelta` is display-only and never enters `pending_calls`; complete calls
     /// are retained but paired with synthetic error results so resume cannot execute
@@ -2498,31 +2457,17 @@ impl RunningAgent {
         // TRANSIENT-failure retry counter for the CURRENT round: incremented on each
         // visible re-open after a retryable provider error; reset to 0 on a successful
         // open so every round gets its own fresh budget.
-        let mut provider_retry: u32 = 0;
-        // MID-STREAM reconnect counter. Lives across the whole turn (declared
-        // here, outside the round loop) but the BUDGET is PER model-request /
-        // round: incremented on each idle-timeout reconnect, and reset to 0 once a
-        // round's stream completes normally — so each round independently gets up
-        // to MAX_STREAM_RETRIES reconnects (codex's per-request semantics). It is
-        // deliberately NOT reset on `open` (a re-open must not refill it mid-round,
-        // else a permanently-stalling stream would retry forever within one round).
-        let mut stream_retry: u32 = 0;
-        // FIRST-TOKEN retry counter for the WHOLE turn: incremented on each
-        // re-issue caused by a first-token timeout (model hasn't emitted ANY
-        // token within `first_token_timeout`). Budget is per-turn so a model
-        // that never emits a first token can't spin forever across rounds.
-        let mut first_token_retries: u32 = 0;
+        //
+        // 统一重试账本：OPEN / 流空闲 / 首 token / 空响应 / 中途断流共用同一条
+        // 阶梯与同一个计数器（见 `crate::retry`）。一轮正常完成才回满。
+        let mut retry_engine = RetryEngine::new();
         // RATE-LIMIT WaitAndRetry counter for the WHOLE turn: incremented on each
         // WaitAndRetry sleep (OPEN or mid-stream); reset to 0 on a successful open
         // (the window has reopened). Capped at MAX_RATE_LIMIT_WAITS to prevent a
         // livelock if the host hook is broken or the window never opens — at that
         // point the kernel forces a Pause stop rather than spinning indefinitely.
         let mut rate_limit_waits: u32 = 0;
-        // EMPTY-RESPONSE retry counter for the WHOLE turn: incremented on each re-issue
-        // after a content-free 200. UNLIKE the two above it is NOT reset per round —
-        // the budget is per-turn (mirrors v1's per-user-message `empty_response_retries`)
-        // so a model that keeps returning empty across rounds can't spin forever.
-        let mut empty_retries: u32 = 0;
+        // EMPTY-RESPONSE 的预算由统一账本管理（`RetryClass::EmptyResponse`）。
         // Whether the PRE-SEND over-window advisory has fired this turn. Gates it
         // to once per turn (robust to the empty-retry / provider-retry `round -= 1`
         // decrements that reset `round` to 1) AND tells the empty-exhaustion
@@ -2558,6 +2503,9 @@ impl RunningAgent {
         let mut round_cap = self.max_rounds;
         loop {
             round += 1;
+            // 同一逻辑轮的稳定身份：重试时 `round -= 1; continue` 会回到同一个值，
+            // 因此一次故障只对应一个 incident id。
+            let request_seed = format!("turn-{turn_id}-r{round}");
             // Mint this request's id AND build this round's TurnCtx UP FRONT — before
             // the max_rounds fuse — so EVERY terminal (incl. the fuse) has the ctx for
             // `finish_turn`'s `turn_complete` hook. (On a max_rounds termination the
@@ -2927,7 +2875,6 @@ impl RunningAgent {
             let mut stream = match opened {
                 Ok(s) => {
                     overflow_attempt = 0; // a successful open resets the per-round counter
-                    provider_retry = 0; // ditto for the transient-failure budget
                     s
                 }
                 // HARD OVERFLOW recovery (OFF the normal path): the prompt exceeded the
@@ -3024,7 +2971,7 @@ impl RunningAgent {
                                 }
                                 _ = tokio::time::sleep(wait) => {}
                             }
-                            provider_retry = 0; // 429 must not consume the generic transient-retry budget
+                            // 限流等待不消耗统一阶梯预算。
                             round -= 1; // re-issue this round, not a new one
                             continue;
                         }
@@ -3061,37 +3008,37 @@ impl RunningAgent {
                 // errors (auth / 400 / balance) skip this and hard-fail below, so we
                 // never spin ~18s on an error that cannot recover. 429 is handled
                 // above by the host hook before reaching this branch.
-                Err(e) if e.retryable && provider_retry < MAX_PROVIDER_RETRIES => {
-                    provider_retry += 1;
-                    let wait = (provider_retry as u64 * 3).min(15); // 3 / 6 / 9s, matching v1
-                    self.rt
-                        .emit(AgentEvent::Warning(i18n::format_agent_retry_api(
-                            &retry_reason(&e),
-                            wait,
-                            provider_retry as u32,
-                            MAX_PROVIDER_RETRIES as u32,
-                        )));
-                    // Cancellable backoff: Esc during the wait aborts the turn instead
-                    // of forcing the user to sit through the full delay.
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
-                            return;
-                        }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(wait)) => {}
-                    }
-                    round -= 1; // a RETRY of the same logical round, not a new one
-                    continue;
-                }
                 Err(e) => {
+                    // 统一重试：瞬时 OPEN 失败走阶梯，预算耗尽或不可重试则终态。
+                    if retry::classify_open(&e) == RetryClass::OpenTransient {
+                        if let Some(step) =
+                            retry_engine.next(RetryClass::OpenTransient, &request_seed, None)
+                        {
+                            self.emit_retry_notice(&step, RetryClass::OpenTransient.cap());
+                            // Cancellable backoff: Esc during the wait aborts the turn instead
+                            // of forcing the user to sit through the full delay.
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
+                                    return;
+                                }
+                                _ = tokio::time::sleep(step.wait) => {}
+                            }
+                            round -= 1; // a RETRY of the same logical round, not a new one
+                            continue;
+                        }
+                    }
                     self.hooks.on_error(&e.message).await;
                     self.rt.emit(AgentEvent::Error {
                         message: e.message.clone(),
                         http_status: e.http_status,
                         code: e.code,
                     });
-                    Self::persist_turn_diagnostic(convo, &e.message);
+                    // 重试过的故障不再落重复诊断（实时卡片已原地改写为终态）。
+                    if retry_engine.incident_id().is_none() {
+                        Self::persist_turn_diagnostic(convo, &e.message);
+                    }
                     self.finish_turn(convo, StopReason::ProviderError, &turn_ctx)
                         .await;
                     return;
@@ -3198,20 +3145,25 @@ impl RunningAgent {
                                     .unwrap_or_default()
                                     .as_secs();
                                 let retry_budget = self.first_token_retries;
-                                if first_token_retries < retry_budget {
-                                    first_token_retries += 1;
-                                    self.rt.emit(AgentEvent::Warning(i18n::format_agent_retry_first_token(
-                                        first_token_secs,
-                                        first_token_retries as u32,
-                                        retry_budget as u32,
-                                    )));
+                                if let Some(step) = retry_engine.next(
+                                    RetryClass::FirstToken,
+                                    &request_seed,
+                                    Some(retry_budget),
+                                ) {
+                                    self.rt.emit(AgentEvent::Warning(
+                                        i18n::format_agent_retry_first_token(
+                                            first_token_secs,
+                                            step.number,
+                                            retry_budget,
+                                        ),
+                                    ));
                                     tokio::select! {
                                         biased;
                                         _ = cancel.cancelled() => {
                                             self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
                                             return;
                                         }
-                                        _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                                        _ = tokio::time::sleep(step.wait) => {}
                                     }
                                     retry_this_round = true;
                                     break;
@@ -3226,21 +3178,17 @@ impl RunningAgent {
                                 self.finish_turn(convo, StopReason::Timeout, &turn_ctx).await;
                                 return;
                             }
-                            if stream_retry < MAX_STREAM_RETRIES {
-                                stream_retry += 1;
-                                self.rt.emit(AgentEvent::Warning(format!(
-                                    "stream idle timeout — reconnecting ({stream_retry}/{MAX_STREAM_RETRIES})"
-                                )));
-                                let backoff = std::time::Duration::from_millis(
-                                    (200u64 << (stream_retry - 1).min(31)).min(8_000),
-                                );
+                            if let Some(step) =
+                                retry_engine.next(RetryClass::Stall, &request_seed, None)
+                            {
+                                self.emit_retry_notice(&step, RetryClass::Stall.cap());
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
                                         self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
                                         return;
                                     }
-                                    _ = tokio::time::sleep(backoff) => {}
+                                    _ = tokio::time::sleep(step.wait) => {}
                                 }
                                 retry_this_round = true;
                                 break;
@@ -3255,16 +3203,32 @@ impl RunningAgent {
                         if !saw_text_or_tool {
                             break;
                         }
-                        Self::persist_partial_assistant(
-                            convo,
-                            &assistant_text,
-                            &reasoning,
-                            &reasoning_blocks,
-                            &pending_calls,
-                            suppress_internal_stream,
-                            Some(&assistant_message_id),
-                        );
-                        let msg = "stream timeout after partial response; to avoid duplicate output or tool execution, the request was not replayed; partial response preserved".to_string();
+                        // 已出字后流卡死：同样走统一阶梯（内容保留，新气泡继续写）。
+                        if let Some(step) =
+                            retry_engine.next(RetryClass::Stall, &request_seed, None)
+                        {
+                            Self::persist_partial_assistant(
+                                convo,
+                                &assistant_text,
+                                &reasoning,
+                                &reasoning_blocks,
+                                &pending_calls,
+                                suppress_internal_stream,
+                                Some(&assistant_message_id),
+                            );
+                            self.emit_retry_notice(&step, RetryClass::Stall.cap());
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
+                                    return;
+                                }
+                                _ = tokio::time::sleep(step.wait) => {}
+                            }
+                            retry_this_round = true;
+                            break;
+                        }
+                        let msg = "stream timeout after partial response; partial response preserved".to_string();
                         self.hooks.on_error(&msg).await;
                         self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
                         Self::persist_turn_diagnostic(convo, &msg);
@@ -3513,7 +3477,7 @@ impl RunningAgent {
                                     }
                                     _ = tokio::time::sleep(wait) => {}
                                 }
-                                provider_retry = 0; // 429 must not consume the generic transient-retry budget
+                                // 限流等待不消耗统一阶梯预算。
                                 retry_this_round = true;
                                 break; // exit stream loop; outer loop will re-issue round
                             }
@@ -3540,6 +3504,40 @@ impl RunningAgent {
                         }
                     }
                     StreamEvent::Error(e) => {
+                        // 已开流后断流：按统一阶梯接续。已经产出的内容原样保留，
+                        // 下一次请求把它作为 assistant 前缀带上（新气泡继续写）；
+                        // 没拼完的工具调用从未进入 `pending_calls`，天然被丢弃。
+                        if retry::classify_stream(&e) == RetryClass::StreamDrop {
+                            if let Some(step) =
+                                retry_engine.next(RetryClass::StreamDrop, &request_seed, None)
+                            {
+                                if saw_stream_content {
+                                    Self::persist_partial_assistant(
+                                        convo,
+                                        &assistant_text,
+                                        &reasoning,
+                                        &reasoning_blocks,
+                                        &pending_calls,
+                                        suppress_internal_stream,
+                                        Some(&assistant_message_id),
+                                    );
+                                }
+                                self.emit_retry_notice(&step, RetryClass::StreamDrop.cap());
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => {
+                                        self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
+                                        return;
+                                    }
+                                    _ = tokio::time::sleep(step.wait) => {}
+                                }
+                                retry_this_round = true;
+                                break;
+                            }
+                        }
+                        // 已经弹过重试提示的故障，终态不再落一条重复的诊断行：
+                        // 实时卡片已在原位改写为终态详情，重拉时不会再生出第二张卡。
+                        let diagnostic = retry_engine.incident_id().is_none();
                         Self::persist_interrupted_turn(
                             convo,
                             &assistant_text,
@@ -3548,7 +3546,7 @@ impl RunningAgent {
                             &pending_calls,
                             suppress_internal_stream,
                             Some(&assistant_message_id),
-                            Some(e.message.as_str()),
+                            diagnostic.then_some(e.message.as_str()),
                         );
                         self.hooks.on_error(&e.message).await;
                         self.rt.emit(AgentEvent::Error {
@@ -3587,9 +3585,8 @@ impl RunningAgent {
             // error event, and resetting there would disable the five-wait fuse.
             rate_limit_waits = 0;
             // The stream reached its natural end this round (no timeout, no 429
-            // retry) — refill the reconnect budget so a LATER round's stall gets a
-            // fresh MAX_STREAM_RETRIES.
-            stream_retry = 0;
+            // retry). The unified retry budget is refilled AFTER the empty-check
+            // below — resetting here would let an empty response retry forever.
             // EMPTY-RESPONSE FAST RETRY (parity with v1 agent/mod.rs:3027): some
             // OpenAI-compatible gateways (notably the jeikcode→DeepSeek path) sometimes
             // return a 200 with a COMPLETELY empty completion — the stream opened fine
@@ -3636,30 +3633,30 @@ impl RunningAgent {
                 (!saw_stream_content || filler_only_reasoning || thinking_only || blank_text_only)
                     && !truncated;
             if empty_completion {
-                if empty_retries < EMPTY_RESPONSE_MAX_RETRIES {
-                    empty_retries += 1;
-                    // Front-loaded short backoff (see `empty_retry_wait_secs`). The empty
-                    // body returns instantly, so the generic 3/6/9s tier would be pure
-                    // wasted latency. A VISIBLE Warning tells the user a retry is underway.
-                    let wait = empty_retry_wait_secs(thinking_only, empty_retries);
+                if let Some(step) = retry_engine.next(
+                    RetryClass::EmptyResponse,
+                    &request_seed,
+                    Some(EMPTY_RESPONSE_MAX_RETRIES),
+                ) {
+                    let wait = step.wait.as_secs();
                     // Distinguish a GARBLED response (adapter dropped unparseable chunks)
                     // from a truly EMPTY one — different upstream faults, different wording.
                     let notice = if thinking_only {
                         i18n::format_agent_retry_thinking(
-                            empty_retries as u32,
-                            EMPTY_RESPONSE_MAX_RETRIES as u32,
+                            step.number,
+                            EMPTY_RESPONSE_MAX_RETRIES,
                             wait,
                         )
                     } else if saw_malformed {
                         i18n::format_agent_retry_malformed(
-                            empty_retries as u32,
-                            EMPTY_RESPONSE_MAX_RETRIES as u32,
+                            step.number,
+                            EMPTY_RESPONSE_MAX_RETRIES,
                             wait,
                         )
                     } else {
                         i18n::format_agent_retry_empty(
-                            empty_retries as u32,
-                            EMPTY_RESPONSE_MAX_RETRIES as u32,
+                            step.number,
+                            EMPTY_RESPONSE_MAX_RETRIES,
                             wait,
                         )
                     };
@@ -3673,7 +3670,7 @@ impl RunningAgent {
                             self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
                             return;
                         }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(wait)) => {}
+                        _ = tokio::time::sleep(step.wait) => {}
                     }
                     round -= 1; // a RETRY of the same logical round, not a new one
                     continue;
@@ -3707,6 +3704,8 @@ impl RunningAgent {
                     .await;
                 return;
             }
+            // 本轮确实产出了内容：关闭故障身份并回满重试预算。
+            retry_engine.reset();
             // Truncation (`finish_reason=length`) is recorded on the message meta
             // below. The user-facing Warning is DEFERRED: it fires only if the
             // truncation actually ENDS the turn with unfinished work (see the
@@ -5108,6 +5107,7 @@ mod effective_retry_after_tests {
     fn err(message: &str, retry_after_secs: Option<u64>) -> ProviderError {
         ProviderError {
             retryable: true,
+            resumable: false,
             message: message.into(),
             http_status: Some(429),
             code: None,
@@ -5164,31 +5164,6 @@ mod effective_retry_after_tests {
         let mut rpm = err("requests per minute exceeded; retry later", None);
         rpm.code = Some("rate_limit_exceeded".into());
         assert!(!is_terminal_rate_limit(&rpm));
-    }
-}
-
-#[cfg(test)]
-mod empty_retry_wait_tests {
-    use super::empty_retry_wait_secs;
-
-    #[test]
-    fn thinking_only_retries_immediately_then_backs_off() {
-        assert_eq!(
-            (1..=6)
-                .map(|n| empty_retry_wait_secs(true, n))
-                .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 5, 8]
-        );
-    }
-
-    #[test]
-    fn empty_and_malformed_keep_the_short_backoff() {
-        assert_eq!(
-            (1..=6)
-                .map(|n| empty_retry_wait_secs(false, n))
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3, 5, 8, 12]
-        );
     }
 }
 
