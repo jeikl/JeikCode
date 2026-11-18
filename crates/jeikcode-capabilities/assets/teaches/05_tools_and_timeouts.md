@@ -113,9 +113,9 @@ max_rounds = 230                # 单会话模型思考交互最大轮次（0 �
 connect_timeout_secs = 10       # TCP/TLS 建连
 open_timeout_secs = 180         # 等 HTTP 响应头（TTFB），不截断流式 body
 ttft_secs = 180                 # 首个思考/正文/工具 token（别名 first_token_timeout_secs）
-transition_secs = 180           # 思考结束到正文/工具首字
-streaming_sliding_secs = 120    # 相邻业务 token 滑动窗口
-first_token_timeout_retries = 3 # 首 Token 超时后自动重试次数
+transition_secs = 360           # 思考结束到正文/工具首字
+streaming_sliding_secs = 360    # 相邻业务 token 滑动窗口
+first_token_timeout_retries = 6 # 首 Token 超时后自动重试次数
 ```
 
 环境变量覆盖：`JEIKCODE_CONNECT_TIMEOUT_SECS`、`JEIKCODE_OPEN_TIMEOUT_SECS`、`JEIKCODE_TTFT_SECS`（或 `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS`）、`JEIKCODE_TRANSITION_SECS`、`JEIKCODE_STREAMING_SECS`（或 `JEIKCODE_STREAM_TIMEOUT_SECS`）。内容钟为 `0` 表示关闭该档。SSE ping / `ResponseId` / `Usage` 不重置内容滑动窗口。
