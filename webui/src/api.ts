@@ -2202,15 +2202,25 @@ export async function postMigrateLegacy(killZombies: boolean): Promise<{
 
 export interface DesktopSettings {
   close_action: 'ask' | 'tray' | 'quit';
+  agent_mode_policy?: 'memory' | 'global';
+  agent_global_mode?: ApprovalMode;
 }
+
+export type DesktopSettingsUpdate = Partial<DesktopSettings>;
 
 export async function getDesktopSettings(): Promise<DesktopSettings> {
   const resp = await apiFetch('/api/system/desktop-settings', { headers: authHeaders() });
-  if (!resp.ok) return { close_action: 'ask' };
+  if (!resp.ok) {
+    return {
+      close_action: 'ask',
+      agent_mode_policy: 'memory',
+      agent_global_mode: 'build',
+    };
+  }
   return resp.json();
 }
 
-export async function postDesktopSettings(settings: DesktopSettings): Promise<void> {
+export async function postDesktopSettings(settings: DesktopSettingsUpdate): Promise<void> {
   const resp = await apiFetch('/api/system/desktop-settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },

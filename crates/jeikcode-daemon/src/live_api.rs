@@ -640,6 +640,18 @@ pub fn live_set_mode_for_session(session_id: Option<&str>, mode: ApprovalMode) {
     });
 }
 
+/// 记录已解析出的新会话默认/请求审批模式（若全局开关关闭），避免首发写入磁盘前被
+/// 负缓存挡回 `Build`。
+pub(crate) fn live_remember_session_mode(session_id: &str, mode: ApprovalMode) {
+    if live_global_mode_enabled() {
+        return;
+    }
+    let sid = session_id.trim();
+    if !sid.is_empty() {
+        remember_session_approval_mode(sid, mode);
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct ScopedApprovalModeForTest {
     _guard: std::sync::MutexGuard<'static, ()>,
@@ -658,6 +670,9 @@ impl ScopedApprovalModeForTest {
         if let Ok(mut map) = SESSION_APPROVAL_MODES.lock() {
             *map = None;
         }
+        if let Ok(mut misses) = SESSION_APPROVAL_MODE_MISSES.lock() {
+            misses.clear();
+        }
         Self { _guard: guard }
     }
 }
@@ -669,6 +684,9 @@ impl Drop for ScopedApprovalModeForTest {
         live_set_mode(ApprovalMode::Build);
         if let Ok(mut map) = SESSION_APPROVAL_MODES.lock() {
             *map = None;
+        }
+        if let Ok(mut misses) = SESSION_APPROVAL_MODE_MISSES.lock() {
+            misses.clear();
         }
     }
 }
@@ -3976,28 +3994,75 @@ async fn apply_mode_request(state: &AppState, req: &LiveModeReq) -> bool {
     }
 
     if req.mode == ApprovalMode::Auto {
-        match scope {
-            Some(sid) => {
-                state
-                    .pending_permissions
-                    .deliver_all_for_session(sid.trim(), PermissionDecision::AllowOnce);
+        clear_pending_permissions_on_auto(state, scope);
+    }
+    ok
+}
+
+fn clear_pending_permissions_on_auto(state: &AppState, scope: Option<&str>) {
+    match scope {
+        Some(sid) => {
+            state
+                .pending_permissions
+                .deliver_all_for_session(sid.trim(), PermissionDecision::AllowOnce);
+            jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                sid.trim(),
+            );
+        }
+        None => {
+            state
+                .pending_permissions
+                .deliver_all(PermissionDecision::AllowOnce);
+            if let Ok(binding) = crate::native_live::binding() {
                 jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
-                    sid.trim(),
+                    &binding.session_id,
                 );
-            }
-            None => {
-                state
-                    .pending_permissions
-                    .deliver_all(PermissionDecision::AllowOnce);
-                if let Ok(binding) = crate::native_live::binding() {
-                    jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
-                        &binding.session_id,
-                    );
-                }
             }
         }
     }
-    ok
+}
+
+/// 进程冷启动初始化：读取 `~/.jeikcode/desktop-settings.json` 中的 Agent 模式策略。
+/// `agent_mode_policy == "global"` 时开启全局统一模式；否则以记忆模式启动（关闭全局覆盖，
+/// 各会话按自身 `meta.approval_mode` 恢复，新会话回落为 Build）。
+pub(crate) fn init_agent_mode_from_desktop_settings() {
+    let settings = crate::api_config::load_desktop_settings_payload();
+    if settings.agent_mode_policy == "global" {
+        let mode = parse_approval_mode_wire(Some(&settings.agent_global_mode))
+            .unwrap_or(ApprovalMode::Build);
+        live_set_global_mode_enabled(true, Some(mode));
+    } else {
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+    }
+}
+
+/// 保存系统设置中的 Agent 模式策略后立即生效，并向全部实例广播 `ModeGlobal` 状态。
+pub(crate) async fn apply_persisted_agent_mode_policy(
+    state: &AppState,
+    policy: &str,
+    global_mode_wire: &str,
+) {
+    let is_global = policy.trim().eq_ignore_ascii_case("global");
+    let target_mode =
+        parse_approval_mode_wire(Some(global_mode_wire)).unwrap_or(ApprovalMode::Build);
+    if is_global {
+        live_set_global_mode_enabled(true, Some(target_mode));
+        let _ = apply_live_mode_scoped(None, target_mode).await;
+        if target_mode == ApprovalMode::Auto {
+            clear_pending_permissions_on_auto(state, None);
+        }
+    } else {
+        live_set_global_mode_enabled(false, None);
+        reapply_per_session_modes().await;
+    }
+    crate::publish_global(crate::GlobalWireEvent::ModeGlobal {
+        enabled: is_global,
+        mode: if is_global {
+            target_mode.wire().to_string()
+        } else {
+            live_current_approval_mode().wire().to_string()
+        },
+    });
 }
 
 /// 关闭全局开关后，把各会话恢复为自己的模式（仅影响正在运行的 runner）。
@@ -5010,6 +5075,88 @@ mod tests {
             }
             other => panic!("expected SessionMode event, got: {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persisted_agent_mode_policy_applies_broadcasts_and_cold_starts() {
+        let home = crate::tests::ScopedChatHome::new();
+        let _mode_guard = ScopedApprovalModeForTest::new();
+        let state = crate::tests::chat_test_state(&home);
+        let mut global_rx = crate::global_events().subscribe();
+
+        // 保存“全局模式 = plan”，当场生效并广播 ModeGlobal(enabled=true, mode="plan")。
+        crate::api_config::post_desktop_settings(
+            axum::extract::State(state.clone()),
+            axum::Json(crate::api_config::DesktopSettingsUpdate {
+                close_action: None,
+                agent_mode_policy: Some("global".to_string()),
+                agent_global_mode: Some("plan".to_string()),
+            }),
+        )
+        .await;
+
+        assert!(live_global_mode_enabled());
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Plan);
+
+        let mut saw_global_plan = false;
+        while let Ok(Ok(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), global_rx.recv()).await
+        {
+            if matches!(
+                ev,
+                crate::GlobalWireEvent::ModeGlobal {
+                    enabled: true,
+                    ref mode
+                } if mode == "plan"
+            ) {
+                saw_global_plan = true;
+                break;
+            }
+        }
+        assert!(
+            saw_global_plan,
+            "saving global agent mode policy must broadcast ModeGlobal(enabled=true, mode=plan)"
+        );
+
+        // 模拟进程大退冷启动：重置内存状态后再调用 init_agent_mode_from_desktop_settings()。
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+        init_agent_mode_from_desktop_settings();
+        assert!(live_global_mode_enabled());
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Plan);
+
+        // 切回“记忆模式”：保存后当场关闭全局覆盖并广播 ModeGlobal(enabled=false)。
+        crate::api_config::post_desktop_settings(
+            axum::extract::State(state),
+            axum::Json(crate::api_config::DesktopSettingsUpdate {
+                close_action: None,
+                agent_mode_policy: Some("memory".to_string()),
+                agent_global_mode: None,
+            }),
+        )
+        .await;
+
+        assert!(!live_global_mode_enabled());
+        let mut saw_memory_switch = false;
+        while let Ok(Ok(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), global_rx.recv()).await
+        {
+            if matches!(
+                ev,
+                crate::GlobalWireEvent::ModeGlobal { enabled: false, .. }
+            ) {
+                saw_memory_switch = true;
+                break;
+            }
+        }
+        assert!(
+            saw_memory_switch,
+            "saving memory agent mode policy must broadcast ModeGlobal(enabled=false)"
+        );
+
+        // 冷启动再次以记忆模式启动（global=false）。
+        live_set_global_mode_enabled(true, Some(ApprovalMode::Auto));
+        init_agent_mode_from_desktop_settings();
+        assert!(!live_global_mode_enabled());
     }
 
     #[tokio::test]

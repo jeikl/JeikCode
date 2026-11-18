@@ -77,7 +77,7 @@ const STEER_NATURAL_DRAIN_GRACE_MS = 1500;
  * （subscribe_live_with_replay），把已画完的正文/思考再落一遍。
  */
 const WATCH_REATTACH_AFTER_HIDDEN_MS = 60000;
-import { postChatPrompt, stopChat, postChatSteer, admitChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatRuntime, getChatPending, watchChatSession, SSEEvent, getSessionFreshness, SessionDetail, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, ApprovalMode, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, getCommands, CommandInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, claimChatQueue, releaseChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, admitChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatRuntime, getChatPending, watchChatSession, SSEEvent, getSessionFreshness, SessionDetail, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, peekBootstrapCache, ApprovalMode, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, getCommands, CommandInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, claimChatQueue, releaseChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
 import { pullSession } from '../lib/sessionPull';
 import { InlineBubbleEditor } from './InlineBubbleEditor';
 import {
@@ -485,6 +485,8 @@ interface ChatProps {
   topModelSlot?: HTMLElement | null;
   /** 打开模型配置（和模型选择框绑在一起）。 */
   onOpenModelConfig?: () => void;
+  /** 打开模式配置（跳转到系统设置 -> 行为与快捷键 -> Agent 模式）。 */
+  onOpenModeSettings?: () => void;
   /** 当前会话的审批 / 提问，交给右下角通知栈，而不是居中弹层。 */
   onLiveReview?: (review: {
     sessionId: string | null;
@@ -533,6 +535,7 @@ export function Chat({
   setActiveMainTabId: externalSetActiveMainTabId,
   topModelSlot,
   onOpenModelConfig,
+  onOpenModeSettings,
   onLiveReview,
   onBindReviewDismiss,
 }: ChatProps) {
@@ -2073,14 +2076,17 @@ export function Chat({
   // 审批模式（build / accept_edits / bypass / plan）。进程级 runtime 状态，
   // 由 /live snapshot + 'mode' 事件同步，切换调 postLiveMode（当前回合立即生效）。
   // confirmedMode 是 daemon 已确认值。--host 新建会话默认 Build；协议会话观察时显示 Auto。
-  const [modeState, setModeState] = useState(() => initModeState('build' as ApprovalMode));
+  const cachedBootMode = peekBootstrapCache()?.approval_mode;
+  const [modeState, setModeState] = useState(() =>
+    initModeState((cachedBootMode?.mode ?? 'build') as ApprovalMode),
+  );
   /** 全局模式开关（默认关闭）。开启后所有会话统一跟随 `modeState.confirmedMode`。 */
-  const [globalModeEnabled, setGlobalModeEnabled] = useState(false);
-  const globalModeRef = useRef(false);
+  const [globalModeEnabled, setGlobalModeEnabled] = useState(() => Boolean(cachedBootMode?.global));
+  const globalModeRef = useRef(globalModeEnabled);
   globalModeRef.current = globalModeEnabled;
   /** 由渲染作用域赋值；事件处理器通过 ref 调用以拿到最新闭包。 */
   const applyOwnSessionModeRef = useRef<(sid: string) => void>(() => {});
-  const nativeModeRef = useRef<ApprovalMode>('build');
+  const nativeModeRef = useRef<ApprovalMode>((cachedBootMode?.mode ?? 'build') as ApprovalMode);
   const protocolSessionRef = useRef(false);
   const [pendingAttach, setPendingAttach] = useState<PendingAttach[]>(() =>
     initialDraft?.images ? imagesToPending(initialDraft.images) : [],
@@ -4475,15 +4481,16 @@ export function Chat({
           ? { effort: activeSession.reasoning_effort, budget: activeSession.thinking_budget }
           : null,
       );
-      restoreModeForSession(
-        sessionId,
-        activeSession?.id === sessionId ? (activeSession.approval_mode as ApprovalMode) : null,
-      );
-      // 全局开关开启时，所有会话共用同一个模式：忽略会话级缓存/元数据，
-      // 直接沿用当前已确认的全局模式，避免切回旧会话时退回旧值。
+      // 全局开关开启时，所有会话共用同一个模式：不把临时全局值写进会话级缓存，
+      // 避免关闭全局后误把全局值当成该会话自己的记忆模式。
       if (globalModeRef.current) {
         nativeModeRef.current = modeState.confirmedMode;
         setModeState(initModeState(modeState.confirmedMode));
+      } else {
+        restoreModeForSession(
+          sessionId,
+          activeSession?.id === sessionId ? (activeSession.approval_mode as ApprovalMode) : null,
+        );
       }
 
       // 恢复新会话的输入框草稿
@@ -4947,7 +4954,11 @@ export function Chat({
           }
           // Queue state is hydrated from localStorage and then reconciled with
           // `/chat/queue`; the canvas cache can predate a steer state transition.
-          if (idb.approvalMode) {
+          if (
+            idb.approvalMode &&
+            !globalModeRef.current &&
+            !(activeSession?.id === loadId && activeSession.approval_mode)
+          ) {
             modeCacheRef.current.set(loadId, idb.approvalMode as ApprovalMode);
             if (activeIdRef.current === loadId && !modeState.pendingMode) {
               nativeModeRef.current = idb.approvalMode as ApprovalMode;
@@ -5297,6 +5308,9 @@ export function Chat({
             nativeModeRef.current = targetMode;
             setModeState(initModeState(targetMode));
             modeCacheRef.current.set(loadId, targetMode);
+            if (projectHash && sessionMode) {
+              updateSessionCacheMeta(projectHash, loadId, { approvalMode: sessionMode });
+            }
           }
         } else {
           // Draft / brand-new empty sessions 404 on disk until first persist —
@@ -5306,17 +5320,19 @@ export function Chat({
           loadedForRef.current = isEmptyNew ? loadId : null;
           if (isEmptyNew) {
             protocolSessionRef.current = false;
-            getApprovalMode(loadId)
-              .then((current) => {
-                if (activeIdRef.current === loadId) {
-                  modeCacheRef.current.set(loadId, current);
-                  nativeModeRef.current = current;
-                  setModeState(initModeState(current));
-                }
-              })
-              .catch(() => {
-                setModeState(initModeState(nativeModeRef.current));
-              });
+            if (!globalModeRef.current) {
+              getApprovalMode(loadId)
+                .then((current) => {
+                  if (activeIdRef.current === loadId && !globalModeRef.current) {
+                    modeCacheRef.current.set(loadId, current);
+                    nativeModeRef.current = current;
+                    setModeState(initModeState(current));
+                  }
+                })
+                .catch(() => {
+                  if (!globalModeRef.current) setModeState(initModeState(nativeModeRef.current));
+                });
+            }
           }
           if (!isEmptyNew) {
             nextHint = t('chat.continueSession', { id: loadId.slice(0, 8) });
@@ -5556,26 +5572,22 @@ export function Chat({
   useEffect(() => {
     let cancelled = false;
     const initialSid = activeIdRef.current;
-    if (!modeCacheRef.current.has(initialSid || '')) {
-      getApprovalModeState(initialSid || undefined)
-        .then((current) => {
-          if (cancelled) return;
-          setGlobalModeEnabled(current.global);
-          if (protocolSessionRef.current) return;
-          if (initialSid && modeCacheRef.current.has(initialSid)) return;
+    getApprovalModeState(initialSid || undefined)
+      .then((current) => {
+        if (cancelled) return;
+        setGlobalModeEnabled(current.global);
+        if (protocolSessionRef.current) return;
+        if (current.global) {
           nativeModeRef.current = current.mode;
           setModeState(initModeState(current.mode));
-          if (initialSid) modeCacheRef.current.set(initialSid, current.mode);
-        })
-        .catch(() => {});
-    } else {
-      // 缓存命中也要对齐全局开关（例如刷新前已开启全局）。
-      getApprovalModeState(initialSid || undefined)
-        .then((current) => {
-          if (!cancelled) setGlobalModeEnabled(current.global);
-        })
-        .catch(() => {});
-    }
+          return;
+        }
+        if (initialSid && modeCacheRef.current.has(initialSid)) return;
+        nativeModeRef.current = current.mode;
+        setModeState(initModeState(current.mode));
+        if (initialSid) modeCacheRef.current.set(initialSid, current.mode);
+      })
+      .catch(() => {});
 
     const applyIncomingMode = (nextMode: ApprovalMode) => {
       if (cancelled || protocolSessionRef.current) return;
@@ -5628,7 +5640,10 @@ export function Chat({
         return;
       }
       const sid = activeIdRef.current;
-      if (!sid) return;
+      if (!sid) {
+        if (detail.mode) applyIncomingMode(detail.mode);
+        return;
+      }
       // 恢复本会话自己的模式。优先用本地已知值（0 请求），只有在缓存与会话
       // 元数据都缺失时才拉一次，避免「关闭全局」引发多端请求风暴。
       applyOwnSessionModeRef.current(sid);
@@ -11099,6 +11114,14 @@ export function Chat({
       if (effectiveSid) {
         boundSessionId = effectiveSid;
         localTurnSessionsRef.current.add(effectiveSid);
+        if (!globalModeRef.current) {
+          modeCacheRef.current.set(effectiveSid, approvalMode);
+          const hash =
+            activeSession?.project_hash ||
+            projectHashBySessionRef.current.get(effectiveSid) ||
+            viewedProjectHashRef.current;
+          if (hash) updateSessionCacheMeta(hash, effectiveSid, { approvalMode });
+        }
         if (stillViewingTurn) {
           activeIdRef.current = effectiveSid;
           loadedForRef.current = effectiveSid;
@@ -13989,6 +14012,7 @@ export function Chat({
             disabled={Boolean(modeState.pendingMode)}
             globalEnabled={globalModeEnabled}
             onToggleGlobal={toggleGlobalMode}
+            onOpenModeSettings={onOpenModeSettings}
             onChange={(m) => switchMode(m)}
           />
           <div class="input-turn-controls">

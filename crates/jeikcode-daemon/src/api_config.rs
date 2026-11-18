@@ -1715,39 +1715,131 @@ pub(crate) async fn post_migrate_legacy(
     Json(res)
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+fn default_close_action() -> String {
+    "ask".to_string()
+}
+
+fn default_agent_mode_policy() -> String {
+    "memory".to_string()
+}
+
+fn default_agent_global_mode() -> String {
+    "build".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DesktopSettingsPayload {
-    #[serde(default)]
+    #[serde(default = "default_close_action")]
     pub close_action: String,
+    /// 启动与日常权限模式策略：`"memory"`（默认，按会话记忆）或 `"global"`（全局统一模式）。
+    #[serde(default = "default_agent_mode_policy")]
+    pub agent_mode_policy: String,
+    /// 选择 `"global"` 策略时生效的全局模式：`"build"` | `"plan"` | `"accept_edits"` | `"bypass"`。
+    #[serde(default = "default_agent_global_mode")]
+    pub agent_global_mode: String,
+}
+
+impl Default for DesktopSettingsPayload {
+    fn default() -> Self {
+        Self {
+            close_action: default_close_action(),
+            agent_mode_policy: default_agent_mode_policy(),
+            agent_global_mode: default_agent_global_mode(),
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DesktopSettingsUpdate {
+    #[serde(default)]
+    pub close_action: Option<String>,
+    #[serde(default)]
+    pub agent_mode_policy: Option<String>,
+    #[serde(default)]
+    pub agent_global_mode: Option<String>,
+}
+
+pub(crate) fn normalize_desktop_settings(
+    mut payload: DesktopSettingsPayload,
+) -> DesktopSettingsPayload {
+    payload.close_action = match payload.close_action.trim().to_ascii_lowercase().as_str() {
+        "tray" => "tray".to_string(),
+        "quit" => "quit".to_string(),
+        _ => default_close_action(),
+    };
+    payload.agent_mode_policy = if payload
+        .agent_mode_policy
+        .trim()
+        .eq_ignore_ascii_case("global")
+    {
+        "global".to_string()
+    } else {
+        default_agent_mode_policy()
+    };
+    payload.agent_global_mode =
+        crate::live_api::parse_approval_mode_wire(Some(&payload.agent_global_mode))
+            .unwrap_or(crate::approval_mode::ApprovalMode::Build)
+            .wire()
+            .to_string();
+    payload
 }
 
 fn desktop_settings_file_path() -> std::path::PathBuf {
     jeikcode_config::config::Config::config_dir().join("desktop-settings.json")
 }
 
-pub(crate) async fn get_desktop_settings() -> impl IntoResponse {
-    let path = desktop_settings_file_path();
+pub(crate) fn load_desktop_settings_payload_at(path: &std::path::Path) -> DesktopSettingsPayload {
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
-    let mut payload =
-        serde_json::from_str::<DesktopSettingsPayload>(&text).unwrap_or(DesktopSettingsPayload {
-            close_action: "ask".into(),
-        });
-    if payload.close_action.is_empty() {
-        payload.close_action = "ask".into();
-    }
-    Json(payload)
+    let parsed = serde_json::from_str::<DesktopSettingsPayload>(&text).unwrap_or_default();
+    normalize_desktop_settings(parsed)
 }
 
-pub(crate) async fn post_desktop_settings(
-    Json(payload): Json<DesktopSettingsPayload>,
-) -> impl IntoResponse {
-    let path = desktop_settings_file_path();
+pub(crate) fn load_desktop_settings_payload() -> DesktopSettingsPayload {
+    load_desktop_settings_payload_at(&desktop_settings_file_path())
+}
+
+pub(crate) fn merge_desktop_settings_at(
+    path: &std::path::Path,
+    update: &DesktopSettingsUpdate,
+) -> DesktopSettingsPayload {
+    let mut current = load_desktop_settings_payload_at(path);
+    if let Some(close_action) = &update.close_action {
+        current.close_action = close_action.clone();
+    }
+    if let Some(policy) = &update.agent_mode_policy {
+        current.agent_mode_policy = policy.clone();
+    }
+    if let Some(mode) = &update.agent_global_mode {
+        current.agent_global_mode = mode.clone();
+    }
+    let normalized = normalize_desktop_settings(current);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let body = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    let body = serde_json::to_string_pretty(&normalized).unwrap_or_default();
     let _ = std::fs::write(path, body);
-    Json(serde_json::json!({ "success": true }))
+    normalized
+}
+
+pub(crate) async fn get_desktop_settings() -> impl IntoResponse {
+    Json(load_desktop_settings_payload())
+}
+
+pub(crate) async fn post_desktop_settings(
+    State(state): State<AppState>,
+    Json(update): Json<DesktopSettingsUpdate>,
+) -> impl IntoResponse {
+    let mode_touched = update.agent_mode_policy.is_some() || update.agent_global_mode.is_some();
+    let payload = merge_desktop_settings_at(&desktop_settings_file_path(), &update);
+    if mode_touched {
+        crate::live_api::apply_persisted_agent_mode_policy(
+            &state,
+            &payload.agent_mode_policy,
+            &payload.agent_global_mode,
+        )
+        .await;
+    }
+    Json(serde_json::json!({ "success": true, "settings": payload }))
 }
 
 /// POST /config/reload - Reloads config.toml from disk, remounts MCP/skills on
@@ -2302,5 +2394,45 @@ mod tests {
             &self_tasks,
             Some(self_exe),
         ));
+    }
+
+    #[test]
+    fn desktop_settings_preserve_agent_mode_policy_on_partial_close_action_update() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("desktop-settings.json");
+
+        let saved = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                close_action: Some("ask".into()),
+                agent_mode_policy: Some("global".into()),
+                agent_global_mode: Some("bypass".into()),
+            },
+        );
+        assert_eq!(saved.agent_mode_policy, "global");
+        assert_eq!(saved.agent_global_mode, "bypass");
+
+        // Close-prompt dialog only updates close_action; agent mode policy must survive intact.
+        let after_close = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                close_action: Some("tray".into()),
+                agent_mode_policy: None,
+                agent_global_mode: None,
+            },
+        );
+        assert_eq!(after_close.close_action, "tray");
+        assert_eq!(after_close.agent_mode_policy, "global");
+        assert_eq!(after_close.agent_global_mode, "bypass");
+
+        // Unknown values normalize safely back to memory + build defaults.
+        let normalized = super::normalize_desktop_settings(super::DesktopSettingsPayload {
+            close_action: "".into(),
+            agent_mode_policy: "invalid".into(),
+            agent_global_mode: "invalid".into(),
+        });
+        assert_eq!(normalized.close_action, "ask");
+        assert_eq!(normalized.agent_mode_policy, "memory");
+        assert_eq!(normalized.agent_global_mode, "build");
     }
 }

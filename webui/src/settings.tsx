@@ -12,7 +12,7 @@ export type { Theme, EffectiveTheme };
 export { resolveEffectiveTheme };
 
 /** Which settings dialog to open from the sidebar settings menu. */
-export type SettingsSection = 'theme' | 'language' | 'model' | 'system';
+export type SettingsSection = 'theme' | 'language' | 'model' | 'system' | 'agent_mode';
 
 export type TParams = Record<string, string | number>;
 

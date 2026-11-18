@@ -385,6 +385,7 @@ const zh = {
   'mode.plan.desc': '只读规划',
   'mode.global': '全局',
   'mode.global.desc': '应用到所有会话',
+  'mode.settingsBtn': 'Agent 模式设置',
 
   // Reasoning effort selector（中英文同一套英文文案，避免「关闭思考 (off)」这类夹杂）
   'effort.label': 'Effort',
@@ -634,6 +635,13 @@ const zh = {
   'settings.escUndoLabel': 'ESC 撤销上一条消息',
   'settings.escUndoDesc': '开启后，ESC 可取消待发卡片、停止并回填上一条消息，或退出编辑状态。',
   'settings.escUndoImmediate': '修改后立即生效',
+  'settings.agentModeTitle': 'Agent 模式',
+  'settings.agentModeDesc': '配置默认启动及各实例同步的会话权限模式策略；点击下方“保存设置”后立即生效并同步广播。',
+  'settings.agentModeMemory': '默认：记忆模式',
+  'settings.agentModeMemoryTooltip': '每个会话独立记忆各自最后选择的模式（新会话默认使用 Build），切换会话或冷启动重开时自动恢复并同步广播到全部实例。',
+  'settings.agentModeGlobal': '全局模式',
+  'settings.agentModeGlobalTooltip': '所有会话与冷启动实例统一使用右侧下拉框选定的全局模式，保存并全局广播（可供探测与全部实例同步）。',
+  'settings.agentModeGlobalSelectAria': '选择全局 Agent 模式',
   'settings.savedSuccess': '设置已保存',
   'settings.aboutTitle': '关于 JeikCode',
   'settings.aboutDesc': '高性能智能编程助手',
@@ -1557,6 +1565,7 @@ export const en: Record<MsgKey, string> = {
   'mode.plan.desc': 'Read-only planning',
   'mode.global': 'Global',
   'mode.global.desc': 'Apply to all sessions',
+  'mode.settingsBtn': 'Agent Mode Settings',
 
   // Reasoning effort selector
   'effort.label': 'Effort',
@@ -1800,6 +1809,13 @@ export const en: Record<MsgKey, string> = {
   'settings.escUndoLabel': 'ESC undoes the last message',
   'settings.escUndoDesc': 'When enabled, ESC can cancel a pending card, stop and restore the last message, or exit editing.',
   'settings.escUndoImmediate': 'Takes effect immediately',
+  'settings.agentModeTitle': 'Agent Mode',
+  'settings.agentModeDesc': 'Configure the startup and synced permission mode policy across instances; clicking "Save" applies and broadcasts it immediately.',
+  'settings.agentModeMemory': 'Default: Memory Mode',
+  'settings.agentModeMemoryTooltip': "Remember each session's last selected mode individually (new sessions default to Build), restoring and syncing across all instances on switch or restart.",
+  'settings.agentModeGlobal': 'Global Mode',
+  'settings.agentModeGlobalTooltip': 'Force all sessions and cold-started instances to use the global mode selected in the dropdown, persisted and broadcast globally across all instances.',
+  'settings.agentModeGlobalSelectAria': 'Select global Agent mode',
   'settings.savedSuccess': 'Settings saved',
   'settings.aboutTitle': 'About JeikCode',
   'settings.aboutDesc': 'High-performance intelligent coding assistant',

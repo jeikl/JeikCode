@@ -9082,6 +9082,28 @@ html[data-keyboard-open] .chat-landing {
   font-weight: 500;
 }
 
+.system-settings-card-box.system-settings-box-highlight {
+  border-color: var(--app-brand, #2563eb);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-brand, #2563eb) 22%, transparent);
+}
+.system-settings-agent-global-row {
+  flex-wrap: wrap;
+}
+.system-settings-mode-select {
+  min-width: 150px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--app-input-border, rgba(255, 255, 255, 0.14));
+  background: var(--app-input-background, var(--app-menu-background));
+  color: var(--app-primary-foreground);
+  font-size: 13px;
+  cursor: pointer;
+}
+.system-settings-mode-select:focus-visible {
+  outline: 2px solid var(--app-brand, #2563eb);
+  outline-offset: 1px;
+}
+
 .about-hero-row {
   display: flex;
   align-items: center;
@@ -11453,6 +11475,33 @@ html[data-keyboard-open] .chat-landing {
   transition: transform 120ms ease;
 }
 .mode-global-switch.on .mode-global-knob { transform: translateX(16px); }
+.mode-global-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.mode-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.mode-settings-btn:hover,
+.mode-settings-btn:focus-visible {
+  background: color-mix(in srgb, var(--app-secondary-foreground) 16%, transparent);
+  color: var(--app-primary-foreground);
+  border-color: color-mix(in srgb, var(--app-secondary-foreground) 24%, transparent);
+  outline: none;
+}
 
 .model-item.active {
   background: var(--app-list-active-background);

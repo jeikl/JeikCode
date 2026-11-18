@@ -15792,6 +15792,7 @@ pub(crate) async fn process_chat_request(
         req.session_title.as_deref(),
         Some(&req.message),
         initial_preferred.as_deref(),
+        Some(approval_mode),
     )?;
     if !is_new_session
         && req
@@ -16238,6 +16239,7 @@ fn publish_chat_session_assignment(
     session_title: Option<&str>,
     first_user_prompt: Option<&str>,
     preferred_model: Option<&str>,
+    resolved_approval_mode: Option<crate::approval_mode::ApprovalMode>,
 ) -> anyhow::Result<()> {
     let mut provisional_name = None;
     if is_new_session {
@@ -16255,14 +16257,18 @@ fn publish_chat_session_assignment(
             .map(str::trim)
             .is_some_and(|title| !title.is_empty());
         // Protocol sessions are automation-owned: their durable mode is Auto.
-        // Native WebUI sessions keep the live session/global mode.
-        meta.approval_mode = Some(if has_protocol_title {
-            crate::approval_mode::ApprovalMode::Auto.wire().to_string()
+        // Native WebUI sessions persist the turn's resolved session/global mode
+        // so creating or chatting from a draft session remembers the chosen mode
+        // across restarts and cross-instance upserts.
+        let persisted_mode = if has_protocol_title {
+            crate::approval_mode::ApprovalMode::Auto
         } else {
-            live_api::live_session_approval_mode(Some(session_id))
-                .wire()
-                .to_string()
-        });
+            let mode = resolved_approval_mode
+                .unwrap_or_else(|| live_api::live_session_approval_mode(Some(session_id)));
+            live_api::live_remember_session_mode(session_id, mode);
+            mode
+        };
+        meta.approval_mode = Some(persisted_mode.wire().to_string());
         meta.message_count = 1;
         if let Some(title) = session_title.map(str::trim).filter(|t| !t.is_empty()) {
             meta.name = title.to_string();
@@ -22881,6 +22887,9 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
                 "serve: --yolo enabled (auto-approve tools; request_user_input tool hidden; no modal stalls)"
             );
         }
+    } else {
+        // 非 --yolo 启动时，按系统设置恢复默认权限模式策略（记忆模式 vs 全局指定模式）。
+        live_api::init_agent_mode_from_desktop_settings();
     }
 
     // Step 1: Load config (R1.1, R1.5) — tolerate errors, fallback to default.
@@ -24308,6 +24317,7 @@ mod tests {
             Some("jeik"),
             None,
             None,
+            Some(crate::approval_mode::ApprovalMode::Plan),
         )
         .unwrap();
 
@@ -24315,6 +24325,7 @@ mod tests {
         let loaded = manager.load_native_session(session_id).unwrap();
         assert!(loaded.snapshot.messages.is_empty());
         assert_eq!(loaded.meta.name, "jeik");
+        assert_eq!(loaded.meta.approval_mode.as_deref(), Some("bypass"));
         assert!(loaded.meta.user_renamed);
         assert!(matches!(
             event_rx.try_recv(),
@@ -24356,12 +24367,14 @@ mod tests {
             None,
             Some("帮我写一个快速排序算法"),
             None,
+            Some(crate::approval_mode::ApprovalMode::AcceptEdits),
         )
         .unwrap();
 
         let manager = NativeSessionManager::for_project(&working_dir);
         let loaded = manager.load_native_session(session_id).unwrap();
         assert_eq!(loaded.meta.name, "帮我写一个快速排序算法");
+        assert_eq!(loaded.meta.approval_mode.as_deref(), Some("accept_edits"));
         assert!(!loaded.meta.user_renamed);
         assert!(!loaded.meta.ai_named);
         assert!(matches!(
@@ -24389,6 +24402,7 @@ mod tests {
             true,
             &event_tx,
             Some("default"),
+            None,
             None,
             None,
         );

@@ -91,7 +91,9 @@ import {
   getChatPending,
   getActiveChatSessions,
   getHealth,
+  getApprovalModeState,
   invalidateApiGetCache,
+  invalidateBootstrapCache,
   checkUpdate,
   fetchUpgradeDiffs,
   postSessionSeen,
@@ -242,6 +244,21 @@ export function App() {
         if (event.type === 'session_mode') {
           if (event.session_id && sessionId === event.session_id) {
             setActiveSession((prev) => (prev ? { ...prev, approval_mode: event.mode } : prev));
+          }
+          return;
+        }
+        if (event.type === 'mode_global') {
+          invalidateBootstrapCache();
+          if (event.enabled) {
+            setActiveSession((prev) => (prev ? { ...prev, approval_mode: event.mode } : prev));
+          } else if (sessionId) {
+            void getApprovalModeState(sessionId)
+              .then((cur) => {
+                setActiveSession((prev) =>
+                  prev && prev.id === sessionId ? { ...prev, approval_mode: cur.mode } : prev,
+                );
+              })
+              .catch(() => {});
           }
           return;
         }
@@ -2057,6 +2074,7 @@ export function App() {
             setActiveMainTabId={setActiveMainTabId}
             topModelSlot={topModelSlot}
             onOpenModelConfig={() => setSettingsSection('model')}
+            onOpenModeSettings={() => setSettingsSection('agent_mode')}
             onLiveReview={onLiveReview}
             onBindReviewDismiss={onBindReviewDismiss}
           />
@@ -2089,6 +2107,15 @@ export function App() {
       {settingsSection === 'system' && (
         <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
           <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
+        </LazyBoundary>
+      )}
+      {settingsSection === 'agent_mode' && (
+        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
+          <SystemSettingsDialog
+            initialTab="desktop"
+            focusSection="agent_mode"
+            onClose={() => setSettingsSection(null)}
+          />
         </LazyBoundary>
       )}
       {headerDialog === 'rename' && activeSession && (

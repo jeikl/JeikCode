@@ -1,6 +1,12 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { getDesktopSettings, postDesktopSettings, getHealth, type DesktopSettings } from '../api';
+import {
+  getDesktopSettings,
+  postDesktopSettings,
+  getHealth,
+  invalidateBootstrapCache,
+  type ApprovalMode,
+} from '../api';
 import { bakedAppVersion, normalizeAppVersion } from '../lib/appVersion';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
 import { useSettings } from '../settings';
@@ -9,6 +15,7 @@ import { ModelConfigView } from './SettingsDialogs';
 interface SystemSettingsDialogProps {
   onClose: () => void;
   initialTab?: TabKey;
+  focusSection?: 'agent_mode';
 }
 
 type TabKey = 'models' | 'desktop' | 'about';
@@ -20,16 +27,19 @@ interface ModuleTab {
   icon: string;
 }
 
-export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDialogProps) {
+export function SystemSettingsDialog({ onClose, initialTab, focusSection }: SystemSettingsDialogProps) {
   const { t, escUndoEnabled, setEscUndoEnabled } = useSettings();
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab || 'models');
   const [closeAction, setCloseAction] = useState<'ask' | 'tray' | 'quit'>('ask');
+  const [agentModePolicy, setAgentModePolicy] = useState<'memory' | 'global'>('memory');
+  const [agentGlobalMode, setAgentGlobalMode] = useState<ApprovalMode>('build');
   const [desktopLoaded, setDesktopLoaded] = useState(false);
   const [aboutLoaded, setAboutLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [appVersion, setAppVersion] = useState(bakedAppVersion());
+  const agentModeBoxRef = useRef<HTMLDivElement>(null);
 
   // 遮罩空白处点击关闭：避免弹窗内拖拽划词时被误判为外部点击而秒关。
   const backdropDismiss = useBackdropDismiss(onClose);
@@ -49,6 +59,8 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
       .then((res) => {
         if (!cancelled) {
           if (res.close_action) setCloseAction(res.close_action);
+          if (res.agent_mode_policy) setAgentModePolicy(res.agent_mode_policy);
+          if (res.agent_global_mode) setAgentGlobalMode(res.agent_global_mode);
           setDesktopLoaded(true);
         }
       })
@@ -60,6 +72,12 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
       cancelled = true;
     };
   }, [activeTab, desktopLoaded]);
+
+  // 从模式选择器齿轮跳转过来时，加载完成后自动定位到 Agent 模式设置区块
+  useEffect(() => {
+    if (activeTab !== 'desktop' || focusSection !== 'agent_mode' || !desktopLoaded) return;
+    agentModeBoxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [activeTab, focusSection, desktopLoaded]);
 
   useEffect(() => {
     if (activeTab !== 'about' || aboutLoaded) return;
@@ -82,7 +100,20 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
     setSaving(true);
     setSavedSuccess(false);
     try {
-      await postDesktopSettings({ close_action: closeAction });
+      await postDesktopSettings({
+        close_action: closeAction,
+        agent_mode_policy: agentModePolicy,
+        agent_global_mode: agentGlobalMode,
+      });
+      invalidateBootstrapCache();
+      window.dispatchEvent(
+        new CustomEvent('jeikcode:mode_global_changed', {
+          detail: {
+            enabled: agentModePolicy === 'global',
+            mode: agentModePolicy === 'global' ? agentGlobalMode : 'build',
+          },
+        }),
+      );
       setSavedSuccess(true);
       window.setTimeout(() => setSavedSuccess(false), 2000);
     } catch {
@@ -197,6 +228,70 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
                         onChange={() => setCloseAction('ask')}
                       />
                       <span>{t('settings.closeActionAsk') || '每次询问我'}</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div
+                  ref={agentModeBoxRef}
+                  class={
+                    'system-settings-card-box' +
+                    (focusSection === 'agent_mode' ? ' system-settings-box-highlight' : '')
+                  }
+                >
+                  <div class="system-settings-box-title">
+                    {t('settings.agentModeTitle')}
+                  </div>
+                  <div class="system-settings-box-desc">
+                    {t('settings.agentModeDesc')}
+                  </div>
+
+                  <div class="system-settings-radio-group">
+                    <label
+                      class="system-settings-radio-label"
+                      title={t('settings.agentModeMemoryTooltip')}
+                    >
+                      <input
+                        type="radio"
+                        name="agent_mode_policy"
+                        value="memory"
+                        checked={agentModePolicy === 'memory'}
+                        onChange={() => setAgentModePolicy('memory')}
+                      />
+                      <span>{t('settings.agentModeMemory')}</span>
+                    </label>
+
+                    <label
+                      class="system-settings-radio-label system-settings-agent-global-row"
+                      title={t('settings.agentModeGlobalTooltip')}
+                    >
+                      <input
+                        type="radio"
+                        name="agent_mode_policy"
+                        value="global"
+                        checked={agentModePolicy === 'global'}
+                        onChange={() => setAgentModePolicy('global')}
+                      />
+                      <span>{t('settings.agentModeGlobal')}</span>
+                      <select
+                        class="system-settings-mode-select"
+                        aria-label={t('settings.agentModeGlobalSelectAria')}
+                        title={t('settings.agentModeGlobalTooltip')}
+                        value={agentGlobalMode}
+                        onMouseDown={(e) => {
+                          setAgentModePolicy('global');
+                          e.stopPropagation();
+                        }}
+                        onChange={(e) => {
+                          setAgentModePolicy('global');
+                          setAgentGlobalMode((e.target as HTMLSelectElement).value as ApprovalMode);
+                        }}
+                      >
+                        <option value="build">{t('mode.build')}</option>
+                        <option value="plan">{t('mode.plan')}</option>
+                        <option value="accept_edits">{t('mode.accept_edits')}</option>
+                        <option value="bypass">{t('mode.auto')}</option>
+                      </select>
                     </label>
                   </div>
                 </div>
