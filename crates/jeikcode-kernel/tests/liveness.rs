@@ -122,7 +122,7 @@ async fn stream_timeout_reconnects_then_recovers() {
 // PENDS FOREVER on every attempt. The kernel walks the unified ladder (9
 // attempts) then clean-fails: on_error + Error (mentions timeout) +
 // TurnComplete — never looping forever, never a bogus success. Virtual time
-// keeps the full 83s ladder instant.
+// keeps the full 257s ladder instant.
 #[tokio::test(start_paused = true)]
 async fn stream_timeout_exhausts_retries_then_fails() {
     let reg = ToolRegistry::new();
@@ -140,8 +140,8 @@ async fn stream_timeout_exhausts_retries_then_fails() {
 
     handle.commands.send(send("go")).unwrap();
 
-    // Virtual time: the unified ladder (0+1+2+2+3+10+15+20+30s) auto-advances.
-    let (notices, error_msg, completed) = tokio::time::timeout(Duration::from_secs(120), async {
+    // Virtual time: the unified ladder (0+2+5+10+15+30+45+60+90s) auto-advances.
+    let (notices, error_msg, completed) = tokio::time::timeout(Duration::from_secs(600), async {
         let mut notices = 0;
         let mut error_msg: Option<String> = None;
         let mut completed = false;

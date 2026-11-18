@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use crate::stream::ProviderError;
 
-/// 统一退避阶梯（秒）：第 N 次重试前等待。非递减，累计 83 秒。
-pub const RETRY_LADDER_SECS: [u64; 9] = [0, 1, 2, 2, 3, 10, 15, 20, 30];
+/// 统一退避阶梯（秒）：第 N 次重试前等待。非递减，累计 257 秒。
+pub const RETRY_LADDER_SECS: [u64; 9] = [0, 2, 5, 10, 15, 30, 45, 60, 90];
 
 /// 失败分类：只描述「哪一类故障」，不携带自己的次数/间隔。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn ladder_is_the_single_agreed_sequence() {
-        assert_eq!(RETRY_LADDER_SECS, [0, 1, 2, 2, 3, 10, 15, 20, 30]);
+        assert_eq!(RETRY_LADDER_SECS, [0, 2, 5, 10, 15, 30, 45, 60, 90]);
         assert!(
             RETRY_LADDER_SECS.windows(2).all(|w| w[0] <= w[1]),
             "阶梯必须非递减"

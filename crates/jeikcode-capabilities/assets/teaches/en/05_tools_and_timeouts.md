@@ -117,7 +117,7 @@ Environment variable overrides: `JEIKCODE_CONNECT_TIMEOUT_SECS`, `JEIKCODE_OPEN_
 
 ### Automatic retries (unified ladder)
 
-Every transient failure shares one backoff ladder: `0, 1, 2, 2, 3, 10, 15, 20, 30` seconds (up to 9 attempts). The failure kind only decides the cap and the action:
+Every transient failure shares one backoff ladder: `0, 2, 5, 10, 15, 30, 45, 60, 90` seconds (up to 9 attempts, 257 seconds cumulative). The failure kind only decides the cap and the action:
 
 | Failure | Cap | Action |
 | :--- | :---: | :--- |
@@ -131,7 +131,7 @@ Every transient failure shares one backoff ladder: `0, 1, 2, 2, 3, 10, 15, 20, 3
 | Context overflow | 3 | Compact, then resend |
 | Output truncated by length cap | 2 | Continue generating (not a failure) |
 
-One notice per incident: it appears on the first retry, stays silent afterwards, and is rewritten in place with the terminal detail once the budget is exhausted. 401/403, 400, balance/moderation/model-not-found, decode failures, user cancellation, and policy denials are never retried.
+One card per incident: every attempt overwrites the progress in place (`retry x/9`), and the card is rewritten with the terminal state once the budget is exhausted or the stream recovers; different incidents get their own cards. 401/403, 400, balance/moderation/model-not-found, decode failures, user cancellation, and policy denials are never retried.
 
 ---
 
