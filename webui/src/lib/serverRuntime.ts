@@ -100,3 +100,61 @@ export interface ServerChatRuntime {
 export function serverRuntimeRunning(runtime: ServerChatRuntime | null | undefined): boolean {
   return runtime?.running === true;
 }
+
+export type DoneConfirmationAction =
+  | 'finish'
+  | 'wait_controller'
+  | 'reattach_new_turn'
+  | 'retry_shutdown';
+
+export interface ResolveDoneConfirmationInput {
+  runtime: ServerChatRuntime | null | undefined;
+  /** done 事件自身携带的 operation_id（若有） */
+  completedOperationId?: string | null;
+  /** 前端记录的当前回合 operation_id / request_id */
+  expectedOperationId?: string | null;
+  /** 剩余重试次数（首次调用通常 > 0，退避耗尽时为 0） */
+  attemptsLeft: number;
+  inManualStopGuard: boolean;
+}
+
+/**
+ * 收到 `done` 终态后，结合服务端 `/chat/runtime` 权威快照决定前端收尾动作：
+ * - 空闲或处于手动停止保护期内：直接收尾（`'finish'`）；
+ * - 后台控制器（`loop` / `goal`）保持激活：保持停驻等待下一轮唤醒（`'wait_controller'`）；
+ * - `chat` 通道已切换为另一个不同 `turn_id` 或 `live` 在跑：重连新回合实时流（`'reattach_new_turn'`）；
+ * - 同一回合仍在做收尾清理（`handle.shutdown().await` 等）：在有限退避次数内重试（`'retry_shutdown'`），耗尽后直接 `'finish'`，防止停在假忙碌与无限计时。
+ */
+export function resolveDoneConfirmation(
+  input: ResolveDoneConfirmationInput,
+): DoneConfirmationAction {
+  if (input.inManualStopGuard || !serverRuntimeRunning(input.runtime)) {
+    return 'finish';
+  }
+  const source = input.runtime?.source;
+  if (source === 'loop' || source === 'goal') {
+    return 'wait_controller';
+  }
+  if (source === 'live') {
+    return 'reattach_new_turn';
+  }
+  if (source === 'chat' || !source) {
+    const serverTurnId = input.runtime?.turn_id;
+    const knownTurnIds = [input.completedOperationId, input.expectedOperationId].filter(
+      (id): id is string => typeof id === 'string' && id.length > 0,
+    );
+    if (
+      typeof serverTurnId === 'string' &&
+      serverTurnId.length > 0 &&
+      knownTurnIds.length > 0 &&
+      !knownTurnIds.includes(serverTurnId)
+    ) {
+      return 'reattach_new_turn';
+    }
+    return input.attemptsLeft > 0 ? 'retry_shutdown' : 'finish';
+  }
+  if (source === 'compaction') {
+    return input.attemptsLeft > 0 ? 'retry_shutdown' : 'finish';
+  }
+  return input.attemptsLeft > 0 ? 'retry_shutdown' : 'finish';
+}

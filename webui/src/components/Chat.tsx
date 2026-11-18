@@ -353,6 +353,7 @@ import { resolveSessionLifecycle } from '../lib/sessionLifecycle';
 import {
   isRunningProofFrame,
   resolveRuntimeBusyAction,
+  resolveDoneConfirmation,
   serverRuntimeRunning,
 } from '../lib/serverRuntime';
 import {
@@ -2506,6 +2507,17 @@ export function Chat({
   function endSendNowHandover(sid: string | null | undefined) {
     if (sid) sendNowHandoverBySessionRef.current.delete(sid);
   }
+  const confirmIdleEpochBySessionRef = useRef<Map<string, number>>(new Map());
+  const stopRestoringQueueRef = useRef(false);
+  function bumpConfirmIdleEpoch(sid: string | null | undefined): number {
+    if (!sid) return 0;
+    const next = (confirmIdleEpochBySessionRef.current.get(sid) ?? 0) + 1;
+    confirmIdleEpochBySessionRef.current.set(sid, next);
+    return next;
+  }
+  function currentConfirmIdleEpoch(sid: string | null | undefined): number {
+    return sid ? confirmIdleEpochBySessionRef.current.get(sid) ?? 0 : 0;
+  }
   function armTurn(sid: string | null | undefined) {
     if (!sid) return;
     turnArmedAtRef.current.set(sid, Date.now());
@@ -2767,15 +2779,29 @@ export function Chat({
         }
         const frameIsTerminal =
           frame.type === 'done' || frame.type === 'stopped' || frame.type === 'error';
-        // 新一轮刚投递、这轮还没吐过任何帧：此时到达的终态属于上一回合。
+        const frameOpId = (frame as { operation_id?: unknown }).operation_id;
+        const currentOpId = currentOperationBySessionRef.current.get(params.loadId);
+        const matchesCurrentOperation =
+          typeof frameOpId === 'string' &&
+          frameOpId.length > 0 &&
+          Boolean(currentOpId) &&
+          frameOpId === currentOpId;
+        // 新一轮刚投递、这轮还没吐过任何帧：此时到达的终态属于上一回合；
+        // 但若帧显式携带了本回合 operation_id，则属于当前回合自己的终态，绝不能误杀。
         if (
           frameIsTerminal &&
-          (isTerminalForArmedTurnWithoutFrames(params.loadId) ||
+          ((!matchesCurrentOperation && isTerminalForArmedTurnWithoutFrames(params.loadId)) ||
             isTerminalFromOtherTurn(frame, params.loadId))
         ) {
           continue;
         }
-        if (!frameIsTerminal) markTurnFrameSeen(params.loadId);
+        if (
+          !frameIsTerminal &&
+          frame.type !== 'state' &&
+          frame.type !== 'session_status'
+        ) {
+          markTurnFrameSeen(params.loadId);
+        }
         const isCurrentView = activeIdRef.current === params.loadId;
         if (!isCurrentView) {
           // 会话在后台运行时，总线推流实时反哺进会话专属缓存 messageCacheRef。
@@ -2994,11 +3020,14 @@ export function Chat({
                   return;
                 }
                 terminalSeen = true;
-                sessionWatchersRef.current.delete(loadId);
-                localActiveStreamsBySessionRef.current.delete(loadId);
-                backgroundRunningSessionsRef.current.delete(loadId);
-                localTurnSessionsRef.current.delete(loadId);
-                onTurnRunningChange?.(loadId, false);
+                watchAbort.abort();
+                if (sessionWatchersRef.current.get(loadId) === watchAbort) {
+                  sessionWatchersRef.current.delete(loadId);
+                }
+                if (localActiveStreamsBySessionRef.current.get(loadId)?.abortController === watchAbort) {
+                  localActiveStreamsBySessionRef.current.delete(loadId);
+                }
+                settleSessionRunningState(loadId);
                 archiveBackgroundTodos(loadId);
                 if (activeIdRef.current === loadId) {
                   setBusyAndClock(false);
@@ -3009,8 +3038,13 @@ export function Chat({
               },
               onForegroundTerminal: () => {
                 terminalSeen = true;
-                sessionWatchersRef.current.delete(loadId);
-                localActiveStreamsBySessionRef.current.delete(loadId);
+                watchAbort.abort();
+                if (sessionWatchersRef.current.get(loadId) === watchAbort) {
+                  sessionWatchersRef.current.delete(loadId);
+                }
+                if (localActiveStreamsBySessionRef.current.get(loadId)?.abortController === watchAbort) {
+                  localActiveStreamsBySessionRef.current.delete(loadId);
+                }
                 settleToIdleWatch(effectiveProjectHash, loadId, sessionGenerationRef.current);
               },
               onBackgroundTerminal: () => {
@@ -3056,12 +3090,45 @@ export function Chat({
       // 它的首帧会带回真实运行状态，并在回合结束时送达终态；
       // 同一会话只允许一条订阅（若已存在则不重复挂）。
       if (!terminalSeen && !watchAbort.signal.aborted) {
-        if (isSessionTurnHandoverProtected(loadId)) return;
-        if (!sessionWatchersRef.current.get(loadId)) {
-          startDetachedHistoryPoll(effectiveProjectHash, loadId, sessionGenerationRef.current, {
-            localReattach: true,
-          });
+        const currentWatcher = sessionWatchersRef.current.get(loadId);
+        if (currentWatcher && currentWatcher !== watchAbort) return;
+        if (currentWatcher === watchAbort) {
+          sessionWatchersRef.current.delete(loadId);
         }
+        if (localActiveStreamsBySessionRef.current.get(loadId)?.abortController === watchAbort) {
+          localActiveStreamsBySessionRef.current.delete(loadId);
+        }
+        if (isSessionTurnHandoverProtected(loadId)) return;
+        const exitGen = sessionGenerationRef.current;
+        void getChatRuntime(loadId)
+          .catch(() =>
+            getActiveChatSessions()
+              .then((actives) => ({ running: Array.isArray(actives) && actives.includes(loadId) }))
+              .catch(() => ({ running: false })),
+          )
+          .then((runtime) => {
+            if (sessionGenerationRef.current !== exitGen) return;
+            if (sessionWatchersRef.current.get(loadId)) return;
+            if (hasRunningLocalSend(loadId) || isSessionTurnHandoverProtected(loadId)) return;
+            if (serverRuntimeRunning(runtime)) {
+              if (!isSessionInManualStopGuard(loadId)) {
+                startDetachedHistoryPoll(effectiveProjectHash, loadId, exitGen, {
+                  localReattach: true,
+                  background: activeIdRef.current !== loadId,
+                });
+              }
+              return;
+            }
+            settleSessionRunningState(loadId);
+            if (activeIdRef.current === loadId) {
+              setBusyAndClock(false);
+              busyRef.current = false;
+            }
+            if (effectiveProjectHash) {
+              settleToIdleWatch(effectiveProjectHash, loadId, exitGen);
+              void syncSessionCacheFromDisk(effectiveProjectHash, loadId);
+            }
+          });
       }
     };
 
@@ -3072,11 +3139,29 @@ export function Chat({
       if (terminalSeen || watchAbort.signal.aborted || !effectiveProjectHash) return;
       if (Date.now() - lastFrameAt < 30000) return;
       lastFrameAt = Date.now();
-      getActiveChatSessions()
-        .then((active) => {
+      getChatRuntime(loadId)
+        .catch(() =>
+          getActiveChatSessions().then((active) => ({
+            running: Array.isArray(active) && active.includes(loadId),
+          })),
+        )
+        .then((runtime) => {
           if (terminalSeen || watchAbort.signal.aborted) return;
-          if (!Array.isArray(active) || !active.includes(loadId)) {
+          if (hasRunningLocalSend(loadId) || isSessionTurnHandoverProtected(loadId)) return;
+          if (!serverRuntimeRunning(runtime)) {
             terminalSeen = true;
+            watchAbort.abort();
+            if (sessionWatchersRef.current.get(loadId) === watchAbort) {
+              sessionWatchersRef.current.delete(loadId);
+            }
+            if (localActiveStreamsBySessionRef.current.get(loadId)?.abortController === watchAbort) {
+              localActiveStreamsBySessionRef.current.delete(loadId);
+            }
+            settleSessionRunningState(loadId);
+            if (activeIdRef.current === loadId) {
+              setBusyAndClock(false);
+              busyRef.current = false;
+            }
             settleToIdleWatch(effectiveProjectHash, loadId, sessionGenerationRef.current);
             void syncSessionCacheFromDisk(effectiveProjectHash, loadId);
           }
@@ -3828,9 +3913,15 @@ export function Chat({
                 void getChatRuntime(sid)
                   .then((runtime) => {
                     if (activeIdRef.current !== sid) return;
-                    if (!serverRuntimeRunning(runtime)) {
+                    if (
+                      !serverRuntimeRunning(runtime) &&
+                      !hasRunningLocalSend(sid) &&
+                      !isSessionTurnHandoverProtected(sid)
+                    ) {
+                      settleSessionRunningState(sid);
+                      setBusyAndClock(false);
                       busyRef.current = false;
-                      setBusy(false);
+                      settleToIdleWatch(hash, sid, sessionGenerationRef.current);
                     }
                     scheduleDeferredReconcile(hash, sid, 0);
                   })
@@ -4062,10 +4153,12 @@ export function Chat({
           }
           if (activeIdRef.current === sid) {
             if (event.running) {
-              armRunningForSession(
-                sid,
-                event.phase === 'compacting' ? event.phase_started_at ?? undefined : undefined,
-              );
+              if (!isSessionInManualStopGuard(sid)) {
+                armRunningForSession(
+                  sid,
+                  event.phase === 'compacting' ? event.phase_started_at ?? undefined : undefined,
+                );
+              }
             } else {
               confirmActivityIdleFromAuthority(sid, { ensureIdleWatch: true });
             }
@@ -5721,9 +5814,27 @@ export function Chat({
     const busyWatchdog = window.setInterval(() => {
       const sid = activeIdRef.current;
       if (!sid || !busyRef.current) return;
+      if (
+        abortRef.current !== null ||
+        activeStreamRequestIdRef.current !== null ||
+        hasRunningLocalSend(sid) ||
+        isSessionTurnHandoverProtected(sid) ||
+        compactingSessionsRef.current.has(sid)
+      ) {
+        return;
+      }
       void getChatRuntime(sid)
         .then((runtime) => {
           if (!busyRef.current || activeIdRef.current !== sid) return;
+          if (
+            abortRef.current !== null ||
+            activeStreamRequestIdRef.current !== null ||
+            hasRunningLocalSend(sid) ||
+            isSessionTurnHandoverProtected(sid) ||
+            compactingSessionsRef.current.has(sid)
+          ) {
+            return;
+          }
           if (serverRuntimeRunning(runtime)) return;
           settleSessionRunningState(sid);
           setBusyAndClock(false);
@@ -5928,10 +6039,12 @@ export function Chat({
         const origin = displayOrigin;
         if (origin === 'turn_diagnostic') {
           const text = (msg.content ?? '').trim();
-          // 旧版本把重试/存活提示写进 display.jsonl；它们不是转录记录，
-          // 刷新后重新投影会永久粘在最新回答下面。压缩边界等真正的持久
-          // 通知不匹配这些重试文案，必须保留。
-          if (text && !isTransientAdvisoryText(text)) {
+          // 新版通过 append_display_notice 落盘的事件卡（重试通知 *:retry / 边界通知 notice-*）
+          // 带明确通知身份，跨刷新应完整保留；仅对没有该身份的旧版残留文案继续兜底过滤。
+          const hasAuthoritativeNoticeId =
+            typeof msg.id === 'string' &&
+            (msg.id.startsWith('notice-') || msg.id.endsWith(':retry'));
+          if (text && (hasAuthoritativeNoticeId || !isTransientAdvisoryText(text))) {
             const authenticSeq =
               typeof msg.seq === 'number' && Number.isInteger(msg.seq) && msg.seq >= 0
                 ? msg.seq
@@ -8648,8 +8761,14 @@ export function Chat({
       return;
     }
     if (event.type === 'state') {
-      // 权威运行状态：重连即可收敛，无需任何业务轮询。
-      if (event.running === false) settleSessionRunningState(targetSid);
+      // 权威运行状态：重连即可收敛，无需任何业务轮询（本地刚点发送的交接窗口除外）。
+      if (
+        event.running === false &&
+        !hasRunningLocalSend(targetSid) &&
+        !isSessionTurnHandoverProtected(targetSid)
+      ) {
+        settleSessionRunningState(targetSid);
+      }
       return;
     }
     const msgs = messageCacheRef.current.get(targetSid);
@@ -9749,15 +9868,22 @@ export function Chat({
             }
           }
           transitionChatRecovery({ type: 'authoritative_terminal' });
-          localTurnSessionsRef.current.delete(event.session_id);
-          backgroundRunningSessionsRef.current.delete(event.session_id);
-          onTurnRunningChange?.(event.session_id, false);
-          turnStartedAtBySessionRef.current.delete(event.session_id);
-          setSessionCompacting(event.session_id, false);
-          setBusyAndClock(false);
-          markTurnTerminal(event.session_id);
-          if (event.session_id) {
-            markSessionTerminalSettled(event.session_id);
+          const doneClearSid = event.session_id || doneSid;
+          if (doneClearSid) {
+            localTurnSessionsRef.current.delete(doneClearSid);
+            backgroundRunningSessionsRef.current.delete(doneClearSid);
+            onTurnRunningChange?.(doneClearSid, false);
+            turnStartedAtBySessionRef.current.delete(doneClearSid);
+            bumpConfirmIdleEpoch(doneClearSid);
+          }
+          setSessionCompacting(doneClearSid, false);
+          if (!doneClearSid || doneClearSid === activeIdRef.current) {
+            setBusyAndClock(false);
+            busyRef.current = false;
+          }
+          markTurnTerminal(doneClearSid);
+          if (doneClearSid) {
+            markSessionTerminalSettled(doneClearSid);
           }
           // A failed/hung next turn must not leave the previous tail skipped
           // forever. User cancellation is excluded because the rollback path
@@ -9782,11 +9908,21 @@ export function Chat({
           // the session is actually idle.
           const settleSid = event.session_id || doneSid;
           const settleGen = sessionGenerationRef.current;
+          const settleEpoch = bumpConfirmIdleEpoch(settleSid);
+          const completedOpId = (event as { operation_id?: string }).operation_id;
+          const expectedOpId = settleSid
+            ? currentOperationBySessionRef.current.get(settleSid)
+            : undefined;
           const settleHash =
             projectHashBySessionRef.current.get(settleSid || '') ||
             (settleSid === activeIdRef.current ? activeSession?.project_hash : undefined) ||
+            (settleSid === activeIdRef.current ? viewedProjectHashRef.current : undefined) ||
             '';
+          const isStaleConfirm = () =>
+            sessionGenerationRef.current !== settleGen ||
+            (Boolean(settleSid) && currentConfirmIdleEpoch(settleSid) !== settleEpoch);
           const finishTerminal = () => {
+            if (isStaleConfirm()) return;
             if (settleSid) {
               localTurnSessionsRef.current.delete(settleSid);
               backgroundRunningSessionsRef.current.delete(settleSid);
@@ -9794,8 +9930,10 @@ export function Chat({
               turnStartedAtBySessionRef.current.delete(settleSid);
             }
             setSessionCompacting(settleSid, false);
-            setBusyAndClock(false);
-            busyRef.current = false;
+            if (!settleSid || settleSid === activeIdRef.current) {
+              setBusyAndClock(false);
+              busyRef.current = false;
+            }
             markTurnTerminal(settleSid);
             if (settleSid) {
               markSessionTerminalSettled(settleSid);
@@ -9809,6 +9947,7 @@ export function Chat({
             // `/loop`·`/goal` 控制器。只看 `/chat/active` 会在 loop 的 wakeup
             // 间隙误判空闲，把运行态熄灭（只能刷新恢复）。
             const ensureLiveWatcherOnContinuation = () => {
+              if (isStaleConfirm() || isSessionInManualStopGuard(settleSid)) return;
               const w = sessionWatchersRef.current.get(settleSid);
               const wAlive = !!w && !w.signal.aborted;
               const hasFgPost =
@@ -9820,34 +9959,62 @@ export function Chat({
                 });
               }
             };
-            const confirmIdle = (attempt: number) => {
+            const shutdownRetryDelaysMs = [150, 300, 600, 1000, 1500, 2000];
+            const confirmIdle = (retryIdx: number) => {
+              if (isStaleConfirm()) return;
+              const attemptsLeft = shutdownRetryDelaysMs.length - retryIdx;
+              const delayMs = shutdownRetryDelaysMs[retryIdx] ?? 2000;
               void getChatRuntime(settleSid)
                 .then((runtime) => {
-                  if (sessionGenerationRef.current !== settleGen) return;
-                  if (serverRuntimeRunning(runtime)) {
-                    // 新一轮/续轮已经接管：保留停止态，并确保观察流已重连（上一轮 done 会关闭旧流）。
-                    ensureLiveWatcherOnContinuation();
-                    if (attempt > 0) window.setTimeout(() => confirmIdle(attempt - 1), 450);
+                  if (isStaleConfirm()) return;
+                  const action = resolveDoneConfirmation({
+                    runtime,
+                    completedOperationId: completedOpId,
+                    expectedOperationId: expectedOpId,
+                    attemptsLeft,
+                    inManualStopGuard: isSessionInManualStopGuard(settleSid),
+                  });
+                  if (action === 'finish') {
+                    finishTerminal();
                     return;
                   }
-                  finishTerminal();
+                  if (action === 'wait_controller') {
+                    // /loop 或 /goal 处于轮次间隔等待期：收掉旧回合的运行中标记并保持被动 idleWatch，
+                    // 绝不能再起 DetachedHistoryPoll（否则会把刚刚结束的这轮再重放卡死）。
+                    localTurnSessionsRef.current.delete(settleSid);
+                    backgroundRunningSessionsRef.current.delete(settleSid);
+                    markTurnTerminal(settleSid);
+                    markSessionTerminalSettled(settleSid);
+                    if (settleHash) {
+                      startIdleWatch(settleHash, settleSid, settleGen);
+                    }
+                    return;
+                  }
+                  if (action === 'reattach_new_turn') {
+                    ensureLiveWatcherOnContinuation();
+                    return;
+                  }
+                  window.setTimeout(() => confirmIdle(retryIdx + 1), delayMs);
                 })
                 .catch(() => {
                   // 旧 daemon 没有 /chat/runtime：退回 /chat/active 的既有口径。
                   void getActiveChatSessions()
                     .then((actives) => {
-                      if (sessionGenerationRef.current !== settleGen) return;
-                      if (actives.includes(settleSid)) {
-                        ensureLiveWatcherOnContinuation();
-                        if (attempt > 0) window.setTimeout(() => confirmIdle(attempt - 1), 450);
-                        return;
+                      if (isStaleConfirm()) return;
+                      if (actives.includes(settleSid) && !isSessionInManualStopGuard(settleSid)) {
+                        if (attemptsLeft > 0) {
+                          window.setTimeout(() => confirmIdle(retryIdx + 1), delayMs);
+                          return;
+                        }
                       }
                       finishTerminal();
                     })
-                    .catch(finishTerminal);
+                    .catch(() => {
+                      if (!isStaleConfirm()) finishTerminal();
+                    });
                 });
             };
-            confirmIdle(1);
+            confirmIdle(0);
           }
 
           // 未被回合内并入的转向消息，还原为普通排队消息，回合结束后由 drain 自动发送；
@@ -9927,15 +10094,27 @@ export function Chat({
       }
 
       case 'state': {
-        // 连接建立时的权威运行状态：已空闲就收尾，不靠轮询/焦点。
-        const stateSid = activeIdRef.current ?? sessionId;
-        if (event.running === false && stateSid) {
+        // 连接建立时的权威运行状态：已空闲就收尾，不靠轮询/焦点（保留本地刚刚发起的发送窗口）。
+        const stateSid =
+          (event as { session_id?: string }).session_id || activeIdRef.current || sessionId;
+        if (
+          event.running === false &&
+          stateSid &&
+          !hasRunningLocalSend(stateSid) &&
+          !isSessionTurnHandoverProtected(stateSid)
+        ) {
           settleSessionRunningState(stateSid);
-          setBusyAndClock(false);
-          busyRef.current = false;
-          onTurnRunningChange?.(stateSid, false);
+          if (stateSid === activeIdRef.current) {
+            setBusyAndClock(false);
+            busyRef.current = false;
+            onTurnRunningChange?.(stateSid, false);
+          }
           const stateHash =
-            projectHashBySessionRef.current.get(stateSid) || activeSession?.project_hash || '';
+            projectHashBySessionRef.current.get(stateSid) ||
+            (stateSid === activeIdRef.current
+              ? viewedProjectHashRef.current || activeSession?.project_hash
+              : undefined) ||
+            '';
           if (stateHash) {
             settleToIdleWatch(stateHash, stateSid, sessionGenerationRef.current);
             void syncSessionCacheFromDisk(stateHash, stateSid);
@@ -9983,11 +10162,20 @@ export function Chat({
         } else {
           transitionChatRecovery({ type: 'authoritative_terminal' });
           setSessionCompacting(stoppedSid, false);
-          if (activeIdRef.current) {
+          const stoppedClearSid = stoppedSid || activeIdRef.current;
+          if (stoppedClearSid) {
+            backgroundRunningSessionsRef.current.delete(stoppedClearSid);
+            localTurnSessionsRef.current.delete(stoppedClearSid);
+            onTurnRunningChange?.(stoppedClearSid, false);
+            turnStartedAtBySessionRef.current.delete(stoppedClearSid);
+            bumpConfirmIdleEpoch(stoppedClearSid);
+          }
+          if (activeIdRef.current && activeIdRef.current !== stoppedClearSid) {
             backgroundRunningSessionsRef.current.delete(activeIdRef.current);
             localTurnSessionsRef.current.delete(activeIdRef.current);
             onTurnRunningChange?.(activeIdRef.current, false);
             turnStartedAtBySessionRef.current.delete(activeIdRef.current);
+            bumpConfirmIdleEpoch(activeIdRef.current);
           }
           setBusyAndClock(false);
           markTurnTerminal(stoppedSid);
@@ -10032,11 +10220,20 @@ export function Chat({
           }
         }
         transitionChatRecovery({ type: 'authoritative_terminal' });
-        if (activeIdRef.current) {
+        const errClearSid = (event as { session_id?: string }).session_id || activeIdRef.current;
+        if (errClearSid) {
+          backgroundRunningSessionsRef.current.delete(errClearSid);
+          localTurnSessionsRef.current.delete(errClearSid);
+          onTurnRunningChange?.(errClearSid, false);
+          turnStartedAtBySessionRef.current.delete(errClearSid);
+          bumpConfirmIdleEpoch(errClearSid);
+        }
+        if (activeIdRef.current && activeIdRef.current !== errClearSid) {
           backgroundRunningSessionsRef.current.delete(activeIdRef.current);
           localTurnSessionsRef.current.delete(activeIdRef.current);
           onTurnRunningChange?.(activeIdRef.current, false);
           turnStartedAtBySessionRef.current.delete(activeIdRef.current);
+          bumpConfirmIdleEpoch(activeIdRef.current);
         }
         setBusyAndClock(false);
         markTurnTerminal(activeIdRef.current ?? sessionId);
@@ -10599,6 +10796,11 @@ export function Chat({
     // 在画之前就铸造，画布从第一帧起就能按 id 判重（不必等回声/身份帧）。
     // Not crypto.randomUUID(): unavailable on http://LAN-IP (non-secure context).
     const requestId = opts?.requestId ?? randomUUID();
+    const prevOperationId = turnOwnerSid
+      ? currentOperationBySessionRef.current.get(turnOwnerSid)
+      : undefined;
+    let requestAccepted = false;
+    bumpConfirmIdleEpoch(turnOwnerSid);
     // Bind this turn's terminal frames to the request id the daemon echoes.
     noteTurnOperation(turnOwnerSid, requestId);
     // Idempotent on purpose: a mid-turn steer / send-now is a direction change and
@@ -10751,9 +10953,14 @@ export function Chat({
           // “非流式：Working 转到底，结束时中间过程与正文啪地全部出现”。模型响应
           // 越快、回放帧越集中，这个现象越明显（新会话窗口首条消息最常见）。
           canvasReadySessionIdRef.current = effectiveSid;
+          requestAccepted = true;
           flushPreMountStreamBuffer(effectiveSid);
-          // 新会话首发时 turnOwnerSid 还是 null，这里补上“已投递未吐帧”的窗口标记。
-          armTurn(effectiveSid);
+          bumpConfirmIdleEpoch(effectiveSid);
+          // 新会话首发时 turnOwnerSid 还是 null，这里补上“已投递未吐帧”的窗口标记；
+          // 已有会话在发送起点已 armTurn，若帧已到达切勿覆盖并清空 turnFrameSeenRef。
+          if (!turnArmedAtRef.current.has(effectiveSid)) {
+            armTurn(effectiveSid);
+          }
         } else if (!messageCacheRef.current.has(effectiveSid)) {
           // 切走后缓存可能还是空的（落地页首发后立刻切走，切换块因 prevId 为空未落盘）。
           // 用本轮的乐观提问补一个起点，否则 applyEventToSessionCache 会把后续推流帧整体丢弃。
@@ -10884,6 +11091,18 @@ export function Chat({
           localTurnSessionsRef.current.delete(errorSid);
           localActiveStreamsBySessionRef.current.delete(errorSid);
           pendingSelfEchoBySessionRef.current.delete(errorSid);
+          if (!requestAccepted && currentOperationBySessionRef.current.get(errorSid) === requestId) {
+            if (prevOperationId) currentOperationBySessionRef.current.set(errorSid, prevOperationId);
+            else currentOperationBySessionRef.current.delete(errorSid);
+          }
+          // 409 说明服务端另有运行中的回合，同步其权威 turn_id，防止旧 requestId 吞掉真正的终态。
+          void getChatRuntime(errorSid)
+            .then((runtime) => {
+              if (runtime?.turn_id && serverRuntimeRunning(runtime)) {
+                noteTurnOperation(errorSid, runtime.turn_id);
+              }
+            })
+            .catch(() => {});
         }
         pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
         if (isConflict) {
@@ -11110,6 +11329,7 @@ export function Chat({
     if (
       isSessionRunning ||
       !runtimeAuthoritative ||
+      stopRestoringQueueRef.current ||
       queued.length === 0 ||
       modeState.pendingMode ||
       isSessionLoading ||
@@ -12633,7 +12853,14 @@ export function Chat({
     const stopWasSuperseded = (): boolean => {
       if (!currentSid) return false;
       const nowStream = localActiveStreamsBySessionRef.current.get(currentSid);
-      return nowStream !== undefined && nowStream !== localStreamEntry;
+      if (
+        nowStream !== undefined &&
+        nowStream !== localStreamEntry &&
+        ownsRunningLocalSend(nowStream)
+      ) {
+        return true;
+      }
+      return localTurnSessionsRef.current.has(currentSid);
     };
     // 用户主动停止：按会话精准递增代数并复位抑制标记与交接保护，绝不误取消其他会话的立即发送。
     bumpSessionSendNowEpoch(sendNowEpochBySessionRef.current, currentSid);
@@ -12669,9 +12896,10 @@ export function Chat({
       onTurnRunningChange?.(requestAlias, false);
     }
     // 掐流动作放在第一个 await 之前：此刻仍属旧回合，新回合不可能已经建好观察流。
+    bumpConfirmIdleEpoch(currentSid);
+    bumpConfirmIdleEpoch(requestAlias);
     stopDetachedHistoryPoll(currentSid ?? undefined);
     stopIdleWatch();
-    await restoreQueuedToComposer();
     // 只掐断停止时捕获的那条旧流；新回合（如果用户已经发了）的句柄绝不能碰。
     localStreamEntry?.abortController.abort();
     streamAtStop?.abort();
@@ -12686,6 +12914,12 @@ export function Chat({
       busyRef.current = false;
     }
     transitionChatRecovery({ type: 'stop_succeeded' });
+    stopRestoringQueueRef.current = true;
+    try {
+      await restoreQueuedToComposer();
+    } finally {
+      stopRestoringQueueRef.current = false;
+    }
     onPermissionResolved?.(null);
     if (!ownStream && (currentSid || requestAlias)) {
       // 停止确认只是输入态反馈，展示成 toast；绝不能写进转录流、粘在回答下面。
@@ -12703,14 +12937,22 @@ export function Chat({
       if (!superseded) {
         setBusyAndClock(false);
         busyRef.current = false;
+        transitionChatRecovery({ type: 'stop_succeeded' });
+        if (currentSid) {
+          markSessionManuallyStopped(currentSid);
+          turnStartedAtBySessionRef.current.delete(currentSid);
+        }
+        if (requestAlias) {
+          markSessionManuallyStopped(requestAlias);
+          turnStartedAtBySessionRef.current.delete(requestAlias);
+        }
       }
-      transitionChatRecovery({ type: 'stop_succeeded' });
       if (currentSid && !superseded) {
         backgroundRunningSessionsRef.current.delete(currentSid);
         localTurnSessionsRef.current.delete(currentSid);
         onTurnRunningChange?.(currentSid, false);
       }
-      if (requestAlias) {
+      if (requestAlias && (!superseded || requestAlias !== currentSid)) {
         backgroundRunningSessionsRef.current.delete(requestAlias);
         localTurnSessionsRef.current.delete(requestAlias);
         onTurnRunningChange?.(requestAlias, false);

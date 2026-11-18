@@ -4363,6 +4363,24 @@ impl ActiveChatRegistry {
         sessions
     }
 
+    /// 查询会话在 `/chat` 通道上的运行状态；已进入终态但尚未完成收尾清理的操作不再视为运行中。
+    async fn runtime_status_for_session(
+        &self,
+        session_id: &str,
+    ) -> (bool, Option<String>, Option<u64>) {
+        let guard = self.inner.read().await;
+        let Some(op_id) = guard.aliases.get(session_id) else {
+            return (false, None, None);
+        };
+        let Some(op) = guard.operations.get(op_id) else {
+            return (false, None, None);
+        };
+        if op.terminal_reached {
+            return (false, None, None);
+        }
+        (true, op.status.clone(), Some(op.started_at))
+    }
+
     async fn has_active_operations(&self) -> bool {
         !self.inner.read().await.operations.is_empty()
     }
@@ -12272,6 +12290,15 @@ pub enum ChatEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
     },
+    /// 连接建立时的权威运行状态：非 standby 重连若发现回合已空闲且无终态重放，直接收敛。
+    #[serde(rename = "state")]
+    State {
+        running: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     /// AI session title generated / renamed
     #[serde(rename = "session_renamed")]
     SessionRenamed { session_id: String, name: String },
@@ -14268,6 +14295,11 @@ impl ChatRuntimeProjector {
                 }
                 self.terminal_seen = true;
                 self.terminal_reason = Some(reason);
+                // 回合已到达终态，清理本回合登记的压缩阶段，避免 /chat/runtime 在 complete() 之前继续报告 running。
+                let _ = crate::note_compaction_finished_for_prefix(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                );
                 if let Some(usage) = stats.last_usage {
                     self.total_tokens = (usage.tokens.prompt + usage.tokens.completion) as usize;
                 }
@@ -14302,6 +14334,11 @@ impl ChatRuntimeProjector {
                 }
                 self.terminal_seen = true;
                 self.terminal_reason = Some(reason);
+                // 异常终态同样需要清理本回合登记的压缩阶段。
+                let _ = crate::note_compaction_finished_for_prefix(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                );
                 self.last_error = Some(error.message.clone());
                 let mut events = Vec::new();
                 if let Some(event) = self.finish() {
@@ -15713,7 +15750,12 @@ pub(crate) async fn process_chat_request(
                 eprintln!("Warning: Failed to save native session after early stop: {e}");
             }
         }
-        let _ = event_tx.send(ChatEvent::Stopped);
+        let early_stopped = ChatEvent::Stopped;
+        terminal_sent.store(true, std::sync::atomic::Ordering::Release);
+        active_chats
+            .mark_terminal(&operation_id, &early_stopped)
+            .await;
+        let _ = event_tx.send(early_stopped);
         // Turn never ran — the turn task (which registers the responder) never
         // spawned, so this is a defensive no-op cleanup for interactive modes.
         if registered_permission_responder {
@@ -15898,10 +15940,15 @@ pub(crate) async fn process_chat_request(
             .last_error
             .clone()
             .unwrap_or_else(|| "coding runtime event stream closed before turn terminal".into());
-        let _ = event_tx.send(ChatEvent::Error {
+        let fallback_error = ChatEvent::Error {
             message,
             message_id: None,
-        });
+        };
+        terminal_sent.store(true, std::sync::atomic::Ordering::Release);
+        active_chats
+            .mark_terminal(&operation_id, &fallback_error)
+            .await;
+        let _ = event_tx.send(fallback_error);
     }
 
     // The native runtime owns turn boundaries, mid-turn cancel cleanup
@@ -16115,6 +16162,22 @@ fn chat_watch_session_start_json(session_id: &str, cursor: u64) -> String {
     .to_string()
 }
 
+/// 构造 `/chat/watch` 握手阶段下发的权威运行态帧（不占游标 `seq`）。
+fn chat_watch_state_json(session_id: &str, running: bool) -> String {
+    chat_watch_frame_json_with_tail(
+        &ChatEvent::State {
+            running,
+            stop_reason: None,
+            message: None,
+        },
+        session_id,
+        None,
+        false,
+        false,
+        None,
+    )
+}
+
 #[cfg(test)]
 mod chat_watch_frame_tests {
     use super::*;
@@ -16209,6 +16272,17 @@ mod chat_watch_frame_tests {
         assert_eq!(handshake["type"], "session_start");
         assert_eq!(handshake["session_id"], "s-1");
         assert_eq!(handshake["cursor"], serde_json::Value::Number(42.into()));
+    }
+
+    #[test]
+    fn standby_state_frame_reports_authority_without_advancing_cursor() {
+        let state_frame: serde_json::Value =
+            serde_json::from_str(&chat_watch_state_json("s-1", false)).unwrap();
+        assert_eq!(state_frame["type"], "state");
+        assert_eq!(state_frame["running"], false);
+        assert_eq!(state_frame["session_id"], "s-1");
+        assert_eq!(state_frame["replay"], false);
+        assert!(state_frame.get("seq").is_none());
     }
 }
 
@@ -16363,7 +16437,7 @@ async fn prepare_chat_watch(
     //   after_seq = N  → 只补 seq >= N 的回放帧，然后转实时
     //   缺省           → 全量补发（无游标兜底，前端按身份幂等收敛）
     let mut replay_head: Vec<(u64, ChatEvent)> = Vec::new();
-    let mut handshake: Option<String> = None;
+    let mut handshake: Vec<String> = Vec::new();
     // Prefer atomic snapshot+subscribe when a turn is live so a mid-stream
     // browser refresh gets the full thinking/text/tool history, not only
     // deltas after reconnect. Idle standby watchers skip this so a leftover
@@ -16375,6 +16449,12 @@ async fn prepare_chat_watch(
             .await
         {
             let buffer_len = snapshot.iter().map(|(seq, _)| *seq).max().unwrap_or(0);
+            let snapshot_had_terminal = snapshot.iter().any(|(_, event)| {
+                matches!(
+                    event,
+                    ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                )
+            });
             tracing::debug!(
                 session_id = %session_id,
                 replay_events = snapshot.len(),
@@ -16389,7 +16469,7 @@ async fn prepare_chat_watch(
             match q.after_seq {
                 Some(-1) if snapshot.is_empty() => {
                     // 新会话且当前无在途输出：只给一个起始游标。
-                    handshake = Some(chat_watch_session_start_json(&session_id, buffer_len));
+                    handshake.push(chat_watch_session_start_json(&session_id, buffer_len));
                     if let Some(user) = opening_user {
                         replay_head = vec![user];
                     }
@@ -16473,7 +16553,7 @@ async fn prepare_chat_watch(
             if let Some(cut) = terminal_at {
                 replay_head.truncate(cut + 1);
             }
-            if terminal_at.is_none() {
+            if terminal_at.is_none() && !snapshot_had_terminal {
                 tokio::spawn(async move {
                     loop {
                         match bus_rx.recv().await {
@@ -16497,6 +16577,12 @@ async fn prepare_chat_watch(
                     }
                 });
             } else {
+                // 快照已终态且游标已越过终态帧：客户端拿不到 Done/Error，
+                // 补充权威 `state` 帧让重连立即收敛，随后关闭传输。
+                if terminal_at.is_none() {
+                    let running_now = session_is_authoritatively_running(&state, &session_id).await;
+                    handshake.push(chat_watch_state_json(&session_id, running_now));
+                }
                 // No live pump: drop the sender so the SSE stream ends cleanly
                 // after the replayed terminal instead of hanging on keepalive.
                 drop(tx);
@@ -16544,6 +16630,13 @@ async fn prepare_chat_watch(
                     });
                 }
                 WatchOutcome::Standby => {
+                    // 非 standby 主动重连进待机且没有可重放的终态事件（例如服务重启后
+                    // 或缓存已回收）：立即下发一条权威 `state` 帧，防止客户端停留在重连死等。
+                    if rx.is_empty() {
+                        let running_now =
+                            session_is_authoritatively_running(&state, &session_id).await;
+                        handshake.push(chat_watch_state_json(&session_id, running_now));
+                    }
                     tracing::debug!(
                         session_id = %session_id,
                         "chat_watch: STANDBY until next admit"
@@ -19564,6 +19657,49 @@ struct ChatRuntimeQuery {
     session_id: String,
 }
 
+struct SessionExternalRuntime {
+    live_running: bool,
+    registry_live: bool,
+    controller: ControllerState,
+    compaction_phase_started_at: Option<u64>,
+    compaction_owner: Option<String>,
+    execution_revision: u64,
+}
+
+impl SessionExternalRuntime {
+    fn is_running(&self) -> bool {
+        self.live_running
+            || self.registry_live
+            || self.controller.loop_active
+            || self.controller.goal_active
+            || self.compaction_phase_started_at.is_some()
+    }
+}
+
+fn collect_session_external_runtime(session_id: &str) -> SessionExternalRuntime {
+    use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
+
+    SessionExternalRuntime {
+        live_running: crate::native_live::live_running_session_id().as_deref() == Some(session_id),
+        registry_live: SessionRuntimeRegistry::global()
+            .live_turn_session_ids()
+            .iter()
+            .any(|id| id == session_id),
+        controller: crate::controller_state_for(session_id).unwrap_or_default(),
+        compaction_phase_started_at: compaction_started_at(session_id),
+        compaction_owner: compaction_owner(session_id),
+        execution_revision: execution_phase_revision(session_id),
+    }
+}
+
+async fn session_is_authoritatively_running(state: &AppState, session_id: &str) -> bool {
+    let (chat_active, _, _) = state
+        .active_chats
+        .runtime_status_for_session(session_id)
+        .await;
+    chat_active || collect_session_external_runtime(session_id).is_running()
+}
+
 /// GET /chat/runtime?session_id=… — the single server-side authority for
 /// 「这个会话现在有没有人在干活」.
 ///
@@ -19590,45 +19726,31 @@ async fn chat_runtime(
         )
             .into_response();
     }
-    let (chat_active, chat_status, chat_started_at) = {
-        let guard = state.active_chats.inner.read().await;
-        if let Some(op_id) = guard.aliases.get(&session_id) {
-            if let Some(op) = guard.operations.get(op_id) {
-                (true, op.status.clone(), Some(op.started_at))
-            } else {
-                (true, None, None)
-            }
-        } else {
-            (false, None, None)
-        }
-    };
-    let live_running =
-        crate::native_live::live_running_session_id().as_deref() == Some(session_id.as_str());
-    let registry_live = SessionRuntimeRegistry::global()
-        .live_turn_session_ids()
-        .iter()
-        .any(|id| id == &session_id);
-    let controller = crate::controller_state_for(&session_id).unwrap_or_default();
+    let (chat_active, chat_status, chat_started_at) = state
+        .active_chats
+        .runtime_status_for_session(&session_id)
+        .await;
+    let ext = collect_session_external_runtime(&session_id);
+    let running = chat_active || ext.is_running();
+    let live_running = ext.live_running;
+    let registry_live = ext.registry_live;
+    let controller = ext.controller;
+    let compaction_phase_started_at = ext.compaction_phase_started_at;
+    let compaction_owner = ext.compaction_owner;
+    let execution_revision = ext.execution_revision;
     let meta = SessionRuntimeRegistry::global()
         .list_all()
         .into_iter()
         .find(|entry| entry.session_id == session_id);
-    let turn_id = state
-        .active_chats
-        .admitted_user_for_session(&session_id)
-        .await
-        .and_then(|user| user.client_input_id);
-    let compaction_phase_started_at = compaction_started_at(&session_id);
-    let compaction_owner = compaction_owner(&session_id);
-    let execution_revision = execution_phase_revision(&session_id);
-    let running = chat_active
-        || live_running
-        || registry_live
-        || controller.loop_active
-        || controller.goal_active
-        // 阶段登记本身就是“有人在跑”的证据：手动 `/live/compact` 在空闲 runtime
-        // 上执行时，上述四个信号都可能为假。
-        || compaction_phase_started_at.is_some();
+    let turn_id = if chat_active {
+        state
+            .active_chats
+            .admitted_user_for_session(&session_id)
+            .await
+            .and_then(|user| user.client_input_id)
+    } else {
+        None
+    };
     // `/chat` 操作自己的 status 与压缩登记表取并集：自动压缩过去只广播事件、
     // 不写操作状态，刷新后客户端就丢了 `Compacting…`；native live 更没有操作状态。
     let status =
@@ -25081,6 +25203,45 @@ mod tests {
         assert!(admission.cancellation.is_cancelled());
         assert!(*stop_gate.lock().await);
         registry.complete(&admission.operation_id).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_status_for_session_clears_on_mark_terminal_before_complete() {
+        let registry = ActiveChatRegistry::default();
+        let admission = registry.admit(Some("session-rt"), None).await.unwrap();
+        registry
+            .set_operation_status(&admission.operation_id, Some("running".to_string()))
+            .await;
+
+        let (active_before, status_before, started_before) =
+            registry.runtime_status_for_session("session-rt").await;
+        assert!(active_before);
+        assert_eq!(status_before.as_deref(), Some("running"));
+        assert!(started_before.is_some());
+
+        registry
+            .mark_terminal(
+                &admission.operation_id,
+                &ChatEvent::Done {
+                    tokens: 1,
+                    tool_calls: 0,
+                    session_id: "session-rt".to_string(),
+                    stop_reason: None,
+                    message: None,
+                    message_id: None,
+                },
+            )
+            .await;
+
+        let (active_after_terminal, status_after, started_after) =
+            registry.runtime_status_for_session("session-rt").await;
+        assert!(!active_after_terminal);
+        assert_eq!(status_after, None);
+        assert_eq!(started_after, None);
+
+        registry.complete(&admission.operation_id).await;
+        let (active_after_complete, _, _) = registry.runtime_status_for_session("session-rt").await;
+        assert!(!active_after_complete);
     }
 
     #[tokio::test]

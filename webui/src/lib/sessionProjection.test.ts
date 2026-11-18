@@ -1134,6 +1134,26 @@ test('stripTransientNoticeRows 剔除瞬态提示，只保留持久化边界通�
   assert.deepEqual(out.map((row) => row.id), ['a-1', 'notice-compact']);
 });
 
+test('stripTransientNoticeRows 保留带有 persistent 标记的持久账本通知即便含重试/超时词', () => {
+  const rows = [
+    {
+      role: 'system',
+      id: 'm-1:retry',
+      seq: 5,
+      persistent: true,
+      parts: [{ kind: 'notice' as const, text: 'stream idle timeout (retrying 2/9)', id: 'm-1:retry:1:notice' }],
+    },
+    {
+      role: 'system',
+      id: 'transient-1',
+      transient: true,
+      parts: [{ kind: 'notice' as const, text: '模型只返回了思考，正在重试(1/6)...' }],
+    },
+  ];
+  const out = stripTransientNoticeRows(rows as any);
+  assert.deepEqual(out.map((row) => row.id), ['m-1:retry']);
+});
+
 test('stripTransientNoticeRows 从 assistant 行中剔除 rate_limited 部件', () => {
   const rows = [
     {

@@ -169,8 +169,12 @@ export function acceptReplayFrame(
   // fold applies. Old daemons have no flag, where seq presence is the fallback.
   const replay = event.replay === true
     || (!explicitReplay && event.replay === undefined && typeof event.seq === 'number');
-  // 会话级阶段状态与上下文占用变化不属于某条折叠线以上的历史消息，必须立刻放行。
-  if (event.type === 'session_status' || event.type === 'context_compacted') {
+  // 会话级阶段状态、权威状态帧与上下文占用变化不属于折叠线以上的历史消息，必须立刻放行。
+  if (
+    event.type === 'session_status' ||
+    event.type === 'context_compacted' ||
+    event.type === 'state'
+  ) {
     return { paint: [event], placeUsers: [] };
   }
   const terminal = TERMINAL.has(event.type);

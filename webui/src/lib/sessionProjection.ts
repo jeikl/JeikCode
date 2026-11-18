@@ -1684,13 +1684,17 @@ export function stripTransientNoticeRows<
     }
     const parts = row.parts ?? [];
     // Rate-limit cards and retry/liveness advisories are live-turn feedback;
-    // they must never survive a cache round-trip. This also cleans legacy
-    // notice/rate_limited parts that were attached to assistant rows.
+    // they must never survive a cache round-trip. However explicit persisted
+    // ledger notices (`persistent: true && !transient`) are authoritative and
+    // must never be dropped by legacy keyword heuristics.
+    const preserveAuthoritativeNotice =
+      row.role === 'system' && row.persistent === true && row.transient !== true;
     const cleanedParts = parts.filter((part) => {
       if (part.kind === 'rate_limited') return false;
       if (
-        part.kind === 'notice'
-        && (isEphemeralAdvisoryText(part.text ?? '') || isTransientAdvisoryText(part.text ?? ''))
+        !preserveAuthoritativeNotice &&
+        part.kind === 'notice' &&
+        (isEphemeralAdvisoryText(part.text ?? '') || isTransientAdvisoryText(part.text ?? ''))
       ) {
         return false;
       }

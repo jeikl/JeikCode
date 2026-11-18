@@ -471,13 +471,29 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
       const text = action.text.trim();
       if (!text) break;
       const noticeId = action.id || ('notice-' + action.seq);
+      const defaultPartId = `${noticeId}:1:notice`;
       // 同一事件（同 id）的进度/终态是覆写，不是新增，也不能像旧实现那样直接跳过：
       // 跳过会让卡片永远停在第一次的“重试 1/9”。
       const existingAt = rows.findIndex((row) => row.id === noticeId);
       if (existingAt >= 0) {
         const existing = rows[existingAt]!;
-        const next = rows.slice();
-        next[existingAt] = { ...existing, parts: [{ kind: 'notice', text }] } as unknown as T;
+        const existingPart = existing.parts.find((part) => part.kind === 'notice');
+        if (existingPart && existingPart.kind === 'notice' && existingPart.text === text) {
+          break;
+        }
+        const existingPartId =
+          existingPart && existingPart.kind === 'notice' && existingPart.id
+            ? existingPart.id
+            : defaultPartId;
+        next = rows.slice();
+        next[existingAt] = {
+          ...existing,
+          persistent: true,
+          parts: [{ kind: 'notice', text, id: existingPartId }],
+          ...(typeof action.seq === 'number' && typeof existing.seq !== 'number'
+            ? { seq: action.seq }
+            : {}),
+        } as unknown as T;
         break;
       }
       const note = {
@@ -485,7 +501,7 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
         id: noticeId,
         // Authoritative display-log notice (e.g. compaction boundary): durable.
         persistent: true,
-        parts: [{ kind: 'notice', text }],
+        parts: [{ kind: 'notice', text, id: defaultPartId }],
         ts: action.ts ?? Date.now(),
         seq: action.seq,
       } as unknown as T;

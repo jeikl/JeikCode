@@ -158,4 +158,26 @@ test('权威显示通知按 display_seq 摆位并按 id 幂等去重', () => {
     ts: 1_700,
   });
   assert.equal(replayed, inserted);
+
+  // 同 id 新内容（例如重试 1/9 → 2/9 → 终态详情）：必须原地覆写并保留位置与部件身份。
+  const retryInitial = reduceCanvasEvent(initial, {
+    type: 'authoritative_notice',
+    id: 'm1:retry',
+    seq: 3,
+    text: '连接中断,已保留当前输出,重试 1/9 次',
+    ts: 1_800,
+  });
+  const retryUpdated = reduceCanvasEvent(retryInitial, {
+    type: 'authoritative_notice',
+    id: 'm1:retry',
+    seq: 5,
+    text: '连接中断,已保留当前输出,重试 2/9 次',
+    ts: 1_900,
+  });
+  assert.notEqual(retryUpdated, retryInitial);
+  assert.equal(retryUpdated.length, retryInitial.length);
+  const updatedRow = retryUpdated.find((r) => r.id === 'm1:retry')!;
+  assert.equal(updatedRow.parts[0]!.kind, 'notice');
+  assert.equal((updatedRow.parts[0] as { text?: string }).text, '连接中断,已保留当前输出,重试 2/9 次');
+  assert.equal((updatedRow.parts[0] as { id?: string }).id, 'm1:retry:1:notice');
 });

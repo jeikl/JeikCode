@@ -438,12 +438,12 @@ function getCacheTtlMs(input: RequestInfo | URL): number {
   if (path === '/projects') return 5_000;
   if (path === '/sessions') return 3_000;
   if (path === '/models') return 30_000;
-  if (path === '/chat/active') return 3_000;
   if (path === '/health') return 5_000;
   if (path === '/config') return 10_000;
   if (path === '/capabilities' || path === '/mcp/status') return 5_000;
   if (path === '/runtime/sessions') return 3_000;
-  if (path === '/chat/runtime' || path === '/chat/queue') return 1_000;
+  // /chat/runtime 与 /chat/active 是停/走权威判定接口，绝不能返回陈旧缓存（仍由 inFlightGets 合并同帧并发请求）。
+  if (path === '/chat/queue') return 1_000;
   if (/^\/projects\/[^/]+\/sessions$/.test(path)) return 10_000;
   return 0;
 }
@@ -2008,6 +2008,12 @@ export function peekConfigCache(): ConfigInfo | null {
 /** 清空配置快照缓存（配置变更 / 重载时调用）。 */
 export function invalidateConfigCache(): void {
   configSnapshotCache = null;
+  for (const key of [...getCache.keys()]) {
+    const urlPart = key.split('|')[0] ?? '';
+    if (requestPathname(urlPart) === '/config') {
+      getCache.delete(key);
+    }
+  }
 }
 
 export async function getConfig(): Promise<ConfigInfo> {

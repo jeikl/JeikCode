@@ -560,8 +560,9 @@ test('401 drops the rejected bearer and retries with the HttpOnly cookie', async
   }) as typeof fetch;
 
   try {
-    const { getConfig, isAuthExpired, resetAuthExpired } = await import('./api.ts');
+    const { getConfig, invalidateConfigCache, isAuthExpired, resetAuthExpired } = await import('./api.ts');
     resetAuthExpired();
+    invalidateConfigCache();
     const cfg = await getConfig();
     assert.equal(cfg.default_provider, 'claude-opus-4-6');
     assert.equal(calls.length, 2);
@@ -569,6 +570,8 @@ test('401 drops the rejected bearer and retries with the HttpOnly cookie', async
     assert.equal(isAuthExpired(), false);
   } finally {
     globalThis.fetch = originalFetch;
+    const { invalidateConfigCache } = await import('./api.ts');
+    invalidateConfigCache();
   }
 });
 
@@ -589,8 +592,9 @@ test('permanently rejected credentials latch the auth gate without reloading', a
   };
 
   try {
-    const { getConfig, isAuthExpired, resetAuthExpired } = await import('./api.ts');
+    const { getConfig, invalidateConfigCache, isAuthExpired, resetAuthExpired } = await import('./api.ts');
     resetAuthExpired();
+    invalidateConfigCache();
     await assert.rejects(() => getConfig());
     assert.equal(isAuthExpired(), true);
     assert.equal(calls, 2, 'one original request + one cookie-only retry');
@@ -604,8 +608,9 @@ test('permanently rejected credentials latch the auth gate without reloading', a
     globalThis.fetch = originalFetch;
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
-    const { resetAuthExpired } = await import('./api.ts');
+    const { invalidateConfigCache, resetAuthExpired } = await import('./api.ts');
     resetAuthExpired();
+    invalidateConfigCache();
   }
 });
 
@@ -812,3 +817,73 @@ test('getModels extracts Bearer token even when pasted into /token=... pathname'
 });
 
 
+
+test('getChatRuntime bypasses TTL cache on sequential calls while deduping concurrent calls', async () => {
+  const originalFetch = globalThis.fetch;
+  let callCount = 0;
+  let releaseConcurrent!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseConcurrent = resolve;
+  });
+
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.startsWith('/chat/runtime')) {
+      callCount += 1;
+      if (callCount === 1) {
+        await gate;
+        return new Response(
+          JSON.stringify({ running: true, source: 'chat', turn_id: 'op-1' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ running: false, source: 'idle' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    return new Response('null', { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const { getChatRuntime } = await import('./api.ts');
+    const p1 = getChatRuntime('session-runtime-cache');
+    const p2 = getChatRuntime('session-runtime-cache');
+    releaseConcurrent();
+    const [r1, r2] = await Promise.all([p1, p2]);
+    assert.equal(callCount, 1);
+    assert.equal(r1.running, true);
+    assert.equal(r2.running, true);
+
+    const r3 = await getChatRuntime('session-runtime-cache');
+    assert.equal(callCount, 2);
+    assert.equal(r3.running, false);
+    assert.equal(r3.source, 'idle');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('getActiveChatSessions bypasses TTL cache on sequential calls', async () => {
+  const originalFetch = globalThis.fetch;
+  let callCount = 0;
+  globalThis.fetch = (async () => {
+    callCount += 1;
+    const payload = callCount === 1 ? ['s-active'] : [];
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  try {
+    const { getActiveChatSessions } = await import('./api.ts');
+    const first = await getActiveChatSessions();
+    const second = await getActiveChatSessions();
+    assert.equal(callCount, 2);
+    assert.deepEqual(first, ['s-active']);
+    assert.deepEqual(second, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
