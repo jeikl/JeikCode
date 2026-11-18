@@ -11705,7 +11705,6 @@ html[data-keyboard-open] .chat-landing {
     border-radius: 10px !important;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4) !important;
     z-index: 48 !important;
-    right: auto !important;
   }
   .right-panel-collapsed-rail .rail-tab-text {
     display: none !important;

@@ -205,7 +205,9 @@ export interface RightInspectorProps {
 
   rail: {
     top: number;
-    left: number;
+    /** 水平锚定边：页面缩放 / 改窗时保持到该边的距离。 */
+    edge: 'left' | 'right';
+    offset: number;
     onDragStart: (e: MouseEvent | TouchEvent) => void;
   };
 }
@@ -462,7 +464,11 @@ export function RightInspector({
           class="right-panel-collapsed-rail draggable-floating-widget"
           role="toolbar"
           aria-label={t('chat.inspectorTabs')}
-          style={{ top: `${rail.top}px`, left: `${rail.left}px`, right: 'auto' }}
+          style={
+            rail.edge === 'right'
+              ? { top: `${rail.top}px`, right: `${rail.offset}px`, left: 'auto' }
+              : { top: `${rail.top}px`, left: `${rail.offset}px`, right: 'auto' }
+          }
         >
           <div
             class="widget-drag-handle"

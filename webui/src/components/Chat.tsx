@@ -160,6 +160,17 @@ import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
 import { getPageZoom } from '../lib/pageZoom';
+import {
+  FLOATING_WIDGET_EDGE_GAP,
+  FLOATING_WIDGET_POS_STORAGE_KEY,
+  FLOATING_WIDGET_SIZE,
+  LEGACY_FLOATING_WIDGET_POS_KEY,
+  LEGACY_FLOATING_WIDGET_TOP_KEY,
+  clampFloatingWidgetPos,
+  moveFloatingWidget,
+  parseFloatingWidgetPos,
+  type FloatingWidgetPos,
+} from '../lib/floatingWidget';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
 import { onSoftRefresh } from '../lib/appRefresh';
 
@@ -6441,29 +6452,44 @@ export function Chat({
     return 480;
   });
 
-  // 浮动 Git / 提问入口：自由拖到视口任意位置，记忆 left/top。
-  const [widgetPos, setWidgetPos] = useState<{ left: number; top: number }>(() => {
+  // 浮动 Git / 提问入口：自由拖拽，但水平方向锚定到最近的视口边缘。
+  // 页面缩放改的是布局视口宽度，保存绝对 left 会在缩放后留下巨大空隙；
+  // 保存到“所贴边的距离”才能让贴右的工具条在缩放 / 改窗后继续贴住右边缘。
+  const readWidgetViewport = () => {
+    const zoom = getPageZoom() || 1.0;
+    return {
+      width: typeof window !== 'undefined' ? Math.round(window.innerWidth / zoom) : 0,
+      height: typeof window !== 'undefined' ? Math.round(window.innerHeight / zoom) : 0,
+    };
+  };
+  const [widgetPos, setWidgetPos] = useState<FloatingWidgetPos>(() => {
+    const viewport = readWidgetViewport();
     try {
-      const raw = localStorage.getItem('jeikcode:floating-widget-pos');
-      if (raw) {
-        const parsed = JSON.parse(raw) as { left?: number; top?: number };
-        if (Number.isFinite(parsed.left) && Number.isFinite(parsed.top)) {
-          return { left: parsed.left as number, top: parsed.top as number };
-        }
+      const saved = parseFloatingWidgetPos(
+        localStorage.getItem(FLOATING_WIDGET_POS_STORAGE_KEY),
+        viewport,
+      );
+      if (saved) return saved;
+      // 旧版只记录过顶部位置（横向坐标由当时的缩放比例临时算出），迁移时只继承顶部，
+      // 横向回落到贴右，避免把旧缩放下算出的绝对 left 一起带进来。
+      let legacyTop: number | null = null;
+      const legacyRaw = localStorage.getItem(LEGACY_FLOATING_WIDGET_POS_KEY);
+      if (legacyRaw) {
+        const legacyTopValue = Number((JSON.parse(legacyRaw) as { top?: unknown })?.top);
+        if (Number.isFinite(legacyTopValue)) legacyTop = legacyTopValue;
       }
-      const legacyTop = localStorage.getItem('jeikcode:floating-widget-top');
-      if (legacyTop) {
-        const top = parseInt(legacyTop, 10);
-        if (Number.isFinite(top)) {
-          const zoom = getPageZoom() || 1.0;
-          const left = typeof window !== 'undefined' ? Math.max(8, Math.round(window.innerWidth / zoom) - 52) : 8;
-          return { left, top };
-        }
+      if (legacyTop == null) {
+        const topOnly = parseInt(localStorage.getItem(LEGACY_FLOATING_WIDGET_TOP_KEY) ?? '', 10);
+        if (Number.isFinite(topOnly)) legacyTop = topOnly;
+      }
+      if (legacyTop != null) {
+        return clampFloatingWidgetPos(
+          { edge: 'right', offset: FLOATING_WIDGET_EDGE_GAP, top: legacyTop },
+          viewport,
+        );
       }
     } catch {}
-    const zoom = getPageZoom() || 1.0;
-    const left = typeof window !== 'undefined' ? Math.max(8, Math.round(window.innerWidth / zoom) - 52) : 8;
-    return { left, top: 130 };
+    return { edge: 'right', offset: FLOATING_WIDGET_EDGE_GAP, top: 130 };
   });
   const widgetPosRef = useRef(widgetPos);
   widgetPosRef.current = widgetPos;
@@ -6477,18 +6503,25 @@ export function Chat({
     const startY = point.clientY;
     const start = widgetPosRef.current;
     const rail = (e.currentTarget as HTMLElement).closest('.draggable-floating-widget') as HTMLElement | null;
-    const railW = rail?.offsetWidth ?? 40;
-    const railH = rail?.offsetHeight ?? 88;
+    const size = {
+      width: rail?.offsetWidth ?? FLOATING_WIDGET_SIZE.width,
+      height: rail?.offsetHeight ?? FLOATING_WIDGET_SIZE.height,
+    };
+    // 拖拽结束时可能还有一次 move 尚未提交到 state，直接记住最后一次计算结果。
+    let latest = start;
 
     const onMove = (moveEv: MouseEvent | TouchEvent) => {
       const cur = 'touches' in moveEv ? (moveEv as TouchEvent).touches[0] : (moveEv as MouseEvent);
       if (!cur) return;
       const zoom = getPageZoom() || 1.0;
-      const maxLeft = Math.max(8, Math.round(window.innerWidth / zoom) - railW - 8);
-      const maxTop = Math.max(48, Math.round(window.innerHeight / zoom) - railH - 8);
-      const left = Math.max(8, Math.min(maxLeft, start.left + (cur.clientX - startX) / zoom));
-      const top = Math.max(48, Math.min(maxTop, start.top + (cur.clientY - startY) / zoom));
-      setWidgetPos({ left, top });
+      latest = moveFloatingWidget(
+        start,
+        (cur.clientX - startX) / zoom,
+        (cur.clientY - startY) / zoom,
+        readWidgetViewport(),
+        size,
+      );
+      setWidgetPos(latest);
     };
 
     const onEnd = () => {
@@ -6498,7 +6531,7 @@ export function Chat({
       window.removeEventListener('touchmove', onMove as any);
       window.removeEventListener('touchend', onEnd);
       try {
-        localStorage.setItem('jeikcode:floating-widget-pos', JSON.stringify(widgetPosRef.current));
+        localStorage.setItem(FLOATING_WIDGET_POS_STORAGE_KEY, JSON.stringify(latest));
       } catch {}
     };
 
@@ -6511,17 +6544,14 @@ export function Chat({
 
   useEffect(() => {
     const clamp = () => {
-      const railW = 40;
-      const railH = 96;
-      const zoom = getPageZoom() || 1.0;
-      setWidgetPos((p) => {
-        const maxLeft = Math.max(8, Math.round(window.innerWidth / zoom) - railW - 8);
-        const maxTop = Math.max(48, Math.round(window.innerHeight / zoom) - railH - 8);
-        const left = Math.max(8, Math.min(maxLeft, p.left));
-        const top = Math.max(48, Math.min(maxTop, p.top));
-        if (left === p.left && top === p.top) return p;
-        return { left, top };
-      });
+      const next = clampFloatingWidgetPos(widgetPosRef.current, readWidgetViewport());
+      if (next === widgetPosRef.current) return;
+      widgetPosRef.current = next;
+      setWidgetPos(next);
+      // 夹取后的位置才是下一次渲染的真实坐标，顺手落盘避免重载后再次越界。
+      try {
+        localStorage.setItem(FLOATING_WIDGET_POS_STORAGE_KEY, JSON.stringify(next));
+      } catch {}
     };
     window.addEventListener('resize', clamp);
     window.addEventListener('jeikcode:zoom_change', clamp);
@@ -13640,7 +13670,8 @@ export function Chat({
             onEyeDrop={handleEyeDrop}
             rail={{
               top: widgetPos.top,
-              left: widgetPos.left,
+              edge: widgetPos.edge,
+              offset: widgetPos.offset,
               onDragStart: handleWidgetMouseDown,
             }}
           />
@@ -14124,7 +14155,8 @@ export function Chat({
         onEyeDrop={handleEyeDrop}
         rail={{
           top: widgetPos.top,
-          left: widgetPos.left,
+          edge: widgetPos.edge,
+          offset: widgetPos.offset,
           onDragStart: handleWidgetMouseDown,
         }}
       />
