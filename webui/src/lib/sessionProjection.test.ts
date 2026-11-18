@@ -1317,17 +1317,18 @@ test('rate_limited 目标轮不在画布时不落到最终答案后面', () => {
   assert.equal(out[2]!.id, 'a-final');
 });
 
-test('paintAssistantNotice 目标轮不在画布时落到当前提问之后，而不是整段末尾', () => {
+test('paintAssistantNotice 目标轮不在画布时落到末尾，且不占用持久坐标', () => {
   const canvas = [
     { role: 'user', id: 'u-1', parts: [{ kind: 'text' as const, text: '本轮提问' }] },
     { role: 'assistant', id: 'a-final', parts: [{ kind: 'text' as const, text: '最终答案' }] },
   ];
-  // 目标轮（只返回思考的那一轮）已不在当前窗口，不能把提示挂到最终答案下面。
-  const out = paintAssistantNotice(canvas, '模型只返回了思考，正在重试(1/6)...', 'a-thinking');
+  // 目标行不在画布：提示只能当作当前连接的瞬时反馈放在末尾，
+  // 绝不回退到提问之后（那会在对账时被重排到回答上方）。
+  const out = paintAssistantNotice(canvas, '连接中断，已保留当前输出，重试 1/9 次', 'a-thinking');
   assert.equal(out.length, 3);
-  assert.equal(out[1]!.role, 'system');
-  assert.equal(out[2]!.id, 'a-final');
-  assert.equal((out[1] as any).transient, true);
+  assert.equal(out[2]!.role, 'system');
+  assert.equal((out[2] as any).transient, true);
+  assert.equal((out[2] as any).seq, undefined);
 });
 
 test('placeRecoveredTurnUsers 用绝对下标把被折叠线切掉的提问放回原位置', () => {

@@ -152,7 +152,7 @@ async fn mid_stream_transport_drop_resumes_and_completes() {
     let mut completed = false;
     while let Some(ev) = events.recv().await {
         match ev {
-            AgentEvent::Warning(_) => notices += 1,
+            AgentEvent::RetryNotice { .. } => notices += 1,
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::Error { message, .. } => error_msg = Some(message),
             AgentEvent::TurnComplete { .. } => {
@@ -456,11 +456,13 @@ async fn retryable_open_failure_retries_visibly_then_succeeds() {
 
     let mut events = handle.events;
     let mut warnings: Vec<String> = Vec::new();
+    let mut notices = 0usize;
     let mut errored = false;
     let mut stop: Option<String> = None;
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            AgentEvent::RetryNotice { .. } => notices += 1,
             AgentEvent::Error { .. } => errored = true,
             AgentEvent::TurnComplete { reason } => {
                 stop = Some(format!("{reason:?}"));
@@ -471,9 +473,8 @@ async fn retryable_open_failure_retries_visibly_then_succeeds() {
     }
 
     assert_eq!(
-        warnings.len(),
-        1,
-        "一次故障只弹一条提示（后续重试静默）；got {warnings:?}"
+        notices, 2,
+        "每次重试都发一条进度（同一 id 原地更新）；got {warnings:?}"
     );
     assert!(
         !errored,

@@ -84,9 +84,7 @@ async fn stream_timeout_reconnects_then_recovers() {
         let mut completed = false;
         while let Some(ev) = handle.events.recv().await {
             match ev {
-                AgentEvent::Warning(m) if m.contains("reconnecting") || m.contains("自动重连") => {
-                    saw_reconnect = true
-                }
+                AgentEvent::RetryNotice { .. } => saw_reconnect = true,
                 AgentEvent::Error { message, .. } => error_msg = Some(message),
                 AgentEvent::TurnComplete { .. } => {
                     completed = true;
@@ -149,9 +147,7 @@ async fn stream_timeout_exhausts_retries_then_fails() {
         let mut completed = false;
         while let Some(ev) = handle.events.recv().await {
             match ev {
-                AgentEvent::Warning(m) if m.contains("reconnecting") || m.contains("自动重连") => {
-                    notices += 1
-                }
+                AgentEvent::RetryNotice { .. } => notices += 1,
                 AgentEvent::Error { message, .. } => error_msg = Some(message),
                 AgentEvent::TurnComplete { .. } => {
                     completed = true;
@@ -169,7 +165,7 @@ async fn stream_timeout_exhausts_retries_then_fails() {
         completed,
         "after exhausting retries the turn must clean-fail with TurnComplete"
     );
-    assert_eq!(notices, 1, "一次故障只弹一条提示（后续重试静默）");
+    assert_eq!(notices, 9, "每次重试都发一条进度（同一 id 原地更新）");
     assert!(
         error_msg.as_deref().is_some_and(|m| m.contains("timeout")),
         "the exhausted timeout must surface as an Error mentioning 'timeout'; got {error_msg:?}"

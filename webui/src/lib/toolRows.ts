@@ -52,7 +52,7 @@ export type MsgPart =
   /** Model reasoning / thinking stream — rendered as a collapsible block. */
   | { kind: 'reasoning'; text: string; id?: string; ids?: string[]; rev?: number; segments?: PartSegment[] }
   | { kind: 'tool'; tool: ToolRow }
-  | { kind: 'notice'; text: string }
+  | { kind: 'notice'; text: string; id?: string }
   | { kind: 'rate_limited'; text: string }
   /**
    * Frozen session todo list attached to the previous assistant reply when

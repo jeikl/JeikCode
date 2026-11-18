@@ -2033,6 +2033,16 @@ pub(crate) enum LiveWireEvent {
         message_id: String,
         turn_ordinal: u32,
     },
+    /// 已落盘的显示通知（重试进度等）：同 `id` 原地更新，`display_seq` 是账本坐标。
+    #[serde(rename = "display_notice")]
+    DisplayNotice {
+        session_id: String,
+        id: String,
+        display_seq: u64,
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        created_at: Option<u64>,
+    },
     /// One or more live inputs were folded into the active turn. The exact
     /// payload lets browser clients acknowledge their FIFO pending-steer UI
     /// without guessing from text deltas or turn terminals.
@@ -2339,6 +2349,28 @@ impl NativeLiveWireProjector {
                     tokens_after: None,
                     message_id: self.notice_anchor(),
                 },
+                Kernel::RetryNotice {
+                    notice_id, message, ..
+                } => {
+                    match crate::persist_session_display_notice(
+                        &self.session_id,
+                        &message,
+                        Some(notice_id.clone()),
+                    ) {
+                        Some(record) => LiveWireEvent::DisplayNotice {
+                            session_id: self.session_id.clone(),
+                            id: record.id.unwrap_or(notice_id),
+                            display_seq: record.seq,
+                            text: record.content,
+                            created_at: record.created_at,
+                        },
+                        None => LiveWireEvent::Warning {
+                            message,
+                            tokens_after: None,
+                            message_id: self.notice_anchor(),
+                        },
+                    }
+                }
                 Kernel::RateLimited {
                     reset_at_display,
                     reset_label,
@@ -2913,6 +2945,13 @@ fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::respo
         provider: join.binding.provider.clone(),
         mode: live_current_mode_wire(),
         working_dir: snapshot_wd.to_string_lossy().to_string(),
+    });
+    // 连上来的第一帧携带权威运行状态：客户端不靠 replay 是否恰好包含终态，
+    // 也不靠轮询。重试中/已结束都能在重连时立即收敛。
+    head.push(LiveWireEvent::State {
+        running: join.turn_active,
+        stop_reason: None,
+        message: None,
     });
     let mut projector = NativeLiveWireProjector {
         session_id: join.binding.session_id.clone(),

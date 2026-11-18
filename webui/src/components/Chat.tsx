@@ -3051,13 +3051,16 @@ export function Chat({
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
 
-      // 无论何种非正常退出（重试耗尽或后端收尾中断），若尚未送达终态，立刻做权威磁盘历史对账兜底
+      // 无论何种非正常退出（重试耗尽或后端收尾中断），若尚未送达终态，
+      // 不要在这里“凭本地状态”收尾：立刻重新挂上权威观察流。
+      // 它的首帧会带回真实运行状态，并在回合结束时送达终态；
+      // 同一会话只允许一条订阅（若已存在则不重复挂）。
       if (!terminalSeen && !watchAbort.signal.aborted) {
-        sessionWatchersRef.current.delete(loadId);
-        localActiveStreamsBySessionRef.current.delete(loadId);
-        settleDiskCatchUp(effectiveProjectHash, loadId);
-        if (effectiveProjectHash) {
-          startDetachedTick(effectiveProjectHash, loadId, loadGeneration);
+        if (isSessionTurnHandoverProtected(loadId)) return;
+        if (!sessionWatchersRef.current.get(loadId)) {
+          startDetachedHistoryPoll(effectiveProjectHash, loadId, sessionGenerationRef.current, {
+            localReattach: true,
+          });
         }
       }
     };
@@ -5712,8 +5715,35 @@ export function Chat({
     window.addEventListener('offline', onOffline);
     window.addEventListener('online', onOnline);
 
+    // 运行态看门狗：只在本端认为仍在运行、且当前会话是活动会话时生效。
+    // 任何一次终帧丢失/断流/半开连接都不会再让停止按钮永久卡住：
+    // 服务端权威状态一变为空闲，5 秒内自动复位并做一次磁盘对账。
+    const busyWatchdog = window.setInterval(() => {
+      const sid = activeIdRef.current;
+      if (!sid || !busyRef.current) return;
+      void getChatRuntime(sid)
+        .then((runtime) => {
+          if (!busyRef.current || activeIdRef.current !== sid) return;
+          if (serverRuntimeRunning(runtime)) return;
+          settleSessionRunningState(sid);
+          setBusyAndClock(false);
+          busyRef.current = false;
+          onTurnRunningChange?.(sid, false);
+          const ph =
+            projectHashBySessionRef.current.get(sid) ||
+            viewedProjectHashRef.current ||
+            '';
+          if (ph) {
+            settleToIdleWatch(ph, sid, sessionGenerationRef.current);
+            void syncSessionCacheFromDisk(ph, sid);
+          }
+        })
+        .catch(() => {});
+    }, 5000);
+
     return () => {
       cancelled = true;
+      window.clearInterval(busyWatchdog);
       window.removeEventListener('jeikcode:approval_mode_changed', handleCustomEvent);
       window.removeEventListener('jeikcode:session_mode_changed', handleRemoteSessionMode);
       window.removeEventListener('jeikcode:mode_global_changed', handleGlobalModeSwitch);
@@ -5910,7 +5940,15 @@ export function Chat({
             // 旧实现把它伪装成 assistant 行，刷新后看起来就像回答正文的一部分。
             loaded.push({
               role: 'system',
-              parts: [{ kind: 'notice', text }],
+              parts: [
+                {
+                  kind: 'notice',
+                  text,
+                  ...(msg.id ? { id: `${msg.id}:1:notice` } : {}),
+                },
+              ],
+              // 账本行：跨刷新保留，且参与按 seq 归位。
+              persistent: true,
               ts: msg.created_at,
               id: msg.id,
               sourceIndex,
@@ -8609,6 +8647,11 @@ export function Chat({
       });
       return;
     }
+    if (event.type === 'state') {
+      // 权威运行状态：重连即可收敛，无需任何业务轮询。
+      if (event.running === false) settleSessionRunningState(targetSid);
+      return;
+    }
     const msgs = messageCacheRef.current.get(targetSid);
     if (!msgs || msgs.length === 0) return;
     if (event.type === 'display_notice') {
@@ -9879,6 +9922,24 @@ export function Chat({
               detail: { sessionId: notifySid, kind: doneKind },
             }),
           );
+        }
+        break;
+      }
+
+      case 'state': {
+        // 连接建立时的权威运行状态：已空闲就收尾，不靠轮询/焦点。
+        const stateSid = activeIdRef.current ?? sessionId;
+        if (event.running === false && stateSid) {
+          settleSessionRunningState(stateSid);
+          setBusyAndClock(false);
+          busyRef.current = false;
+          onTurnRunningChange?.(stateSid, false);
+          const stateHash =
+            projectHashBySessionRef.current.get(stateSid) || activeSession?.project_hash || '';
+          if (stateHash) {
+            settleToIdleWatch(stateHash, stateSid, sessionGenerationRef.current);
+            void syncSessionCacheFromDisk(stateHash, stateSid);
+          }
         }
         break;
       }

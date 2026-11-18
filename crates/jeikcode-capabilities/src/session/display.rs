@@ -933,6 +933,41 @@ impl SessionManager {
         })
     }
 
+    /// 账本级幂等：在日志`尾部窗口`里查找同一 `(id, content)` 的最近记录。
+    ///
+    /// 只读末尾 256KiB（最多回看 16 条），不扫描全文件；读取/解析失败时
+    /// 返回 `None`（宁可追加，也不阻断写入）。
+    fn find_recent_display_notice(
+        &self,
+        id: &str,
+        notice_id: &str,
+        text: &str,
+    ) -> Option<DisplayRecord> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = self.display_path(id).ok()?;
+        let mut file = std::fs::File::open(&path).ok()?;
+        let len = file.metadata().ok()?.len();
+        let start = len.saturating_sub(256 * 1024);
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).ok()?;
+        let decoded = String::from_utf8_lossy(&buf);
+        let mut lines: Vec<&str> = decoded.lines().collect();
+        // 从中间开始读时首行可能是半行，丢弃。
+        if start > 0 && !lines.is_empty() {
+            lines.remove(0);
+        }
+        for line in lines.iter().rev().take(16) {
+            let Ok(record) = serde_json::from_str::<DisplayRecord>(line) else {
+                continue;
+            };
+            if record.id.as_deref() == Some(notice_id) && record.content.trim() == text {
+                return Some(record);
+            }
+        }
+        None
+    }
+
     /// Append a standalone display-only notice record (e.g. compaction mark,
     /// tool-fold notice, command notice, or warning) to `display.jsonl` with an
     /// authoritative monotonic `seq` and unique `id`. Never enters `snapshot.messages`
@@ -960,8 +995,14 @@ impl SessionManager {
             if meta.v != DISPLAY_VERSION || !meta.complete {
                 return Ok(None);
             }
-            let next_seq = meta.last_seq.saturating_add(1);
             let record_id = notice_id.unwrap_or_else(|| format!("notice-{}", uuid::Uuid::new_v4()));
+            // 账本幂等：同一 (id, content) 已经写过就复用原记录。
+            // 两个投影器（/chat 与 /live）可能同时处理同一次事件；没有这道
+            // 去重就会各追加一条同 id/同内容记录。
+            if let Some(existing) = self.find_recent_display_notice(id, &record_id, &text) {
+                return Ok(Some(existing));
+            }
+            let next_seq = meta.last_seq.saturating_add(1);
             let record = DisplayRecord {
                 v: DISPLAY_VERSION,
                 session_id: id.to_string(),
@@ -1703,5 +1744,43 @@ mod tests {
         assert!(mgr.read_display("s1").unwrap().is_some());
         mgr.invalidate_display("s1").unwrap();
         assert!(mgr.read_display("s1").unwrap().is_none());
+    }
+
+    #[test]
+    fn display_notice_is_idempotent_by_id_and_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        mgr.write_display_backfill("s1", &[record(1, 0, "Q")], 1)
+            .unwrap();
+        let text = "连接中断，已保留当前输出，重试 1/9 次";
+        let first = mgr
+            .append_display_notice("s1", text, Some("m-a:retry".into()))
+            .unwrap()
+            .unwrap();
+        // 两个投影器先后处理同一次事件：同 (id, content) 必须复用原记录。
+        let second = mgr
+            .append_display_notice("s1", text, Some("m-a:retry".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.seq, first.seq, "同 (id, content) 不得重复追加");
+        assert_eq!(second.id, first.id);
+        // 同一 id、不同内容（下一次尝试）是真实更新，必须追加为新记录。
+        let third = mgr
+            .append_display_notice(
+                "s1",
+                "连接中断，已保留当前输出，重试 2/9 次",
+                Some("m-a:retry".into()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(third.seq, first.seq + 1);
+        let (_, rows) = mgr.read_display("s1").unwrap().unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.id.as_deref() == Some("m-a:retry"))
+                .count(),
+            2,
+            "只有内容变化才新增一条"
+        );
     }
 }

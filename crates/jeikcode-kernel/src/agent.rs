@@ -2269,13 +2269,16 @@ impl RunningAgent {
         self.rt.emit(AgentEvent::TurnComplete { reason });
     }
 
-    /// 统一重试提示：同一次故障只在第一次重试时弹一条，后续重试静默。
+    /// 统一重试进度：每次尝试都发，共用 `incident_id` 作为持久身份；
+    /// 客户端按 id 原地更新，刷新后由账本记录恢复。
     fn emit_retry_notice(&self, step: &RetryStep, max: u32) {
-        if !step.first {
-            return;
-        }
-        self.rt
-            .emit(AgentEvent::Warning(i18n::format_agent_auto_retry(max)));
+        self.rt.emit(AgentEvent::RetryNotice {
+            notice_id: step.incident_id.clone(),
+            part_id: format!("{}:1:notice", step.incident_id),
+            message: i18n::format_agent_retry_progress(step.number, max),
+            attempt: step.number,
+            max,
+        });
     }
 
     /// Persist only the replay-safe, fully assembled portion of a failed stream.
@@ -3035,10 +3038,8 @@ impl RunningAgent {
                         http_status: e.http_status,
                         code: e.code,
                     });
-                    // 重试过的故障不再落重复诊断（实时卡片已原地改写为终态）。
-                    if retry_engine.incident_id().is_none() {
-                        Self::persist_turn_diagnostic(convo, &e.message);
-                    }
+                    // 终态始终落一条诊断：重试进度已单独落盘，不会重复。
+                    Self::persist_turn_diagnostic(convo, &e.message);
                     self.finish_turn(convo, StopReason::ProviderError, &turn_ctx)
                         .await;
                     return;
@@ -3535,9 +3536,6 @@ impl RunningAgent {
                                 break;
                             }
                         }
-                        // 已经弹过重试提示的故障，终态不再落一条重复的诊断行：
-                        // 实时卡片已在原位改写为终态详情，重拉时不会再生出第二张卡。
-                        let diagnostic = retry_engine.incident_id().is_none();
                         Self::persist_interrupted_turn(
                             convo,
                             &assistant_text,
@@ -3546,7 +3544,7 @@ impl RunningAgent {
                             &pending_calls,
                             suppress_internal_stream,
                             Some(&assistant_message_id),
-                            diagnostic.then_some(e.message.as_str()),
+                            Some(e.message.as_str()),
                         );
                         self.hooks.on_error(&e.message).await;
                         self.rt.emit(AgentEvent::Error {

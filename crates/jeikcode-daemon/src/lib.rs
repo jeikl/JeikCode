@@ -14672,6 +14672,26 @@ impl ChatRuntimeProjector {
                     message_id: self.notice_anchor(),
                 }]
             }
+            Agent::RetryNotice {
+                notice_id, message, ..
+            } => {
+                // 重试进度是可落盘的：同 `notice_id` 每次尝试更新一条记录，
+                // 客户端按 id 原地替换；刷新后由账本最后一条恢复。
+                match persist_session_display_notice(session_id, &message, Some(notice_id.clone()))
+                {
+                    Some(record) => vec![ChatEvent::DisplayNotice {
+                        session_id: session_id.to_string(),
+                        id: record.id.unwrap_or(notice_id),
+                        display_seq: record.seq,
+                        text: record.content,
+                        created_at: record.created_at,
+                    }],
+                    None => vec![ChatEvent::Warning {
+                        message,
+                        message_id: self.notice_anchor(),
+                    }],
+                }
+            }
             Agent::Warning(message) => {
                 // Liveness / retry advisories are TRANSIENT: they belong to the
                 // live turn, not the durable transcript. Persisting them here put

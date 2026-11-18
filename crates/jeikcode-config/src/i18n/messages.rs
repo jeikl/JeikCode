@@ -1763,6 +1763,11 @@ pub enum Msg<'a> {
     AgentAutoRetry {
         max: u32,
     },
+    /// 重试进度（可落盘）：同一条记录按 `attempt` 原地更新。
+    AgentRetryProgress {
+        attempt: u32,
+        max: u32,
+    },
     /// Context-pressure advisory before a request that is at/over the watermark.
     AgentOverWindow {
         estimate_k: u32,

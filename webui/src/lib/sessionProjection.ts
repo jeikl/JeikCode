@@ -1564,11 +1564,7 @@ export function paintAssistantNotice<T extends ProjectionMessage>(
       return next;
     }
   }
-  // 只在**末尾连续区域**去重，不能全局去重：
-  // 全局 `some` 会让一条历史 notice 永远占着画布（它已被写进缓存），
-  // 而它的 seq 落在当时那一轮之后、后续每一轮之前 —— 视觉上就是
-  // “这条提示粘在之后所有模型回答的下面”。
-  // 只检查尾部（同一轮的重复帧），跨轮的不再复用。
+  // 只在**末尾连续区域**按文本去重（同一轮的重复帧），跨轮的不再复用。
   const hasNotice = (message: ProjectionMessage): boolean =>
     message.role === 'system'
     && message.parts.some((part) => part.kind === 'notice' && part.text === text);
@@ -1579,44 +1575,14 @@ export function paintAssistantNotice<T extends ProjectionMessage>(
     break;
   }
 
-  const seqOf = (message: ProjectionMessage | undefined): number | undefined =>
-    typeof message?.seq === 'number' ? message.seq : undefined;
-
+  // 瞬时提示只按画布位置排序：绝不借用持久行的 `seq`（那会让它在对账时
+  // 被重排到伪造的锚点旁边）。命中锚点行就插在其后，否则放末尾。
   let at = messages.length;
-  let anchorSeq: number | undefined;
-  let targetFound = false;
   if (targetId) {
     const target = messages.findIndex(
       (message) => message.id === targetId || message.clientInputId === targetId,
     );
-    if (target >= 0) {
-      at = target + 1;
-      anchorSeq = seqOf(messages[target]);
-      targetFound = true;
-    }
-  }
-  if (!targetFound) {
-    // The exact assistant round may be above the current canvas window or may
-    // not have painted yet. Falling back to the absolute tail makes the notice
-    // permanently stick below the final answer. The current turn's user prompt
-    // is the nearest stable boundary: place the transient advisory right after
-    // it, before the answer rows.
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i]!.role === 'user') {
-        at = i + 1;
-        anchorSeq = seqOf(messages[i]);
-        break;
-      }
-    }
-  }
-  if (anchorSeq == null) {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const seq = seqOf(messages[i]);
-      if (seq != null) {
-        anchorSeq = seq;
-        break;
-      }
-    }
+    if (target >= 0) at = target + 1;
   }
 
   const noticeId = id ?? (targetId ? `notice-${targetId}` : `notice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -1626,8 +1592,7 @@ export function paintAssistantNotice<T extends ProjectionMessage>(
     // Live advisory only. `stripTransientNoticeRows` removes it before it can
     // become a durable canvas row; durable boundaries use `authoritative_notice`.
     transient: true,
-    parts: [{ kind: 'notice', text }],
-    ...(anchorSeq != null ? { seq: anchorSeq + 0.5 } : {}),
+    parts: [{ kind: 'notice', text, id: `${noticeId}:1:notice` }],
   } as unknown as T;
   const next = messages.slice();
   next.splice(at, 0, row);
@@ -2068,9 +2033,13 @@ export function spliceAuthoritativeDiskTail<
 
   for (let i = 0; i < canvas.length; i += 1) {
     const message = canvas[i]!;
-    const anchored = message.role === 'system';
-    if (anchored) {
-      anchoredNotices.push(message);
+    if (message.role === 'system') {
+      // 持久行 = 显式标记，或「带账本 seq 且未标记 transient」的旧版通知；
+      // 瞬时提示是 live-only，合并时丢弃。
+      const row = message as { persistent?: boolean; transient?: boolean; seq?: number };
+      if (row.persistent === true || (row.transient !== true && typeof row.seq === 'number')) {
+        anchoredNotices.push(message);
+      }
       continue;
     }
     // steer 行的绝对下标是 fold 时按当前窗口末尾推算出来的，从来没被磁盘确认过；

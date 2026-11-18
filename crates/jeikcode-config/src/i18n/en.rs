@@ -1387,6 +1387,8 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
             "Network connection interrupted: remote host closed or reset connection. You can retry.".into(),
         Msg::AgentAutoRetry { max } =>
             format!("Connection dropped; reconnecting automatically (up to {max} attempts), current output preserved…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("Connection interrupted; current output preserved; retry {attempt}/{max}").into(),
         Msg::StreamReadResetHint =>
             "This error is common in corporate network or proxy environments; please check proxy/VPN/firewall settings.".into(),
         Msg::StreamReadDetailsPrefix => "Details: ".into(),

@@ -689,6 +689,8 @@ export type SSEEvent =
   | { type: 'done'; tokens: unknown; tool_calls: unknown; session_id: string; stop_reason?: string; message?: string; message_id?: string; operation_id?: string }
   | { type: 'stopped'; session_id?: string; operation_id?: string }
   | { type: 'error'; message: string; message_id?: string; operation_id?: string }
+  /** 连上来的第一帧权威运行状态：不靠 replay/轮询收尾。 */
+  | { type: 'state'; running: boolean; stop_reason?: string; message?: string }
   | { type: 'warning'; message: string; message_id?: string; /** Live path: committed compaction's post-context tokens. */ tokens_after?: number }
   /** Committed compaction: update the context meter immediately (no usage follows). */
   | { type: 'context_compacted'; session_id?: string; tokens: number }

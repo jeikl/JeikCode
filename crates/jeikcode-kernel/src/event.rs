@@ -285,6 +285,15 @@ pub enum AgentEvent {
     Reasoning(String),
     /// Non-fatal advisory (e.g. a truncated response). The turn still completes.
     Warning(String),
+    /// 重试进度（可落盘）：同一次故障的每个尝试共用 `notice_id` / `part_id`，
+    /// 客户端按 id 原地更新，历史按最后一条收敛。
+    RetryNotice {
+        notice_id: String,
+        part_id: String,
+        message: String,
+        attempt: u32,
+        max: u32,
+    },
     /// A 429 rate-limit PAUSE (host decided the reset is too far to auto-wait).
     /// A driver renders this as a non-error pause line with the reset time, NOT
     /// as a red error. `secs_until_reset`/`reset_at_display` may be empty when the

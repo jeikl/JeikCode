@@ -259,6 +259,11 @@ pub fn format_agent_auto_retry(max: u32) -> String {
     t(Msg::AgentAutoRetry { max }).into_owned()
 }
 
+/// 重试进度：`重试 x/9 次`。
+pub fn format_agent_retry_progress(attempt: u32, max: u32) -> String {
+    t(Msg::AgentRetryProgress { attempt, max }).into_owned()
+}
+
 pub fn format_stream_read_reset_hint() -> String {
     t(Msg::StreamReadResetHint).into_owned()
 }

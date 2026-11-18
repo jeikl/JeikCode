@@ -471,8 +471,15 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
       const text = action.text.trim();
       if (!text) break;
       const noticeId = action.id || ('notice-' + action.seq);
-      // 同一条显示记录可能先由 `display_notice` 实时送达、再由磁盘重拉返回：按 id 去重。
-      if (rows.some((row) => row.id === noticeId)) break;
+      // 同一事件（同 id）的进度/终态是覆写，不是新增，也不能像旧实现那样直接跳过：
+      // 跳过会让卡片永远停在第一次的“重试 1/9”。
+      const existingAt = rows.findIndex((row) => row.id === noticeId);
+      if (existingAt >= 0) {
+        const existing = rows[existingAt]!;
+        const next = rows.slice();
+        next[existingAt] = { ...existing, parts: [{ kind: 'notice', text }] } as unknown as T;
+        break;
+      }
       const note = {
         role: 'system',
         id: noticeId,
