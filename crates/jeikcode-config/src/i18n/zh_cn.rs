@@ -1362,6 +1362,27 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
             format!("连接中断,正在自动重连(最多 {max} 次),已保留当前输出…").into(),
         Msg::AgentRetryProgress { attempt, max } =>
             format!("连接中断,已保留当前输出,重试 {attempt}/{max} 次").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("流空闲超时，已保留当前输出，重试 {attempt}/{max} 次")
+        } else {
+            format!("流空闲超时，正在重试 {attempt}/{max} 次")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("网络连接中断，已保留当前输出，重试 {attempt}/{max} 次")
+        } else {
+            format!("网络连接中断，正在重试 {attempt}/{max} 次")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("连接已恢复（重试 {attempts} 次后继续）").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "自动重连后流响应仍超时，已终止本轮".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("触发速率限制，{secs} 秒后自动重试…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "达到速率限制额度，已暂停，请等待重置或切换模型后继续".into()
+        } else {
+            format!("达到速率限制已暂停：{detail}").into()
+        },
         Msg::AgentStreamTimeoutPartialResponse =>
             "流在已产生部分回复后超时；已保留部分回复，可继续。".into(),
         Msg::StreamReadResetHint =>

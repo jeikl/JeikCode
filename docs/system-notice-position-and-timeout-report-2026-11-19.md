@@ -107,19 +107,27 @@ Read × 200
 
 **这不是前端计算错误，而是通知获得了一个比它所描述内容更早的持久坐标。**
 
-### 4.2 叠加/不更新：事件身份按“轮”拆分，且覆写结果曾被丢弃
+> **补充（实时阶段为何在刷新前就已经置顶）**：  
+> 实机在**未刷新前**同样看到卡片插到 `A.thinking` / `Glob` 之前，直接推手在于 `webui/src/lib/canvas/actions.ts` 的 `authoritative_notice` 插入逻辑混用了两套不一致的 `seq` 坐标系：  
+> 1. 实时阶段助手与工具行尚未写入 `display.jsonl`，`canvasStore.ts` 的 `normalizeCanvas` 会为它们在本地按数组顺序合成递增 `seq`；  
+> 2. 服务端 `append_display_notice` 却只看到账本里已落盘的记录并分配 `last_seq + 1`；  
+> 3. `actions.ts` 使用 `rows.findIndex(r => r.seq > action.seq)` 查找插槽，**只要该通知的账本 `display_seq` 小于画布上已有某条实时行的本地合成 `seq`**，就会命中那条更早的实时行并把它倒插到前面（具体落在 `A` 之前还是某个工具之前取决于当时的序差时序）。此外若发生 `OpenTransient` 失败（如 `agent.rs` 在 HTTP 流打开前失败），此时尚未发射 `AgentEvent::AssistantMessage`，`notice_anchor()` 退回到提问本身也是正确语义（此时尚无 `A.thinking`）；只有已产出部分内容的 `StreamDrop`/`Stall` 才应锚定于对应 `A` 之后。
 
-- 重试事件 id 由 `turn-{turn_id}-r{round}:retry` 生成，两次断网 = 两个不同 id、都从 `1/9` 开始；
-- 同一事件每次尝试又各写一条账本记录；
-- `authoritative_notice` 曾因 `const next` 变量遮蔽，**覆写结果被丢弃**（`ffe20fb2f` 已修复）；
-- 实时卡与账本卡一度使用不同 id，前端无法识别为同一张卡。
+### 4.2 叠加/不更新：事件身份与终态闭合的真实成因
+
+- 重试事件 id 由 `turn-{turn_id}-r{round}:retry` 生成：在“第 1 轮断网恢复后，第 N 轮再次断网”场景下生成两个不同 id 并各自从 `1/9` 开始**属于正确语义**，本身不是导致不更新的 bug；
+- 同一事件在文案发生变化时（如进度从 `1/9 → 2/9`）会向 `display.jsonl` 追加新记录（仅同 `(id, content)` 有尾部窗口幂等去重，进度递增仍不断 append 并推高 `last_seq` 与分页跨度）；同页内 `normalizeCanvas` 按“位置 = 首次出现、内容 = 最后一次出现”合并，但在跨分页切片时仍会导致位置锚点与最新文案被页边界割裂；
+- 真正导致进度停在 `1/9` 不更新的，是此前 `authoritative_notice` 的 `const next` 变量遮蔽直接丢弃了覆写结果（`ffe20fb2f` 已修复），以及实时流与账本 id 未对齐/重试未落新文案；
+- **补充遗漏 1（重试耗尽终态仍裂成两张卡）**：`RetryEngine` 虽然为每次重试维护了 `incident_id`，但当预算耗尽失败退出时（`agent.rs` 的 `OpenTransient` / `Stall` / `StreamDrop` 耗尽分支），内核转为发射不带 `incident_id` 的 `AgentEvent::Error` 与 `Self::persist_turn_diagnostic(...)`，**并未复用原 `incident_id` 把原卡改写为终态错误**；即便前端支持原地覆写，重试失败时仍会残留“卡在 `9/9` 的进度卡 + 一张新增错误卡”；
+- **补充遗漏 2（漏网重试路径）**：目前仅 `OpenTransient`、`Stall`、`StreamDrop` 走了 `AgentEvent::RetryNotice`；`FirstToken` 超时重试与 `EmptyResponse`（含只返回思考 / 空响应 / 格式异常）重试**仍在直接发 `AgentEvent::Warning`**，`429 RateLimited` 也独立走诊断写入，均尚未并入统一的带身份通知通道；
+- 实时卡与账本卡一度使用不同 id，前端无法识别为同一张卡（已通过 `${noticeId}:1:notice` 对齐部分链路）。
 
 ### 4.3 两个思考块之间缺卡：通知没有锚点
 
 - 通知只带 `notice_id`/`part_id`，没有 `anchor_message_id`；
 - daemon 的锚点来自可变游标 `notice_anchor()`（当前流式消息 id）；
 - 断流续写后“当前消息”变成 B，A 又可能不在当前窗口；
-- 实时卡只能回退到尾部或丢失；刷新后又被 `seq` 推到开头。
+- 实时卡在无合适锚点或未匹配 `seq` 时容易回退到尾部或与实时行错位；刷新后又被过小的 `seq` 推到开头。
 
 ### 4.4 停不下来：终帧丢失后无权威收尾
 
@@ -127,7 +135,7 @@ Read × 200
 - `/chat/runtime` 的短 TTL 缓存可能返回旧状态；
 - 焦点/截图触发的权威对账是当时唯一的兜底。
 
-**状态**：`ffe20fb2f` 已修主链路（`runtime_status_for_session` 尊重 `terminal_reached`、`ChatEvent::State` 权威握手、移除 `/chat/runtime` 与 `/chat/active` 的 TTL 缓存、`done` 有限确认、停止保护窗）。`busyWatchdog` 仍保留为兜底。
+**状态**：`ffe20fb2f` 已修主链路（`runtime_status_for_session` 尊重 `terminal_reached`、`/chat/watch` 与 `/live` 对齐补发 `ChatEvent::State` 权威握手、移除 `/chat/runtime` 与 `/chat/active` 的 TTL 缓存、`done` 有限确认、停止按钮 `watchOnly` 隔离与手动停止保护窗）。`busyWatchdog` 仍保留为最终传输挂死兜底。
 
 ### 4.5 超时误判：思考相使用滑动预算
 
@@ -158,8 +166,8 @@ Read × 200
 | 限流/错误可能出现两张 | 一张实时卡 + 一条诊断记录，身份不同 |
 | 压缩/旧提示靠文案识别 | `isCompactionDoneNotice`、`TRANSIENT_ADVISORY_MARKERS` 多语言前缀匹配 |
 | 跨实例/冷启动位置不一致 | 缺少统一事件身份与锚点，缓存与账本各有一套去重 |
-| 重试进度历史只留第一条 | 同 id 多条记录、历史取首条而非最后一条 |
-| 断网卡在长上下文中消失 | 锚点不在当前窗口时没有挂起队列，回退到尾部或丢失 |
+| 同事件冗余 append / 终态分裂 | 同 id 进度变更每次追加新行推高 `last_seq`，跨分页位置与内容割裂；重试耗尽发新 `Error` 而不闭合原 `incident_id` |
+| 断网卡在长上下文中消失 | 锚点不在当前窗口时没有挂起队列，回退到尾部或丢失；`FirstToken`/`EmptyResponse` 仍走 `Warning` |
 
 ---
 
@@ -205,20 +213,26 @@ NoticePart {
 
 - 删除回合中途的 `append_display_notice`；
 - 回合外手动压缩：无待写记录，立即落盘；
-- `/chat` 与 `/live` 只负责把事件送入缓冲，不再各自持久化。
+- `/chat` 与 `/live` 只负责把事件送入缓冲，不再各自持久化；
+- **关键边界补充（防长回合压缩抹掉锚点 & 崩溃/取消丢卡）**：  
+  1. 200 轮长回合若触发**回合内自动压缩**，`convo.messages` 中的前置轮次会被摘要替换。若完全等到大回合 `turn_complete` 才一次性写 `display.jsonl`，早期轮次所锚定的 `anchorMessageId = A` 在压缩后已从 `convo.messages` 消失，事件卡将失去目标锚点；且长回合中途进程重启或用户取消（`StopReason::Cancelled` 走 `write_cancelled_user` 回滚）会彻底丢失纯内存缓冲中的通知。  
+  2. 因此“单写入口”应保证**写权限与顺序分配仍由 `DisplayHook`（及同一账本锁内的检查点）唯一掌控**，但刷新落盘时机必须绑定 **每轮/工具批结算点、回合内压缩提交前、Partial 持久化与取消/终态钩子**，在被压缩或回滚清理前先把已产出的前置切片连同其锚定事件卡顺序落盘；
+  3. **切片级幂等与记录去重约束**：现行 `append_display_turn` 仅以整回合 `completed_prompt_ids` 作为幂等锁且不对助手/工具记录 `id` 去重——改成阶段性分段追加后，必须拆分出 **切片级幂等键**（如 `turn_id + round/batch_ordinal`）与单记录身份去重，并把 `completed_prompt_ids` 保留给整回合终态；否则第 1 轮提前落盘就会把后续第 2–200 轮拦掉，或在同一轮重试重入时重复落盘。
 
 ### P2 线上协议统一
 
-- 新增 `system_notice` 帧，两个通道共用；
+- 新增 `system_notice` 帧，两个通道共用（同时把 `FirstToken`、`EmptyResponse`、`RateLimited` 统一收敛进来）；
+- **重试耗尽必须复用同一 `incident_id` / `eventId` 发送 `status: 'settled', severity: 'error'` 闭合原卡**，终态控制事件（`Done` / `Error` / `Stopped`）不再额外制造第二张重复诊断卡；
 - 终端控制事件（`Done` / `Error` / `Stopped`）与展示卡彻底分离；
 - 提示文案区分 `stall`（等待超时）与 `drop`（连接中断）。
 
 ### P3 前端投影与缓存
 
 - 同 `partId` → 原地覆写；新 `partId` → 按锚点插入；
+- **废弃 `authoritative_notice` 中靠 `rows.findIndex(r => r.seq > action.seq)` 找位置的逻辑**：实时阶段禁止用账本 `display_seq` 对比前端合成 `seq`，全部改按 `anchorMessageId` + `slot` 归位；
 - 锚点不在当前窗口 → `pendingAnchoredEvents`，窗口加载后归位，绝不静默丢弃；
 - 瞬时卡无 `seq`、不参与磁盘合并；账本卡持久并按 `seq` 还原；
-- 历史同 `eventId` 取最后一条；
+- 历史同 `eventId` 取最后一条（同时保留首次因果位置）；
 - 删除文案启发式与“同 id 跳过”。
 
 ### P4 迁移与清理
@@ -226,7 +240,7 @@ NoticePart {
 - `DisplayRecord` 增加 `event_id`、`part_id`、`anchor_message_id`、`anchor_part_id`、`revision`、`severity`、`status`；
 - `DISPLAY_VERSION` 升到 5，读取时惰性升级；
 - v4 通知：`eventId = 原 id`、无锚点 → 重挂到所属回合末尾；
-- 删除：`seq+0.5`、双投影器双写、`isCompactionDoneNotice`、`hasRecentCompactionNotice`、`TRANSIENT_ADVISORY_MARKERS`、`busyWatchdog`。
+- 删除：`seq+0.5`、双投影器双写、`isCompactionDoneNotice`、`hasRecentCompactionNotice`、`TRANSIENT_ADVISORY_MARKERS`；待确认 SSE/WS 活性超时断开与 `ChatEvent::State` 重连收敛完全闭环无盲区后，再移除 `busyWatchdog`。
 
 ### P5 验收
 
@@ -270,15 +284,19 @@ NoticePart {
 | `a2beed974` | 部分回复超时文案本地化 | 已完成 |
 | `976c7cee0` | `transition`/`streaming` 默认值提升到 360s | 已完成（配置缓解） |
 | `ffe20fb2f` | 运行态权威收尾、停止按钮、同 id 覆写、持久通知保留 | 已完成 |
-| P0–P5 | 事件卡部件化、锚点落盘、单写入口、迁移与清理 | **待实施** |
+| 本次提交 | P0–P4：统一 `SystemNotice` 契约、Think→Transition 预算修正在内、Display v5 切片幂等与单写入口、因果锚点与缺席队列、移除文案启发式与双写 | **已完成**（单测/构建/Debug 成品已验证；`busyWatchdog` 按约定暂留待线下 200 轮实测闭环后清理） |
 
 旧 provider 的“不重放”策略已在 `96bb739c8` 中移除；当前断流会保留部分输出并按统一阶梯续写。
+
+关于 P5 验收与验证范围：已完成 Rust 单元测试与集成测试（`jeikcode-kernel` 42 项、`jeikcode-capabilities` display 30 项、`jeikcode-coding` 10 项、`jeikcode-daemon` 相关 25 项）、`webui` 全量单测（967/967）与 `npm run build`、以及 `target/debug/jeikcode.exe` 重编；物理断网长回合真机联调待线下实测验证。
 
 ---
 
 ## 9. 风险与边界
 
 - `Thinking` 当前使用 `streaming` 预算，再进入 `Transition`；在配置层提升到 360s 后，最坏静默等待为 720s。根治需要在 P1 中按相位分配预算，避免重复计时。
+- 若仅把所有通知缓存到 `turn_complete` 一次性写盘，长回合内的**自动压缩**会先裁掉前置轮次消息导致锚点丢失，且**进程重启/用户取消**会抹掉纯内存提示；必须让账本按轮/压缩点提前锁定前置切片与关联通知。
+- `OpenTransient` 与首个 token 前的超时发生在 `AssistantMessage` 建立之前，此类通知天然锚定于用户提问（或上一可见节点）之后，不应强行预设 `A.thinking` 锚点。
 - 旧 v4 通知没有锚点，迁移只能重挂到回合末尾；历史位置无法完全还原，但不会再置顶。
 - 浏览器网络模拟（CDP offline）只会挂起已有流，真正断线需要物理断网或强制 abort；本报告中的关键证据来自用户物理断网。
 

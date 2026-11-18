@@ -1768,6 +1768,32 @@ pub enum Msg<'a> {
         attempt: u32,
         max: u32,
     },
+    /// 流空闲卡死重试进度：区分连接断流与空闲超时。
+    AgentRetryStallProgress {
+        attempt: u32,
+        max: u32,
+        has_output: bool,
+    },
+    /// 连接断流/传输瞬断重试进度：区分连接断流与空闲超时。
+    AgentRetryDropProgress {
+        attempt: u32,
+        max: u32,
+        has_output: bool,
+    },
+    /// 重试成功恢复生成后的收口提示。
+    AgentRetryRecovered {
+        attempts: u32,
+    },
+    /// 自动重连耗尽后的流超时终态。
+    AgentStreamTimeoutTerminal,
+    /// 429 自动退避等待通知。
+    AgentRateLimitedWaiting {
+        secs: u64,
+    },
+    /// 429 配额/速率限制暂停终态。
+    AgentRateLimitedPaused {
+        detail: &'a str,
+    },
     /// 已产生部分回复后流超时：保留部分内容，回合以超时结束。
     AgentStreamTimeoutPartialResponse,
     /// Context-pressure advisory before a request that is at/over the watermark.

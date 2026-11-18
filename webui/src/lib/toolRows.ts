@@ -9,6 +9,7 @@
 // separate, while a replayed event is coalesced. Mirrors the tuix
 // coalesce-by-call_id fix (commit 80d6540f).
 
+import type { NoticeKind, NoticeSeverity, NoticeStatus } from '../api.ts';
 import type { SubtaskItem } from './subtasks';
 import type { TodoItem } from './todos';
 
@@ -45,6 +46,17 @@ export interface PartSegment {
   rev?: number;
 }
 
+export interface NoticeMeta {
+  eventId?: string;
+  partId?: string;
+  noticeKind?: NoticeKind;
+  severity?: NoticeSeverity;
+  status?: NoticeStatus;
+  revision?: number;
+  anchorMessageId?: string;
+  anchorPartId?: string;
+}
+
 export type MsgPart =
   /** `ids` keeps absorbed wire part ids after coalescing so a later replay
    *  addressed to any of them still lands on this logical part. */
@@ -52,13 +64,29 @@ export type MsgPart =
   /** Model reasoning / thinking stream — rendered as a collapsible block. */
   | { kind: 'reasoning'; text: string; id?: string; ids?: string[]; rev?: number; segments?: PartSegment[] }
   | { kind: 'tool'; tool: ToolRow }
-  | { kind: 'notice'; text: string; id?: string }
-  | { kind: 'rate_limited'; text: string }
+  | ({ kind: 'notice'; text: string; id?: string } & NoticeMeta)
+  | { kind: 'rate_limited'; text: string; eventId?: string }
   /**
    * Frozen session todo list attached to the previous assistant reply when
    * the user starts the next turn. Live updates use the sticky panel instead.
    */
   | { kind: 'todo_list'; items: TodoItem[] };
+
+/** Monotonic update guard: once settled, an active event must never downgrade it;
+ *  older revisions are discarded so out-of-order replays converge to truth. */
+export function shouldAcceptNoticeUpdate(
+  prev: { status?: NoticeStatus; revision?: number } | undefined,
+  incoming: { status?: NoticeStatus; revision?: number },
+): boolean {
+  if (!prev) return true;
+  const prevSettled = prev.status === 'settled';
+  const nextSettled = incoming.status === 'settled';
+  if (prevSettled && !nextSettled) return false;
+  const prevRev = typeof prev.revision === 'number' ? prev.revision : 0;
+  const nextRev = typeof incoming.revision === 'number' ? incoming.revision : 0;
+  if (nextRev < prevRev) return false;
+  return true;
+}
 
 /** Append or replace a trailing `todo_list` part on an assistant message. */
 export function withTrailingTodoList(parts: MsgPart[], items: TodoItem[]): MsgPart[] {

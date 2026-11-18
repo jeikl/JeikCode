@@ -1389,6 +1389,27 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
             format!("Connection dropped; reconnecting automatically (up to {max} attempts), current output preserved…").into(),
         Msg::AgentRetryProgress { attempt, max } =>
             format!("Connection interrupted; current output preserved; retry {attempt}/{max}").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("Stream stalled (idle timeout); output preserved, retrying {attempt}/{max}")
+        } else {
+            format!("Stream stalled (idle timeout), retrying {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("Connection dropped; output preserved, retrying {attempt}/{max}")
+        } else {
+            format!("Connection dropped, retrying {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("Connection recovered after {attempts} retries, continuing").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "Stream timeout after automatic reconnects".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("Rate limited, retrying in {secs}s...").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "Rate limit reached; paused until window resets".into()
+        } else {
+            format!("Rate limit paused: {detail}").into()
+        },
         Msg::AgentStreamTimeoutPartialResponse =>
             "Stream timeout after partial response; the partial response was preserved and can be continued.".into(),
         Msg::StreamReadResetHint =>

@@ -586,7 +586,14 @@ fn read_display_tail_view(
     // end at the snapshot's last message, it may be missing that in-flight tail
     // (the snapshot/inflight file already has it). Fall back to the full read,
     // which appends the snapshot tail idempotently.
-    let display_last_id = records.last().and_then(|record| record.id.as_deref());
+    let display_last_id = records
+        .iter()
+        .rev()
+        .find(|record| {
+            record.event_id.is_none()
+                && record.internal_origin.as_deref() != Some("turn_diagnostic")
+        })
+        .and_then(|record| record.id.as_deref());
     if let Some(snapshot_last_id) = session
         .snapshot
         .messages
@@ -1031,15 +1038,7 @@ mod session_window_tests {
                 role: "user".into(),
                 id: Some(id.into()),
                 content: text.into(),
-                reasoning: None,
-                synthetic: false,
-                internal_origin: None,
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                is_error: false,
-                images: Vec::new(),
-                created_at: None,
-                elapsed_ms: None,
+                ..Default::default()
             }
         }
         fn turn_stat(
@@ -1311,15 +1310,7 @@ mod session_window_tests {
             role: "user".into(),
             id: None,
             content: long.clone(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
-            created_at: None,
-            elapsed_ms: None,
+            ..Default::default()
         };
         let turns = session_records_user_outline(&[record], 0);
         assert_eq!(turns[0].label.chars().count(), 120);
@@ -1341,15 +1332,7 @@ mod session_window_tests {
             role: "user".into(),
             id: Some("m-empty".into()),
             content: "   \n\t".into(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
-            created_at: None,
-            elapsed_ms: None,
+            ..Default::default()
         };
         assert!(session_records_user_outline(&[record], 0).is_empty());
     }
@@ -1505,6 +1488,149 @@ mod chat_replay_tests {
             other => panic!("unexpected replay buffer: {other:?}"),
         }
     }
+
+    #[test]
+    fn replay_coalesces_non_adjacent_system_notices_and_preserves_settled() {
+        use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus};
+
+        let notice = |rev: u32, status: NoticeStatus, severity: NoticeSeverity, text: &str| {
+            ChatEvent::SystemNotice {
+                session_id: "s-replay".into(),
+                event_id: "retry-inc-1".into(),
+                part_id: "retry-inc-1:1:notice".into(),
+                kind: NoticeKind::Retry,
+                severity,
+                status,
+                revision: rev,
+                text: text.into(),
+                anchor_message_id: Some("a-anchor".into()),
+                anchor_part_id: None,
+                created_at: Some(1_000),
+            }
+        };
+
+        let mut log = ReplayLog::new(0);
+        assert_eq!(
+            push_chat_replay(
+                &mut log,
+                notice(
+                    1,
+                    NoticeStatus::Active,
+                    NoticeSeverity::Warning,
+                    "attempt 1/9"
+                )
+            ),
+            1
+        );
+        assert_eq!(
+            push_chat_replay(
+                &mut log,
+                ChatEvent::TextDelta {
+                    content: "partial".into(),
+                    message_id: Some("a-anchor".into()),
+                    part_id: Some("a-anchor:1:text".into()),
+                    part_seq: Some(1),
+                    part_rev: Some(1),
+                }
+            ),
+            2
+        );
+        // 非相邻同 event_id 通知必须原位合并，不能额外 append。
+        assert_eq!(
+            push_chat_replay(
+                &mut log,
+                notice(
+                    2,
+                    NoticeStatus::Settled,
+                    NoticeSeverity::Error,
+                    "retries exhausted"
+                )
+            ),
+            3
+        );
+        // 已被 Settled 的事件不允许被旧/滞后 Active 反向降级。
+        assert_eq!(
+            push_chat_replay(
+                &mut log,
+                notice(
+                    3,
+                    NoticeStatus::Active,
+                    NoticeSeverity::Warning,
+                    "stale active"
+                )
+            ),
+            4
+        );
+
+        assert_eq!(log.events.len(), 2, "same event_id must coalesce in place");
+        assert_eq!(log.events[0].0, 4, "coalesced slot advances replay cursor");
+        match &log.events[0].1 {
+            ChatEvent::SystemNotice {
+                revision,
+                status,
+                severity,
+                text,
+                anchor_message_id,
+                ..
+            } => {
+                assert_eq!(*revision, 2);
+                assert_eq!(*status, NoticeStatus::Settled);
+                assert_eq!(*severity, NoticeSeverity::Error);
+                assert_eq!(text, "retries exhausted");
+                assert_eq!(anchor_message_id.as_deref(), Some("a-anchor"));
+            }
+            other => panic!("expected SystemNotice at slot 0, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn display_record_notice_metadata_roundtrips_to_message_info() {
+        use jeikcode_capabilities::session::{DisplayRecord, DISPLAY_VERSION};
+        use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus};
+
+        let record = DisplayRecord {
+            v: DISPLAY_VERSION,
+            session_id: "s-meta".into(),
+            turn_id: 4,
+            index: 2,
+            seq: 9,
+            role: "assistant".into(),
+            id: Some("retry-inc-42".into()),
+            content: "stream stall (2/9)".into(),
+            internal_origin: Some("turn_diagnostic".into()),
+            created_at: Some(12_345),
+            event_id: Some("retry-inc-42".into()),
+            part_id: Some("retry-inc-42:1:notice".into()),
+            anchor_message_id: Some("a-42".into()),
+            anchor_part_id: Some("a-42:1:text".into()),
+            notice_kind: Some(NoticeKind::Timeout),
+            revision: Some(2),
+            severity: Some(NoticeSeverity::Warning),
+            status: Some(NoticeStatus::Active),
+            ..Default::default()
+        };
+
+        let info = display_record_to_message_info(&record);
+        let notice = info.notice.as_ref().expect("MessageInfo.notice preserved");
+        assert_eq!(notice.event_id.as_deref(), Some("retry-inc-42"));
+        assert_eq!(notice.part_id.as_deref(), Some("retry-inc-42:1:notice"));
+        assert_eq!(notice.anchor_message_id.as_deref(), Some("a-42"));
+        assert_eq!(notice.anchor_part_id.as_deref(), Some("a-42:1:text"));
+        assert_eq!(notice.notice_kind, Some(NoticeKind::Timeout));
+        assert_eq!(notice.revision, Some(2));
+        assert_eq!(notice.severity, Some(NoticeSeverity::Warning));
+        assert_eq!(notice.status, Some(NoticeStatus::Active));
+
+        let roundtrip = display_record_from_message_info("s-meta", 2, &info);
+        assert_eq!(roundtrip.event_id, record.event_id);
+        assert_eq!(roundtrip.part_id, record.part_id);
+        assert_eq!(roundtrip.anchor_message_id, record.anchor_message_id);
+        assert_eq!(roundtrip.anchor_part_id, record.anchor_part_id);
+        assert_eq!(roundtrip.notice_kind, record.notice_kind);
+        assert_eq!(roundtrip.revision, record.revision);
+        assert_eq!(roundtrip.severity, record.severity);
+        assert_eq!(roundtrip.status, record.status);
+    }
 }
 
 #[cfg(test)]
@@ -1639,15 +1765,8 @@ mod transcript_display_tests {
             role: role.into(),
             id: Some("m-1".into()),
             content: content.into(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
             created_at: Some(1),
-            elapsed_ms: None,
+            ..Default::default()
         }
     }
 
@@ -5492,74 +5611,142 @@ impl ReplayLog {
     fn push(&mut self, event: ChatEvent) -> u64 {
         self.next_seq = self.next_seq.saturating_add(1);
         let seq = self.next_seq;
-        let coalesced = match (&event, self.events.last_mut()) {
-            (
-                ChatEvent::TextDelta {
-                    content,
-                    message_id,
-                    part_id,
-                    part_rev,
+        // SystemNotice 必须按 event_id 在整段缓冲内原位合并：重试过程往往夹杂 TextDelta/ToolCall，
+        // 若仅检查 last_mut()，非相邻的进度修订会在重连回放时再次吐出多张卡。
+        let coalesced = if let ChatEvent::SystemNotice {
+            event_id,
+            revision,
+            status,
+            severity,
+            text,
+            part_id,
+            kind,
+            anchor_message_id,
+            anchor_part_id,
+            created_at,
+            ..
+        } = &event
+        {
+            if let Some((
+                prev_seq,
+                ChatEvent::SystemNotice {
+                    event_id: _,
+                    revision: prev_revision,
+                    status: prev_status,
+                    severity: prev_severity,
+                    text: prev_text,
+                    part_id: prev_part_id,
+                    kind: prev_kind,
+                    anchor_message_id: prev_anchor_message_id,
+                    anchor_part_id: prev_anchor_part_id,
+                    created_at: prev_created_at,
                     ..
                 },
-                Some((
-                    prev_seq,
+            )) = self.events.iter_mut().rev().find(|(_, candidate)| {
+                matches!(
+                    candidate,
+                    ChatEvent::SystemNotice { event_id: prev_id, .. } if prev_id == event_id
+                )
+            }) {
+                let prev_settled = *prev_status == jeikcode_kernel::event::NoticeStatus::Settled;
+                let incoming_settled = *status == jeikcode_kernel::event::NoticeStatus::Settled;
+                if (!prev_settled || incoming_settled) && *revision >= *prev_revision {
+                    *prev_revision = *revision;
+                    *prev_status = *status;
+                    *prev_severity = *severity;
+                    *prev_text = text.clone();
+                    *prev_part_id = part_id.clone();
+                    *prev_kind = *kind;
+                    if anchor_message_id.is_some() {
+                        *prev_anchor_message_id = anchor_message_id.clone();
+                    }
+                    if anchor_part_id.is_some() {
+                        *prev_anchor_part_id = anchor_part_id.clone();
+                    }
+                    if prev_created_at.is_none() {
+                        *prev_created_at = *created_at;
+                    }
+                }
+                *prev_seq = seq;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let coalesced = if coalesced {
+            true
+        } else {
+            match (&event, self.events.last_mut()) {
+                (
                     ChatEvent::TextDelta {
-                        content: prev,
-                        message_id: prev_message_id,
-                        part_id: prev_part_id,
-                        part_rev: prev_part_rev,
+                        content,
+                        message_id,
+                        part_id,
+                        part_rev,
                         ..
                     },
-                )),
-            ) if message_id == prev_message_id && part_id == prev_part_id => {
-                prev.push_str(content);
-                if part_rev.is_some() {
-                    *prev_part_rev = *part_rev;
+                    Some((
+                        prev_seq,
+                        ChatEvent::TextDelta {
+                            content: prev,
+                            message_id: prev_message_id,
+                            part_id: prev_part_id,
+                            part_rev: prev_part_rev,
+                            ..
+                        },
+                    )),
+                ) if message_id == prev_message_id && part_id == prev_part_id => {
+                    prev.push_str(content);
+                    if part_rev.is_some() {
+                        *prev_part_rev = *part_rev;
+                    }
+                    *prev_seq = seq;
+                    true
                 }
-                *prev_seq = seq;
-                true
-            }
-            (
-                ChatEvent::ReasoningDelta {
-                    content,
-                    message_id,
-                    part_id,
-                    part_rev,
-                    ..
-                },
-                Some((
-                    prev_seq,
+                (
                     ChatEvent::ReasoningDelta {
-                        content: prev,
-                        message_id: prev_message_id,
-                        part_id: prev_part_id,
-                        part_rev: prev_part_rev,
+                        content,
+                        message_id,
+                        part_id,
+                        part_rev,
                         ..
                     },
-                )),
-            ) if message_id == prev_message_id && part_id == prev_part_id => {
-                prev.push_str(content);
-                if part_rev.is_some() {
-                    *prev_part_rev = *part_rev;
+                    Some((
+                        prev_seq,
+                        ChatEvent::ReasoningDelta {
+                            content: prev,
+                            message_id: prev_message_id,
+                            part_id: prev_part_id,
+                            part_rev: prev_part_rev,
+                            ..
+                        },
+                    )),
+                ) if message_id == prev_message_id && part_id == prev_part_id => {
+                    prev.push_str(content);
+                    if part_rev.is_some() {
+                        *prev_part_rev = *part_rev;
+                    }
+                    *prev_seq = seq;
+                    true
                 }
-                *prev_seq = seq;
-                true
+                (
+                    ChatEvent::ToolOutputChunk { id, chunk },
+                    Some((
+                        prev_seq,
+                        ChatEvent::ToolOutputChunk {
+                            id: prev_id,
+                            chunk: prev,
+                        },
+                    )),
+                ) if id == prev_id => {
+                    prev.push_str(chunk);
+                    *prev_seq = seq;
+                    true
+                }
+                _ => false,
             }
-            (
-                ChatEvent::ToolOutputChunk { id, chunk },
-                Some((
-                    prev_seq,
-                    ChatEvent::ToolOutputChunk {
-                        id: prev_id,
-                        chunk: prev,
-                    },
-                )),
-            ) if id == prev_id => {
-                prev.push_str(chunk);
-                *prev_seq = seq;
-                true
-            }
-            _ => false,
         };
         if !coalesced {
             self.events.push((seq, event));
@@ -6188,6 +6375,29 @@ pub struct ToolResultInfo {
     pub line_count: usize,
 }
 
+/// Structured notice sidecar attached to `turn_diagnostic` display records
+/// so WebUI cold loads and live SSE/WS deltas share identical card identity,
+/// causal anchor, severity and settled status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageNoticeInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_kind: Option<jeikcode_kernel::event::NoticeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<jeikcode_kernel::event::NoticeSeverity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<jeikcode_kernel::event::NoticeStatus>,
+}
+
 /// Message info for API response
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct MessageInfo {
@@ -6271,6 +6481,8 @@ pub struct MessageInfo {
     /// span) so refresh / session switch still shows the live "用时" total.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<MessageNoticeInfo>,
 }
 
 /// Serializable image payload returned in session history.
@@ -6440,6 +6652,7 @@ impl MessageInfo {
             images,
             created_at: (msg.created_at_ms > 0).then_some(msg.created_at_ms),
             elapsed_ms: msg.meta.as_ref().map(|m| m.elapsed_ms).filter(|&ms| ms > 0),
+            notice: None,
         }
     }
 }
@@ -8392,11 +8605,9 @@ fn build_session_detail_response(
                 None
             } else {
                 read_display_cached(&display_manager, &session.meta.id).filter(|(meta, records)| {
-                    if meta.v == jeikcode_capabilities::session::DISPLAY_VERSION {
-                        // v4 normal path: exact prompt-identity coverage; no text
-                        // reconciliation. A gap (including a dropped tail whose
-                        // turn id was reused after a rewind) falls through to the
-                        // one-time canonical rebuild below.
+                    if matches!(meta.v, 4 | jeikcode_capabilities::session::DISPLAY_VERSION) {
+                        // v4/v5 normal path: exact prompt-identity coverage; v4 rows
+                        // are normalized in read_display and upgraded lazily below.
                         meta.complete
                             && v4_display_covers_completed_user_turns(
                                 meta,
@@ -9467,6 +9678,25 @@ fn display_record_to_message_info(
                 Some("transcript_archive") | Some("presentation") | Some("pending_input")
             )
     });
+    let notice = (record.internal_origin.as_deref() == Some("turn_diagnostic")
+        || record.notice_kind.is_some()
+        || record.event_id.is_some())
+    .then(|| {
+        let eid = record.event_id.clone().or_else(|| record.id.clone());
+        MessageNoticeInfo {
+            part_id: record
+                .part_id
+                .clone()
+                .or_else(|| eid.as_ref().map(|id| format!("{id}:1:notice"))),
+            event_id: eid,
+            anchor_message_id: record.anchor_message_id.clone(),
+            anchor_part_id: record.anchor_part_id.clone(),
+            notice_kind: record.notice_kind,
+            revision: record.revision,
+            severity: record.severity,
+            status: record.status,
+        }
+    });
     message_info! {
         turn_id: (record.turn_id > 0).then_some(record.turn_id),
         seq: (record.seq > 0).then_some(record.seq),
@@ -9485,6 +9715,7 @@ fn display_record_to_message_info(
         images,
         created_at: record.created_at,
         elapsed_ms: record.elapsed_ms,
+        notice,
     }
 }
 
@@ -9637,6 +9868,20 @@ fn display_record_from_message_info(
             .unwrap_or_default(),
         created_at: message.created_at,
         elapsed_ms: message.elapsed_ms,
+        event_id: message.notice.as_ref().and_then(|n| n.event_id.clone()),
+        part_id: message.notice.as_ref().and_then(|n| n.part_id.clone()),
+        anchor_message_id: message
+            .notice
+            .as_ref()
+            .and_then(|n| n.anchor_message_id.clone()),
+        anchor_part_id: message
+            .notice
+            .as_ref()
+            .and_then(|n| n.anchor_part_id.clone()),
+        notice_kind: message.notice.as_ref().and_then(|n| n.notice_kind),
+        revision: message.notice.as_ref().and_then(|n| n.revision),
+        severity: message.notice.as_ref().and_then(|n| n.severity),
+        status: message.notice.as_ref().and_then(|n| n.status),
     }
 }
 
@@ -12268,6 +12513,24 @@ pub enum ChatEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_at: Option<u64>,
     },
+    /// 统一结构化系统通知：同 `event_id` 按 `revision` 原地更新并按 `anchor_message_id` 就位。
+    #[serde(rename = "system_notice")]
+    SystemNotice {
+        session_id: String,
+        event_id: String,
+        part_id: String,
+        kind: jeikcode_kernel::event::NoticeKind,
+        severity: jeikcode_kernel::event::NoticeSeverity,
+        status: jeikcode_kernel::event::NoticeStatus,
+        revision: u32,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<u64>,
+    },
     /// Auxiliary session persistence failed. Clients must display this outside
     /// the assistant message timeline.
     #[serde(rename = "persistence_warning")]
@@ -12289,6 +12552,8 @@ pub enum ChatEvent {
         /// 同 `Warning`：提示所属的 assistant 消息 id，供客户端定向挂载与重放去重。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<String>,
     },
     /// 连接建立时的权威运行状态：非 standby 重连若发现回合已空闲且无终态重放，直接收敛。
     #[serde(rename = "state")]
@@ -13927,6 +14192,9 @@ struct ChatRuntimeProjector {
     partial_last_save: Option<std::time::Instant>,
     partial_bytes_since_save: usize,
     partial_tools: Vec<jeikcode_capabilities::session::PartialToolCall>,
+    /// 最近一次已通过 `SystemNotice` 收口或等待限流的元数据，防止重复卡片与双写。
+    last_settled_notice_text: Option<String>,
+    pending_rate_limit_notice: Option<(String, Option<String>)>,
 }
 
 impl Default for ChatRuntimeProjector {
@@ -13953,14 +14221,14 @@ impl Default for ChatRuntimeProjector {
             partial_last_save: None,
             partial_bytes_since_save: 0,
             partial_tools: Vec::new(),
+            last_settled_notice_text: None,
+            pending_rate_limit_notice: None,
         }
     }
 }
 
-/// 保证在压缩改写 `snapshot.json` 或追加独立显示通知之前，会话的 v4 `display.jsonl`
-/// 已经完整落地。若该会话此前因 `/undo`、编辑、删除或旧格式导入而缺少完整 v4 日志，
-/// 直接调 `append_display_notice` 会返回 `Ok(None)`，导致压缩标记既写不进磁盘、
-/// 也不会广播给其它实例。
+/// 保证在压缩改写 `snapshot.json` 或追加独立显示通知之前，会话的 v5/v4 `display.jsonl`
+/// 已经完整落地。
 pub(crate) fn ensure_v4_display_for_session(
     manager: &NativeSessionManager,
     loaded: &jeikcode_capabilities::session::LoadedSession,
@@ -13978,7 +14246,7 @@ pub(crate) fn ensure_v4_display_for_session(
         .ok()
         .flatten()
         .is_some_and(|(meta, records)| {
-            meta.v == jeikcode_capabilities::session::DISPLAY_VERSION
+            matches!(meta.v, 4 | jeikcode_capabilities::session::DISPLAY_VERSION)
                 && meta.complete
                 && v4_display_covers_completed_user_turns(
                     &meta,
@@ -14009,33 +14277,6 @@ pub(crate) fn ensure_v4_display_for_session(
         .map(|(index, message)| display_record_from_message_info(&loaded.meta.id, index, message))
         .collect();
     let _ = manager.write_display_backfill(&loaded.meta.id, &records, snapshot_last_turn);
-}
-
-pub(crate) fn persist_session_display_notice(
-    session_id: &str,
-    message: &str,
-    notice_id: Option<String>,
-) -> Option<jeikcode_capabilities::session::DisplayRecord> {
-    if session_id.trim().is_empty() || message.trim().is_empty() {
-        return None;
-    }
-    let resolved = resolve_session_by_id(session_id).ok().flatten()?;
-    let mgr = NativeSessionManager::with_root(
-        NativeSessionManager::sessions_root().join(&resolved.project_hash),
-    );
-    if let Ok(loaded) = mgr.load_native_session(&resolved.meta.id) {
-        ensure_v4_display_for_session(&mgr, &loaded);
-    }
-    let record = mgr
-        .append_display_notice(&resolved.meta.id, message, notice_id)
-        .ok()
-        .flatten();
-    if record.is_some() {
-        publish_global(GlobalWireEvent::DisplayAppended {
-            session_id: resolved.meta.id,
-        });
-    }
-    record
 }
 
 impl ChatRuntimeProjector {
@@ -14163,34 +14404,14 @@ impl ChatRuntimeProjector {
             CodingRuntimeEvent::CompactionFinished {
                 completion: CompactionCompletion::Completed(outcome),
             } if outcome.committed => {
-                // Clear the driver's "compacting" status (the kernel announced it for
-                // every pass) and refresh the footer meter with the post-compaction size.
+                // 压缩阶段结束且刷新页脚上下文计数；压缩边界通知卡片由 kernel 紧随
+                // 发出的 AgentEvent::SystemNotice 与 DisplayHook 单入口共同承担，避免双写。
                 crate::finish_compaction_phase(
                     permission_session_id,
                     crate::COMPACTION_OWNER_TURN,
                     true,
                 );
-                let mark = jeikcode_config::i18n::format_compaction_mark(
-                    outcome.removed_messages,
-                    outcome.estimated_tokens_before,
-                    outcome.estimated_tokens_after,
-                );
-                let notice_event =
-                    match persist_session_display_notice(permission_session_id, &mark, None) {
-                        Some(record) => ChatEvent::DisplayNotice {
-                            session_id: permission_session_id.to_string(),
-                            id: record.id.unwrap_or_default(),
-                            display_seq: record.seq,
-                            text: record.content,
-                            created_at: record.created_at,
-                        },
-                        None => ChatEvent::Warning {
-                            message: mark,
-                            message_id: self.notice_anchor(),
-                        },
-                    };
                 vec![
-                    notice_event,
                     ChatEvent::ContextCompacted {
                         session_id: permission_session_id.to_string(),
                         tokens: outcome.estimated_tokens_after as u32,
@@ -14700,43 +14921,69 @@ impl ChatRuntimeProjector {
                     cached,
                 }]
             }
+            Agent::SystemNotice(notice) => {
+                if notice.kind == jeikcode_kernel::event::NoticeKind::RateLimit {
+                    // 限流由紧随其后的 Agent::RateLimited 结合 WebUI 本地化文案统一出卡，
+                    // 在此暂存 event_id 与因果锚点，避免实时阶段出现两张卡。
+                    self.pending_rate_limit_notice =
+                        Some((notice.event_id, notice.anchor_message_id));
+                    return Vec::new();
+                }
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Settled {
+                    self.last_settled_notice_text = Some(notice.text.trim().to_string());
+                }
+                vec![ChatEvent::SystemNotice {
+                    session_id: session_id.to_string(),
+                    event_id: notice.event_id,
+                    part_id: notice.part_id,
+                    kind: notice.kind,
+                    severity: notice.severity,
+                    status: notice.status,
+                    revision: notice.revision,
+                    text: notice.text,
+                    anchor_message_id: notice.anchor_message_id.or_else(|| self.notice_anchor()),
+                    anchor_part_id: notice.anchor_part_id,
+                    created_at: None,
+                }]
+            }
             Agent::Error { message, .. } => {
                 self.last_error = Some(message.clone());
                 // Agent errors are diagnostics until the runtime emits TurnFinished.
-                // Emitting a terminal HTTP error here would create Error + Done for one turn.
+                // 若前面已有同文 Settled SystemNotice 收口，则不再额外发第二张 Warning 卡。
+                if self.last_settled_notice_text.as_deref() == Some(message.trim()) {
+                    return Vec::new();
+                }
                 vec![ChatEvent::Warning {
                     message,
                     message_id: self.notice_anchor(),
                 }]
             }
             Agent::RetryNotice {
-                notice_id, message, ..
-            } => {
-                // 重试进度是可落盘的：同 `notice_id` 每次尝试更新一条记录，
-                // 客户端按 id 原地替换；刷新后由账本最后一条恢复。
-                match persist_session_display_notice(session_id, &message, Some(notice_id.clone()))
-                {
-                    Some(record) => vec![ChatEvent::DisplayNotice {
-                        session_id: session_id.to_string(),
-                        id: record.id.unwrap_or(notice_id),
-                        display_seq: record.seq,
-                        text: record.content,
-                        created_at: record.created_at,
-                    }],
-                    None => vec![ChatEvent::Warning {
-                        message,
-                        message_id: self.notice_anchor(),
-                    }],
-                }
-            }
+                notice_id,
+                part_id,
+                message,
+                attempt,
+                ..
+            } => vec![ChatEvent::SystemNotice {
+                session_id: session_id.to_string(),
+                event_id: notice_id,
+                part_id,
+                kind: jeikcode_kernel::event::NoticeKind::Retry,
+                severity: jeikcode_kernel::event::NoticeSeverity::Warning,
+                status: jeikcode_kernel::event::NoticeStatus::Active,
+                revision: attempt.max(1),
+                text: message,
+                anchor_message_id: self.notice_anchor(),
+                anchor_part_id: None,
+                created_at: None,
+            }],
             Agent::Warning(message) => {
-                // Liveness / retry advisories are TRANSIENT: they belong to the
-                // live turn, not the durable transcript. Persisting them here put
-                // them at the end of display.jsonl (assistant rounds are flushed
-                // only at turn_complete), where every later refresh rendered
-                // them below the final answer. Keep only the live wire event;
-                // durable boundary notices use `Compacted`/`DisplayNotice`.
                 let localized = localize_agent_warning(&message);
+                if self.last_settled_notice_text.as_deref() == Some(message.trim())
+                    || self.last_settled_notice_text.as_deref() == Some(localized.trim())
+                {
+                    return Vec::new();
+                }
                 vec![ChatEvent::Warning {
                     message: localized,
                     message_id: self.notice_anchor(),
@@ -14748,14 +14995,22 @@ impl ChatRuntimeProjector {
                 secs_until_reset,
                 auto_resuming,
                 server_message,
-            } => vec![ChatEvent::RateLimited {
-                reset_at_display,
-                reset_label,
-                secs_until_reset,
-                auto_resuming,
-                server_message,
-                message_id: self.notice_anchor(),
-            }],
+            } => {
+                let (event_id, anchor) = self
+                    .pending_rate_limit_notice
+                    .take()
+                    .map(|(id, a)| (Some(id), a))
+                    .unwrap_or((None, None));
+                vec![ChatEvent::RateLimited {
+                    reset_at_display,
+                    reset_label,
+                    secs_until_reset,
+                    auto_resuming,
+                    server_message,
+                    message_id: anchor.or_else(|| self.notice_anchor()),
+                    event_id,
+                }]
+            }
             Agent::Steered { count, inputs } => {
                 let anchor_message_id = self.current_message_id.clone();
                 let mut events = Vec::new();
@@ -14787,36 +15042,19 @@ impl ChatRuntimeProjector {
                 }]
             }
             Agent::Compacted {
-                removed,
-                bytes_before,
                 bytes_after,
                 committed: true,
                 ..
             } => {
                 crate::finish_compaction_phase(session_id, crate::COMPACTION_OWNER_TURN, true);
-                let est_before = (bytes_before as f32 / 3.5).ceil() as usize;
                 let est_after = (bytes_after as f32 / 3.5).ceil() as usize;
-                let mark =
-                    jeikcode_config::i18n::format_compaction_mark(removed, est_before, est_after);
-                let notice_event = match persist_session_display_notice(session_id, &mark, None) {
-                    Some(record) => ChatEvent::DisplayNotice {
-                        session_id: session_id.to_string(),
-                        id: record.id.unwrap_or_default(),
-                        display_seq: record.seq,
-                        text: record.content,
-                        created_at: record.created_at,
-                    },
-                    None => ChatEvent::Warning {
-                        message: mark,
-                        message_id: self.notice_anchor(),
-                    },
-                };
+                // 边界通知卡由紧随其后的 Agent::SystemNotice 与 DisplayHook 单入口负责，
+                // 不再双写账本或发重复通知卡。
                 vec![
                     ChatEvent::SessionStatus {
                         session_id: session_id.to_string(),
                         status: "running".to_string(),
                     },
-                    notice_event,
                     ChatEvent::ContextCompacted {
                         session_id: session_id.to_string(),
                         tokens: est_after as u32,
@@ -14852,8 +15090,7 @@ impl ChatRuntimeProjector {
             | Agent::Request { .. }
             | Agent::Snapshot { .. }
             | Agent::TurnComplete { .. }
-            | Agent::Cancelled
-            | Agent::Compacted { .. } => Vec::new(),
+            | Agent::Cancelled => Vec::new(),
             _ => Vec::new(),
         }
     }
@@ -26240,6 +26477,7 @@ mod tests {
             auto_resuming: false,
             server_message: None,
             message_id: None,
+            event_id: None,
         })
         .unwrap();
         // auto_resuming=false serializes as false (not omitted, since serde(default) only affects deserialization)
@@ -26549,15 +26787,7 @@ mod tests {
             role: "user".into(),
             id: Some(id.into()),
             content: id.into(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
-            created_at: None,
-            elapsed_ms: None,
+            ..Default::default()
         }
     }
 
@@ -27630,15 +27860,8 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
                 role: "user".into(),
                 id: None,
                 content: "DISPLAY ONLY Q".into(),
-                reasoning: None,
-                synthetic: false,
-                internal_origin: None,
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                is_error: false,
-                images: Vec::new(),
                 created_at: Some(1),
-                elapsed_ms: None,
+                ..Default::default()
             },
             DisplayRecord {
                 v: DISPLAY_VERSION,
@@ -27649,15 +27872,8 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
                 role: "assistant".into(),
                 id: None,
                 content: "DISPLAY ONLY A".into(),
-                reasoning: None,
-                synthetic: false,
-                internal_origin: None,
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                is_error: false,
-                images: Vec::new(),
                 created_at: Some(2),
-                elapsed_ms: None,
+                ..Default::default()
             },
         ];
         manager.write_display_backfill(id, &records, 0).unwrap();
@@ -28721,6 +28937,7 @@ mod v4_coverage_tests {
                 images: Vec::new(),
                 created_at: Some(1),
                 elapsed_ms: None,
+                ..Default::default()
             }
         }
 
@@ -28864,6 +29081,7 @@ mod v4_coverage_tests {
                 images: Vec::new(),
                 created_at: Some(index as u64),
                 elapsed_ms: None,
+                ..Default::default()
             })
             .collect();
         manager.write_display_backfill("s1", &rows, 1000).unwrap();
@@ -28922,6 +29140,7 @@ mod v4_coverage_tests {
                 images: Vec::new(),
                 created_at: Some(index as u64),
                 elapsed_ms: None,
+                ..Default::default()
             })
             .collect();
         manager.write_display_backfill(id, &rows, 50).unwrap();

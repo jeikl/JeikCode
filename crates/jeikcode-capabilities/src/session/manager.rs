@@ -5285,15 +5285,8 @@ mod tests {
             role: role.into(),
             id: Some(id.into()),
             content: content.into(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
             created_at: Some(1),
-            elapsed_ms: None,
+            ..DisplayRecord::default()
         };
         mgr.write_display_backfill(
             "s1",

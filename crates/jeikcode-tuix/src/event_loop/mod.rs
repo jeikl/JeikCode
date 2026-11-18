@@ -18081,6 +18081,15 @@ fn project_kernel_event(
             snapshot: jeikcode_kernel::message::SessionSnapshot::new(Vec::new()),
         }),
         Kernel::Warning(message) => Some(AgentEvent::Warning(message)),
+        Kernel::SystemNotice(notice) => {
+            if notice.status == jeikcode_kernel::event::NoticeStatus::Settled
+                && notice.severity == jeikcode_kernel::event::NoticeSeverity::Error
+            {
+                None
+            } else {
+                Some(AgentEvent::Warning(notice.text))
+            }
+        }
         Kernel::RateLimited {
             reset_at_display,
             reset_label,

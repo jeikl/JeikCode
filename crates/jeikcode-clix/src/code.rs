@@ -23,7 +23,7 @@ use jeikcode_coding::{
     CodingRuntimeStart, DefaultCodingProviderFactory, PrepareOptions, SessionMode,
     StaticPluginHookSource, TurnCompletion, UserInput,
 };
-use jeikcode_kernel::event::{AgentEvent, StopReason};
+use jeikcode_kernel::event::{AgentEvent, NoticeSeverity, NoticeStatus, StopReason};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
@@ -426,6 +426,12 @@ async fn drive_turn(
                 eprintln!("\n[error] {message}")
             }
             CodingRuntimeEvent::Agent(AgentEvent::Warning(w)) => eprintln!("[warn] {w}"),
+            CodingRuntimeEvent::Agent(AgentEvent::SystemNotice(n))
+                if n.status != jeikcode_kernel::event::NoticeStatus::Settled
+                    || n.severity != jeikcode_kernel::event::NoticeSeverity::Error =>
+            {
+                eprintln!("[warn] {}", n.text)
+            }
             CodingRuntimeEvent::CompactionStarted { trigger } => {
                 // The kernel fires this ONLY when a real drain/summary (a multi-second
                 // LLM call) will run — manual `/compact`, overflow tier 2, OR an auto

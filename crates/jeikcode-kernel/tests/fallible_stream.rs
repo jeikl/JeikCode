@@ -152,6 +152,11 @@ async fn mid_stream_transport_drop_resumes_and_completes() {
     let mut completed = false;
     while let Some(ev) = events.recv().await {
         match ev {
+            jeikcode_kernel::event::AgentEvent::SystemNotice(ref notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                notices += 1
+            }
             AgentEvent::RetryNotice { .. } => notices += 1,
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::Error { message, .. } => error_msg = Some(message),
@@ -462,6 +467,11 @@ async fn retryable_open_failure_retries_visibly_then_succeeds() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            AgentEvent::SystemNotice(ref notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                notices += 1
+            }
             AgentEvent::RetryNotice { .. } => notices += 1,
             AgentEvent::Error { .. } => errored = true,
             AgentEvent::TurnComplete { reason } => {
@@ -576,6 +586,11 @@ async fn empty_response_is_retried_then_succeeds() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            jeikcode_kernel::event::AgentEvent::SystemNotice(notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                warnings.push(notice.text)
+            }
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::Error { .. } => errored = true,
             AgentEvent::TurnComplete { reason } => {
@@ -640,6 +655,11 @@ async fn thinking_only_stream_is_retried_then_succeeds() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            jeikcode_kernel::event::AgentEvent::SystemNotice(notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                warnings.push(notice.text)
+            }
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::TurnComplete { reason } => {
                 stop = Some(format!("{reason:?}"));
@@ -698,6 +718,11 @@ async fn whitespace_only_stream_is_retried_then_succeeds() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            jeikcode_kernel::event::AgentEvent::SystemNotice(notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                warnings.push(notice.text)
+            }
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::Error { .. } => errored = true,
             AgentEvent::TurnComplete { reason } => {
@@ -759,6 +784,13 @@ async fn empty_response_exhaustion_fails_visibly() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) if w.contains("空响应") || w.contains("empty response") => {
+                retry_notices += 1
+            }
+            jeikcode_kernel::event::AgentEvent::SystemNotice(ref notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active
+                    && (notice.text.contains("空响应")
+                        || notice.text.contains("empty response")) =>
+            {
                 retry_notices += 1
             }
             AgentEvent::Error { message, .. } => error_msg = Some(message),
@@ -826,6 +858,11 @@ async fn malformed_response_retried_with_distinct_notice() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            jeikcode_kernel::event::AgentEvent::SystemNotice(notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                warnings.push(notice.text)
+            }
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::TurnComplete { reason } => {
                 stop = Some(format!("{reason:?}"));

@@ -4512,6 +4512,21 @@ body {
   color: var(--app-warning-accent);
 }
 
+/* Error variant */
+.msg-notice-card.is-error {
+  border-color: color-mix(in srgb, var(--app-error-foreground, #ef4444) 30%, var(--app-border, rgba(255, 255, 255, 0.08)));
+}
+
+.msg-notice-card.is-error .msg-notice-icon-wrapper {
+  background: color-mix(in srgb, var(--app-error-foreground, #ef4444) 16%, transparent);
+  color: var(--app-error-foreground, #ef4444);
+}
+
+/* Active in-progress pulse indicator */
+.msg-notice-card.is-active .msg-notice-icon-wrapper {
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
 /* Success variant */
 .msg-notice-card.is-success .msg-notice-icon-wrapper {
   background: color-mix(in srgb, var(--app-success-foreground) 15%, transparent);

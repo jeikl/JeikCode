@@ -665,6 +665,31 @@ export interface SeqTaggedFrame {
   replay?: boolean;
 }
 
+export type NoticeKind =
+  | 'retry'
+  | 'timeout'
+  | 'rate_limit'
+  | 'compaction'
+  | 'truncation'
+  | 'command'
+  | 'error'
+  | 'warning';
+
+export type NoticeSeverity = 'info' | 'warning' | 'error';
+
+export type NoticeStatus = 'active' | 'settled';
+
+export interface MessageNoticeInfo {
+  event_id?: string;
+  part_id?: string;
+  anchor_message_id?: string;
+  anchor_part_id?: string;
+  notice_kind?: NoticeKind;
+  revision?: number;
+  severity?: NoticeSeverity;
+  status?: NoticeStatus;
+}
+
 export type SSEEvent =
   | { type: 'runtime_info'; provider: string; model: string }
   | { type: 'session_assigned'; session_id: string }
@@ -697,8 +722,31 @@ export type SSEEvent =
   /** 已落盘的显示通知（如手动压缩边界）：带显示日志的权威 `id`/`display_seq`，
    *  各端按同一序号摆成独立 system 行。 */
   | { type: 'display_notice'; session_id?: string; id: string; display_seq: number; text: string; created_at?: number }
+  | {
+      type: 'system_notice';
+      session_id?: string;
+      event_id: string;
+      part_id: string;
+      kind: NoticeKind;
+      severity: NoticeSeverity;
+      status: NoticeStatus;
+      revision: number;
+      text: string;
+      anchor_message_id?: string;
+      anchor_part_id?: string;
+      created_at?: number;
+    }
   | { type: 'persistence_warning'; message: string }
-  | { type: 'rate_limited'; reset_at_display: string; reset_label: string; secs_until_reset: number | null; auto_resuming: boolean; server_message?: string | null; message_id?: string }
+  | {
+      type: 'rate_limited';
+      reset_at_display: string;
+      reset_label: string;
+      secs_until_reset: number | null;
+      auto_resuming: boolean;
+      server_message?: string | null;
+      message_id?: string;
+      event_id?: string;
+    }
   // Artifact events: the daemon's ArtifactDetector strips fenced code blocks from
   // TextDelta and emits them as separate artifact_start / artifact_content / artifact_end
   // events (see ArtifactDetector in crates/jeikcode-daemon/src/lib.rs). Without handling
@@ -1645,6 +1693,8 @@ export interface SessionMessage {
   /** Whole user-turn wall-clock duration in ms (user send → final answer).
    *  Survives refresh / session switch. Not a single LLM round. */
   elapsed_ms?: number;
+  /** v5 结构化显示通知元数据（事件 id / 因果锚点 / 状态与修订号）。 */
+  notice?: MessageNoticeInfo;
 }
 
 export interface SessionTurnOutline {

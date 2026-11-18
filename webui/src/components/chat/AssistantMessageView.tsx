@@ -325,7 +325,14 @@ function renderAssistantParts(parts: MsgPart[], search: string, cwd?: string): V
       i++;
     } else if (p.kind === 'notice') {
       out.push(
-        <NoticeCard key={`nt-${i}`} text={p.text} search={search} />,
+        <NoticeCard
+          key={`nt-${i}`}
+          text={p.text}
+          kind={p.noticeKind}
+          severity={p.severity}
+          status={p.status}
+          search={search}
+        />,
       );
       i++;
     } else if (p.kind === 'rate_limited') {

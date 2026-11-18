@@ -1607,37 +1607,9 @@ export function paintAssistantNotice<T extends ProjectionMessage>(
  * 继续排在它后面 —— 用户看到的就是「这条提示带到以后所有模型回答的下面」。
  * 所以落缓存前统一剥掉；需要时由当前轮自己的事件重新生成。
  */
-/** 旧版本曾把“停止确认 / 发送被阻止”等输入态提示写进系统行。
- *  它们不是历史：即使后来补上了 id + seq，也必须在缓存读写时剥掉，
- *  否则会永远粘在最新回答下面。
- *
- *  只匹配旧版已经落缓存的文案前缀（当前版本已改为 toast，不再产生新行），
- *  不参与任何实时路由判定。 */
-const TRANSIENT_ADVISORY_MARKERS = [
-  '正在重试',
-  '秒后重试',
-  '正在重连',
-  '只返回了思考',
-  '空响应',
-  '响应格式异常',
-  '上下文水位',
-  '上下文已溢出',
-  'retrying',
-  'only reasoning',
-  'empty response',
-  'malformed response',
-  'stream idle timeout',
-  'context watermark',
-  'context overflow',
-] as const;
-
-/** True for legacy persisted retry/liveness advisories that must never be
- *  re-projected as transcript rows after a reload. New advisories are live-only. */
-export function isTransientAdvisoryText(text: string): boolean {
-  const value = text.trim().toLowerCase();
-  if (!value) return false;
-  return TRANSIENT_ADVISORY_MARKERS.some((marker) => value.includes(marker));
-}
+/** 旧版曾把“停止确认 / 发送被阻止”等本地输入态提示写进系统行。
+ *  清理缓存时，不再按重试/超时的多语言文本关键词瞎猜（那会让权威事件卡被误删
+ *  或因翻译变化漏删），改为严格依据结构化持久化与生命周期契约判别。 */
 
 const EPHEMERAL_ADVISORY_PREFIXES = [
   '已请求停止当前回合',
@@ -1683,18 +1655,17 @@ export function stripTransientNoticeRows<
       continue;
     }
     const parts = row.parts ?? [];
-    // Rate-limit cards and retry/liveness advisories are live-turn feedback;
-    // they must never survive a cache round-trip. However explicit persisted
-    // ledger notices (`persistent: true && !transient`) are authoritative and
-    // must never be dropped by legacy keyword heuristics.
+    const hasStructuredEvent = parts.some(
+      (part) => part.kind === 'notice' && typeof part.eventId === 'string' && part.eventId.length > 0,
+    );
     const preserveAuthoritativeNotice =
-      row.role === 'system' && row.persistent === true && row.transient !== true;
+      row.role === 'system' && (row.persistent === true || hasStructuredEvent) && row.transient !== true;
     const cleanedParts = parts.filter((part) => {
       if (part.kind === 'rate_limited') return false;
       if (
         !preserveAuthoritativeNotice &&
         part.kind === 'notice' &&
-        (isEphemeralAdvisoryText(part.text ?? '') || isTransientAdvisoryText(part.text ?? ''))
+        isEphemeralAdvisoryText(part.text ?? '')
       ) {
         return false;
       }
@@ -1708,23 +1679,33 @@ export function stripTransientNoticeRows<
       : ({ ...row, parts: cleanedParts } as T);
     if (nextRow.role !== 'system') {
       // An assistant row that only carried a transient advisory is not an answer.
-      if (cleanedParts.length === 0 && parts.length > 0) continue;
+      if (cleanedParts.length === 0 && parts.length > 0) {
+        changed = true;
+        continue;
+      }
       out.push(nextRow);
       continue;
     }
-    if (cleanedParts.length === 0) continue;
-    if (nextRow.persistent === true) {
+    if (cleanedParts.length === 0) {
+      changed = true;
+      continue;
+    }
+    if (preserveAuthoritativeNotice) {
       out.push(nextRow);
       continue;
     }
-    if (nextRow.transient === true) continue;
-    // Legacy rows had id+seq but no durability marker. A notice-only system
-    // row is an advisory, not a transcript record: drop it. Authoritative
-    // boundaries are reloaded from display.jsonl and carry `persistent`.
+    if (nextRow.transient === true) {
+      changed = true;
+      continue;
+    }
+    // Legacy rows had id+seq but no durability marker (`persistent`) and no v5 `eventId`.
     const onlyTransient = cleanedParts.every(
       (part) => part.kind === 'notice' || part.kind === 'rate_limited',
     );
-    if (onlyTransient) continue;
+    if (onlyTransient) {
+      changed = true;
+      continue;
+    }
     out.push(nextRow);
   }
   return changed ? out : rows;
@@ -1757,12 +1738,42 @@ function withLocalOnlyParts<T extends { id?: string }>(row: T, canvasById: Map<s
   return { ...row, parts: [...diskParts, ...missing] };
 }
 
-/** 本地通知行（命令输出 / 压缩标记）在画布中的插入位置：钉在创建时的锚点之后，绝不越过未落盘的新轮次。 */
-function localNoticeInsertIndex<T extends { id?: string; sourceIndex?: number }>(
+/** 本地通知行（命令输出 / 压缩标记 / 系统事件）在画布中的插入位置：
+ *  优先按 `anchorMessageId` 钉在真实因果锚点之后，绝不越过未落盘的新轮次；
+ *  仅当旧数据缺少锚点时才回退 `seq` 序。 */
+function localNoticeInsertIndex<T extends { id?: string; clientInputId?: string; role?: string; parts?: MsgPart[]; sourceIndex?: number }>(
   rows: T[],
-  notice: { seq?: number },
+  notice: { seq?: number; parts?: MsgPart[] },
   maxIndex: number,
 ): number {
+  const anchorId = notice.parts?.find(
+    (part): part is Extract<MsgPart, { kind: 'notice' }> => part.kind === 'notice',
+  )?.anchorMessageId;
+  if (anchorId) {
+    const anchorIdx = rows.findIndex(
+      (row, index) =>
+        index < maxIndex &&
+        (row.id === anchorId ||
+          row.clientInputId === anchorId ||
+          (row.role === 'assistant' &&
+            (row.parts ?? []).some(
+              (p) => 'id' in p && typeof p.id === 'string' && p.id.startsWith(`${anchorId}:`),
+            ))),
+    );
+    if (anchorIdx >= 0) {
+      let at = anchorIdx + 1;
+      while (
+        at < maxIndex &&
+        rows[at]?.role === 'system' &&
+        (rows[at]?.parts ?? []).some(
+          (p) => p.kind === 'notice' && p.anchorMessageId === anchorId,
+        )
+      ) {
+        at += 1;
+      }
+      return at;
+    }
+  }
   if (typeof notice.seq !== 'number') return maxIndex;
   const next = rows.findIndex(
     (row) => typeof (row as { seq?: number }).seq === 'number'

@@ -2043,6 +2043,24 @@ pub(crate) enum LiveWireEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         created_at: Option<u64>,
     },
+    /// 统一结构化系统通知：同 `event_id` 按 `revision` 原地刷新，按 `anchor_message_id` 因果落位。
+    #[serde(rename = "system_notice")]
+    SystemNotice {
+        session_id: String,
+        event_id: String,
+        part_id: String,
+        kind: jeikcode_kernel::event::NoticeKind,
+        severity: jeikcode_kernel::event::NoticeSeverity,
+        status: jeikcode_kernel::event::NoticeStatus,
+        revision: u32,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<u64>,
+    },
     /// One or more live inputs were folded into the active turn. The exact
     /// payload lets browser clients acknowledge their FIFO pending-steer UI
     /// without guessing from text deltas or turn terminals.
@@ -2069,6 +2087,9 @@ pub(crate) enum LiveWireEvent {
     /// path display + session-list filter to follow. Carries the absolute path.
     #[serde(rename = "working_dir")]
     WorkingDir { working_dir: String },
+    /// 压缩后通知前端立即刷新上下文计数。
+    #[serde(rename = "context_compacted")]
+    ContextCompacted { session_id: String, tokens: u32 },
     /// Rate-limit hit: provider has throttled requests. Carries display-ready reset
     /// time and label so the webui can render a countdown notice instead of a generic error.
     #[serde(rename = "rate_limited")]
@@ -2086,6 +2107,8 @@ pub(crate) enum LiveWireEvent {
         /// 与 `Warning` 相同的回合锚点：限流提示属于发生限流的那一轮。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<String>,
     },
 }
 
@@ -2098,6 +2121,9 @@ struct NativeLiveWireProjector {
     current_message_id: Option<String>,
     part_seq: u32,
     last_part_kind: Option<String>,
+    /// 最近一次已通过 `SystemNotice` 收口或等待限流的元数据，防止同文重复卡片。
+    last_settled_notice_text: Option<String>,
+    pending_rate_limit_notice: Option<(String, Option<String>)>,
 }
 
 impl NativeLiveWireProjector {
@@ -2287,7 +2313,6 @@ impl NativeLiveWireProjector {
                     cached: meta.tokens.cached as usize,
                 },
                 Kernel::Compacted {
-                    removed,
                     bytes_before,
                     bytes_after,
                     committed: true,
@@ -2298,20 +2323,13 @@ impl NativeLiveWireProjector {
                         crate::COMPACTION_OWNER_LIVE,
                         true,
                     );
-                    let before_tokens = (bytes_before as f32 / 3.5).ceil() as usize;
                     let after_tokens = (bytes_after as f32 / 3.5).ceil() as usize;
-                    let mark = jeikcode_config::i18n::format_compaction_mark(
-                        removed,
-                        before_tokens,
-                        after_tokens,
-                    );
-                    // live 路径也必须落盘：否则刷新/异地端只剩瞬态 Warning，
-                    // 紫色压缩边界会随页面重建而消失。
-                    let _ = crate::persist_session_display_notice(&self.session_id, &mark, None);
-                    LiveWireEvent::Warning {
-                        message: mark,
-                        tokens_after: Some(after_tokens as u32),
-                        message_id: self.notice_anchor(),
+                    let _ = bytes_before;
+                    // /live 投影器只转发上下文计数刷新，不再双写 display 账本；
+                    // 压缩边界通知卡片由 kernel紧随发出的 AgentEvent::SystemNotice 承担。
+                    LiveWireEvent::ContextCompacted {
+                        session_id: self.session_id.clone(),
+                        tokens: after_tokens as u32,
                     }
                 }
                 Kernel::CompactionFailed { error, .. } => {
@@ -2343,48 +2361,93 @@ impl NativeLiveWireProjector {
                     );
                     return None;
                 }
-                Kernel::Error { message, .. } => LiveWireEvent::Error { message },
-                Kernel::Warning(message) => LiveWireEvent::Warning {
-                    message: crate::localize_agent_warning(&message),
-                    tokens_after: None,
-                    message_id: self.notice_anchor(),
-                },
-                Kernel::RetryNotice {
-                    notice_id, message, ..
-                } => {
-                    match crate::persist_session_display_notice(
-                        &self.session_id,
-                        &message,
-                        Some(notice_id.clone()),
-                    ) {
-                        Some(record) => LiveWireEvent::DisplayNotice {
-                            session_id: self.session_id.clone(),
-                            id: record.id.unwrap_or(notice_id),
-                            display_seq: record.seq,
-                            text: record.content,
-                            created_at: record.created_at,
-                        },
-                        None => LiveWireEvent::Warning {
-                            message,
-                            tokens_after: None,
-                            message_id: self.notice_anchor(),
-                        },
+                Kernel::SystemNotice(notice) => {
+                    if notice.kind == jeikcode_kernel::event::NoticeKind::RateLimit {
+                        // 限流由紧随其后的 Kernel::RateLimited 结合浏览器多语言格式统一渲染；
+                        // 在此暂存 event_id 与因果锚点，避免出现两张卡片。
+                        self.pending_rate_limit_notice =
+                            Some((notice.event_id, notice.anchor_message_id));
+                        return None;
+                    }
+                    if notice.status == jeikcode_kernel::event::NoticeStatus::Settled {
+                        self.last_settled_notice_text = Some(notice.text.trim().to_string());
+                    }
+                    LiveWireEvent::SystemNotice {
+                        session_id: self.session_id.clone(),
+                        event_id: notice.event_id,
+                        part_id: notice.part_id,
+                        kind: notice.kind,
+                        severity: notice.severity,
+                        status: notice.status,
+                        revision: notice.revision,
+                        text: notice.text,
+                        anchor_message_id: notice
+                            .anchor_message_id
+                            .or_else(|| self.notice_anchor()),
+                        anchor_part_id: notice.anchor_part_id,
+                        created_at: None,
                     }
                 }
+                Kernel::Error { message, .. } => {
+                    if self.last_settled_notice_text.as_deref() == Some(message.trim()) {
+                        return None;
+                    }
+                    LiveWireEvent::Error { message }
+                }
+                Kernel::Warning(message) => {
+                    let localized = crate::localize_agent_warning(&message);
+                    if self.last_settled_notice_text.as_deref() == Some(message.trim())
+                        || self.last_settled_notice_text.as_deref() == Some(localized.trim())
+                    {
+                        return None;
+                    }
+                    LiveWireEvent::Warning {
+                        message: localized,
+                        tokens_after: None,
+                        message_id: self.notice_anchor(),
+                    }
+                }
+                Kernel::RetryNotice {
+                    notice_id,
+                    part_id,
+                    message,
+                    attempt,
+                    ..
+                } => LiveWireEvent::SystemNotice {
+                    session_id: self.session_id.clone(),
+                    event_id: notice_id,
+                    part_id,
+                    kind: jeikcode_kernel::event::NoticeKind::Retry,
+                    severity: jeikcode_kernel::event::NoticeSeverity::Warning,
+                    status: jeikcode_kernel::event::NoticeStatus::Active,
+                    revision: attempt.max(1),
+                    text: message,
+                    anchor_message_id: self.notice_anchor(),
+                    anchor_part_id: None,
+                    created_at: None,
+                },
                 Kernel::RateLimited {
                     reset_at_display,
                     reset_label,
                     secs_until_reset,
                     auto_resuming,
                     server_message,
-                } => LiveWireEvent::RateLimited {
-                    reset_at_display,
-                    reset_label,
-                    secs_until_reset,
-                    auto_resuming,
-                    server_message,
-                    message_id: self.notice_anchor(),
-                },
+                } => {
+                    let (event_id, anchor) = self
+                        .pending_rate_limit_notice
+                        .take()
+                        .map(|(id, a)| (Some(id), a))
+                        .unwrap_or((None, None));
+                    LiveWireEvent::RateLimited {
+                        reset_at_display,
+                        reset_label,
+                        secs_until_reset,
+                        auto_resuming,
+                        server_message,
+                        message_id: anchor.or_else(|| self.notice_anchor()),
+                        event_id,
+                    }
+                }
                 Kernel::ToolCallStreaming { .. }
                 | Kernel::ToolBatchStarted { .. }
                 | Kernel::ToolBatchCompleted { .. }
@@ -2544,16 +2607,11 @@ impl NativeLiveWireProjector {
                     crate::COMPACTION_OWNER_LIVE,
                     true,
                 );
-                let mark = jeikcode_config::i18n::format_compaction_mark(
-                    outcome.removed_messages,
-                    outcome.estimated_tokens_before,
-                    outcome.estimated_tokens_after,
-                );
-                let _ = crate::persist_session_display_notice(&self.session_id, &mark, None);
-                LiveWireEvent::Warning {
-                    message: mark,
-                    tokens_after: Some(outcome.estimated_tokens_after as u32),
-                    message_id: self.notice_anchor(),
+                // 压缩边界通知由 kernel 的 AgentEvent::SystemNotice 统一推送，
+                // 不在此二次写盘或发送第二张提示卡片；只同步最新 context tokens。
+                LiveWireEvent::ContextCompacted {
+                    session_id: self.session_id.clone(),
+                    tokens: outcome.estimated_tokens_after as u32,
                 }
             }
             crate::live_hub::LiveViewEvent::Runtime(Runtime::CompactionFinished {

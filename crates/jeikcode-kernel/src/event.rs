@@ -147,6 +147,61 @@ pub enum AgentCommand {
     Shutdown,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// 统一系统通知的分类：决定样式与去重策略。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeKind {
+    Retry,
+    Timeout,
+    RateLimit,
+    Compaction,
+    Truncation,
+    Command,
+    Error,
+    Warning,
+}
+
+/// 统一系统通知的严重级别。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+/// 统一系统通知的状态：active 可继续按 revision 刷新，settled 为终态不再降级。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeStatus {
+    Active,
+    Settled,
+}
+
+/// 统一结构化系统通知载荷：流式阶段与账本持久化共用同一份身份与锚点。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemNotice {
+    pub event_id: String,
+    pub part_id: String,
+    pub kind: NoticeKind,
+    pub severity: NoticeSeverity,
+    pub status: NoticeStatus,
+    pub revision: u32,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<u64>,
+    #[serde(default = "default_true")]
+    pub persist: bool,
+}
+
 /// One call inside a `ToolBatchStarted` payload — everything the driver/UI
 /// needs to render a child row in the group block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -294,6 +349,9 @@ pub enum AgentEvent {
         attempt: u32,
         max: u32,
     },
+    /// 统一结构化系统通知：同 `event_id` 按 `revision` 原地升级并在终态收敛，
+    /// 携带 `anchor_message_id` 保证实时流式与账本重放落位一致。
+    SystemNotice(SystemNotice),
     /// A 429 rate-limit PAUSE (host decided the reset is too far to auto-wait).
     /// A driver renders this as a non-error pause line with the reset time, NOT
     /// as a red error. `secs_until_reset`/`reset_at_display` may be empty when the

@@ -3500,6 +3500,13 @@ pub(crate) async fn run_native_headless(
             | CodingRuntimeEvent::PersistenceWarning(message) => {
                 eprintln!("[warning] {message}")
             }
+            CodingRuntimeEvent::Agent(KernelEvent::SystemNotice(notice))
+                if notice.kind != jeikcode_kernel::event::NoticeKind::Compaction
+                    && (notice.status != jeikcode_kernel::event::NoticeStatus::Settled
+                        || notice.severity != jeikcode_kernel::event::NoticeSeverity::Error) =>
+            {
+                eprintln!("[notice] {}", notice.text)
+            }
             CodingRuntimeEvent::Agent(KernelEvent::RateLimited {
                 reset_at_display,
                 reset_label,

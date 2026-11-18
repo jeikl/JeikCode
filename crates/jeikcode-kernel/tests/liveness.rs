@@ -84,6 +84,11 @@ async fn stream_timeout_reconnects_then_recovers() {
         let mut completed = false;
         while let Some(ev) = handle.events.recv().await {
             match ev {
+                jeikcode_kernel::event::AgentEvent::SystemNotice(ref notice)
+                    if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+                {
+                    saw_reconnect = true
+                }
                 AgentEvent::RetryNotice { .. } => saw_reconnect = true,
                 AgentEvent::Error { message, .. } => error_msg = Some(message),
                 AgentEvent::TurnComplete { .. } => {
@@ -147,6 +152,11 @@ async fn stream_timeout_exhausts_retries_then_fails() {
         let mut completed = false;
         while let Some(ev) = handle.events.recv().await {
             match ev {
+                jeikcode_kernel::event::AgentEvent::SystemNotice(ref notice)
+                    if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+                {
+                    notices += 1
+                }
                 AgentEvent::RetryNotice { .. } => notices += 1,
                 AgentEvent::Error { message, .. } => error_msg = Some(message),
                 AgentEvent::TurnComplete { .. } => {
@@ -383,4 +393,147 @@ async fn no_timeout_by_default_unchanged() {
         text, "answer",
         "the default path is unchanged — full text delivered"
     );
+}
+
+/// 思考静默进入过渡期后不得叠加两倍超时（360s + 360s = 720s）：
+/// 首个 thinking token 之后若一直无正文/工具输出，总静默时间不得超过 transition 上限。
+#[tokio::test(start_paused = true)]
+async fn thinking_silence_does_not_stack_streaming_and_transition_timeouts() {
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use jeikcode_kernel::message::Message;
+    use jeikcode_kernel::provider::{ChatOptions, LlmProvider};
+    use jeikcode_kernel::stream::ProviderError;
+    use jeikcode_kernel::timeouts::TimeoutPolicy;
+
+    struct ThinkThenStallProvider(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl LlmProvider for ThinkThenStallProvider {
+        fn model_name(&self) -> &str {
+            "think-stall"
+        }
+        fn context_window(&self) -> u32 {
+            0
+        }
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[jeikcode_kernel::tool::ToolDef],
+            _options: &ChatOptions,
+        ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                Ok(Box::pin(
+                    futures::stream::once(async { StreamEvent::Reasoning("thinking...".into()) })
+                        .chain(futures::stream::pending()),
+                ))
+            } else {
+                Ok(Box::pin(futures::stream::iter(vec![
+                    StreamEvent::TextDelta("recovered".into()),
+                    StreamEvent::Done { truncated: false },
+                ])))
+            }
+        }
+    }
+    use futures::StreamExt;
+
+    let mut policy = TimeoutPolicy::unbounded();
+    policy.ttft = Some(Duration::from_millis(50));
+    policy.streaming = Some(Duration::from_millis(100));
+    policy.transition = Some(Duration::from_millis(100));
+
+    let provider = Arc::new(ThinkThenStallProvider(std::sync::atomic::AtomicUsize::new(
+        0,
+    )));
+    let mut handle = Agent::builder()
+        .provider(provider.clone())
+        .tools(ToolRegistry::new().mount(&[] as &[&str]))
+        .timeouts(policy)
+        .build()
+        .spawn();
+
+    let started = tokio::time::Instant::now();
+    handle.commands.send(send("go")).unwrap();
+
+    let mut text = String::new();
+    let mut completed = false;
+    while let Some(ev) = handle.events.recv().await {
+        match ev {
+            AgentEvent::TextDelta(t) => text.push_str(&t),
+            AgentEvent::TurnComplete { .. } => {
+                completed = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let elapsed = started.elapsed();
+    assert!(completed);
+    assert_eq!(text, "recovered");
+    // 若错误叠加了 streaming(100ms) + transition(100ms)，此处会 >= 200ms。
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "thinking silence stacked streaming + transition timeouts: {elapsed:?}"
+    );
+}
+
+/// 同一故障重试耗尽与恢复时都必须复用同一个 `event_id` 并以 settled 收口。
+#[tokio::test(start_paused = true)]
+async fn retry_incidents_settle_same_event_id_on_exhaustion_and_recovery() {
+    use jeikcode_kernel::event::{NoticeSeverity, NoticeStatus};
+
+    // (1) 重试耗尽：所有 Active 进度与最后一条 Settled/Error 共用同一 event_id。
+    let mut handle = Agent::builder()
+        .provider(Arc::new(StallThenProvider::new(100, vec![])))
+        .tools(ToolRegistry::new().mount(&[] as &[&str]))
+        .stream_timeout(LIVENESS)
+        .build()
+        .spawn();
+    handle.commands.send(send("go")).unwrap();
+    let mut exhausted_events = Vec::new();
+    while let Some(ev) = handle.events.recv().await {
+        match ev {
+            AgentEvent::SystemNotice(n) => exhausted_events.push(n),
+            AgentEvent::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(exhausted_events.len(), 10, "9 次活跃重试 + 1 次终态收口");
+    let first_id = exhausted_events[0].event_id.clone();
+    assert!(
+        exhausted_events.iter().all(|n| n.event_id == first_id),
+        "所有尝试与终态必须共用同一个 event_id"
+    );
+    let last = exhausted_events.last().unwrap();
+    assert_eq!(last.status, NoticeStatus::Settled);
+    assert_eq!(last.severity, NoticeSeverity::Error);
+    assert_eq!(last.revision, 10);
+
+    // (2) 恢复成功：复用同一 event_id 收口为 Info / Settled。
+    let mut handle2 = Agent::builder()
+        .provider(Arc::new(StallThenProvider::new(
+            1,
+            vec![
+                StreamEvent::TextDelta("ok".into()),
+                StreamEvent::Done { truncated: false },
+            ],
+        )))
+        .tools(ToolRegistry::new().mount(&[] as &[&str]))
+        .stream_timeout(LIVENESS)
+        .build()
+        .spawn();
+    handle2.commands.send(send("go")).unwrap();
+    let mut recovered_events = Vec::new();
+    while let Some(ev) = handle2.events.recv().await {
+        match ev {
+            AgentEvent::SystemNotice(n) => recovered_events.push(n),
+            AgentEvent::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(recovered_events.len(), 2, "1 次活跃重试 + 1 次恢复收口");
+    assert_eq!(recovered_events[0].event_id, recovered_events[1].event_id);
+    assert_eq!(recovered_events[0].status, NoticeStatus::Active);
+    assert_eq!(recovered_events[1].status, NoticeStatus::Settled);
+    assert_eq!(recovered_events[1].severity, NoticeSeverity::Info);
 }

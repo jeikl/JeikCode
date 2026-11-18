@@ -1,6 +1,9 @@
 use crate::checkpoint::{CompactionCheckpoint, CompactionCheckpointError};
 use crate::clock::{Clock, SystemClock};
-use crate::event::{AgentCommand, AgentEvent, StopReason, ToolBatchCall};
+use crate::event::{
+    AgentCommand, AgentEvent, NoticeKind, NoticeSeverity, NoticeStatus, StopReason, SystemNotice,
+    ToolBatchCall,
+};
 use crate::hook::{
     Continuation, ContinuationKind, ContinuationVisibility, HookChain, LifecycleHooks, TurnCtx,
 };
@@ -1447,6 +1450,7 @@ impl RunningAgent {
         &self,
         convo: &mut Conversation,
         attempted_stages: &mut [bool; 2],
+        ctx: Option<&TurnCtx>,
     ) {
         let Some(trigger) = self.should_compact(convo) else {
             return;
@@ -1487,7 +1491,7 @@ impl RunningAgent {
             return;
         }
         attempted_stages[stage] = true;
-        self.run_compaction(convo, trigger).await;
+        self.run_compaction(convo, trigger, ctx).await;
     }
 
     /// Run one compaction: build a read-only `CompactionView` over the current
@@ -1500,7 +1504,12 @@ impl RunningAgent {
     /// is confined to an inner block that ends BEFORE the `&mut convo.apply_plan`
     /// call — so the strategy may await without holding a borrow across the mutable
     /// apply.
-    async fn run_compaction(&self, convo: &mut Conversation, trigger: CompactTrigger) {
+    async fn run_compaction(
+        &self,
+        convo: &mut Conversation,
+        trigger: CompactTrigger,
+        ctx: Option<&TurnCtx>,
+    ) {
         let trigger_for_event = trigger.clone(); // `trigger` is moved into the view below
         let floor = convo.sacred_floor();
         // Raw prompt tokens from the most recent assistant meta (default 0 if none yet).
@@ -1559,6 +1568,7 @@ impl RunningAgent {
         let prepared = convo.prepare_plan(plan, floor);
         let report = prepared.report();
         let mut snapshot = None;
+        let pre_compact_anchor = Self::last_visible_anchor(convo);
         if report.committed {
             let Some(candidate) = prepared.candidate() else {
                 self.rt.emit(AgentEvent::CompactionFailed {
@@ -1580,9 +1590,44 @@ impl RunningAgent {
                 }
             }
             snapshot = Some(candidate_snapshot);
+            // 裁减 convo.messages 之前先把本轮已有消息与缓冲通知刷入显示账本，
+            // 防止早期轮次的因果锚点在压缩后从工作集里消失。
+            self.hooks
+                .pre_compaction(convo, &trigger_for_event, ctx)
+                .await;
         }
 
         let report = convo.commit_prepared(prepared);
+        let mut post_compact_notice = None;
+        if report.committed {
+            let est_before = if used_tokens > 0 {
+                used_tokens as usize
+            } else {
+                (report.bytes_before / 4).max(1)
+            };
+            let est_after = if report.bytes_before > 0 {
+                ((est_before as f64) * (report.bytes_after as f64 / report.bytes_before as f64))
+                    .round() as usize
+            } else {
+                0
+            };
+            let event_id = format!("compact:epoch:{}", report.epoch_after);
+            let notice = SystemNotice {
+                part_id: format!("{event_id}:1:notice"),
+                event_id,
+                kind: NoticeKind::Compaction,
+                severity: NoticeSeverity::Info,
+                status: NoticeStatus::Settled,
+                revision: 1,
+                text: i18n::format_compaction_mark(report.removed, est_before, est_after),
+                anchor_message_id: pre_compact_anchor,
+                anchor_part_id: None,
+                turn_id: ctx.map(|c| c.turn_id),
+                persist: true,
+            };
+            self.hooks.post_compaction(&report, &notice, ctx).await;
+            post_compact_notice = Some(notice);
+        }
         self.rt.emit(AgentEvent::Compacted {
             trigger: trigger_for_event,
             epoch: report.epoch_after,
@@ -1592,6 +1637,9 @@ impl RunningAgent {
             committed: report.committed,
             snapshot,
         });
+        if let Some(notice) = post_compact_notice {
+            self.rt.emit(AgentEvent::SystemNotice(notice));
+        }
     }
     async fn session_loop(self, mut cmd_rx: UnboundedReceiver<AgentCommand>) {
         let mut convo = match &self.resume {
@@ -1736,7 +1784,7 @@ impl RunningAgent {
                 // any auto threshold. `apply_plan` still refuses a net-loss/no-op
                 // plan (no epoch burn).
                 AgentCommand::Compact { focus } => {
-                    self.run_compaction(&mut convo, CompactTrigger::Manual { focus })
+                    self.run_compaction(&mut convo, CompactTrigger::Manual { focus }, None)
                         .await;
                 }
                 AgentCommand::SendMessage { text, images } => {
@@ -1899,7 +1947,7 @@ impl RunningAgent {
         // append-only on the compacted history. NEVER fired inside run_turn's round
         // loop (that would reopen the within-turn cache break).
         if let Some(trigger) = self.should_compact(convo) {
-            self.run_compaction(convo, trigger).await;
+            self.run_compaction(convo, trigger, None).await;
         }
         // CANCEL = UNDO: remember the history length BEFORE this turn's user
         // message is pushed, so a cancelled turn can roll all the way back to here —
@@ -2208,7 +2256,7 @@ impl RunningAgent {
                 // A mid-turn /compact runs HERE — the turn boundary, the documented
                 // cache-safe trigger point.
                 AgentCommand::Compact { focus } => {
-                    self.run_compaction(convo, CompactTrigger::Manual { focus })
+                    self.run_compaction(convo, CompactTrigger::Manual { focus }, None)
                         .await;
                 }
                 AgentCommand::CancelSteer { text, message_id } => {
@@ -2269,16 +2317,93 @@ impl RunningAgent {
         self.rt.emit(AgentEvent::TurnComplete { reason });
     }
 
-    /// 统一重试进度：每次尝试都发，共用 `incident_id` 作为持久身份；
-    /// 客户端按 id 原地更新，刷新后由账本记录恢复。
-    fn emit_retry_notice(&self, step: &RetryStep, max: u32) {
-        self.rt.emit(AgentEvent::RetryNotice {
-            notice_id: step.incident_id.clone(),
-            part_id: format!("{}:1:notice", step.incident_id),
-            message: i18n::format_agent_retry_progress(step.number, max),
-            attempt: step.number,
-            max,
-        });
+    /// 计算当前对话中最近一条对前端可见的消息 id（仅 User / Assistant，
+    /// 排除 synthetic 与 turn_diagnostic），保证直播锚点与显示账本一致。
+    fn last_visible_anchor(convo: &Conversation) -> Option<String> {
+        convo.messages.iter().rev().find_map(|message| {
+            if message.synthetic
+                || message.is_display_only()
+                || message.internal_origin.as_deref() == Some("verify_cadence")
+            {
+                return None;
+            }
+            match message.role {
+                crate::message::Role::User | crate::message::Role::Assistant => message.id.clone(),
+                _ => None,
+            }
+        })
+    }
+
+    /// 统一发送结构化系统通知：同 `event_id` 递增 `revision` 并固定首次因果锚点，
+    /// 持久化通知同步回调 `LifecycleHooks::on_system_notice` 交由单一写入入口落盘。
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_system_notice(
+        &self,
+        convo: &Conversation,
+        turn_ctx: &TurnCtx,
+        revisions: &mut std::collections::HashMap<String, u32>,
+        anchors: &mut std::collections::HashMap<String, Option<String>>,
+        event_id: impl Into<String>,
+        kind: NoticeKind,
+        severity: NoticeSeverity,
+        status: NoticeStatus,
+        text: impl Into<String>,
+        explicit_anchor: Option<String>,
+        persist: bool,
+    ) {
+        let event_id = event_id.into();
+        let text = text.into();
+        let rev = revisions.entry(event_id.clone()).or_insert(0);
+        *rev = rev.saturating_add(1);
+        let revision = *rev;
+        let anchor_message_id = anchors
+            .entry(event_id.clone())
+            .or_insert_with(|| explicit_anchor.or_else(|| Self::last_visible_anchor(convo)))
+            .clone();
+        let notice = SystemNotice {
+            part_id: format!("{event_id}:1:notice"),
+            event_id,
+            kind,
+            severity,
+            status,
+            revision,
+            text,
+            anchor_message_id,
+            anchor_part_id: None,
+            turn_id: Some(turn_ctx.turn_id),
+            persist,
+        };
+        if persist {
+            self.hooks.on_system_notice(&notice, convo, turn_ctx).await;
+        }
+        self.rt.emit(AgentEvent::SystemNotice(notice));
+    }
+
+    async fn emit_retry_notice(
+        &self,
+        convo: &Conversation,
+        turn_ctx: &TurnCtx,
+        revisions: &mut std::collections::HashMap<String, u32>,
+        anchors: &mut std::collections::HashMap<String, Option<String>>,
+        step: &RetryStep,
+        kind: NoticeKind,
+        text: String,
+        explicit_anchor: Option<String>,
+    ) {
+        self.emit_system_notice(
+            convo,
+            turn_ctx,
+            revisions,
+            anchors,
+            step.incident_id.clone(),
+            kind,
+            NoticeSeverity::Warning,
+            NoticeStatus::Active,
+            text,
+            explicit_anchor,
+            true,
+        )
+        .await;
     }
 
     /// Persist only the replay-safe, fully assembled portion of a failed stream.
@@ -2464,6 +2589,12 @@ impl RunningAgent {
         // 统一重试账本：OPEN / 流空闲 / 首 token / 空响应 / 中途断流共用同一条
         // 阶梯与同一个计数器（见 `crate::retry`）。一轮正常完成才回满。
         let mut retry_engine = RetryEngine::new();
+        // 本轮所有结构化系统通知的递增修订号与首次因果锚点缓存，保证同 event_id
+        // 原地收敛、不在重试或恢复时飘到结尾。
+        let mut notice_revisions: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut notice_anchors: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
         // RATE-LIMIT WaitAndRetry counter for the WHOLE turn: incremented on each
         // WaitAndRetry sleep (OPEN or mid-stream); reset to 0 on a successful open
         // (the window has reopened). Capped at MAX_RATE_LIMIT_WAITS to prevent a
@@ -2566,24 +2697,48 @@ impl RunningAgent {
                         } else {
                             // Explicit stop (Esc / picker) OR fail-closed default
                             // (no requester / timeout): the round cap is the reason.
-                            Self::persist_turn_diagnostic(
+                            let msg = format!("max rounds ({cap}) reached");
+                            self.emit_system_notice(
                                 convo,
-                                &format!("max rounds ({cap}) reached"),
-                            );
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                format!("err-max-rounds:{}", turn_ctx.turn_id),
+                                NoticeKind::Error,
+                                NoticeSeverity::Error,
+                                NoticeStatus::Settled,
+                                msg.clone(),
+                                None,
+                                true,
+                            )
+                            .await;
+                            Self::persist_turn_diagnostic(convo, &msg);
                             self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
                                 .await;
                             return;
                         }
                     } else {
+                        let msg = format!("max rounds ({cap}) reached");
+                        self.emit_system_notice(
+                            convo,
+                            &turn_ctx,
+                            &mut notice_revisions,
+                            &mut notice_anchors,
+                            format!("err-max-rounds:{}", turn_ctx.turn_id),
+                            NoticeKind::Error,
+                            NoticeSeverity::Error,
+                            NoticeStatus::Settled,
+                            msg.clone(),
+                            None,
+                            true,
+                        )
+                        .await;
                         self.rt.emit(AgentEvent::Error {
-                            message: format!("max rounds ({cap}) reached"),
+                            message: msg.clone(),
                             http_status: None,
                             code: None,
                         });
-                        Self::persist_turn_diagnostic(
-                            convo,
-                            &format!("max rounds ({cap}) reached"),
-                        );
+                        Self::persist_turn_diagnostic(convo, &msg);
                         self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
                             .await;
                         return;
@@ -2702,8 +2857,12 @@ impl RunningAgent {
                     };
                     if self.compaction.will_summarize(&view) {
                         midturn_auto_attempted = true;
-                        self.run_compaction(convo, CompactTrigger::Auto { utilization })
-                            .await;
+                        self.run_compaction(
+                            convo,
+                            CompactTrigger::Auto { utilization },
+                            Some(&turn_ctx),
+                        )
+                        .await;
                         messages = convo.model_history();
                         self.hooks.pre_request(&mut messages, &turn_ctx).await;
                         let stored_wire = convo.model_history();
@@ -2748,8 +2907,12 @@ impl RunningAgent {
                     && attempts < MAX_OVERFLOW_ATTEMPTS
                 {
                     let before = est(&convo.messages);
-                    self.run_compaction(convo, CompactTrigger::Overflow { attempt: attempts })
-                        .await;
+                    self.run_compaction(
+                        convo,
+                        CompactTrigger::Overflow { attempt: attempts },
+                        Some(&turn_ctx),
+                    )
+                    .await;
                     attempts += 1;
                     if est(&convo.messages) >= before {
                         break; // nothing drained (sacred floor / single huge input) — warn below
@@ -2896,6 +3059,7 @@ impl RunningAgent {
                         CompactTrigger::Overflow {
                             attempt: overflow_attempt,
                         },
+                        Some(&turn_ctx),
                     )
                     .await;
                     overflow_attempt += 1;
@@ -2928,6 +3092,7 @@ impl RunningAgent {
                         host_verdict.is_none() && hint.retry_after_secs.is_none() && !hint.terminal;
                     let decision = host_verdict
                         .unwrap_or_else(|| crate::hook::RateLimitDecision::from_hint(&hint));
+                    let rl_event_id = format!("rl:{}:r{round}", turn_ctx.turn_id);
                     match decision {
                         crate::hook::RateLimitDecision::WaitAndRetry { secs } => {
                             rate_limit_waits += 1;
@@ -2936,6 +3101,23 @@ impl RunningAgent {
                                 // MAX_RATE_LIMIT_WAITS times without the window reopening.
                                 // Force a clean Pause stop to prevent spinning indefinitely
                                 // (e.g. a broken hook that always returns WaitAndRetry).
+                                let pause_text = i18n::format_agent_rate_limited_paused(
+                                    server_message.as_deref().unwrap_or(""),
+                                );
+                                self.emit_system_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    rl_event_id,
+                                    NoticeKind::RateLimit,
+                                    NoticeSeverity::Warning,
+                                    NoticeStatus::Settled,
+                                    pause_text,
+                                    None,
+                                    true,
+                                )
+                                .await;
                                 Self::persist_turn_diagnostic(
                                     convo,
                                     server_message.as_deref().unwrap_or("rate limited"),
@@ -2957,6 +3139,20 @@ impl RunningAgent {
                             let wait = if quiet_first_eligible && rate_limit_waits == 1 {
                                 SILENT_FIRST_RATE_LIMIT_RETRY
                             } else {
+                                self.emit_system_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    rl_event_id,
+                                    NoticeKind::RateLimit,
+                                    NoticeSeverity::Warning,
+                                    NoticeStatus::Active,
+                                    i18n::format_agent_rate_limited_waiting(secs),
+                                    None,
+                                    false,
+                                )
+                                .await;
                                 self.rt.emit(AgentEvent::RateLimited {
                                     reset_at_display: String::new(),
                                     reset_label: String::new(),
@@ -2983,6 +3179,23 @@ impl RunningAgent {
                             reset_label,
                             secs_until_reset,
                         } => {
+                            let pause_text = i18n::format_agent_rate_limited_paused(
+                                server_message.as_deref().unwrap_or(""),
+                            );
+                            self.emit_system_notice(
+                                convo,
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                rl_event_id,
+                                NoticeKind::RateLimit,
+                                NoticeSeverity::Warning,
+                                NoticeStatus::Settled,
+                                pause_text,
+                                None,
+                                true,
+                            )
+                            .await;
                             Self::persist_turn_diagnostic(
                                 convo,
                                 server_message.as_deref().unwrap_or("rate limited"),
@@ -3017,7 +3230,21 @@ impl RunningAgent {
                         if let Some(step) =
                             retry_engine.next(RetryClass::OpenTransient, &request_seed, None)
                         {
-                            self.emit_retry_notice(&step, RetryClass::OpenTransient.cap());
+                            self.emit_retry_notice(
+                                convo,
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                &step,
+                                NoticeKind::Retry,
+                                i18n::format_agent_retry_drop_progress(
+                                    step.number,
+                                    RetryClass::OpenTransient.cap(),
+                                    false,
+                                ),
+                                None,
+                            )
+                            .await;
                             // Cancellable backoff: Esc during the wait aborts the turn instead
                             // of forcing the user to sit through the full delay.
                             tokio::select! {
@@ -3032,13 +3259,31 @@ impl RunningAgent {
                             continue;
                         }
                     }
+                    let incident_id = retry_engine
+                        .incident_id()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("err-open:{}:r{round}", turn_ctx.turn_id));
+                    self.emit_system_notice(
+                        convo,
+                        &turn_ctx,
+                        &mut notice_revisions,
+                        &mut notice_anchors,
+                        incident_id,
+                        NoticeKind::Error,
+                        NoticeSeverity::Error,
+                        NoticeStatus::Settled,
+                        e.message.clone(),
+                        None,
+                        true,
+                    )
+                    .await;
                     self.hooks.on_error(&e.message).await;
                     self.rt.emit(AgentEvent::Error {
                         message: e.message.clone(),
                         http_status: e.http_status,
                         code: e.code,
                     });
-                    // 终态始终落一条诊断：重试进度已单独落盘，不会重复。
+                    // 终态始终落一条诊断：同 incident_id 已在上方收口，此处保留 convo 快照兜底。
                     Self::persist_turn_diagnostic(convo, &e.message);
                     self.finish_turn(convo, StopReason::ProviderError, &turn_ctx)
                         .await;
@@ -3134,9 +3379,16 @@ impl RunningAgent {
                     }
                     _ = async { tokio::time::sleep_until(phase_deadline.unwrap()).await }, if phase_deadline.is_some() => {
                         if phase == crate::timeouts::StreamPhase::Thinking && !saw_text_or_tool {
-                            phase = crate::timeouts::StreamPhase::Transition;
-                            last_content = tokio::time::Instant::now();
-                            continue;
+                            // 思考静默进入过渡期时不得重置 `last_content`：否则当
+                            // thinking=360s 与 transition=360s 相等时会被串成 720s。
+                            if let Some(transition_limit) =
+                                self.timeouts.phase_limit(crate::timeouts::StreamPhase::Transition)
+                            {
+                                if last_content.elapsed() < transition_limit {
+                                    phase = crate::timeouts::StreamPhase::Transition;
+                                    continue;
+                                }
+                            }
                         }
                         if !saw_text_or_tool && !saw_stream_content {
                             if self.timeouts.ttft.is_some() {
@@ -3151,13 +3403,21 @@ impl RunningAgent {
                                     &request_seed,
                                     Some(retry_budget),
                                 ) {
-                                    self.rt.emit(AgentEvent::Warning(
+                                    self.emit_retry_notice(
+                                        convo,
+                                        &turn_ctx,
+                                        &mut notice_revisions,
+                                        &mut notice_anchors,
+                                        &step,
+                                        NoticeKind::Timeout,
                                         i18n::format_agent_retry_first_token(
                                             first_token_secs,
                                             step.number,
                                             retry_budget,
                                         ),
-                                    ));
+                                        None,
+                                    )
+                                    .await;
                                     tokio::select! {
                                         biased;
                                         _ = cancel.cancelled() => {
@@ -3173,6 +3433,24 @@ impl RunningAgent {
                                     retry_budget as u32,
                                     first_token_secs,
                                 );
+                                let incident_id = retry_engine
+                                    .incident_id()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| format!("err-ttft:{}:r{round}", turn_ctx.turn_id));
+                                self.emit_system_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    incident_id,
+                                    NoticeKind::Timeout,
+                                    NoticeSeverity::Error,
+                                    NoticeStatus::Settled,
+                                    msg.clone(),
+                                    None,
+                                    true,
+                                )
+                                .await;
                                 self.hooks.on_error(&msg).await;
                                 self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
                                 Self::persist_turn_diagnostic(convo, &msg);
@@ -3182,7 +3460,21 @@ impl RunningAgent {
                             if let Some(step) =
                                 retry_engine.next(RetryClass::Stall, &request_seed, None)
                             {
-                                self.emit_retry_notice(&step, RetryClass::Stall.cap());
+                                self.emit_retry_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    &step,
+                                    NoticeKind::Timeout,
+                                    i18n::format_agent_retry_stall_progress(
+                                        step.number,
+                                        RetryClass::Stall.cap(),
+                                        false,
+                                    ),
+                                    None,
+                                )
+                                .await;
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
@@ -3195,6 +3487,24 @@ impl RunningAgent {
                                 break;
                             }
                             let msg = "stream timeout after automatic reconnects".to_string();
+                            let incident_id = retry_engine
+                                .incident_id()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| format!("err-stall:{}:r{round}", turn_ctx.turn_id));
+                            self.emit_system_notice(
+                                convo,
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                incident_id,
+                                NoticeKind::Timeout,
+                                NoticeSeverity::Error,
+                                NoticeStatus::Settled,
+                                msg.clone(),
+                                None,
+                                true,
+                            )
+                            .await;
                             self.hooks.on_error(&msg).await;
                             self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
                             Self::persist_turn_diagnostic(convo, &msg);
@@ -3204,7 +3514,7 @@ impl RunningAgent {
                         if !saw_text_or_tool {
                             break;
                         }
-                        // 已出字后流卡死：同样走统一阶梯（内容保留，新气泡继续写）。
+                        // 已出字后流卡死：先将部分正文/调用落成可见气泡检查点，再锚定重试通知。
                         if let Some(step) =
                             retry_engine.next(RetryClass::Stall, &request_seed, None)
                         {
@@ -3217,7 +3527,22 @@ impl RunningAgent {
                                 suppress_internal_stream,
                                 Some(&assistant_message_id),
                             );
-                            self.emit_retry_notice(&step, RetryClass::Stall.cap());
+                            self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
+                            self.emit_retry_notice(
+                                convo,
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                &step,
+                                NoticeKind::Timeout,
+                                i18n::format_agent_retry_stall_progress(
+                                    step.number,
+                                    RetryClass::Stall.cap(),
+                                    true,
+                                ),
+                                Some(assistant_message_id.clone()),
+                            )
+                            .await;
                             tokio::select! {
                                 biased;
                                 _ = cancel.cancelled() => {
@@ -3231,9 +3556,37 @@ impl RunningAgent {
                         }
                         let msg =
                             i18n::format_agent_stream_timeout_partial_response();
+                        Self::persist_interrupted_turn(
+                            convo,
+                            &assistant_text,
+                            &reasoning,
+                            &reasoning_blocks,
+                            &pending_calls,
+                            suppress_internal_stream,
+                            Some(&assistant_message_id),
+                            Some(&msg),
+                        );
+                        self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
+                        let incident_id = retry_engine
+                            .incident_id()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("err-stall:{}:r{round}", turn_ctx.turn_id));
+                        self.emit_system_notice(
+                            convo,
+                            &turn_ctx,
+                            &mut notice_revisions,
+                            &mut notice_anchors,
+                            incident_id,
+                            NoticeKind::Timeout,
+                            NoticeSeverity::Error,
+                            NoticeStatus::Settled,
+                            msg.clone(),
+                            Some(assistant_message_id.clone()),
+                            true,
+                        )
+                        .await;
                         self.hooks.on_error(&msg).await;
                         self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
-                        Self::persist_turn_diagnostic(convo, &msg);
                         self.finish_turn(convo, StopReason::Timeout, &turn_ctx).await;
                         return;
                     }
@@ -3400,6 +3753,7 @@ impl RunningAgent {
                         // retracted from the live UI. Keep the clean RateLimited terminal,
                         // but do not auto-retry this partially-consumed stream. A 429 before
                         // the first content event remains safe to retry below.
+                        let rl_event_id = format!("rl:{}:r{round}", turn_ctx.turn_id);
                         if saw_stream_content {
                             Self::persist_partial_assistant(
                                 convo,
@@ -3410,6 +3764,7 @@ impl RunningAgent {
                                 suppress_internal_stream,
                                 Some(&assistant_message_id),
                             );
+                            self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
                             let (reset_at_display, reset_label, secs_until_reset) = match decision {
                                 crate::hook::RateLimitDecision::WaitAndRetry { secs } => {
                                     (String::new(), String::new(), Some(secs))
@@ -3420,6 +3775,23 @@ impl RunningAgent {
                                     secs_until_reset,
                                 } => (reset_at_display, reset_label, secs_until_reset),
                             };
+                            let pause_text = i18n::format_agent_rate_limited_paused(
+                                server_message.as_deref().unwrap_or(""),
+                            );
+                            self.emit_system_notice(
+                                convo,
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                rl_event_id,
+                                NoticeKind::RateLimit,
+                                NoticeSeverity::Warning,
+                                NoticeStatus::Settled,
+                                pause_text,
+                                Some(assistant_message_id.clone()),
+                                true,
+                            )
+                            .await;
                             self.rt.emit(AgentEvent::RateLimited {
                                 reset_at_display,
                                 reset_label,
@@ -3441,6 +3813,23 @@ impl RunningAgent {
                                 if rate_limit_waits > MAX_RATE_LIMIT_WAITS {
                                     // Livelock fuse (mid-stream path): same guard as the OPEN
                                     // path — force a clean Pause stop rather than spinning.
+                                    let pause_text = i18n::format_agent_rate_limited_paused(
+                                        server_message.as_deref().unwrap_or(""),
+                                    );
+                                    self.emit_system_notice(
+                                        convo,
+                                        &turn_ctx,
+                                        &mut notice_revisions,
+                                        &mut notice_anchors,
+                                        rl_event_id,
+                                        NoticeKind::RateLimit,
+                                        NoticeSeverity::Warning,
+                                        NoticeStatus::Settled,
+                                        pause_text,
+                                        None,
+                                        true,
+                                    )
+                                    .await;
                                     self.rt.emit(AgentEvent::RateLimited {
                                         reset_at_display: String::new(),
                                         reset_label: String::new(),
@@ -3462,6 +3851,20 @@ impl RunningAgent {
                                 let wait = if quiet_first_eligible && rate_limit_waits == 1 {
                                     SILENT_FIRST_RATE_LIMIT_RETRY
                                 } else {
+                                    self.emit_system_notice(
+                                        convo,
+                                        &turn_ctx,
+                                        &mut notice_revisions,
+                                        &mut notice_anchors,
+                                        rl_event_id,
+                                        NoticeKind::RateLimit,
+                                        NoticeSeverity::Warning,
+                                        NoticeStatus::Active,
+                                        i18n::format_agent_rate_limited_waiting(secs),
+                                        None,
+                                        false,
+                                    )
+                                    .await;
                                     self.rt.emit(AgentEvent::RateLimited {
                                         reset_at_display: String::new(),
                                         reset_label: String::new(),
@@ -3488,6 +3891,23 @@ impl RunningAgent {
                                 reset_label,
                                 secs_until_reset,
                             } => {
+                                let pause_text = i18n::format_agent_rate_limited_paused(
+                                    server_message.as_deref().unwrap_or(""),
+                                );
+                                self.emit_system_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    rl_event_id,
+                                    NoticeKind::RateLimit,
+                                    NoticeSeverity::Warning,
+                                    NoticeStatus::Settled,
+                                    pause_text,
+                                    None,
+                                    true,
+                                )
+                                .await;
                                 self.rt.emit(AgentEvent::RateLimited {
                                     reset_at_display,
                                     reset_label,
@@ -3509,6 +3929,8 @@ impl RunningAgent {
                         // 已开流后断流：按统一阶梯接续。已经产出的内容原样保留，
                         // 下一次请求把它作为 assistant 前缀带上（新气泡继续写）；
                         // 没拼完的工具调用从未进入 `pending_calls`，天然被丢弃。
+                        let content_anchor =
+                            saw_stream_content.then(|| assistant_message_id.clone());
                         if retry::classify_stream(&e) == RetryClass::StreamDrop {
                             if let Some(step) =
                                 retry_engine.next(RetryClass::StreamDrop, &request_seed, None)
@@ -3523,8 +3945,23 @@ impl RunningAgent {
                                         suppress_internal_stream,
                                         Some(&assistant_message_id),
                                     );
+                                    self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
                                 }
-                                self.emit_retry_notice(&step, RetryClass::StreamDrop.cap());
+                                self.emit_retry_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    &step,
+                                    NoticeKind::Retry,
+                                    i18n::format_agent_retry_drop_progress(
+                                        step.number,
+                                        RetryClass::StreamDrop.cap(),
+                                        saw_stream_content,
+                                    ),
+                                    content_anchor,
+                                )
+                                .await;
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
@@ -3547,6 +3984,27 @@ impl RunningAgent {
                             Some(&assistant_message_id),
                             Some(e.message.as_str()),
                         );
+                        if saw_stream_content {
+                            self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
+                        }
+                        let incident_id = retry_engine
+                            .incident_id()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("err-stream:{}:r{round}", turn_ctx.turn_id));
+                        self.emit_system_notice(
+                            convo,
+                            &turn_ctx,
+                            &mut notice_revisions,
+                            &mut notice_anchors,
+                            incident_id,
+                            NoticeKind::Error,
+                            NoticeSeverity::Error,
+                            NoticeStatus::Settled,
+                            e.message.clone(),
+                            content_anchor,
+                            true,
+                        )
+                        .await;
                         self.hooks.on_error(&e.message).await;
                         self.rt.emit(AgentEvent::Error {
                             message: e.message,
@@ -3659,7 +4117,17 @@ impl RunningAgent {
                             wait,
                         )
                     };
-                    self.rt.emit(AgentEvent::Warning(notice));
+                    self.emit_retry_notice(
+                        convo,
+                        &turn_ctx,
+                        &mut notice_revisions,
+                        &mut notice_anchors,
+                        &step,
+                        NoticeKind::Retry,
+                        notice,
+                        None,
+                    )
+                    .await;
                     // Cancellable backoff: Esc during the wait aborts the turn instead
                     // of forcing the user to sit through the delay (same shape as the
                     // retryable-open arm above).
@@ -3692,6 +4160,24 @@ impl RunningAgent {
                     EMPTY_RESPONSE_MAX_RETRIES,
                     over_window_warned,
                 );
+                let incident_id = retry_engine
+                    .incident_id()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("err-empty:{}:r{round}", turn_ctx.turn_id));
+                self.emit_system_notice(
+                    convo,
+                    &turn_ctx,
+                    &mut notice_revisions,
+                    &mut notice_anchors,
+                    incident_id,
+                    NoticeKind::Error,
+                    NoticeSeverity::Error,
+                    NoticeStatus::Settled,
+                    msg.clone(),
+                    None,
+                    true,
+                )
+                .await;
                 self.hooks.on_error(&msg).await;
                 self.rt.emit(AgentEvent::Error {
                     message: msg.clone(),
@@ -3703,7 +4189,24 @@ impl RunningAgent {
                     .await;
                 return;
             }
-            // 本轮确实产出了内容：关闭故障身份并回满重试预算。
+            // 本轮确实产出了内容：若有活跃重试事件，先将其收口为 settled 再重置预算。
+            if let Some(incident_id) = retry_engine.incident_id().map(str::to_string) {
+                let attempts = retry_engine.attempts();
+                self.emit_system_notice(
+                    convo,
+                    &turn_ctx,
+                    &mut notice_revisions,
+                    &mut notice_anchors,
+                    incident_id,
+                    NoticeKind::Retry,
+                    NoticeSeverity::Info,
+                    NoticeStatus::Settled,
+                    i18n::format_agent_retry_recovered(attempts),
+                    None,
+                    true,
+                )
+                .await;
+            }
             retry_engine.reset();
             // Truncation (`finish_reason=length`) is recorded on the message meta
             // below. The user-facing Warning is DEFERRED: it fires only if the
@@ -3802,6 +4305,7 @@ impl RunningAgent {
             // From the next boundary on, parked steers fold normally.
             initial_prompt_round = false;
             self.hooks.on_turn_progress(convo).await;
+            self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
             if pending_calls.is_empty() {
                 // Exact-loop evidence is consecutive across tool rounds only. A
                 // no-tool assistant reply is an observable break in that sequence,
@@ -3834,6 +4338,7 @@ impl RunningAgent {
                     self.compact_before_internal_continuation(
                         convo,
                         &mut internal_auto_compaction_attempted_stages,
+                        Some(&turn_ctx),
                     )
                     .await;
                     convo.push(Message::synthetic_user(TRUNCATION_RESUME_NUDGE.to_string()));
@@ -3845,17 +4350,28 @@ impl RunningAgent {
                     // continuing, check the cap. `None` = unlimited (opt-out).
                     if let Some(max) = self.max_continuations {
                         if continuations >= max {
+                            let msg =
+                                format!("max offer_continuation continuations ({max}) reached");
+                            self.emit_system_notice(
+                                convo,
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                format!("err-max-cont:{}", turn_ctx.turn_id),
+                                NoticeKind::Error,
+                                NoticeSeverity::Error,
+                                NoticeStatus::Settled,
+                                msg.clone(),
+                                None,
+                                true,
+                            )
+                            .await;
                             self.rt.emit(AgentEvent::Error {
-                                message: format!(
-                                    "max offer_continuation continuations ({max}) reached"
-                                ),
+                                message: msg.clone(),
                                 http_status: None,
                                 code: None,
                             });
-                            Self::persist_turn_diagnostic(
-                                convo,
-                                &format!("max offer_continuation continuations ({max}) reached"),
-                            );
+                            Self::persist_turn_diagnostic(convo, &msg);
                             self.finish_turn(convo, StopReason::MaxContinuations, &turn_ctx)
                                 .await;
                             return;
@@ -3865,6 +4381,7 @@ impl RunningAgent {
                     self.compact_before_internal_continuation(
                         convo,
                         &mut internal_auto_compaction_attempted_stages,
+                        Some(&turn_ctx),
                     )
                     .await;
                     let Continuation {
@@ -3887,9 +4404,22 @@ impl RunningAgent {
                 // continuation), surface the warning now — this is the one case the
                 // user needs to see: real work was cut off and is not being finished.
                 if truncated {
-                    self.rt.emit(AgentEvent::Warning(
-                        "response truncated: finish_reason=length".into(),
-                    ));
+                    let trunc_msg = "response truncated: finish_reason=length".to_string();
+                    self.emit_system_notice(
+                        convo,
+                        &turn_ctx,
+                        &mut notice_revisions,
+                        &mut notice_anchors,
+                        format!("trunc:{}", turn_ctx.turn_id),
+                        NoticeKind::Truncation,
+                        NoticeSeverity::Warning,
+                        NoticeStatus::Settled,
+                        i18n::format_agent_response_truncated(),
+                        Some(assistant_message_id.clone()),
+                        true,
+                    )
+                    .await;
+                    self.rt.emit(AgentEvent::Warning(trunc_msg));
                 }
                 self.finish_turn(convo, StopReason::Stopped, &turn_ctx)
                     .await;
@@ -4500,6 +5030,7 @@ impl RunningAgent {
                 ToolLoopFingerprint { calls: loop_calls }
             });
             self.hooks.on_turn_progress(convo).await;
+            self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
             // ── Cancel during the batch: close batch + roll back the turn ──
             // Reached only when Phase ② observed a cancel. The results that DID
             // complete were applied above so their ToolResult events fired; the
@@ -4528,6 +5059,20 @@ impl RunningAgent {
                 });
             }
             if policy_denied {
+                self.emit_system_notice(
+                    convo,
+                    &turn_ctx,
+                    &mut notice_revisions,
+                    &mut notice_anchors,
+                    format!("err-policy:{}", turn_ctx.turn_id),
+                    NoticeKind::Error,
+                    NoticeSeverity::Error,
+                    NoticeStatus::Settled,
+                    "policy denied",
+                    None,
+                    true,
+                )
+                .await;
                 Self::persist_turn_diagnostic(convo, "policy denied");
                 self.finish_turn(convo, StopReason::PolicyDenied, &turn_ctx)
                     .await;
@@ -4587,6 +5132,20 @@ impl RunningAgent {
                     "stopped: the model replayed the same reasoning/text and tool-call \
                          pattern for {echo_rounds} consecutive rounds"
                 );
+                self.emit_system_notice(
+                    convo,
+                    &turn_ctx,
+                    &mut notice_revisions,
+                    &mut notice_anchors,
+                    format!("err-echo:{}", turn_ctx.turn_id),
+                    NoticeKind::Error,
+                    NoticeSeverity::Error,
+                    NoticeStatus::Settled,
+                    message.clone(),
+                    None,
+                    true,
+                )
+                .await;
                 self.rt.emit(AgentEvent::Error {
                     message: message.clone(),
                     http_status: None,
@@ -4631,6 +5190,20 @@ impl RunningAgent {
                     }
                     ToolLoopDecision::Stop => {
                         let warning = tool_loop_terminal_warning(policy);
+                        self.emit_system_notice(
+                            convo,
+                            &turn_ctx,
+                            &mut notice_revisions,
+                            &mut notice_anchors,
+                            format!("err-tool-loop:{}", turn_ctx.turn_id),
+                            NoticeKind::Warning,
+                            NoticeSeverity::Warning,
+                            NoticeStatus::Settled,
+                            warning.clone(),
+                            None,
+                            true,
+                        )
+                        .await;
                         self.rt.emit(AgentEvent::Warning(warning.clone()));
                         Self::persist_turn_diagnostic(convo, &warning);
                         self.finish_turn(convo, StopReason::ToolLoopDetected, &turn_ctx)
@@ -4673,6 +5246,20 @@ impl RunningAgent {
                     "stopped: the model repeated the same tool-call pattern for \
                          {repeat_rounds} consecutive rounds"
                 );
+                self.emit_system_notice(
+                    convo,
+                    &turn_ctx,
+                    &mut notice_revisions,
+                    &mut notice_anchors,
+                    format!("err-repeat:{}", turn_ctx.turn_id),
+                    NoticeKind::Error,
+                    NoticeSeverity::Error,
+                    NoticeStatus::Settled,
+                    message.clone(),
+                    None,
+                    true,
+                )
+                .await;
                 self.rt.emit(AgentEvent::Error {
                     message: message.clone(),
                     http_status: None,

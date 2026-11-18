@@ -26,7 +26,7 @@ export interface ReplayFoldMessage {
 
 const TERMINAL = new Set(['done', 'stopped', 'error']);
 /** 折叠线以上的正文可以丢，待审批 / 待输入 / 压缩边界通知不能丢。 */
-const INTERACTIVE = new Set(['permission_request', 'user_input_request', 'display_notice']);
+const INTERACTIVE = new Set(['permission_request', 'user_input_request', 'display_notice', 'system_notice']);
 
 /**
  * Should this frame be applied with replay semantics (replace the accumulated
@@ -107,6 +107,13 @@ export function replayFrameOnCanvas(messages: ReplayFoldMessage[], event: SSEEve
       return canvasHasTool(messages, event.id);
     case 'permission_request':
       return canvasHasTool(messages, event.call_id);
+    case 'system_notice':
+      return messages.some(
+        (message) =>
+          message.role === 'system' &&
+          (message.id === event.event_id ||
+            message.parts.some((part) => part.kind === 'notice' && part.eventId === event.event_id)),
+      );
     default:
       return false;
   }
@@ -132,6 +139,8 @@ export function replayFrameAnchor(event: SSEEvent): ReplayFoldAnchor {
       return { toolId: event.id };
     case 'permission_request':
       return { toolId: event.call_id };
+    case 'system_notice':
+      return event.anchor_message_id ? { messageId: event.anchor_message_id } : {};
     default:
       return {};
   }

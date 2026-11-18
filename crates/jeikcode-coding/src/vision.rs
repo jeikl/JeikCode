@@ -139,6 +139,7 @@ mod tests {
     fn perr(msg: &str) -> ProviderError {
         ProviderError {
             retryable: false,
+            resumable: false,
             message: msg.into(),
             http_status: None,
             code: None,

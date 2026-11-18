@@ -428,16 +428,58 @@ async fn exec_native_compact(
         );
         notice_text = Some(mark.clone());
         let mgr = NativeSessionManager::with_root(mgr_root);
-        // 压缩边界是转录里的正式记录：保留显示日志分配的权威 `seq`/`id`，
-        // 交给调用方原样广播，所有实例按同一序号摆放。
-        notice = mgr
-            .append_display_notice(&sid_for_notice, mark, None)
-            .ok()
-            .flatten();
         revision = mgr
             .load_snapshot(&sid_for_notice)
             .ok()
             .map(|snap| snap.cache_epoch);
+        let anchor_id = mgr
+            .read_display(&sid_for_notice)
+            .ok()
+            .flatten()
+            .and_then(|(_, rows)| {
+                rows.into_iter().rev().find_map(|row| {
+                    if row.synthetic
+                        || row.internal_origin.as_deref() == Some("turn_diagnostic")
+                        || row.internal_origin.as_deref() == Some("verify_cadence")
+                    {
+                        return None;
+                    }
+                    if row.role.eq_ignore_ascii_case("user")
+                        || row.role.eq_ignore_ascii_case("assistant")
+                    {
+                        row.id
+                    } else {
+                        None
+                    }
+                })
+            });
+        let epoch_key = revision.unwrap_or_else(|| {
+            u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0)
+        });
+        let event_id = format!("compact:epoch:{epoch_key}");
+        let draft = jeikcode_capabilities::session::DisplayRecord {
+            v: jeikcode_capabilities::session::DISPLAY_VERSION,
+            session_id: sid_for_notice.clone(),
+            turn_id: 0,
+            index: 0,
+            seq: 0,
+            role: "assistant".to_string(),
+            id: Some(event_id.clone()),
+            content: mark,
+            internal_origin: Some("turn_diagnostic".to_string()),
+            event_id: Some(event_id.clone()),
+            part_id: Some(format!("{event_id}:1:notice")),
+            anchor_message_id: anchor_id,
+            notice_kind: Some(jeikcode_kernel::event::NoticeKind::Compaction),
+            revision: Some(1),
+            severity: Some(jeikcode_kernel::event::NoticeSeverity::Info),
+            status: Some(jeikcode_kernel::event::NoticeStatus::Settled),
+            ..Default::default()
+        };
+        notice = mgr
+            .upsert_display_notice_record(&sid_for_notice, draft)
+            .ok()
+            .flatten();
     }
     Ok(NativeCompactOutcome {
         result: CommandResult::Compact {
@@ -655,16 +697,36 @@ async fn exec_compact(
     }) = &outcome
     {
         if let Some(record) = notice {
-            // 带显示日志权威 `seq`/`id` 的边界记录：观察者按序号把它摆成一条
-            // 独立 system 行，而不是塞进“最后一条 assistant”的 warning 片段。
+            // 唯一持久化写入方已经分配权威 event_id 与 anchor_message_id，
+            // 直接广播统一 system_notice 事件。
+            let event_id = record
+                .event_id
+                .clone()
+                .or_else(|| record.id.clone())
+                .unwrap_or_default();
             active_chats
                 .broadcast_to_session(
                     sid,
-                    crate::ChatEvent::DisplayNotice {
+                    crate::ChatEvent::SystemNotice {
                         session_id: sid.to_string(),
-                        id: record.id.clone().unwrap_or_default(),
-                        display_seq: record.seq,
+                        event_id: event_id.clone(),
+                        part_id: record
+                            .part_id
+                            .clone()
+                            .unwrap_or_else(|| format!("{event_id}:1:notice")),
+                        kind: record
+                            .notice_kind
+                            .unwrap_or(jeikcode_kernel::event::NoticeKind::Compaction),
+                        severity: record
+                            .severity
+                            .unwrap_or(jeikcode_kernel::event::NoticeSeverity::Info),
+                        status: record
+                            .status
+                            .unwrap_or(jeikcode_kernel::event::NoticeStatus::Settled),
+                        revision: record.revision.unwrap_or(1),
                         text: record.content.clone(),
+                        anchor_message_id: record.anchor_message_id.clone(),
+                        anchor_part_id: record.anchor_part_id.clone(),
                         created_at: record.created_at,
                     },
                 )
@@ -1245,15 +1307,8 @@ mod tests {
                     role: "user".into(),
                     id: Some("u1".into()),
                     content: "u1".into(),
-                    reasoning: None,
-                    synthetic: false,
-                    internal_origin: None,
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                    is_error: false,
-                    images: Vec::new(),
                     created_at: Some(1),
-                    elapsed_ms: None,
+                    ..Default::default()
                 }],
                 3,
             )

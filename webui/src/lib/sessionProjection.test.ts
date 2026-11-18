@@ -7,7 +7,6 @@ import {
   foldLiveTodo,
   hydrateSession,
   identifiedAssistantIndex,
-  isTransientAdvisoryText,
   paintAssistantReasoning,
   paintAssistantText,
   paintAssistantNotice,
@@ -1099,7 +1098,7 @@ test('spliceAuthoritativeDiskTail 丢弃无 seq 的旧缓存通知行，不再�
   assert.deepEqual(spliced.map((m) => m.id ?? 'notice'), ['u-2', 'a-2', 'u-3', 'a-3']);
 });
 
-test('stripTransientNoticeRows 剔除瞬态提示，只保留持久化边界通知', () => {
+test('stripTransientNoticeRows 剔除瞬态提示，只保留持久化与结构化边界通知', () => {
   const rows = [
     { role: 'assistant', id: 'a-1', seq: 1, parts: [{ kind: 'text' as const, text: '回答' }] },
     {
@@ -1120,18 +1119,24 @@ test('stripTransientNoticeRows 剔除瞬态提示，只保留持久化边界通�
       id: 'notice-compact',
       seq: 3,
       persistent: true,
-      parts: [{ kind: 'notice' as const, text: '已压缩 · 摘要 12 条 · ~48.2K→~9.1K tok' }],
+      parts: [{ kind: 'notice' as const, text: '已压缩 · 摘要 12 条 · ~48.2K→~9.1K tok', noticeKind: 'compaction' as const }],
     },
-    // Legacy transient notice: id+seq but no durability marker.
+    // Legacy notice without persistent marker or v5 eventId: dropped across cache reads.
     {
       role: 'system',
       id: 'notice-legacy-warning',
       seq: 4,
       parts: [{ kind: 'notice' as const, text: 'stream idle timeout — reconnecting' }],
     },
+    // Structured v5 eventId notice survives cache roundtrip cleanly.
+    {
+      role: 'system',
+      id: 'retry-inc-2',
+      parts: [{ kind: 'notice' as const, text: 'stream idle timeout (retrying 2/9)', eventId: 'retry-inc-2', status: 'settled' as const }],
+    },
   ];
   const out = stripTransientNoticeRows(rows as any);
-  assert.deepEqual(out.map((row) => row.id), ['a-1', 'notice-compact']);
+  assert.deepEqual(out.map((row) => row.id), ['a-1', 'notice-compact', 'retry-inc-2']);
 });
 
 test('stripTransientNoticeRows 保留带有 persistent 标记的持久账本通知即便含重试/超时词', () => {
@@ -1174,21 +1179,6 @@ test('stripTransientNoticeRows 从 assistant 行中剔除 rate_limited 部件', 
   assert.equal(out.length, 1);
   assert.equal(out[0]!.id, 'a-1');
   assert.deepEqual(out[0]!.parts.map((p: any) => p.kind), ['text']);
-});
-
-test('isTransientAdvisoryText 区分重试提示与压缩边界', () => {
-  assert.equal(
-    isTransientAdvisoryText('模型只返回了思考，正在重试(1/6)...'),
-    true,
-  );
-  assert.equal(
-    isTransientAdvisoryText('Model returned only reasoning, retrying (1/6)...'),
-    true,
-  );
-  assert.equal(
-    isTransientAdvisoryText('已压缩 · 摘要 12 条 · ~48.2K→~9.1K tok'),
-    false,
-  );
 });
 
 test('spliceAuthoritativeDiskTail 用权威行替换同一身份时保留本地 notice 部件', () => {

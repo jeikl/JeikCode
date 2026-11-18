@@ -264,6 +264,51 @@ pub fn format_agent_retry_progress(attempt: u32, max: u32) -> String {
     t(Msg::AgentRetryProgress { attempt, max }).into_owned()
 }
 
+/// 流空闲超时重试进度。
+pub fn format_agent_retry_stall_progress(attempt: u32, max: u32, has_output: bool) -> String {
+    t(Msg::AgentRetryStallProgress {
+        attempt,
+        max,
+        has_output,
+    })
+    .into_owned()
+}
+
+/// 连接中断重试进度。
+pub fn format_agent_retry_drop_progress(attempt: u32, max: u32, has_output: bool) -> String {
+    t(Msg::AgentRetryDropProgress {
+        attempt,
+        max,
+        has_output,
+    })
+    .into_owned()
+}
+
+/// 重试恢复成功收口文案。
+pub fn format_agent_retry_recovered(attempts: u32) -> String {
+    t(Msg::AgentRetryRecovered { attempts }).into_owned()
+}
+
+/// 自动重连耗尽后的流超时终态文案。
+pub fn format_agent_stream_timeout_terminal() -> String {
+    t(Msg::AgentStreamTimeoutTerminal).into_owned()
+}
+
+/// 429 自动退避等待文案。
+pub fn format_agent_rate_limited_waiting(secs: u64) -> String {
+    t(Msg::AgentRateLimitedWaiting { secs }).into_owned()
+}
+
+/// 429 暂停终态文案。
+pub fn format_agent_rate_limited_paused(detail: &str) -> String {
+    t(Msg::AgentRateLimitedPaused { detail }).into_owned()
+}
+
+/// 响应被截断提示文案。
+pub fn format_agent_response_truncated() -> String {
+    t(Msg::AgentResponseTruncated).into_owned()
+}
+
 /// 已产生部分回复后流超时（终态）。
 pub fn format_agent_stream_timeout_partial_response() -> String {
     t(Msg::AgentStreamTimeoutPartialResponse).into_owned()

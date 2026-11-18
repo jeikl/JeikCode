@@ -106,7 +106,7 @@ import { UserMessageView } from './chat/UserMessageView';
 import { AssistantMessageView } from './chat/AssistantMessageView';
 import { QueuedMessageCard } from './chat/QueuedMessageCard';
 import { StatusRow } from './chat/StatusRow';
-import { NoticeCard, isCompactionDoneNotice } from './chat/NoticeCard';
+import { NoticeCard } from './chat/NoticeCard';
 import { AttachmentTray } from './chat/AttachmentTray';
 import { SlashMenu } from './chat/SlashMenu';
 import { AtMentionMenu } from './chat/AtMentionMenu';
@@ -376,7 +376,6 @@ import {
   mergeOlderMessages,
   cachedHeadIsContiguous,
   resolveHistoryOffset,
-  isTransientAdvisoryText,
   stampUserClientInputId,
   stampUserSourceIndex,
   steerInsertAfterAnchor,
@@ -384,6 +383,13 @@ import {
   withAssistantIdentity,
   type TurnUserAnchor,
 } from '../lib/sessionProjection';
+import {
+  drainPendingAnchoredNotices,
+  enqueuePendingAnchoredNotice,
+  hasNoticeAnchorInRows,
+  systemNoticeActionFromWire,
+  type SystemNoticeWire,
+} from '../lib/canvas/actions';
 import {
   clearStreamCursor,
   readStreamCursor,
@@ -1346,6 +1352,10 @@ export function Chat({
   // (`watch_closed`) has no daemon message_id; anchor its notice to the turn's
   // own prompt instead of whatever assistant happens to be newest.
   const turnUserAnchorBySessionRef = useRef<Map<string, string>>(new Map());
+  // Anchored v5 `system_notice` frames whose `anchor_message_id` is not yet on canvas
+  // (e.g. scrolled out above the tail window or waiting on `user_identified`). Coalesced by
+  // `event_id` and drained cleanly as soon as the anchor lands on canvas or older pages load.
+  const pendingAnchoredNoticesRef = useRef<Map<string, SystemNoticeWire[]>>(new Map());
   // Inputs accepted by the live runtime as in-turn steers but not yet folded at
   // a kernel round boundary. Unlike `queued`, these already belong to the active
   // turn and must be recovered if that turn is cancelled before acknowledgement.
@@ -6039,31 +6049,37 @@ export function Chat({
         const origin = displayOrigin;
         if (origin === 'turn_diagnostic') {
           const text = (msg.content ?? '').trim();
-          // 新版通过 append_display_notice 落盘的事件卡（重试通知 *:retry / 边界通知 notice-*）
-          // 带明确通知身份，跨刷新应完整保留；仅对没有该身份的旧版残留文案继续兜底过滤。
-          const hasAuthoritativeNoticeId =
-            typeof msg.id === 'string' &&
-            (msg.id.startsWith('notice-') || msg.id.endsWith(':retry'));
-          if (text && (hasAuthoritativeNoticeId || !isTransientAdvisoryText(text))) {
+          const noticeMeta = msg.notice;
+          if (text) {
             const authenticSeq =
               typeof msg.seq === 'number' && Number.isInteger(msg.seq) && msg.seq >= 0
                 ? msg.seq
                 : undefined;
-            // 诊断/压缩标记是只读通知，不是模型回答：必须落成 system 行。
-            // 旧实现把它伪装成 assistant 行，刷新后看起来就像回答正文的一部分。
+            const eventId = noticeMeta?.event_id ?? msg.id;
+            const partId = noticeMeta?.part_id ?? (msg.id ? `${msg.id}:1:notice` : undefined);
+            // 诊断/压缩标记是只读通知，不是模型回答：必须落成 system 行，
+            // 并完整透传 v5 结构化元数据（kind/severity/status/revision/anchor）。
             loaded.push({
               role: 'system',
               parts: [
                 {
                   kind: 'notice',
                   text,
-                  ...(msg.id ? { id: `${msg.id}:1:notice` } : {}),
+                  ...(partId ? { id: partId, partId } : {}),
+                  ...(eventId ? { eventId } : {}),
+                  ...(noticeMeta?.notice_kind ? { noticeKind: noticeMeta.notice_kind } : {}),
+                  ...(noticeMeta?.severity ? { severity: noticeMeta.severity } : {}),
+                  ...(noticeMeta?.status ? { status: noticeMeta.status } : {}),
+                  ...(typeof noticeMeta?.revision === 'number' ? { revision: noticeMeta.revision } : {}),
+                  ...(noticeMeta?.anchor_message_id ? { anchorMessageId: noticeMeta.anchor_message_id } : {}),
+                  ...(noticeMeta?.anchor_part_id ? { anchorPartId: noticeMeta.anchor_part_id } : {}),
                 },
               ],
-              // 账本行：跨刷新保留，且参与按 seq 归位。
+              // 账本行：跨刷新保留，且不因文本关键词被缓存剥离误杀。
               persistent: true,
               ts: msg.created_at,
-              id: msg.id,
+              id: msg.id ?? eventId,
+              ...(typeof msg.turn_id === 'number' && msg.turn_id > 0 ? { turnId: msg.turn_id } : {}),
               sourceIndex,
               sourceIndexAuthority: 'disk',
               seq: msg.seq,
@@ -6292,25 +6308,21 @@ export function Chat({
   // 插入位置不是永久身份：磁盘对账会用权威切片重建画布，没有身份的通知行
   // 会被当成“未落盘直播尾巴”拖到会话末尾（压缩标记逐轮跑到尾部就是这个）。
   // 通知是本地瞬态记录，但必须带一个落在锚点之后的 seq：既不需要 anchorId，
-  // 也能在权威切片合并时留在原来的轮次。
-  function noticeSeqFrom(msgs: Message[]): number {
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const seq = msgs[i]!.seq;
-      if (typeof seq === 'number') return seq + 0.5;
-    }
-    return msgs.length;
-  }
-
-  /** 同一次压缩的完成提示可能同时来自服务端 warning 与本地兜底：
-   *  只检查最近的 turn 边界（遇到 user 行即停），跨 turn 的真实历史标记
-   *  不参与去重，否则多次压缩会被吞成一条。 */
+  /** 同一次压缩的完成提示可能同时来自服务端 system_notice 与 /compact CLI 返回：
+   *  按结构化 `noticeKind === 'compaction'` 或 `eventId` 前缀判重，仅检查最近的
+   *  turn 边界（遇到 user 行即停），避免跨语言文案脆弱猜测。 */
   function hasRecentCompactionNotice(msgs: Message[]): boolean {
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i]!;
       if (m.role === 'user') return false;
       if (
         Array.isArray(m.parts) &&
-        m.parts.some((p) => p.kind === 'notice' && isCompactionDoneNotice(p.text))
+        m.parts.some(
+          (p) =>
+            p.kind === 'notice' &&
+            (p.noticeKind === 'compaction' ||
+              (typeof p.eventId === 'string' && p.eventId.startsWith('compact:'))),
+        )
       ) {
         return true;
       }
@@ -8561,10 +8573,22 @@ export function Chat({
               if (compactSid) await reloadSessionTranscript(compactSid, compactHash);
               const alreadyHasNotice = hasRecentCompactionNotice(messagesRef.current);
               if (!alreadyHasNotice) {
-                pushCommandNotice(
-                  t('cmd.compact.done', { n: res.removed_messages, before: res.before_tokens, after: res.after_tokens }),
-                  { forceTail: true },
-                );
+                const eventId = `compact:local:${randomUUID()}`;
+                setMessages({
+                  type: 'system_notice',
+                  eventId,
+                  partId: `${eventId}:1:notice`,
+                  kind: 'compaction',
+                  severity: 'info',
+                  status: 'settled',
+                  revision: 1,
+                  text: t('cmd.compact.done', { n: res.removed_messages, before: res.before_tokens, after: res.after_tokens }),
+                });
+                const currentSid = sessionId ?? activeIdRef.current;
+                if (currentSid) {
+                  messageCacheRef.current.set(currentSid, messagesRef.current);
+                  scheduleCanvasCacheSave();
+                }
               }
               tokenCacheRef.current = resetTokenCacheState(res.after_tokens);
               setTokens({ prompt: res.after_tokens, completion: 0, total: res.after_tokens, cached: 0, cached_estimated: false });
@@ -8671,15 +8695,93 @@ export function Chat({
     }
   }
 
-  function pushRateLimitedToLastAssistant(text: string, targetId?: string) {
+  function pushRateLimitedToLastAssistant(text: string, targetId?: string, eventId?: string) {
     // `targetId` is the assistant round this card belongs to; `id` is the card's
     // own row identity. The old code reused the target id as the new row id,
     // which guaranteed no anchor match and always appended a tail row.
-    const rlId = targetId ? `rl-${targetId}` : `rl-${randomUUID()}`;
-    setMessages({ type: 'rate_limited', text, targetId, id: rlId });
+    const rlId = eventId || (targetId ? `rl-${targetId}` : `rl-${randomUUID()}`);
+    setMessages({ type: 'rate_limited', text, targetId, id: rlId, ...(eventId ? { eventId } : {}) });
     const currentSid = sessionId ?? activeIdRef.current;
     if (currentSid) messageCacheRef.current.set(currentSid, messagesRef.current);
   }
+
+  function flushPendingAnchoredNoticesFor(sid?: string) {
+    const keys = [sid, activeIdRef.current, sessionId, '__active__'].filter(
+      (k, idx, arr): k is string => Boolean(k) && arr.indexOf(k) === idx,
+    );
+    let dispatched = false;
+    for (const key of keys) {
+      const queue = pendingAnchoredNoticesRef.current.get(key);
+      if (!queue || queue.length === 0) continue;
+      const { ready, remaining } = drainPendingAnchoredNotices(queue, messagesRef.current);
+      if (ready.length === 0) continue;
+      if (remaining.length > 0) pendingAnchoredNoticesRef.current.set(key, remaining);
+      else pendingAnchoredNoticesRef.current.delete(key);
+      for (const action of ready) {
+        setMessages(action);
+      }
+      dispatched = true;
+    }
+    if (dispatched) {
+      const cacheSid = sessionId ?? activeIdRef.current;
+      if (cacheSid) {
+        messageCacheRef.current.set(cacheSid, messagesRef.current);
+        scheduleCanvasCacheSave();
+      }
+    }
+  }
+
+  function applyLiveSystemNotice(event: Extract<SSEEvent, { type: 'system_notice' }>) {
+    const noticeSid = event.session_id ?? activeIdRef.current ?? sessionId;
+    const rows = messagesRef.current;
+    const alreadyExists = rows.some(
+      (r) =>
+        r.role === 'system' &&
+        (r.id === event.event_id ||
+          (r.parts ?? []).some((p) => p.kind === 'notice' && p.eventId === event.event_id)),
+    );
+    if (!alreadyExists && !hasNoticeAnchorInRows(rows, event.anchor_message_id)) {
+      const key = noticeSid ?? '__active__';
+      const prevQueue = pendingAnchoredNoticesRef.current.get(key) ?? [];
+      pendingAnchoredNoticesRef.current.set(key, enqueuePendingAnchoredNotice(prevQueue, event));
+      return;
+    }
+    setMessages(systemNoticeActionFromWire(event));
+    if (noticeSid) {
+      messageCacheRef.current.set(noticeSid, messagesRef.current);
+      scheduleCanvasCacheSave();
+    }
+  }
+
+  function applyBackgroundSystemNotice(
+    targetSid: string,
+    event: Extract<SSEEvent, { type: 'system_notice' }>,
+  ) {
+    const msgs = messageCacheRef.current.get(targetSid);
+    const alreadyExists = !!msgs?.some(
+      (r) =>
+        r.role === 'system' &&
+        (r.id === event.event_id ||
+          (r.parts ?? []).some((p) => p.kind === 'notice' && p.eventId === event.event_id)),
+    );
+    if (msgs && (alreadyExists || hasNoticeAnchorInRows(msgs, event.anchor_message_id))) {
+      const updated = reduceCanvasEvent(msgs, systemNoticeActionFromWire(event));
+      if (updated !== msgs) messageCacheRef.current.set(targetSid, updated);
+      return;
+    }
+    const prevQueue = pendingAnchoredNoticesRef.current.get(targetSid) ?? [];
+    pendingAnchoredNoticesRef.current.set(
+      targetSid,
+      enqueuePendingAnchoredNotice(prevQueue, event),
+    );
+  }
+
+  // 每当画布消息集更新（例如 user_identified 到达、文本落地或向上加载旧页 `older`），
+  // 立即尝试释放等待锚点的 system_notice 队列。
+  useEffect(() => {
+    flushPendingAnchoredNoticesFor(activeIdRef.current ?? sessionId ?? undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, sessionId]);
 
   function updateToolInLastAssistant(
     id: string,
@@ -8769,6 +8871,10 @@ export function Chat({
       ) {
         settleSessionRunningState(targetSid);
       }
+      return;
+    }
+    if (event.type === 'system_notice') {
+      applyBackgroundSystemNotice(targetSid, event);
       return;
     }
     const msgs = messageCacheRef.current.get(targetSid);
@@ -9037,6 +9143,7 @@ export function Chat({
       case 'done':
       case 'stopped':
       case 'error': {
+        next = reduceCanvasEvent(next, { type: 'settle_active_notices' });
         const openFence = artifactOpenBySessionRef.current.get(targetSid);
         if (openFence) {
           artifactOpenBySessionRef.current.delete(targetSid);
@@ -9074,6 +9181,17 @@ export function Chat({
           postSystemNotifyFn: postSystemNotify,
         });
         break;
+      }
+    }
+    const pendingBgQueue = pendingAnchoredNoticesRef.current.get(targetSid);
+    if (pendingBgQueue && pendingBgQueue.length > 0) {
+      const drained = drainPendingAnchoredNotices(pendingBgQueue, next);
+      if (drained.ready.length > 0) {
+        if (drained.remaining.length > 0) pendingAnchoredNoticesRef.current.set(targetSid, drained.remaining);
+        else pendingAnchoredNoticesRef.current.delete(targetSid);
+        for (const act of drained.ready) {
+          next = reduceCanvasEvent(next, act);
+        }
       }
     }
     if (next !== msgs) messageCacheRef.current.set(targetSid, next);
@@ -9836,6 +9954,7 @@ export function Chat({
           // 同一条规则吞掉。旧实现会在这里先清标记，导致随后到达的 stopped 按“用户停止”
           // 处理，把正在跑的新回合按钮清回发送箭头。
         } else if (terminal.discardQueued) {
+          setMessages({ type: 'settle_active_notices' });
           // 异常终端 / 被取消：停止自动 drain。
           // 只有真正异常的终态（预算耗尽 / 循环保护 / provider 失败 / 超时）才弹黄色
           // 未完成提示；`cancelled` / 用户主动停止（停止按钮、立即发送交接、撞上回合
@@ -9848,16 +9967,19 @@ export function Chat({
             const noticeAnchor =
               event.message_id ??
               (doneSid ? turnUserAnchorBySessionRef.current.get(doneSid) : undefined);
-            // 已经用同一条详情提示过的故障（重试卡片已被终态改写）不再补一张
+            // 已经用同一条详情或结构化 settled error 提示过的故障不再补一张
             // “回合未完成”，否则一次故障会出现两张卡。
             const alreadyExplained =
-              !!terminal.detail &&
               messagesRef.current.some((message) =>
                 message.parts.some(
                   (part) =>
                     part.kind === 'notice' &&
-                    !!part.text &&
-                    part.text.includes(terminal.detail),
+                    ((!!terminal.detail && !!part.text && part.text.includes(terminal.detail)) ||
+                      (part.severity === 'error' &&
+                        part.status === 'settled' &&
+                        (!noticeAnchor ||
+                          !part.anchorMessageId ||
+                          part.anchorMessageId === noticeAnchor))),
                 ),
               );
             if (!alreadyExplained) {
@@ -9896,6 +10018,7 @@ export function Chat({
             scheduleDeferredReconcile(reconcileHash, event.session_id, 500);
           }
         } else {
+          setMessages({ type: 'settle_active_notices' });
           // ── 正常交互完成 (Normal Turn Completion) ──
           // 无论是否存在任何标记，只要是正常完成，100% 绝对无条件终结计时器并收尾待办，
           // 彻底阻断任何“误判结束为假运行计时器一直叠加”的可能！
@@ -10185,6 +10308,9 @@ export function Chat({
         // daemon (WebUI turns force keep_interrupted_context), so the folded
         // steers are durable. Keep the ledger; `done` clears it when the next
         // turn settles, and `handleSendImmediately` resolves by id.
+        if (!isProgrammaticStopped) {
+          setMessages({ type: 'settle_active_notices' });
+        }
         closeOpenArtifactFence();
         finalizePendingToolsOnCanvas();
         commitActiveTodosIntoLastAssistant();
@@ -10196,8 +10322,9 @@ export function Chat({
       case 'error':
         if (isTerminalFromOtherTurn(event, activeIdRef.current ?? sessionId)) break;
         closeOpenArtifactFence();
-        // 压缩失败也走 Error：临时“正在压缩…”行同样要撤回。
+        // 压缩失败也走 Error：临时“正在压缩…”行同样要撤回；同时将遗留 active 通知收敛为 settled。
         retireCompactPendingNotice();
+        setMessages({ type: 'settle_active_notices' });
         {
           const errorText = t('chat.error', { msg: event.message });
           const anchor =
@@ -10205,18 +10332,30 @@ export function Chat({
             (activeIdRef.current
               ? turnUserAnchorBySessionRef.current.get(activeIdRef.current)
               : undefined);
-          const anchorIsUser =
-            !!anchor && messagesRef.current.some((m) => m.role === 'user' && m.id === anchor);
-          if (anchorIsUser) {
-            // A provider failure before the first assistant boundary: keep the
-            // notice under its own prompt instead of the newest answer.
-            pushNoticeToLastAssistant(errorText, anchor);
-          } else {
-            appendToLastAssistant(
-              '\n\n' + errorText,
-              undefined,
-              { messageId: anchor },
-            );
+          const alreadySettledError = messagesRef.current.some((m) =>
+            m.parts.some(
+              (p) =>
+                p.kind === 'notice' &&
+                ((p.severity === 'error' &&
+                  p.status === 'settled' &&
+                  (!anchor || !p.anchorMessageId || p.anchorMessageId === anchor)) ||
+                  (!!event.message && !!p.text && p.text.includes(event.message))),
+            ),
+          );
+          if (!alreadySettledError) {
+            const anchorIsUser =
+              !!anchor && messagesRef.current.some((m) => m.role === 'user' && m.id === anchor);
+            if (anchorIsUser) {
+              // A provider failure before the first assistant boundary: keep the
+              // notice under its own prompt instead of the newest answer.
+              pushNoticeToLastAssistant(errorText, anchor);
+            } else {
+              appendToLastAssistant(
+                '\n\n' + errorText,
+                undefined,
+                { messageId: anchor },
+              );
+            }
           }
         }
         transitionChatRecovery({ type: 'authoritative_terminal' });
@@ -10259,19 +10398,24 @@ export function Chat({
         break;
 
       case 'warning': {
-        // 压缩完成标记是轮次边界，必须落成独立 system 行（渲染为紫色分隔条），
-        // 不能包上 `[警告: …]` 塞进最后一条 assistant 气泡。
-        if (isCompactionDoneNotice(event.message)) {
-          if (!hasRecentCompactionNotice(messagesRef.current)) {
-            pushCommandNotice(event.message, { forceTail: true });
-          }
-        } else {
-          // 非致命提示：渲染成淡色 notice 行 —— 不染红、不并进
-          // 回复文本、不结束回合（任务继续）。对齐 TUI 的黄色 "!" 提示。
-          pushNoticeToLastAssistant(t('chat.warning', { msg: event.message }), event.message_id);
-        }
-        // /live path: a compaction notice carries the post-compaction token count.
+        // 兼容旧版未迁移为 system_notice 的服务端 /live 压缩通知（仅凭结构化 `tokens_after` 判断，
+        // 不再用跨语言文本匹配去猜）。
         if (typeof event.tokens_after === 'number') {
+          if (!hasRecentCompactionNotice(messagesRef.current)) {
+            const eventId = `compact:legacy:${randomUUID()}`;
+            applyLiveSystemNotice({
+              type: 'system_notice',
+              session_id: (event as { session_id?: string }).session_id,
+              event_id: eventId,
+              part_id: `${eventId}:1:notice`,
+              kind: 'compaction',
+              severity: 'info',
+              status: 'settled',
+              revision: 1,
+              text: event.message,
+              anchor_message_id: event.message_id,
+            });
+          }
           // 真正标记已上屏，临时的“正在压缩…”行不再需要。
           retireCompactPendingNotice();
           const prompt = Math.max(0, event.tokens_after);
@@ -10303,6 +10447,10 @@ export function Chat({
             (event as { session_id?: string }).session_id ?? activeIdRef.current,
             false,
           );
+        } else {
+          // 非致命提示：渲染成淡色 notice 行 —— 不染红、不并进
+          // 回复文本、不结束回合（任务继续）。对齐 TUI 的黄色 "!" 提示。
+          pushNoticeToLastAssistant(t('chat.warning', { msg: event.message }), event.message_id);
         }
         break;
       }
@@ -10361,6 +10509,14 @@ export function Chat({
         break;
       }
 
+      case 'system_notice': {
+        if (event.kind === 'compaction' && event.status === 'settled') {
+          retireCompactPendingNotice();
+        }
+        applyLiveSystemNotice(event);
+        break;
+      }
+
       case 'persistence_warning':
         setPersistenceWarning(event.message);
         break;
@@ -10392,7 +10548,7 @@ export function Chat({
         } else {
           text = `${t('chat.rateLimited.pausedNoTime')}${dur} · ${t('chat.rateLimited.hint')}`;
         }
-        pushRateLimitedToLastAssistant(text, event.message_id);
+        pushRateLimitedToLastAssistant(text, event.message_id, event.event_id);
         break;
       }
 
@@ -14264,8 +14420,14 @@ export function Chat({
             // transcript BOUNDARY, not a message: render it as a slim divider marker
             // so it cannot look like part of the assistant answer above it.
             if (msg.role === 'system') {
+              const noticePart = msg.parts.find(
+                (p): p is Extract<MsgPart, { kind: 'notice' }> => p.kind === 'notice',
+              );
               const fullText = msg.parts.map((p) => (p.kind === 'notice' ? p.text : '')).join('');
-              if (isCompactionDoneNotice(fullText)) {
+              const isCompactMarker =
+                noticePart?.noticeKind === 'compaction' ||
+                (typeof msg.id === 'string' && msg.id.startsWith('compact:'));
+              if (isCompactMarker) {
                 return (
                   <div
                     key={msg.id ?? origIdx}
@@ -14287,6 +14449,9 @@ export function Chat({
                 <NoticeCard
                   key={msg.id ?? origIdx}
                   text={fullText}
+                  kind={noticePart?.noticeKind}
+                  severity={noticePart?.severity}
+                  status={noticePart?.status}
                   search={search}
                   className={`command-output ${isActiveSearchMatch ? 'is-active-search-match' : ''}`}
                   searchRef={setMatchRef}
