@@ -1,5 +1,5 @@
-// Prevents additional console window on Windows in release
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Prevents additional console window on Windows
+#![windows_subsystem = "windows"]
 
 //! 薄桌面壳：拉起同一个 `jeikcode webui`，窗口只打开它。
 //! 直接就地（In-Place）执行安装目录下的 `jeikcode`，单一来源运行，消除运行期文件释放与杀毒误报。
@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Listener, Manager};
+#[cfg(not(target_os = "windows"))]
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -140,20 +141,54 @@ fn publish_host_away(window: &tauri::WebviewWindow, away: bool) {
 }
 
 fn show_main_window(window: &tauri::WebviewWindow) {
-    let _ = window.unminimize();
+    let was_minimized = window.is_minimized().unwrap_or(false);
+    if was_minimized {
+        let _ = window.unminimize();
+    }
     let _ = window.show();
     let _ = window.set_focus();
     #[cfg(target_os = "windows")]
     if let Ok(hwnd) = window.hwnd() {
         #[link(name = "user32")]
         extern "system" {
+            fn IsIconic(hWnd: *mut std::ffi::c_void) -> i32;
             fn ShowWindow(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+            fn GetForegroundWindow() -> *mut std::ffi::c_void;
+            fn GetWindowThreadProcessId(
+                hWnd: *mut std::ffi::c_void,
+                lpdwProcessId: *mut u32,
+            ) -> u32;
+            fn AttachThreadInput(idAttach: u32, idAttachTo: u32, fAttach: i32) -> i32;
+            fn BringWindowToTop(hWnd: *mut std::ffi::c_void) -> i32;
             fn SetForegroundWindow(hWnd: *mut std::ffi::c_void) -> i32;
         }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThreadId() -> u32;
+        }
         unsafe {
-            // SW_RESTORE (9) 确保从隐藏/最小化状态恢复到正常窗口大小并展示，避免 SW_SHOW 与 SW_RESTORE 重复调用导致状态失步
-            ShowWindow(hwnd.0 as *mut std::ffi::c_void, 9);
-            SetForegroundWindow(hwnd.0 as *mut std::ffi::c_void);
+            let h = hwnd.0 as *mut std::ffi::c_void;
+            // 仅在真正最小化时使用 SW_RESTORE (9)，避免把原本最大化的窗口还原成小窗口。
+            let cmd = if IsIconic(h) != 0 || was_minimized {
+                9
+            } else {
+                5
+            };
+            ShowWindow(h, cmd);
+            let fg = GetForegroundWindow();
+            let fg_tid = if fg.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(fg, std::ptr::null_mut())
+            };
+            let cur_tid = GetCurrentThreadId();
+            let attached =
+                fg_tid != 0 && fg_tid != cur_tid && AttachThreadInput(cur_tid, fg_tid, 1) != 0;
+            BringWindowToTop(h);
+            SetForegroundWindow(h);
+            if attached {
+                AttachThreadInput(cur_tid, fg_tid, 0);
+            }
         }
     }
     publish_host_away(window, false);
@@ -648,18 +683,213 @@ fn load_shell_settings() -> ShellSettings {
     }
 }
 
-fn apply_autostart(app: &tauri::AppHandle, enabled: bool) {
-    let autolaunch = app.autolaunch();
-    let current = autolaunch.is_enabled().unwrap_or(false);
-    let result = if enabled && !current {
-        autolaunch.enable()
-    } else if !enabled && current {
-        autolaunch.disable()
-    } else {
-        Ok(())
+/// 生成 Windows 注册表自启命令行：可执行文件路径加双引号并固定附带 `--minimized`。
+fn windows_autostart_command_line(exe_path: &Path) -> String {
+    let raw = exe_path.to_string_lossy();
+    let clean = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+    format!("\"{clean}\" --minimized")
+}
+
+#[cfg(target_os = "windows")]
+fn apply_autostart_windows(enabled: bool) -> Result<(), String> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    const HKEY_CURRENT_USER: isize = -2147483647i32 as isize;
+    const KEY_QUERY_VALUE: u32 = 0x0001;
+    const KEY_SET_VALUE: u32 = 0x0002;
+    const REG_SZ: u32 = 1;
+    const ERROR_SUCCESS: i32 = 0;
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegCreateKeyExW(
+            hKey: isize,
+            lpSubKey: *const u16,
+            Reserved: u32,
+            lpClass: *const u16,
+            dwOptions: u32,
+            samDesired: u32,
+            lpSecurityAttributes: *const std::ffi::c_void,
+            phkResult: *mut isize,
+            lpdwDisposition: *mut u32,
+        ) -> i32;
+        fn RegOpenKeyExW(
+            hKey: isize,
+            lpSubKey: *const u16,
+            ulOptions: u32,
+            samDesired: u32,
+            phkResult: *mut isize,
+        ) -> i32;
+        fn RegQueryValueExW(
+            hKey: isize,
+            lpValueName: *const u16,
+            lpReserved: *mut u32,
+            lpType: *mut u32,
+            lpData: *mut u8,
+            lpcbData: *mut u32,
+        ) -> i32;
+        fn RegSetValueExW(
+            hKey: isize,
+            lpValueName: *const u16,
+            Reserved: u32,
+            dwType: u32,
+            lpData: *const u8,
+            cbData: u32,
+        ) -> i32;
+        fn RegDeleteValueW(hKey: isize, lpValueName: *const u16) -> i32;
+        fn RegCloseKey(hKey: isize) -> i32;
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let subkey = wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
+    let value_name = wide("JeikCode Desktop");
+
+    if !enabled {
+        let mut hkey: isize = 0;
+        let rc = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                KEY_SET_VALUE,
+                &mut hkey,
+            )
+        };
+        if rc == ERROR_FILE_NOT_FOUND {
+            return Ok(());
+        }
+        if rc != ERROR_SUCCESS {
+            return Err(format!("RegOpenKeyExW failed ({rc})"));
+        }
+        let del_rc = unsafe { RegDeleteValueW(hkey, value_name.as_ptr()) };
+        unsafe {
+            RegCloseKey(hkey);
+        }
+        if del_rc != ERROR_SUCCESS && del_rc != ERROR_FILE_NOT_FOUND {
+            return Err(format!("RegDeleteValueW failed ({del_rc})"));
+        }
+        return Ok(());
+    }
+
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))?;
+    let expected = windows_autostart_command_line(&exe);
+
+    let mut hkey: isize = 0;
+    let rc = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut hkey,
+            std::ptr::null_mut(),
+        )
     };
-    if let Err(error) = result {
-        eprintln!("[desktop] autostart apply failed: {error}");
+    if rc != ERROR_SUCCESS {
+        return Err(format!("RegCreateKeyExW failed ({rc})"));
+    }
+
+    let mut reg_type: u32 = 0;
+    let mut byte_len: u32 = 0;
+    let q_rc = unsafe {
+        RegQueryValueExW(
+            hkey,
+            value_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut reg_type,
+            std::ptr::null_mut(),
+            &mut byte_len,
+        )
+    };
+    let already_matches = if q_rc == ERROR_SUCCESS && reg_type == REG_SZ && byte_len >= 2 {
+        let mut buf = vec![0u8; byte_len as usize];
+        let q2_rc = unsafe {
+            RegQueryValueExW(
+                hkey,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                buf.as_mut_ptr(),
+                &mut byte_len,
+            )
+        };
+        if q2_rc == ERROR_SUCCESS {
+            let u16s: Vec<u16> = buf[..byte_len as usize]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&v| v != 0)
+                .collect();
+            let current = std::ffi::OsString::from_wide(&u16s)
+                .to_string_lossy()
+                .into_owned();
+            current == expected
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if already_matches {
+        unsafe {
+            RegCloseKey(hkey);
+        }
+        return Ok(());
+    }
+
+    let data = wide(&expected);
+    let data_bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let s_rc = unsafe {
+        RegSetValueExW(
+            hkey,
+            value_name.as_ptr(),
+            0,
+            REG_SZ,
+            data_bytes.as_ptr(),
+            data_bytes.len() as u32,
+        )
+    };
+    unsafe {
+        RegCloseKey(hkey);
+    }
+    if s_rc != ERROR_SUCCESS {
+        return Err(format!("RegSetValueExW failed ({s_rc})"));
+    }
+    Ok(())
+}
+
+fn apply_autostart(app: &tauri::AppHandle, enabled: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        if let Err(error) = apply_autostart_windows(enabled) {
+            eprintln!("[desktop] autostart apply failed: {error}");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let autolaunch = app.autolaunch();
+        let current = autolaunch.is_enabled().unwrap_or(false);
+        let result = if enabled && !current {
+            autolaunch.enable()
+        } else if !enabled && current {
+            autolaunch.disable()
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            eprintln!("[desktop] autostart apply failed: {error}");
+        }
     }
 }
 
@@ -1783,12 +2013,13 @@ fn suppress_console(_cmd: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::Mutex;
 
     use super::{
         external_browser_url, extract_webui_url, host_window_away, navigation_action,
         new_window_action, parse_webui_listen, remember_webui_origin, resolve_desktop_cli,
-        window_url, LinkAction, WebuiOrigin,
+        window_url, windows_autostart_command_line, LinkAction, WebuiOrigin,
     };
 
     fn parse_url(raw: &str) -> tauri::Url {
@@ -1964,5 +2195,15 @@ mod tests {
         remember_webui_origin(&slot, "http://127.0.0.1:13480/?token=abc&desktop=1");
         let stored = slot.lock().unwrap().clone().unwrap();
         assert_eq!(stored, origin("127.0.0.1", 13480));
+    }
+
+    #[test]
+    fn formats_quoted_windows_autostart_command_with_minimized_flag() {
+        assert_eq!(
+            windows_autostart_command_line(Path::new(
+                r"\\?\D:\EngSofeware\JeikCode Desktop\jeikcode-desktop.exe"
+            )),
+            r#""D:\EngSofeware\JeikCode Desktop\jeikcode-desktop.exe" --minimized"#
+        );
     }
 }
