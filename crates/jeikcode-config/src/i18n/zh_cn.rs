@@ -1388,5 +1388,18 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::StreamReadResetHint =>
             "此错误常见于公司网络或代理环境,请检查代理/VPN/防火墙设置后重试。".into(),
         Msg::StreamReadDetailsPrefix => "详情: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "疑似复读死循环：检测到连续重复相同的输出与工具调用，已提示模型最后一次调整方向，否则将终止本轮。".into()
+        } else {
+            "疑似复读死循环：检测到连续重复相同的输出与工具调用，已提示模型调整方向。".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("已停止：模型连续 {rounds} 轮复读相同的推理、文本与工具调用模式").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("疑似工具调用循环：相同调用或只读批处理连续 {threshold} 次返回相同结果，已提示模型调整策略").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("检测到工具调用死循环：相同调用或只读批处理连续 {threshold} 次返回相同结果，已在下次请求前停止").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("已停止：模型连续 {rounds} 轮重复相同的工具调用模式").into(),
     }
 }

@@ -260,10 +260,21 @@ async fn unsupported_snapshot_version_errors_and_starts_empty() {
     let mut warned = false;
     while let Some(ev) = handle.events.recv().await {
         match ev {
-            // Non-fatal degradation → Warning (not Error): an Error here would be
+            // Non-fatal degradation → Warning / SystemNotice(Warning) (not Error): an Error here would be
             // captured into Outcome.error and make a later clean turn look failed.
             AgentEvent::Warning(message)
-                if message.contains("unsupported snapshot version 9999") =>
+                if message
+                    .to_ascii_lowercase()
+                    .contains("unsupported snapshot version 9999") =>
+            {
+                warned = true;
+            }
+            AgentEvent::SystemNotice(notice)
+                if notice.kind == jeikcode_kernel::event::NoticeKind::Warning
+                    && notice
+                        .text
+                        .to_ascii_lowercase()
+                        .contains("unsupported snapshot version 9999") =>
             {
                 warned = true;
             }

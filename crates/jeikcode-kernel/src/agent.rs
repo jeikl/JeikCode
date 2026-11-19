@@ -97,19 +97,11 @@ fn tool_loop_course_correction(policy: ToolLoopPolicy) -> String {
 }
 
 fn tool_loop_warning(policy: ToolLoopPolicy) -> String {
-    format!(
-        "possible tool loop: the same call or read-only batch returned the same result(s) {} \
-         times; asking the model to change course",
-        policy.warning_threshold()
-    )
+    i18n::format_agent_tool_loop_warning(policy.warning_threshold())
 }
 
 fn tool_loop_terminal_warning(policy: ToolLoopPolicy) -> String {
-    format!(
-        "tool loop detected: the same call or read-only batch returned the same result(s) {} \
-         times; stopping before another model request",
-        policy.stop_threshold()
-    )
+    i18n::format_agent_tool_loop_terminal(policy.stop_threshold())
 }
 
 /// Bounded overflow-recovery retries per round (covers ladder tiers 0..=2). After this
@@ -1671,10 +1663,20 @@ impl RunningAgent {
             // would be captured by `run_to_completion` into `Outcome.error`, making
             // a subsequent CLEAN turn look failed (stop=Stopped + error=Some).
             Some(snap) => {
-                self.rt.emit(AgentEvent::Warning(format!(
-                    "unsupported snapshot version {} (kernel supports {}); starting empty",
-                    snap.version, SNAPSHOT_VERSION
-                )));
+                let event_id = format!("snapshot-unsupported:{}", snap.version);
+                self.rt.emit(AgentEvent::SystemNotice(SystemNotice {
+                    part_id: format!("{event_id}:1:notice"),
+                    event_id,
+                    kind: NoticeKind::Warning,
+                    severity: NoticeSeverity::Warning,
+                    status: NoticeStatus::Settled,
+                    revision: 1,
+                    text: i18n::format_agent_unsupported_snapshot(snap.version, SNAPSHOT_VERSION),
+                    anchor_message_id: None,
+                    anchor_part_id: None,
+                    turn_id: None,
+                    persist: false,
+                }));
                 // Degrade to a REAL fresh start — persona seeded exactly like the
                 // None branch below. `resumed` computes false for this path, so
                 // seeding hooks treat it as fresh; the kernel must agree, or the
@@ -2406,6 +2408,37 @@ impl RunningAgent {
         .await;
     }
 
+    /// 将当前活跃重试卡原位收口为已恢复终态并关闭其故障身份（保留本轮总重试预算）。
+    /// 当重连后新气泡开始产出真实内容，或在续写后再次断流且锚点已切换到新气泡时调用，
+    /// 保证同 round 多次产出后断网分别锚定在各自气泡下方（`agent → 卡1 → agent → 卡2`）。
+    async fn settle_active_retry_incident(
+        &self,
+        convo: &Conversation,
+        turn_ctx: &TurnCtx,
+        retry_engine: &mut RetryEngine,
+        revisions: &mut std::collections::HashMap<String, u32>,
+        anchors: &mut std::collections::HashMap<String, Option<String>>,
+    ) {
+        if let Some(incident_id) = retry_engine.incident_id().map(str::to_string) {
+            let attempts = retry_engine.incident_attempts().max(1);
+            self.emit_system_notice(
+                convo,
+                turn_ctx,
+                revisions,
+                anchors,
+                incident_id,
+                NoticeKind::Retry,
+                NoticeSeverity::Info,
+                NoticeStatus::Settled,
+                i18n::format_agent_retry_recovered(attempts),
+                None,
+                true,
+            )
+            .await;
+            retry_engine.close_incident();
+        }
+    }
+
     /// Persist only the replay-safe, fully assembled portion of a failed stream.
     /// `ToolCallDelta` is display-only and never enters `pending_calls`; complete calls
     /// are retained but paired with synthetic error results so resume cannot execute
@@ -2582,6 +2615,7 @@ impl RunningAgent {
         // OVERFLOW recovery counter for the CURRENT round: incremented each time a hard
         // context-overflow triggers a compact-and-retry; reset to 0 on a successful open.
         let mut overflow_attempt: u8 = 0;
+        let mut active_overflow_notice: Option<(String, u32, u32)> = None;
         // TRANSIENT-failure retry counter for the CURRENT round: incremented on each
         // visible re-open after a retryable provider error; reset to 0 on a successful
         // open so every round gets its own fresh budget.
@@ -2942,7 +2976,20 @@ impl RunningAgent {
                 let limit = input_watermark_budget(window);
                 if let Some(advisory) = over_window_advisory(est, window, limit) {
                     over_window_warned = true;
-                    self.rt.emit(AgentEvent::Warning(advisory));
+                    self.emit_system_notice(
+                        convo,
+                        &turn_ctx,
+                        &mut notice_revisions,
+                        &mut notice_anchors,
+                        format!("over-window:{}", turn_ctx.turn_id),
+                        NoticeKind::Warning,
+                        NoticeSeverity::Warning,
+                        NoticeStatus::Settled,
+                        advisory,
+                        None,
+                        true,
+                    )
+                    .await;
                 }
             }
             // CACHE-PREFIX GUARD: pre_request is documented APPEND-ONLY at the tail — it
@@ -2956,12 +3003,25 @@ impl RunningAgent {
             // model-visible history (display-only diagnostics excluded); short-circuits
             // on a shrink (no panic).
             if !appended_only {
-                self.rt.emit(AgentEvent::Warning(format!(
-                    "pre_request is not append-only: the outgoing prefix diverges from the \
-                     {} stored message(s) — this poisons the provider prefix cache for this \
-                     request (a pre_request hook may only APPEND tail reminders)",
-                    convo.model_history().len()
-                )));
+                self.emit_system_notice(
+                    convo,
+                    &turn_ctx,
+                    &mut notice_revisions,
+                    &mut notice_anchors,
+                    format!("pre-request:{}:r{round}", turn_ctx.turn_id),
+                    NoticeKind::Warning,
+                    NoticeSeverity::Warning,
+                    NoticeStatus::Settled,
+                    format!(
+                        "pre_request is not append-only: the outgoing prefix diverges from the \
+                         {} stored message(s) — this poisons the provider prefix cache for this \
+                         request (a pre_request hook may only APPEND tail reminders)",
+                        convo.model_history().len()
+                    ),
+                    None,
+                    false,
+                )
+                .await;
             }
             // READ-ONLY wire observation of the FINAL outgoing request (post
             // pre_request projection, pre chat_stream): telemetry/datalog/cache-RCA
@@ -3040,6 +3100,23 @@ impl RunningAgent {
             };
             let mut stream = match opened {
                 Ok(s) => {
+                    if let Some((overflow_id, ov_round, ov_attempt)) = active_overflow_notice.take()
+                    {
+                        self.emit_system_notice(
+                            convo,
+                            &turn_ctx,
+                            &mut notice_revisions,
+                            &mut notice_anchors,
+                            overflow_id,
+                            NoticeKind::Warning,
+                            NoticeSeverity::Info,
+                            NoticeStatus::Settled,
+                            i18n::format_agent_context_overflow(ov_round, ov_attempt),
+                            None,
+                            false,
+                        )
+                        .await;
+                    }
                     overflow_attempt = 0; // a successful open resets the per-round counter
                     s
                 }
@@ -3051,9 +3128,24 @@ impl RunningAgent {
                 // the error. This is the ONLY place compaction runs mid-turn, and only after
                 // a real provider rejection — pressure never triggers it.
                 Err(e) if e.is_context_overflow() && overflow_attempt < MAX_OVERFLOW_ATTEMPTS => {
-                    self.rt.emit(AgentEvent::Warning(format!(
-                        "context overflow on round {round} (attempt {overflow_attempt}); compacting and retrying"
-                    )));
+                    let ov_round = round as u32;
+                    let ov_attempt = u32::from(overflow_attempt) + 1;
+                    let overflow_event_id = format!("overflow:{}:r{round}", turn_ctx.turn_id);
+                    self.emit_system_notice(
+                        convo,
+                        &turn_ctx,
+                        &mut notice_revisions,
+                        &mut notice_anchors,
+                        overflow_event_id.clone(),
+                        NoticeKind::Warning,
+                        NoticeSeverity::Warning,
+                        NoticeStatus::Active,
+                        i18n::format_agent_context_overflow(ov_round, ov_attempt),
+                        None,
+                        false,
+                    )
+                    .await;
+                    active_overflow_notice = Some((overflow_event_id, ov_round, ov_attempt));
                     self.run_compaction(
                         convo,
                         CompactTrigger::Overflow {
@@ -3259,9 +3351,10 @@ impl RunningAgent {
                             continue;
                         }
                     }
-                    let incident_id = retry_engine
-                        .incident_id()
-                        .map(str::to_string)
+                    let incident_id = active_overflow_notice
+                        .take()
+                        .map(|(id, _, _)| id)
+                        .or_else(|| retry_engine.incident_id().map(str::to_string))
                         .unwrap_or_else(|| format!("err-open:{}:r{round}", turn_ctx.turn_id));
                     self.emit_system_notice(
                         convo,
@@ -3515,6 +3608,21 @@ impl RunningAgent {
                             break;
                         }
                         // 已出字后流卡死：先将部分正文/调用落成可见气泡检查点，再锚定重试通知。
+                        if retry_engine.incident_id().is_some_and(|active_id| {
+                            notice_anchors
+                                .get(active_id)
+                                .and_then(|anchor| anchor.as_deref())
+                                != Some(assistant_message_id.as_str())
+                        }) {
+                            self.settle_active_retry_incident(
+                                convo,
+                                &turn_ctx,
+                                &mut retry_engine,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                            )
+                            .await;
+                        }
                         if let Some(step) =
                             retry_engine.next(RetryClass::Stall, &request_seed, None)
                         {
@@ -3643,6 +3751,16 @@ impl RunningAgent {
                             if suppress_internal_stream {
                                 continue;
                             }
+                            if retry_engine.incident_id().is_some() {
+                                self.settle_active_retry_incident(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut retry_engine,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                )
+                                .await;
+                            }
                             assistant_text.push_str(&t);
                             self.rt.emit(AgentEvent::TextDelta(t));
                         }
@@ -3668,6 +3786,16 @@ impl RunningAgent {
                             }
                             if suppress_internal_stream {
                                 continue;
+                            }
+                            if retry_engine.incident_id().is_some() {
+                                self.settle_active_retry_incident(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut retry_engine,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                )
+                                .await;
                             }
                             reasoning.push_str(&t);
                             // Also buffer for the CURRENT signed block (finalized on the
@@ -3700,6 +3828,16 @@ impl RunningAgent {
                     }
                     StreamEvent::ToolCall(c) => {
                         saw_stream_content = true;
+                        if !suppress_internal_stream && retry_engine.incident_id().is_some() {
+                            self.settle_active_retry_incident(
+                                convo,
+                                &turn_ctx,
+                                &mut retry_engine,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                            )
+                            .await;
+                        }
                         pending_calls.push(c);
                     }
                     // Live DISPLAY of a tool call as it streams; the WHOLE call is still
@@ -3712,6 +3850,16 @@ impl RunningAgent {
                         arguments,
                     } => {
                         saw_stream_content = true;
+                        if !suppress_internal_stream && retry_engine.incident_id().is_some() {
+                            self.settle_active_retry_incident(
+                                convo,
+                                &turn_ctx,
+                                &mut retry_engine,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                            )
+                            .await;
+                        }
                         self.rt.emit(AgentEvent::ToolCallStreaming {
                             index,
                             id,
@@ -3932,6 +4080,23 @@ impl RunningAgent {
                         let content_anchor =
                             saw_stream_content.then(|| assistant_message_id.clone());
                         if retry::classify_stream(&e) == RetryClass::StreamDrop {
+                            if saw_stream_content
+                                && retry_engine.incident_id().is_some_and(|active_id| {
+                                    notice_anchors
+                                        .get(active_id)
+                                        .and_then(|anchor| anchor.as_deref())
+                                        != Some(assistant_message_id.as_str())
+                                })
+                            {
+                                self.settle_active_retry_incident(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut retry_engine,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                )
+                                .await;
+                            }
                             if let Some(step) =
                                 retry_engine.next(RetryClass::StreamDrop, &request_seed, None)
                             {
@@ -4190,23 +4355,14 @@ impl RunningAgent {
                 return;
             }
             // 本轮确实产出了内容：若有活跃重试事件，先将其收口为 settled 再重置预算。
-            if let Some(incident_id) = retry_engine.incident_id().map(str::to_string) {
-                let attempts = retry_engine.attempts();
-                self.emit_system_notice(
-                    convo,
-                    &turn_ctx,
-                    &mut notice_revisions,
-                    &mut notice_anchors,
-                    incident_id,
-                    NoticeKind::Retry,
-                    NoticeSeverity::Info,
-                    NoticeStatus::Settled,
-                    i18n::format_agent_retry_recovered(attempts),
-                    None,
-                    true,
-                )
-                .await;
-            }
+            self.settle_active_retry_incident(
+                convo,
+                &turn_ctx,
+                &mut retry_engine,
+                &mut notice_revisions,
+                &mut notice_anchors,
+            )
+            .await;
             retry_engine.reset();
             // Truncation (`finish_reason=length`) is recorded on the message meta
             // below. The user-facing Warning is DEFERRED: it fires only if the
@@ -4404,7 +4560,6 @@ impl RunningAgent {
                 // continuation), surface the warning now — this is the one case the
                 // user needs to see: real work was cut off and is not being finished.
                 if truncated {
-                    let trunc_msg = "response truncated: finish_reason=length".to_string();
                     self.emit_system_notice(
                         convo,
                         &turn_ctx,
@@ -4419,7 +4574,6 @@ impl RunningAgent {
                         true,
                     )
                     .await;
-                    self.rt.emit(AgentEvent::Warning(trunc_msg));
                 }
                 self.finish_turn(convo, StopReason::Stopped, &turn_ctx)
                     .await;
@@ -5128,10 +5282,7 @@ impl RunningAgent {
                 echo_nudged = false;
             }
             if echo_rounds >= ECHO_STOP_AT {
-                let message = format!(
-                    "stopped: the model replayed the same reasoning/text and tool-call \
-                         pattern for {echo_rounds} consecutive rounds"
-                );
+                let message = i18n::format_agent_echo_loop_terminal(echo_rounds);
                 self.emit_system_notice(
                     convo,
                     &turn_ctx,
@@ -5164,8 +5315,20 @@ impl RunningAgent {
                 } else {
                     echo_loop_nudge()
                 };
-                self.rt
-                    .emit(AgentEvent::Warning(format!("possible echo loop: {nudge}")));
+                self.emit_system_notice(
+                    convo,
+                    &turn_ctx,
+                    &mut notice_revisions,
+                    &mut notice_anchors,
+                    format!("echo-loop-warn:{}:r{round}", turn_ctx.turn_id),
+                    NoticeKind::Warning,
+                    NoticeSeverity::Warning,
+                    NoticeStatus::Settled,
+                    i18n::format_agent_echo_loop_notice(last_reminder),
+                    None,
+                    false,
+                )
+                .await;
                 convo.push(Message::synthetic_user(nudge));
             }
             let echo_streak_active = echo_rounds > 1;
@@ -5185,7 +5348,20 @@ impl RunningAgent {
                     ToolLoopDecision::Continue => {}
                     ToolLoopDecision::Warn if echo_nudged => {}
                     ToolLoopDecision::Warn => {
-                        self.rt.emit(AgentEvent::Warning(tool_loop_warning(policy)));
+                        self.emit_system_notice(
+                            convo,
+                            &turn_ctx,
+                            &mut notice_revisions,
+                            &mut notice_anchors,
+                            format!("tool-loop-warn:{}:r{round}", turn_ctx.turn_id),
+                            NoticeKind::Warning,
+                            NoticeSeverity::Warning,
+                            NoticeStatus::Settled,
+                            tool_loop_warning(policy),
+                            None,
+                            false,
+                        )
+                        .await;
                         convo.push(Message::synthetic_user(tool_loop_course_correction(policy)));
                     }
                     ToolLoopDecision::Stop => {
@@ -5204,7 +5380,6 @@ impl RunningAgent {
                             true,
                         )
                         .await;
-                        self.rt.emit(AgentEvent::Warning(warning.clone()));
                         Self::persist_turn_diagnostic(convo, &warning);
                         self.finish_turn(convo, StopReason::ToolLoopDetected, &turn_ctx)
                             .await;
@@ -5242,10 +5417,7 @@ impl RunningAgent {
             // results, ineligible batches, or no exact policy). The echo fuse
             // similarly owns a replay of the model's own narrative.
             if !exact_streak_active && !echo_streak_active && repeat_rounds >= MAX_REPEAT_ROUNDS {
-                let message = format!(
-                    "stopped: the model repeated the same tool-call pattern for \
-                         {repeat_rounds} consecutive rounds"
-                );
+                let message = i18n::format_agent_repeat_loop_terminal(repeat_rounds);
                 self.emit_system_notice(
                     convo,
                     &turn_ctx,

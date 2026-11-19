@@ -2139,8 +2139,8 @@ struct NativeLiveWireProjector {
     current_message_id: Option<String>,
     part_seq: u32,
     last_part_kind: Option<String>,
-    /// 最近一次已通过 `SystemNotice` 收口或等待限流的元数据，防止同文重复卡片。
-    last_settled_notice_text: Option<String>,
+    /// 最近一次已通过 `SystemNotice` 收口终态错误的文本，避免伴随错误事件重复成卡。
+    last_settled_error_notice_text: Option<String>,
     pending_rate_limit_notice: Option<(String, Option<String>)>,
 }
 
@@ -2387,8 +2387,10 @@ impl NativeLiveWireProjector {
                             Some((notice.event_id, notice.anchor_message_id));
                         return None;
                     }
-                    if notice.status == jeikcode_kernel::event::NoticeStatus::Settled {
-                        self.last_settled_notice_text = Some(notice.text.trim().to_string());
+                    if notice.status == jeikcode_kernel::event::NoticeStatus::Settled
+                        && notice.severity == jeikcode_kernel::event::NoticeSeverity::Error
+                    {
+                        self.last_settled_error_notice_text = Some(notice.text.trim().to_string());
                     }
                     LiveWireEvent::SystemNotice {
                         session_id: self.session_id.clone(),
@@ -2407,24 +2409,16 @@ impl NativeLiveWireProjector {
                     }
                 }
                 Kernel::Error { message, .. } => {
-                    if self.last_settled_notice_text.as_deref() == Some(message.trim()) {
+                    if self.last_settled_error_notice_text.as_deref() == Some(message.trim()) {
                         return None;
                     }
                     LiveWireEvent::Error { message }
                 }
-                Kernel::Warning(message) => {
-                    let localized = crate::localize_agent_warning(&message);
-                    if self.last_settled_notice_text.as_deref() == Some(message.trim())
-                        || self.last_settled_notice_text.as_deref() == Some(localized.trim())
-                    {
-                        return None;
-                    }
-                    LiveWireEvent::Warning {
-                        message: localized,
-                        tokens_after: None,
-                        message_id: self.notice_anchor(),
-                    }
-                }
+                Kernel::Warning(message) => LiveWireEvent::Warning {
+                    message: crate::localize_agent_warning(&message),
+                    tokens_after: None,
+                    message_id: self.notice_anchor(),
+                },
                 Kernel::RetryNotice {
                     notice_id,
                     part_id,

@@ -178,6 +178,11 @@ fn warnings(events: &[AgentEvent]) -> Vec<(usize, &str)> {
         .enumerate()
         .filter_map(|(index, event)| match event {
             AgentEvent::Warning(message) => Some((index, message.as_str())),
+            AgentEvent::SystemNotice(notice)
+                if notice.kind == jeikcode_kernel::event::NoticeKind::Warning =>
+            {
+                Some((index, notice.text.as_str()))
+            }
             _ => None,
         })
         .collect()

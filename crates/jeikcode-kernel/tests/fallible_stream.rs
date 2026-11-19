@@ -256,6 +256,11 @@ async fn recovered_truncation_continues_without_warning() {
     while let Some(ev) = handle.events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warning = Some(w),
+            AgentEvent::SystemNotice(n)
+                if n.kind == jeikcode_kernel::event::NoticeKind::Truncation =>
+            {
+                warning = Some(n.text)
+            }
             AgentEvent::TurnComplete { .. } => {
                 completed = true;
                 break;
@@ -333,6 +338,11 @@ async fn repeated_truncation_is_bounded() {
     while let Some(ev) = handle.events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warning = Some(w),
+            AgentEvent::SystemNotice(n)
+                if n.kind == jeikcode_kernel::event::NoticeKind::Truncation =>
+            {
+                warning = Some(n.text);
+            }
             AgentEvent::TurnComplete { .. } => {
                 completed = true;
                 break;

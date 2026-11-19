@@ -289,6 +289,31 @@ pub fn format_agent_retry_recovered(attempts: u32) -> String {
     t(Msg::AgentRetryRecovered { attempts }).into_owned()
 }
 
+/// Echo 循环告警通知文案（人类可见，模型仍接收纯英文 nudge）。
+pub fn format_agent_echo_loop_notice(final_warning: bool) -> String {
+    t(Msg::AgentEchoLoopNotice { final_warning }).into_owned()
+}
+
+/// Echo 循环触发硬终止文案。
+pub fn format_agent_echo_loop_terminal(rounds: u32) -> String {
+    t(Msg::AgentEchoLoopTerminal { rounds }).into_owned()
+}
+
+/// 精确工具循环预警文案。
+pub fn format_agent_tool_loop_warning(threshold: u32) -> String {
+    t(Msg::AgentToolLoopWarning { threshold }).into_owned()
+}
+
+/// 精确工具循环触顶终止文案。
+pub fn format_agent_tool_loop_terminal(threshold: u32) -> String {
+    t(Msg::AgentToolLoopTerminal { threshold }).into_owned()
+}
+
+/// 重复工具调用模式触发硬终止文案。
+pub fn format_agent_repeat_loop_terminal(rounds: u32) -> String {
+    t(Msg::AgentRepeatLoopTerminal { rounds }).into_owned()
+}
+
 /// 自动重连耗尽后的流超时终态文案。
 pub fn format_agent_stream_timeout_terminal() -> String {
     t(Msg::AgentStreamTimeoutTerminal).into_owned()
@@ -307,6 +332,16 @@ pub fn format_agent_rate_limited_paused(detail: &str) -> String {
 /// 响应被截断提示文案。
 pub fn format_agent_response_truncated() -> String {
     t(Msg::AgentResponseTruncated).into_owned()
+}
+
+/// 回合中上下文溢出触发压缩重试的提示文案。
+pub fn format_agent_context_overflow(round: u32, attempt: u32) -> String {
+    t(Msg::AgentContextOverflow { round, attempt }).into_owned()
+}
+
+/// 恢复会话遇到不支持快照版本时的降级提示文案。
+pub fn format_agent_unsupported_snapshot(version: u32, supported: u32) -> String {
+    t(Msg::AgentUnsupportedSnapshot { version, supported }).into_owned()
 }
 
 /// 已产生部分回复后流超时（终态）。
@@ -1122,5 +1157,161 @@ mod tests {
             Msg::ProviderPanelUpstreamFailed { error: "HTTP 401" }
         )
         .contains("401"));
+    }
+
+    #[test]
+    fn system_notice_messages_localized_across_all_supported_locales() {
+        let cases: &[Msg<'_>] = &[
+            Msg::AgentRetryEmpty {
+                attempt: 2,
+                max: 6,
+                wait: 5,
+            },
+            Msg::AgentRetryThinking {
+                attempt: 2,
+                max: 6,
+                wait: 0,
+            },
+            Msg::AgentRetryMalformed {
+                attempt: 3,
+                max: 6,
+                wait: 10,
+            },
+            Msg::AgentRetryFirstToken {
+                secs: 45,
+                attempt: 2,
+                max: 6,
+            },
+            Msg::AgentRetryApi {
+                reason: "503",
+                wait: 5,
+                attempt: 2,
+                max: 9,
+            },
+            Msg::AgentOverWindow {
+                estimate_k: 180,
+                window_k: 200,
+                buffer_k: 20,
+            },
+            Msg::AgentContextOverflow {
+                round: 3,
+                attempt: 1,
+            },
+            Msg::AgentStreamReconnecting { attempt: 2, max: 9 },
+            Msg::AgentResponseTruncated,
+            Msg::AgentUnsupportedSnapshot {
+                version: 99,
+                supported: 2,
+            },
+            Msg::AgentModelHighLatencyTerminal {
+                retries: 6,
+                secs: 45,
+            },
+            Msg::AgentExhaustedMalformed { max: 6 },
+            Msg::AgentExhaustedThinkingOverWindowIntro { max: 6 },
+            Msg::AgentExhaustedThinkingOverWindowSize {
+                max: 6,
+                prompt_k: 190,
+                window_k: 200,
+            },
+            Msg::AgentExhaustedThinkingGeneric { max: 6 },
+            Msg::AgentExhaustedEmptyOverWindowIntro { max: 6 },
+            Msg::AgentExhaustedEmptyOverWindowSize {
+                max: 6,
+                prompt_k: 190,
+                window_k: 200,
+            },
+            Msg::AgentExhaustedEmptyGeneric { max: 6 },
+            Msg::AgentStatusRateLimited,
+            Msg::AgentStatusUpstreamUnavailable,
+            Msg::AgentStatusResponseTimeout,
+            Msg::AgentStatusConnectionFailed,
+            Msg::AgentStatusInsufficientBalance,
+            Msg::AgentStatusUnauthorized,
+            Msg::StreamReadRetryExhausted { attempts: 9 },
+            Msg::StreamReadPartialResponse,
+            Msg::StreamReadInterrupted,
+            Msg::AgentAutoRetry { max: 9 },
+            Msg::AgentRetryProgress { attempt: 2, max: 9 },
+            Msg::AgentRetryStallProgress {
+                attempt: 2,
+                max: 9,
+                has_output: true,
+            },
+            Msg::AgentRetryStallProgress {
+                attempt: 2,
+                max: 9,
+                has_output: false,
+            },
+            Msg::AgentRetryDropProgress {
+                attempt: 3,
+                max: 9,
+                has_output: true,
+            },
+            Msg::AgentRetryDropProgress {
+                attempt: 3,
+                max: 9,
+                has_output: false,
+            },
+            Msg::AgentRetryRecovered { attempts: 2 },
+            Msg::AgentStreamTimeoutTerminal,
+            Msg::AgentRateLimitedWaiting { secs: 30 },
+            Msg::AgentRateLimitedPaused { detail: "" },
+            Msg::AgentRateLimitedPaused {
+                detail: "quota reset 12:00",
+            },
+            Msg::AgentStreamTimeoutPartialResponse,
+            Msg::StreamReadResetHint,
+            Msg::StreamReadDetailsPrefix,
+            Msg::AgentEchoLoopNotice {
+                final_warning: false,
+            },
+            Msg::AgentEchoLoopNotice {
+                final_warning: true,
+            },
+            Msg::AgentEchoLoopTerminal { rounds: 5 },
+            Msg::AgentToolLoopWarning { threshold: 3 },
+            Msg::AgentToolLoopTerminal { threshold: 5 },
+            Msg::AgentRepeatLoopTerminal { rounds: 6 },
+        ];
+
+        for msg in cases {
+            let en_text = t_with(Locale::En, *msg);
+            assert!(!en_text.trim().is_empty(), "empty English copy for {msg:?}");
+            for &locale in Locale::ALL {
+                let text = t_with(locale, *msg);
+                assert!(
+                    !text.trim().is_empty(),
+                    "empty translation for {locale:?} {msg:?}"
+                );
+                if locale != Locale::En
+                    && !(locale == Locale::De && matches!(msg, Msg::StreamReadDetailsPrefix))
+                {
+                    assert_ne!(
+                        text, en_text,
+                        "locale {locale:?} must not fall back to English for {msg:?}"
+                    );
+                }
+            }
+        }
+        // 繁體中文通知不應回退成簡體字。
+        assert_ne!(
+            t_with(
+                Locale::ZhTw,
+                Msg::AgentRetryDropProgress {
+                    attempt: 1,
+                    max: 9,
+                    has_output: true,
+                }
+            ),
+            t_with(
+                Locale::ZhCn,
+                Msg::AgentRetryDropProgress {
+                    attempt: 1,
+                    max: 9,
+                    has_output: true,
+                }
+            ),
+        );
     }
 }

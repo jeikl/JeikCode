@@ -137,6 +137,10 @@ pub struct RetryStep {
 pub struct RetryEngine {
     attempts: u32,
     incident: Option<String>,
+    /// 当前故障卡已累计的重试次数；随 [`Self::close_incident`] 归零。
+    incident_attempts: u32,
+    /// 本轮内已开启的独立故障卡序号（1 起步，同 round 内续写后再次断流递增）。
+    incident_seq: u32,
 }
 
 impl RetryEngine {
@@ -148,10 +152,24 @@ impl RetryEngine {
     pub fn reset(&mut self) {
         self.attempts = 0;
         self.incident = None;
+        self.incident_attempts = 0;
+        self.incident_seq = 0;
+    }
+
+    /// 收口当前故障卡（例如重连后已产出新气泡内容），清除活跃 `incident_id` 并归零本卡计数，
+    /// 但保留本轮累计 `attempts` 预算上限以防止无限重试；若随后再次断流将分配新 `incident_id`。
+    pub fn close_incident(&mut self) {
+        self.incident = None;
+        self.incident_attempts = 0;
     }
 
     pub fn attempts(&self) -> u32 {
         self.attempts
+    }
+
+    /// 当前活跃故障卡已累计的重试次数。
+    pub fn incident_attempts(&self) -> u32 {
+        self.incident_attempts
     }
 
     /// 本次故障的稳定身份；`None` 表示还没有发生过重试。
@@ -177,15 +195,25 @@ impl RetryEngine {
         }
         let index = (self.attempts as usize).min(RETRY_LADDER_SECS.len() - 1);
         self.attempts += 1;
+        self.incident_attempts += 1;
+        if self.incident.is_none() {
+            self.incident_seq = self.incident_seq.saturating_add(1);
+            let id = if self.incident_seq <= 1 {
+                format!("{seed}:retry")
+            } else {
+                format!("{seed}-i{}:retry", self.incident_seq)
+            };
+            self.incident = Some(id);
+        }
         let incident = self
             .incident
-            .get_or_insert_with(|| format!("{seed}:retry"))
-            .clone();
+            .clone()
+            .unwrap_or_else(|| format!("{seed}:retry"));
         Some(RetryStep {
             number: self.attempts,
             wait: Duration::from_secs(RETRY_LADDER_SECS[index]),
             incident_id: incident,
-            first: self.attempts == 1,
+            first: self.incident_attempts == 1,
         })
     }
 }
@@ -251,6 +279,42 @@ mod tests {
         let next = engine.next(RetryClass::StreamDrop, "m2", None).unwrap();
         assert!(next.first, "新故障必须重新弹一次提示");
         assert_eq!(next.incident_id, "m2:retry");
+    }
+
+    #[test]
+    fn close_incident_opens_new_id_while_preserving_total_budget() {
+        let mut engine = RetryEngine::new();
+        let first = engine
+            .next(RetryClass::StreamDrop, "turn-1-r1", None)
+            .unwrap();
+        assert_eq!(first.incident_id, "turn-1-r1:retry");
+        assert_eq!(first.number, 1);
+        assert_eq!(engine.incident_attempts(), 1);
+
+        // 重连产出新内容后关闭上一张故障卡，保留本轮总预算上限。
+        engine.close_incident();
+        assert!(engine.incident_id().is_none());
+        assert_eq!(engine.incident_attempts(), 0);
+        assert_eq!(engine.attempts(), 1);
+
+        let second = engine
+            .next(RetryClass::StreamDrop, "turn-1-r1", None)
+            .unwrap();
+        assert!(second.first, "第二次独立断网应标记为新故障卡的首条");
+        assert_eq!(second.incident_id, "turn-1-r1-i2:retry");
+        assert_eq!(second.number, 2);
+        assert_eq!(engine.incident_attempts(), 1);
+        assert_eq!(engine.attempts(), 2);
+
+        // 预算上限仍按本轮累计 attempts 封顶（9 次），不会被 close_incident 无限续命。
+        for _ in 0..7 {
+            assert!(engine
+                .next(RetryClass::StreamDrop, "turn-1-r1", None)
+                .is_some());
+        }
+        assert!(engine
+            .next(RetryClass::StreamDrop, "turn-1-r1", None)
+            .is_none());
     }
 
     #[test]

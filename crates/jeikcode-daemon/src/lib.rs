@@ -14192,8 +14192,8 @@ struct ChatRuntimeProjector {
     partial_last_save: Option<std::time::Instant>,
     partial_bytes_since_save: usize,
     partial_tools: Vec<jeikcode_capabilities::session::PartialToolCall>,
-    /// 最近一次已通过 `SystemNotice` 收口或等待限流的元数据，防止重复卡片与双写。
-    last_settled_notice_text: Option<String>,
+    /// 最近一次已通过 `SystemNotice` 收口终态错误的文本，避免伴随 `Agent::Error` 重复成卡。
+    last_settled_error_notice_text: Option<String>,
     pending_rate_limit_notice: Option<(String, Option<String>)>,
 }
 
@@ -14221,7 +14221,7 @@ impl Default for ChatRuntimeProjector {
             partial_last_save: None,
             partial_bytes_since_save: 0,
             partial_tools: Vec::new(),
-            last_settled_notice_text: None,
+            last_settled_error_notice_text: None,
             pending_rate_limit_notice: None,
         }
     }
@@ -14929,8 +14929,10 @@ impl ChatRuntimeProjector {
                         Some((notice.event_id, notice.anchor_message_id));
                     return Vec::new();
                 }
-                if notice.status == jeikcode_kernel::event::NoticeStatus::Settled {
-                    self.last_settled_notice_text = Some(notice.text.trim().to_string());
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Settled
+                    && notice.severity == jeikcode_kernel::event::NoticeSeverity::Error
+                {
+                    self.last_settled_error_notice_text = Some(notice.text.trim().to_string());
                 }
                 vec![ChatEvent::SystemNotice {
                     session_id: session_id.to_string(),
@@ -14949,8 +14951,8 @@ impl ChatRuntimeProjector {
             Agent::Error { message, .. } => {
                 self.last_error = Some(message.clone());
                 // Agent errors are diagnostics until the runtime emits TurnFinished.
-                // 若前面已有同文 Settled SystemNotice 收口，则不再额外发第二张 Warning 卡。
-                if self.last_settled_notice_text.as_deref() == Some(message.trim()) {
+                // 若前面已有同文 Settled Error SystemNotice 收口，则不再额外发第二张 Warning 卡。
+                if self.last_settled_error_notice_text.as_deref() == Some(message.trim()) {
                     return Vec::new();
                 }
                 vec![ChatEvent::Warning {
@@ -14978,14 +14980,8 @@ impl ChatRuntimeProjector {
                 created_at: None,
             }],
             Agent::Warning(message) => {
-                let localized = localize_agent_warning(&message);
-                if self.last_settled_notice_text.as_deref() == Some(message.trim())
-                    || self.last_settled_notice_text.as_deref() == Some(localized.trim())
-                {
-                    return Vec::new();
-                }
                 vec![ChatEvent::Warning {
-                    message: localized,
+                    message: localize_agent_warning(&message),
                     message_id: self.notice_anchor(),
                 }]
             }

@@ -1888,4 +1888,24 @@ pub enum Msg<'a> {
     StreamReadResetHint,
     /// Details prefix.
     StreamReadDetailsPrefix,
+    /// User-visible warning notice when an echo loop is detected.
+    AgentEchoLoopNotice {
+        final_warning: bool,
+    },
+    /// Turn stopped due to repeated identical echo pattern.
+    AgentEchoLoopTerminal {
+        rounds: u32,
+    },
+    /// User-visible warning notice when an exact tool loop crosses the warning threshold.
+    AgentToolLoopWarning {
+        threshold: u32,
+    },
+    /// Turn stopped due to exact tool loop threshold.
+    AgentToolLoopTerminal {
+        threshold: u32,
+    },
+    /// Turn stopped due to repeated identical tool-call pattern.
+    AgentRepeatLoopTerminal {
+        rounds: u32,
+    },
 }

@@ -537,3 +537,154 @@ async fn retry_incidents_settle_same_event_id_on_exhaustion_and_recovery() {
     assert_eq!(recovered_events[1].status, NoticeStatus::Settled);
     assert_eq!(recovered_events[1].severity, NoticeSeverity::Info);
 }
+
+/// 同一逻辑轮中连续发生两次“先吐字再断流并续写”时，必须按恢复点分拆为两张独立锚定的故障卡，同时累计总重试预算。
+#[tokio::test(start_paused = true)]
+async fn same_round_resume_then_second_drop_opens_distinct_anchored_incidents() {
+    use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus};
+    use jeikcode_kernel::stream::ProviderError;
+
+    let drop_err = |msg: &str| ProviderError {
+        retryable: true,
+        resumable: true,
+        message: msg.into(),
+        http_status: None,
+        code: None,
+        retry_after_secs: None,
+    };
+
+    let provider = Arc::new(MockProvider::new(vec![
+        vec![
+            StreamEvent::TextDelta("part-1 ".into()),
+            StreamEvent::Error(drop_err("drop-1")),
+        ],
+        vec![
+            StreamEvent::TextDelta("part-2 ".into()),
+            StreamEvent::Error(drop_err("drop-2")),
+        ],
+        vec![
+            StreamEvent::TextDelta("part-3".into()),
+            StreamEvent::Done { truncated: false },
+        ],
+    ]));
+
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(ToolRegistry::new().mount(&[] as &[&str]))
+        .build()
+        .spawn();
+    handle.commands.send(send("go")).unwrap();
+
+    #[derive(Debug)]
+    enum Seen {
+        Assistant(String),
+        Notice(jeikcode_kernel::event::SystemNotice),
+    }
+
+    let mut timeline = Vec::new();
+    let mut completed = false;
+    tokio::time::timeout(OUTER_GUARD, async {
+        while let Some(ev) = handle.events.recv().await {
+            match ev {
+                AgentEvent::AssistantMessage { message_id } => {
+                    timeline.push(Seen::Assistant(message_id));
+                }
+                AgentEvent::SystemNotice(notice) => {
+                    timeline.push(Seen::Notice(notice));
+                }
+                AgentEvent::TurnComplete { reason } => {
+                    assert_eq!(reason, jeikcode_kernel::event::StopReason::Stopped);
+                    completed = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("multi-drop same-round recovery must finish quickly in virtual time");
+
+    assert!(completed);
+
+    let assistant_ids: Vec<String> = timeline
+        .iter()
+        .filter_map(|item| match item {
+            Seen::Assistant(id) => Some(id.clone()),
+            Seen::Notice(_) => None,
+        })
+        .collect();
+    assert!(
+        assistant_ids.len() >= 2,
+        "每次断流前产出文本都应持有独立 assistant message_id: {assistant_ids:?}"
+    );
+    let m1 = assistant_ids[0].clone();
+    let m2 = assistant_ids[1].clone();
+    assert_ne!(m1, m2);
+
+    let retry_notices: Vec<_> = timeline
+        .iter()
+        .filter_map(|item| match item {
+            Seen::Notice(n) if n.kind == NoticeKind::Retry => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        retry_notices.len(),
+        4,
+        "两次中断应各产生 Active -> Settled 共 4 条重试通知，实际: {retry_notices:#?}"
+    );
+
+    let card1_active = &retry_notices[0];
+    let card1_settled = &retry_notices[1];
+    let card2_active = &retry_notices[2];
+    let card2_settled = &retry_notices[3];
+
+    assert_eq!(card1_active.status, NoticeStatus::Active);
+    assert_eq!(card1_settled.status, NoticeStatus::Settled);
+    assert_eq!(card1_settled.severity, NoticeSeverity::Info);
+    assert_eq!(card1_active.event_id, card1_settled.event_id);
+    assert_eq!(card1_active.anchor_message_id.as_deref(), Some(m1.as_str()));
+    assert_eq!(
+        card1_settled.anchor_message_id.as_deref(),
+        Some(m1.as_str())
+    );
+
+    assert_eq!(card2_active.status, NoticeStatus::Active);
+    assert_eq!(card2_settled.status, NoticeStatus::Settled);
+    assert_eq!(card2_settled.severity, NoticeSeverity::Info);
+    assert_eq!(card2_active.event_id, card2_settled.event_id);
+    assert_eq!(card2_active.anchor_message_id.as_deref(), Some(m2.as_str()));
+    assert_eq!(
+        card2_settled.anchor_message_id.as_deref(),
+        Some(m2.as_str())
+    );
+
+    assert_ne!(
+        card1_active.event_id, card2_active.event_id,
+        "两次断流不能合并为同一个 event_id"
+    );
+    assert!(
+        card1_active.text.contains("1/"),
+        "首张卡片应从第 1 次尝试计数: {}",
+        card1_active.text
+    );
+    assert!(
+        card2_active.text.contains("2/"),
+        "第二张卡片必须延续同轮累计重试预算 (2/N): {}",
+        card2_active.text
+    );
+
+    // 验证时间顺序：m1 -> card1_active -> card1_settled -> m2 (或先 settled 后 m2) -> card2_active -> m3/settled
+    let pos_card1_settled = timeline
+        .iter()
+        .position(|s| matches!(s, Seen::Notice(n) if n.event_id == card1_settled.event_id && n.status == NoticeStatus::Settled))
+        .unwrap();
+    let pos_card2_active = timeline
+        .iter()
+        .position(|s| matches!(s, Seen::Notice(n) if n.event_id == card2_active.event_id && n.status == NoticeStatus::Active))
+        .unwrap();
+    assert!(
+        pos_card1_settled < pos_card2_active,
+        "card1 必须在打开 card2 之前完成 Settled"
+    );
+}

@@ -1415,5 +1415,18 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::StreamReadResetHint =>
             "This error is common in corporate network or proxy environments; please check proxy/VPN/firewall settings.".into(),
         Msg::StreamReadDetailsPrefix => "Details: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "Possible echo loop: repeated output and tool pattern detected; asking the model to change course before stopping this turn.".into()
+        } else {
+            "Possible echo loop: repeated output and tool pattern detected; asking the model to change course.".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("stopped: the model replayed the same reasoning/text and tool-call pattern for {rounds} consecutive rounds").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("possible tool loop: the same call or read-only batch returned the same result(s) {threshold} times; asking the model to change course").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("tool loop detected: the same call or read-only batch returned the same result(s) {threshold} times; stopping before another model request").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("stopped: the model repeated the same tool-call pattern for {rounds} consecutive rounds").into(),
     }
 }
