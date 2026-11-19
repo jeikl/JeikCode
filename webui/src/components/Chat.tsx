@@ -488,7 +488,7 @@ interface ChatProps {
   topModelSlot?: HTMLElement | null;
   /** 打开模型配置（和模型选择框绑在一起）。 */
   onOpenModelConfig?: () => void;
-  /** 打开模式配置（跳转到系统设置 -> 行为与快捷键 -> Agent 模式）。 */
+  /** 打开模式配置（跳转到系统设置 -> Agent 模式）。 */
   onOpenModeSettings?: () => void;
   /** 当前会话的审批 / 提问，交给右下角通知栈，而不是居中弹层。 */
   onLiveReview?: (review: {
@@ -6523,7 +6523,7 @@ export function Chat({
       const saved = localStorage.getItem('jeikcode:right-panel-tab');
       if (isRightPanelTab(saved)) return saved;
     } catch {}
-    return 'questions';
+    return 'git';
   });
   const setRightPanelTab = (tab: RightPanelTab) => {
     setRightPanelTabState(tab);
@@ -6626,8 +6626,9 @@ export function Chat({
     try {
       const saved = localStorage.getItem('jeikcode:right-panel-collapsed');
       if (saved === 'false') return false;
-      // 默认收起：用浮动入口打开 Git / 提问历史，避免一进会话就把主栏拆成两列
-      return true;
+      if (saved === 'true') return true;
+      // 宽屏桌面默认展开：分支、改动、终端等参数首屏可见；窄屏和手机先保证对话宽度。
+      return typeof window !== 'undefined' ? window.innerWidth < 1280 : true;
     } catch {}
     return true;
   });
@@ -6637,6 +6638,19 @@ export function Chat({
       localStorage.setItem('jeikcode:right-panel-collapsed', String(val));
     } catch {}
   };
+
+  // 桌面缩到手机宽度时，面板从双列退化为底部弹层：必须先收起，
+  // 否则弹层会直接盖住整个对话。手机用户主动点开面板不受影响。
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia('(max-width: 768px)');
+    const onChange = (e: MediaQueryListEvent) => {
+      if (e.matches) setRightPanelCollapsed(true);
+    };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 监听全局切右侧面板 Tab 事件 (如 AI 画布点击文件链接自动切至 preview 眼睛标签并展开)
   useEffect(() => {
@@ -6660,7 +6674,7 @@ export function Chat({
         if (parsed >= 200 && parsed <= 1200) return parsed;
       }
     } catch {}
-    return 480;
+    return 360;
   });
 
   // 浮动 Git / 提问入口：自由拖拽，但水平方向锚定到最近的视口边缘。
@@ -8713,7 +8727,6 @@ export function Chat({
           open: true,
           title: t('confirm.initTitle'),
           body: t('confirm.initBody'),
-          icon: '🗺️',
           danger: false,
           confirmLabel: t('confirm.confirmedBtn'),
           cancelLabel: t('common.cancel'),
@@ -13926,17 +13939,17 @@ export function Chat({
                 ];
                 if (cached > 0) {
                   if (isEstimated) {
-                    tooltipLines.push(`⚡ ${t('tokens.estimatedCache')}: ${cachedStr} (${stepPct} ${t('tokens.estBadge')})`);
+                    tooltipLines.push(`${t('tokens.estimatedCache')}: ${cachedStr} (${stepPct} ${t('tokens.estBadge')})`);
                   } else {
-                    tooltipLines.push(`⚡ ${t('tokens.onlineCacheHit')}: ${cachedStr} (${stepPct} ${t('tokens.hitBadge')})`);
+                    tooltipLines.push(`${t('tokens.onlineCacheHit')}: ${cachedStr} (${stepPct} ${t('tokens.hitBadge')})`);
                   }
                 }
                 if (reasoning > 0) {
-                  tooltipLines.push(`💭 ${t('tokens.reasoningTooltip', { n: reasoningStr })}`);
+                  tooltipLines.push(t('tokens.reasoningTooltip', { n: reasoningStr }));
                 }
                 tooltipLines.push(
-                  `📤 ${t('tokens.outputLabel')}: ${completionStr}`,
-                  `🎯 ${t('tokens.totalTooltip', { total: totalStr })}`,
+                  `${t('tokens.outputLabel')}: ${completionStr}`,
+                  t('tokens.totalTooltip', { total: totalStr }),
                 );
                 if (contextLimit) {
                   tooltipLines.push(
@@ -13947,7 +13960,7 @@ export function Chat({
                     }),
                   );
                 }
-                tooltipLines.push(`💡 ${t('tokens.billableTokens')}: ${billableStr}`);
+                tooltipLines.push(`${t('tokens.billableTokens')}: ${billableStr}`);
 
                 return (
                   <div class="composer-tokens-anchor">
@@ -13964,11 +13977,9 @@ export function Chat({
                       }}
                     >
                       <span class="token-pill token-cached is-green">
-                        <span class="token-icon">⚡</span>
                         <span>{cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
                       </span>
                       <span class="token-pill token-total">
-                        <span class="token-icon">🎯</span>
                         <span>{formatTokenMetric(total)}{contextLimit ? `/${formatTokenMetric(contextLimit)}` : ''}</span>
                       </span>
                     </button>
@@ -13983,7 +13994,6 @@ export function Chat({
                       >
                         <div class="token-popover-header">
                           <div class="token-popover-title">
-                            <span class="token-popover-icon">📊</span>
                             <span>{t('tokens.popoverTitle')}</span>
                           </div>
                           <button
@@ -14004,7 +14014,6 @@ export function Chat({
                           <div class="token-popover-progress-box">
                             <div class="token-popover-progress-labels">
                               <span class="token-popover-progress-title">
-                                <span class="token-popover-progress-icon" aria-hidden="true">📝</span>
                                 {t('tokens.contextProgressTitle')}
                               </span>
                               <span class="token-popover-progress-val">
@@ -14032,7 +14041,6 @@ export function Chat({
                         <div class="token-popover-grid">
                           <div class="token-popover-row">
                             <div class="token-popover-row-left">
-                              <span class="token-row-icon">📥</span>
                               <span class="token-row-label">{t('tokens.inputLabel')}</span>
                             </div>
                             <span class="token-popover-row-val">{promptStr}</span>
@@ -14041,7 +14049,6 @@ export function Chat({
                           {cached > 0 && (
                             <div class="token-popover-row is-cached">
                               <div class="token-popover-row-left">
-                                <span class="token-row-icon">⚡</span>
                                 <span class="token-row-label">
                                   {isEstimated ? t('tokens.estimatedCache') : t('tokens.onlineCacheHit')}
                                 </span>
@@ -14057,7 +14064,6 @@ export function Chat({
 
                           <div class="token-popover-row">
                             <div class="token-popover-row-left">
-                              <span class="token-row-icon">📤</span>
                               <span class="token-row-label">{t('tokens.outputLabel')}</span>
                             </div>
                             <div class="token-popover-row-val-group">
@@ -14072,7 +14078,6 @@ export function Chat({
 
                           <div class="token-popover-row is-billable">
                             <div class="token-popover-row-left">
-                              <span class="token-row-icon">💡</span>
                               <span class="token-row-label">{t('tokens.billableTokens')}</span>
                             </div>
                             <span class="token-popover-row-val">{billableStr}</span>
@@ -14096,7 +14101,6 @@ export function Chat({
                               void slashHandlers.execServerCommand('compact', '');
                             }}
                           >
-                            <span class="token-compact-icon" aria-hidden="true">🗜️</span>
                             <span>{t('tokens.compactAction')}</span>
                           </button>
                         )}
@@ -14197,7 +14201,7 @@ export function Chat({
       <>
         <div
           ref={stageRef}
-          class={'chat-stage' + (isRightPanelVisible ? ' has-right-panel' : '')}
+          class={'chat-stage' + (isRightPanelVisible ? ' has-right-panel' : '') + (!isRightPanelVisible ? ' has-rail' : '')}
           onDragOver={handleMainStageDragOver as any}
           onDrop={handleMainStageDrop as any}
         >
@@ -14408,7 +14412,7 @@ export function Chat({
     <>
       <div
         ref={stageRef}
-        class={'chat-stage' + (isRightPanelVisible ? ' has-right-panel' : '') + (activeMainTabId !== 'chat' ? ' is-editor-mode' : '')}
+        class={'chat-stage' + (isRightPanelVisible ? ' has-right-panel' : '') + (!isRightPanelVisible ? ' has-rail' : '') + (activeMainTabId !== 'chat' ? ' is-editor-mode' : '')}
         onDragOver={handleMainStageDragOver as any}
         onDrop={handleMainStageDrop as any}
       >

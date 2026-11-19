@@ -872,7 +872,7 @@ export function GitWebhookDialog({ project, onClose, onSaved }: GitWebhookDialog
                     class="git-capsule-btn"
                     title={t('gitWebhook.tooltipCreateApp')}
                   >
-                    🚀 {t('gitWebhook.capsuleApplyApp')}
+                    {t('gitWebhook.capsuleApplyApp')}
                   </a>
                   <a
                     href="https://github.com/settings/apps"
@@ -881,7 +881,7 @@ export function GitWebhookDialog({ project, onClose, onSaved }: GitWebhookDialog
                     class="git-capsule-btn"
                     title={t('gitWebhook.tooltipViewAppId')}
                   >
-                    🆔 {t('gitWebhook.capsuleAppId')}
+                    {t('gitWebhook.capsuleAppId')}
                   </a>
                   <a
                     href="https://github.com/settings/apps"
@@ -890,7 +890,7 @@ export function GitWebhookDialog({ project, onClose, onSaved }: GitWebhookDialog
                     class="git-capsule-btn"
                     title={t('gitWebhook.tooltipGetKeyPairs')}
                   >
-                    🔑 {t('gitWebhook.capsuleAppKey')}
+                    {t('gitWebhook.capsuleAppKey')}
                   </a>
                 </div>
               )}
@@ -1124,7 +1124,7 @@ export function GitWebhookDialog({ project, onClose, onSaved }: GitWebhookDialog
                 wordBreak: 'break-word',
               }}
             >
-              <span style={{ fontSize: '14px', flexShrink: 0, lineHeight: '1.2' }}>⚠️</span>
+              <span style={{ fontSize: '12px', flexShrink: 0, lineHeight: '1.2', fontFamily: 'monospace' }}>!</span>
               <div>{t('gitWebhook.patDisabledWarning')}</div>
             </div>
 
@@ -1219,7 +1219,6 @@ export function GitWebhookDialog({ project, onClose, onSaved }: GitWebhookDialog
                 {config.accessToken && (
                   <div class="git-app-status-box">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ fontSize: '14px' }}>🛡️</span>
                       <strong>{t('gitWebhook.appTokenActive')}</strong>
                       <span style={{ fontFamily: 'monospace', fontSize: '11px', opacity: 0.85 }}>
                         ({showToken ? config.accessToken.slice(0, 24) + '...' : '••••••••••••••••••••••••'})
@@ -1276,7 +1275,7 @@ export function GitWebhookDialog({ project, onClose, onSaved }: GitWebhookDialog
                       onClick={() => setShowToken(!showToken)}
                       title={showToken ? t('gitWebhook.hideToken') : t('gitWebhook.showToken')}
                     >
-                      {showToken ? '🙈' : '👁️'}
+                      {showToken ? '−' : '+'}
                     </button>
                   </div>
                   <span class="git-input-hint">{t(activeChannelMeta.tokenHintKey as any)}</span>

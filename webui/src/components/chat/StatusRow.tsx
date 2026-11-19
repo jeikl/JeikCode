@@ -1,5 +1,6 @@
 import { useT } from '../../settings';
 import { formatTurnElapsed } from '../../lib/turnTimer';
+import { ElapsedBadge } from './ElapsedBadge';
 import { LiveElapsedText } from './LiveElapsedText';
 
 export function StatusRow({
@@ -23,9 +24,11 @@ export function StatusRow({
         </span>
       ) : liveElapsedMs != null ? (
         <span class="msg-time is-live" style={{ marginLeft: '8px' }}>
-          <span class="msg-turn-elapsed">
-            {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
-          </span>
+          <ElapsedBadge
+            ms={liveElapsedMs}
+            live
+            label={t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
+          />
         </span>
       ) : null}
     </div>

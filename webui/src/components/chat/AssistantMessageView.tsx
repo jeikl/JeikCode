@@ -12,6 +12,7 @@ import { ReasoningBlock } from './ReasoningBlock';
 import { SessionTodoPanel } from './SessionTodoPanel';
 import { ToolGroupView } from './ToolViews';
 import { NoticeCard } from './NoticeCard';
+import { ElapsedBadge } from './ElapsedBadge';
 import { LiveElapsedText } from './LiveElapsedText';
 import { highlightText } from './highlight';
 import { messageHasTools, messageText } from './messageText';
@@ -245,6 +246,15 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     (p) => (p.kind === 'text' && p.text.trim().length > 0) || p.kind === 'tool' || p.kind === 'reasoning',
   );
 
+  const showDoneTime = isLastInTurn && timeLabel && !streaming && !isError;
+  const showDoneFallbackTime =
+    isLastInTurn && !timeLabel && !streaming && turnTotalMs != null && !isError;
+  const showLiveTime =
+    isLastInTurn && streaming && (liveAnchorMs != null || liveElapsedMs != null);
+  const hasFooterRow = Boolean(
+    showDoneTime || showDoneFallbackTime || showLiveTime || msg.readOnly === true || copyBtn,
+  );
+
   return (
     <div class={cls + liveCls} ref={searchRef}>
       {msg.switchTo ? <ModelSwitchBadge model={msg.switchTo} /> : null}
@@ -275,43 +285,49 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           )}
         </>
       )}
-      <div class="msg-footer-row assistant-footer-row">
-        {/* 只在本轮最后一条助手消息上显示时刻和用时。中间的工具/思考/分段正文不要时间。 */}
-        {isLastInTurn && timeLabel && !streaming && !isError && (
-          <span class="msg-time" title={timeFull}>
-            <span class="msg-clock">{timeLabel}</span>
-            {turnTotalMs != null && (
-              <span class="msg-turn-elapsed">
-                {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
-              </span>
-            )}
-          </span>
-        )}
-        {isLastInTurn && !timeLabel && !streaming && turnTotalMs != null && !isError && (
-          <span class="msg-time">
-            <span class="msg-turn-elapsed">
-              {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
+      {hasFooterRow && (
+        <div class="msg-footer-row assistant-footer-row">
+          {/* 只在本轮最后一条助手消息上显示时刻和用时。中间的工具/思考/分段正文不渲染空脚栏，避免工具块下方留白过大。 */}
+          {showDoneTime && (
+            <span class="msg-time" title={timeFull}>
+              <span class="msg-clock">{timeLabel}</span>
+              {turnTotalMs != null && (
+                <ElapsedBadge
+                  ms={turnTotalMs}
+                  label={t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
+                />
+              )}
             </span>
-          </span>
-        )}
-        {isLastInTurn && streaming && (
-          liveAnchorMs != null ? (
-            <LiveElapsedText anchorMs={liveAnchorMs} />
-          ) : liveElapsedMs != null ? (
-            <span class="msg-time is-live">
-              <span class="msg-turn-elapsed">
-                {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
-              </span>
+          )}
+          {showDoneFallbackTime && (
+            <span class="msg-time">
+              <ElapsedBadge
+                ms={turnTotalMs!}
+                label={t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs!) })}
+              />
             </span>
-          ) : null
-        )}
-        {msg.readOnly === true && (
-          <span class="msg-readonly-badge" title={t('chat.readOnlyArchiveHint')}>
-            {t('chat.readOnlyArchive')}
-          </span>
-        )}
-        {copyBtn}
-      </div>
+          )}
+          {showLiveTime && (
+            liveAnchorMs != null ? (
+              <LiveElapsedText anchorMs={liveAnchorMs} />
+            ) : (
+              <span class="msg-time is-live">
+                <ElapsedBadge
+                  ms={liveElapsedMs!}
+                  live
+                  label={t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs!) })}
+                />
+              </span>
+            )
+          )}
+          {msg.readOnly === true && (
+            <span class="msg-readonly-badge" title={t('chat.readOnlyArchiveHint')}>
+              {t('chat.readOnlyArchive')}
+            </span>
+          )}
+          {copyBtn}
+        </div>
+      )}
     </div>
   );
 }, assistantMessagePropsEqual);

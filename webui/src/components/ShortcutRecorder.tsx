@@ -27,9 +27,23 @@ export function ShortcutRecorder({
 
   const isDesktopShell = (): boolean => {
     if (typeof window === 'undefined') return false;
-    return Boolean((window as unknown as { __TAURI__?: unknown }).__TAURI__)
+    if (
+      Boolean((window as unknown as { __TAURI__?: unknown }).__TAURI__)
       || window.location.hostname === 'tauri.localhost'
-      || window.location.protocol === 'tauri:';
+      || window.location.protocol === 'tauri:'
+    ) {
+      return true;
+    }
+    try {
+      // 桌面壳实际导航到回环地址 http://127.0.0.1:<port>/?token=...&desktop=1，
+      // 不一定注入 window.__TAURI__，需结合 desktop=1 查询参数或持久化标记识别。
+      if (new URLSearchParams(window.location.search).get('desktop') === '1') {
+        return true;
+      }
+      return window.sessionStorage.getItem('jeikcode_desktop') === '1';
+    } catch {
+      return false;
+    }
   };
 
   // OS-global shortcuts intercept keydown before the WebView. Suspend the
@@ -73,7 +87,7 @@ export function ShortcutRecorder({
     if (event.ctrlKey) parts.push('Ctrl');
     if (event.altKey) parts.push('Alt');
     if (event.shiftKey) parts.push('Shift');
-    if (event.metaKey) parts.push('Meta');
+    if (event.metaKey) parts.push('Super');
     return parts;
   };
 

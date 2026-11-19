@@ -1218,7 +1218,6 @@ export function CodeEditorTab({
                   onClick={() => setViewMode('edit')}
                   title={t('editor.svgSourceTitle')}
                 >
-                  <span class="editor-btn-icon">✏️</span>
                   <span class="editor-btn-text">{t('editor.svgSource')}</span>
                 </button>
               )}
@@ -1228,7 +1227,7 @@ export function CodeEditorTab({
                 onClick={() => setImgScale((s) => Math.max(0.2, s - 0.2))}
                 title={t('editor.zoomOut')}
               >
-                <span class="editor-btn-icon">➖</span>
+                <span class="editor-btn-icon" aria-hidden="true">−</span>
               </button>
               <button
                 type="button"
@@ -1244,7 +1243,7 @@ export function CodeEditorTab({
                 onClick={() => setImgScale((s) => Math.min(5.0, s + 0.2))}
                 title={t('editor.zoomIn')}
               >
-                <span class="editor-btn-icon">➕</span>
+                <span class="editor-btn-icon" aria-hidden="true">+</span>
               </button>
               <button
                 type="button"
@@ -1252,7 +1251,6 @@ export function CodeEditorTab({
                 onClick={() => setImgScale(1.0)}
                 title={t('editor.fitToView')}
               >
-                <span class="editor-btn-icon">⤢</span>
                 <span class="editor-btn-text">{t('editor.fitToView')}</span>
               </button>
               <button
@@ -1268,7 +1266,6 @@ export function CodeEditorTab({
                 }}
                 title={t('preview.openWithDefaultApp')}
               >
-                <span class="editor-btn-icon">🚀</span>
                 <span class="editor-btn-text">{t('preview.openWithDefaultApp')}</span>
               </button>
               <button
@@ -1284,7 +1281,6 @@ export function CodeEditorTab({
                 }}
                 title={t('explorer.revealInOs')}
               >
-                <span class="editor-btn-icon">📁</span>
                 <span class="editor-btn-text">{t('explorer.revealInOs')}</span>
               </button>
             </>
@@ -1306,7 +1302,6 @@ export function CodeEditorTab({
                 }}
                 title={t('preview.openWithDefaultApp')}
               >
-                <span class="editor-btn-icon">🚀</span>
                 <span class="editor-btn-text">{t('preview.openWithDefaultApp')}</span>
               </button>
               <button
@@ -1322,7 +1317,6 @@ export function CodeEditorTab({
                 }}
                 title={t('explorer.revealInOs')}
               >
-                <span class="editor-btn-icon">📁</span>
                 <span class="editor-btn-text">{t('explorer.revealInOs')}</span>
               </button>
             </>
@@ -1338,7 +1332,6 @@ export function CodeEditorTab({
                   onClick={() => setViewMode('image')}
                   title={t('editor.svgPreviewTitle')}
                 >
-                  <span class="editor-btn-icon">🖼️</span>
                   <span class="editor-btn-text">{t('editor.svgPreview')}</span>
                 </button>
               )}
@@ -1351,7 +1344,6 @@ export function CodeEditorTab({
                   onClick={() => setViewMode((m) => (m === 'edit' ? 'preview' : 'edit'))}
                   title={viewMode === 'edit' ? t('editor.switchToPreview') : t('editor.switchToEdit')}
                 >
-                  <span class="editor-btn-icon">{viewMode === 'edit' ? '📖' : '✏️'}</span>
                   <span class="editor-btn-text">{viewMode === 'edit' ? t('editor.preview') : t('editor.edit')}</span>
                 </button>
               )}
@@ -1362,7 +1354,6 @@ export function CodeEditorTab({
                 onClick={handleFormat}
                 title={t('editor.format')}
               >
-                <span class="editor-btn-icon">🪄</span>
                 <span class="editor-btn-text">{t('editor.format')}</span>
               </button>
               <button
@@ -1374,7 +1365,6 @@ export function CodeEditorTab({
                 }}
                 title={t('editor.find')}
               >
-                <span class="editor-btn-icon">🔍</span>
                 <span class="editor-btn-text">{t('editor.find')}</span>
               </button>
               <button
@@ -1386,7 +1376,6 @@ export function CodeEditorTab({
                 }}
                 title={t('editor.replace')}
               >
-                <span class="editor-btn-icon">🔄</span>
                 <span class="editor-btn-text">{t('editor.replace')}</span>
               </button>
               <button
@@ -1396,7 +1385,6 @@ export function CodeEditorTab({
                 disabled={saving || !isDirty}
                 title={t('editor.save')}
               >
-                <span class="editor-btn-icon">{saving ? '⏳' : isDirty ? '💾' : '✓'}</span>
                 <span class="editor-btn-text">{saving ? t('editor.saving') : isDirty ? t('editor.save') : t('editor.saved')}</span>
               </button>
             </>
@@ -1557,7 +1545,7 @@ export function CodeEditorTab({
         {loadError ? (
           <div class="editor-error-stage">
             <div class="editor-error-card">
-              <div class="editor-error-icon">⚠️</div>
+              <div class="editor-error-icon" aria-hidden="true">!</div>
               <div class="editor-error-title">{t('editor.readFailedTitle')}</div>
               <div class="editor-error-desc">
                 {loadError.toLowerCase().includes('not found')
@@ -1575,7 +1563,7 @@ export function CodeEditorTab({
                   }}
                   title={t('common.retry')}
                 >
-                  <span>🔄 {t('common.retry')}</span>
+                  <span>{t('common.retry')}</span>
                 </button>
                 {onClose && (
                   <button
@@ -1621,14 +1609,14 @@ export function CodeEditorTab({
             <div class="editor-binary-card">
               <div class="editor-binary-icon">
                 {isArchive
-                  ? '📦'
+                  ? 'ARCHIVE'
                   : ext === 'pdf'
-                  ? '📕'
+                  ? 'PDF'
                   : ['mp3', 'wav', 'ogg'].includes(ext)
-                  ? '🎵'
+                  ? 'AUDIO'
                   : ['mp4', 'mov', 'webm'].includes(ext)
-                  ? '🎬'
-                  : '⚙️'}
+                  ? 'VIDEO'
+                  : 'BIN'}
               </div>
               <div class="editor-binary-title">{fileName}</div>
               <div class="editor-binary-desc">
@@ -1650,7 +1638,7 @@ export function CodeEditorTab({
                     }
                   }}
                 >
-                  <span>🚀 {t('preview.openWithDefaultApp')}</span>
+                  <span>{t('preview.openWithDefaultApp')}</span>
                 </button>
                 <button
                   type="button"
@@ -1664,7 +1652,7 @@ export function CodeEditorTab({
                     }
                   }}
                 >
-                  <span>📁 {t('explorer.revealInOs')}</span>
+                  <span>{t('explorer.revealInOs')}</span>
                 </button>
               </div>
             </div>

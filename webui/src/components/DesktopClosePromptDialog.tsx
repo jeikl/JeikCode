@@ -127,7 +127,6 @@ export function DesktopClosePromptDialog() {
               fontSize: '24px',
             }}
           >
-            🖥️
           </div>
           <h3 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600 }}>
             {t('desktop.closePromptTitle') || '关闭 JeikCode'}

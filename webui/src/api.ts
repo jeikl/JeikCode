@@ -2274,7 +2274,7 @@ export async function getDesktopSettings(): Promise<DesktopSettings> {
   return resp.json();
 }
 
-export async function postDesktopSettings(settings: DesktopSettingsUpdate): Promise<void> {
+export async function postDesktopSettings(settings: DesktopSettingsUpdate): Promise<DesktopSettings | null> {
   const resp = await apiFetch('/api/system/desktop-settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -2284,6 +2284,12 @@ export async function postDesktopSettings(settings: DesktopSettingsUpdate): Prom
   // The saved mode policy is now the cold-start truth; drop the short-lived
   // bootstrap snapshot so an immediate refresh cannot repaint the old state.
   invalidateBootstrapCache();
+  try {
+    const body = await resp.json() as { settings?: DesktopSettings };
+    return body?.settings ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Trigger a hot-reload of config from disk (POST /config/reload). */
@@ -3702,7 +3708,15 @@ export async function gitDiscard(options: { path: string; isUntracked?: boolean;
   return resp.json();
 }
 
-export async function gitCommit(options: { message: string; amend?: boolean; cwd?: string }): Promise<{ success: boolean; message: string }> {
+export interface GitCommitResult {
+  success: boolean;
+  message: string;
+  files_changed?: number;
+  insertions?: number;
+  deletions?: number;
+}
+
+export async function gitCommit(options: { message: string; amend?: boolean; cwd?: string }): Promise<GitCommitResult> {
   const resp = await apiFetch('/git/commit', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -4295,7 +4309,7 @@ export interface ScheduleTask {
   prompt: string;
   cwd: string;
   schedule: ScheduleRule;
-  permission_mode: 'auto' | 'accept_edits' | 'plan' | string;
+  permission_mode: 'auto' | 'accept_edits' | 'plan' | 'build' | string;
   notify: string;
   enabled: boolean;
   one_shot: boolean;
@@ -4315,7 +4329,7 @@ export interface ScheduleUpsertPayload {
   prompt: string;
   cwd: string;
   schedule: ScheduleRule;
-  permission_mode?: 'auto' | 'accept_edits' | 'plan' | string;
+  permission_mode?: 'auto' | 'accept_edits' | 'plan' | 'build' | string;
   notify?: string;
   enabled?: boolean;
   one_shot?: boolean;

@@ -1,10 +1,20 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { getBootstrap, getModels, ModelInfo, postLiveReasoningEffort, probeUpstreamModel } from '../api';
+import {
+  getBootstrap,
+  getDesktopSettings,
+  getModels,
+  ModelInfo,
+  postDesktopSettings,
+  postLiveReasoningEffort,
+  probeUpstreamModel,
+  type DesktopSettings,
+} from '../api';
 import { useT } from '../settings';
 import { MsgKey } from '../i18n';
 import { modelAliasLabel } from '../lib/modelLabel';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
+import { showToast } from './Toast';
 
 function areModelsEqual(a: ModelInfo[], b: ModelInfo[]): boolean {
   if (a.length !== b.length) return false;
@@ -129,6 +139,9 @@ export function ModelSelector({
   const [probeResults, setProbeResults] = useState<
     Map<string, { ok: boolean; latencyMs: number; error?: string }>
   >(new Map());
+  // 允许运行中切换模型（与系统设置共享并全局持久化/广播）
+  const [runtimeModelSwitch, setRuntimeModelSwitch] = useState(false);
+  const [savingRuntimeSwitch, setSavingRuntimeSwitch] = useState(false);
 
   const runBatchProbe = async (providerGroup: string, targetModels: ModelInfo[]) => {
     if (probingProviders.has(providerGroup) || targetModels.length === 0) return;
@@ -253,18 +266,74 @@ export function ModelSelector({
     };
   }, []);
 
-  // 当弹窗展开时，按需静默同步一次模型列表
+  // 当弹窗展开时，按需静默同步一次模型列表与运行时切换开关
   useEffect(() => {
-    if (open) {
-      getModels()
-        .then((next) => {
-          if (!areModelsEqual(modelsRef.current, next)) {
-            setModels(next);
-          }
-        })
-        .catch(() => {});
-    }
+    if (!open) return;
+    let cancelled = false;
+    getModels()
+      .then((next) => {
+        if (!cancelled && !areModelsEqual(modelsRef.current, next)) {
+          setModels(next);
+        }
+      })
+      .catch(() => {});
+    getDesktopSettings()
+      .then((settings) => {
+        if (!cancelled && typeof settings.runtime_model_switch === 'boolean') {
+          setRuntimeModelSwitch(settings.runtime_model_switch);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [open]);
+
+  // 与全局系统设置双向联动（本标签页或跨标签页变更立即对齐）
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let active = true;
+    getDesktopSettings()
+      .then((settings) => {
+        if (active && typeof settings.runtime_model_switch === 'boolean') {
+          setRuntimeModelSwitch(settings.runtime_model_switch);
+        }
+      })
+      .catch(() => {});
+    const onDesktopSettingsChanged = (event: Event) => {
+      const settings = (event as CustomEvent<{ settings?: Partial<DesktopSettings> }>).detail?.settings;
+      if (typeof settings?.runtime_model_switch === 'boolean') {
+        setRuntimeModelSwitch(settings.runtime_model_switch);
+      }
+    };
+    window.addEventListener('jeikcode:desktop_settings_changed', onDesktopSettingsChanged);
+    return () => {
+      active = false;
+      window.removeEventListener('jeikcode:desktop_settings_changed', onDesktopSettingsChanged);
+    };
+  }, []);
+
+  const handleToggleRuntimeModelSwitch = async (next: boolean) => {
+    if (savingRuntimeSwitch) return;
+    const previous = runtimeModelSwitch;
+    setRuntimeModelSwitch(next);
+    setSavingRuntimeSwitch(true);
+    try {
+      const saved = await postDesktopSettings({ runtime_model_switch: next });
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('jeikcode:desktop_settings_changed', {
+            detail: { settings: saved ?? { runtime_model_switch: next } },
+          }),
+        );
+      }
+    } catch {
+      setRuntimeModelSwitch(previous);
+      showToast(t('gitWebhook.saveFailed'), 'error');
+    } finally {
+      setSavingRuntimeSwitch(false);
+    }
+  };
 
   // 桌面端思考强度仍是触发器下的下拉；窄屏改为 portal 底栏，由 overlay 关闭。
   useEffect(() => {
@@ -637,7 +706,6 @@ export function ModelSelector({
         >
           <div class="modal-card effort-selector-modal-card" onClick={(e) => e.stopPropagation()}>
             <div class="modal-header">
-              <span aria-hidden="true">🧠</span>
               <h3>{t('effort.label')}</h3>
               <button
                 type="button"
@@ -697,7 +765,6 @@ export function ModelSelector({
             {/* 单行精炼头部：左侧图标+Model标签，中间搜索框，右侧叉叉，一行搞定 */}
             <div class="modal-header model-streamlined-header">
               <div class="model-header-title-badge">
-                <span class="modal-title-icon">🎯</span>
                 <span class="model-header-title-text">{t('model.label') || 'Model'}</span>
               </div>
 
@@ -838,6 +905,25 @@ export function ModelSelector({
                     <div class="model-empty-hint">{t('settings.noSearchResults')}</div>
                   )}
                 </div>
+
+                {/* 左下角：运行时切换模型快捷开关（与系统设置实时双向同步、持久化并全局广播） */}
+                <div class="model-provider-footer">
+                  <label
+                    class={'model-runtime-switch-row' + (runtimeModelSwitch ? ' is-active' : '') + (savingRuntimeSwitch ? ' is-saving' : '')}
+                    title={t('settings.runtimeModelSwitchHint')}
+                  >
+                    <input
+                      type="checkbox"
+                      class="model-runtime-switch-checkbox"
+                      checked={runtimeModelSwitch}
+                      disabled={savingRuntimeSwitch}
+                      onChange={(e) => {
+                        void handleToggleRuntimeModelSwitch((e.target as HTMLInputElement).checked);
+                      }}
+                    />
+                    <span class="model-runtime-switch-label">{t('settings.runtimeModelSwitchLabel')}</span>
+                  </label>
+                </div>
               </div>
 
               {/* 右栏：当前提供商下的所有模型列表 */}
@@ -864,7 +950,6 @@ export function ModelSelector({
                           </>
                         ) : (
                           <>
-                            <span class="model-probe-icon" aria-hidden="true">⚡</span>
                             <span>{t('settings.probeAll')}</span>
                           </>
                         )}

@@ -486,6 +486,7 @@ export function RightInspector({
               <circle cx="11" cy="12" r="1.5" />
             </svg>
           </div>
+          <span class="rail-summary-label">{title}</span>
           {RIGHT_PANEL_TABS.map((id) => {
             const active = tab === id;
             const count = counts[id] ?? 0;

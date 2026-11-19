@@ -195,7 +195,6 @@ export const UserMessageView = memo(function UserMessageView({
           onClick={() => setExpanded(true)}
           title={t('chat.skillExpand')}
         >
-          <span class="skill-badge-icon" aria-hidden="true">⚡</span>
           <span class="skill-badge-label notranslate" translate={false}>{skillTitle}</span>
           <span class="skill-badge-hint">{t('chat.skillExpand')}</span>
         </button>

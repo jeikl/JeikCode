@@ -442,7 +442,7 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
     } catch {}
   };
 
-  // 获取文件图标或徽章
+  // 获取文件类型图标（保留资源管理器的识别度）
   const getTabIcon = (filePath: string) => {
     const ext = (filePath.split('.').pop() || '').toLowerCase();
     if (IMAGE_EXTS.has(ext)) return '🖼️';
@@ -579,7 +579,10 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
               title={t('preview.refresh')}
               aria-label={t('preview.refresh')}
             >
-              🔄
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+                <path d="M13.5 2.5V6h-3.5" />
+              </svg>
             </button>
           )}
 
@@ -597,7 +600,9 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
               }
               aria-label={t('preview.toggleMode')}
             >
-              {activeViewMode === 'edit' ? '📖' : '✏️'}
+              <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: '10px', letterSpacing: 0 }}>
+                {activeViewMode === 'edit' ? 'P' : 'E'}
+              </span>
             </button>
           )}
 
@@ -611,7 +616,11 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
               title={`${t('editor.save')} (Ctrl+S)`}
               aria-label={t('editor.save')}
             >
-              💾
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M2.5 2.5h8l3 3v8h-11z" />
+                <path d="M4.5 2.5v4h6v-4" />
+                <path d="M4.5 9h7v4.5h-7z" />
+              </svg>
             </button>
           )}
 
@@ -667,7 +676,7 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
         {tabs.length === 0 || !activeTab ? (
           <div class="preview-empty-stage">
             <div class="preview-empty-box">
-              <div class="preview-empty-icon">👁️</div>
+              <div class="preview-empty-icon" aria-hidden="true">👁️</div>
               <div class="preview-empty-title">
                 {t('preview.emptyTitle')}
               </div>

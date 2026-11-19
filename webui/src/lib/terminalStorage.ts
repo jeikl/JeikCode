@@ -23,19 +23,19 @@ export type HostPlatform = 'windows' | 'macos' | 'linux';
 
 export const SHELL_CONFIGS: Record<HostPlatform, ShellOption[]> = {
   windows: [
-    { id: 'powershell', name: 'PowerShell', icon: '⚡' },
-    { id: 'cmd', name: 'CMD', icon: '⬛' },
-    { id: 'gitbash', name: 'Git Bash', icon: '🌲' },
-    { id: 'wsl', name: 'WSL (Ubuntu)', icon: '🐧' },
+    { id: 'powershell', name: 'PowerShell', icon: '›' },
+    { id: 'cmd', name: 'CMD', icon: '›' },
+    { id: 'gitbash', name: 'Git Bash', icon: '›' },
+    { id: 'wsl', name: 'WSL (Ubuntu)', icon: '›' },
   ],
   macos: [
-    { id: 'zsh', name: 'Zsh', icon: '🐚' },
-    { id: 'bash', name: 'Bash', icon: '🐚' },
+    { id: 'zsh', name: 'Zsh', icon: '›' },
+    { id: 'bash', name: 'Bash', icon: '›' },
   ],
   linux: [
-    { id: 'bash', name: 'Bash', icon: '🐚' },
-    { id: 'zsh', name: 'Zsh', icon: '🐚' },
-    { id: 'sh', name: 'Sh', icon: '🐚' },
+    { id: 'bash', name: 'Bash', icon: '›' },
+    { id: 'zsh', name: 'Zsh', icon: '›' },
+    { id: 'sh', name: 'Sh', icon: '›' },
   ],
 };
 

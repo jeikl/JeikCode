@@ -65,6 +65,97 @@ function normalizeProviderType(type: string | undefined): string {
   return t;
 }
 
+// Compact line glyphs for the provider/model manager. Kept inline so the
+// settings dialog does not pull a second icon dependency into its chunk.
+function PlusGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+      <path d="M8 3v10M3 8h10" />
+    </svg>
+  );
+}
+
+function PencilGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
+      <path d="M10.8 2.6l2.6 2.6-7.3 7.3-3 .7.7-3z" />
+    </svg>
+  );
+}
+
+function TrashGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M2.5 4.5h11M6 4.5V2.8h4v1.7M4.2 4.5v8.2c0 .7.5 1.3 1.2 1.3h5.2c.7 0 1.2-.6 1.2-1.3V4.5" />
+      <path d="M6.6 7.2v4.4M9.4 7.2v4.4" />
+    </svg>
+  );
+}
+
+function StarGlyph({ filled = false }: { filled?: boolean }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill={filled ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">
+      <path d="M8 1.8l1.8 3.7 4.1.6-3 2.9.7 4.1L8 11.2l-3.6 1.9.7-4.1-3-2.9 4.1-.6z" />
+    </svg>
+  );
+}
+
+function ChevronGlyph({ up = false }: { up?: boolean }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d={up ? 'M4 10l4-4 4 4' : 'M4 6l4 4 4-4'} />
+    </svg>
+  );
+}
+
+function ContextGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+      <rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1.4" />
+      <path d="M5.2 3.2v9.6M10.8 3.2v9.6" />
+    </svg>
+  );
+}
+
+function ImageGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="2" y="2.5" width="12" height="11" rx="1.5" />
+      <circle cx="5.6" cy="6" r="1.2" />
+      <path d="M2.8 12.2l3.6-3.6 2.5 2.5 2-2 2.3 2.3" />
+    </svg>
+  );
+}
+
+function ReasoningGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6.2 2.5a3.5 3.5 0 0 0-3.4 4.4A2.8 2.8 0 0 0 4 12.3a3.2 3.2 0 0 0 4.2 1.1V2.5z" />
+      <path d="M9.8 2.5a3.5 3.5 0 0 1 3.4 4.4 2.8 2.8 0 0 1-1.2 5.4 3.2 3.2 0 0 1-4.2 1.1V2.5z" />
+    </svg>
+  );
+}
+
+function HistoryGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" />
+      <path d="M2.5 2.8v3.6H6" />
+      <path d="M8 5.4V8l1.8 1.1" />
+    </svg>
+  );
+}
+
+function protocolTag(type: string | undefined): { label: string; tone: string } | null {
+  const normalized = normalizeProviderType(type);
+  if (normalized === 'ollama') return null;
+  if (normalized === 'openai') return { label: 'completions', tone: 'green' };
+  if (normalized === 'responses') return { label: 'responses', tone: 'green' };
+  if (normalized === 'anthropic') return { label: 'anthropic', tone: 'amber' };
+  if (normalized === 'gemini') return { label: 'gemini', tone: 'blue' };
+  return { label: normalized || 'custom', tone: 'neutral' };
+}
+
 /** Persist account.provider as a curated preset id (align with TUI). */
 function toPresetProviderId(type: string | undefined): string {
   const wire = normalizeProviderType(type);
@@ -138,7 +229,6 @@ function SettingsModal({
     >
       <div class={'modal-card' + sizeClass} onClick={(e) => e.stopPropagation()}>
         <div class="modal-header">
-          <span>⚙</span>
           <h3>{title}</h3>
           <button class="ghost-btn modal-close" onClick={onClose} aria-label={t('settings.close')}>
             ×
@@ -534,51 +624,46 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
               <div class="model-config-overview-top">
                 <div class="model-config-overview-info">
                   <div class="model-config-overview-title">
-                    <span>⚡</span>
-                    <span>{t('settings.menuModel')}</span>
-                  </div>
-                  <div class="model-config-overview-desc">
-                    {t('settings.modelConfigSubtitle')}
+                    <span>{t('settings.tabModels')}</span>
                   </div>
                 </div>
 
                 <div class="model-config-overview-actions">
                   <button
-                    class="btn btn-primary"
+                    class="btn btn-primary model-config-action-btn"
                     type="button"
                     onClick={() => {
                       setAddModelDefaultAccount(undefined);
                       setShowAddModel(true);
                     }}
                   >
-                    ＋ {t('settings.addModel')}
+                    <PlusGlyph />
+                    <span>{t('settings.addModel')}</span>
                   </button>
                   <button
-                    class="btn"
+                    class="btn model-config-action-btn"
                     type="button"
                     onClick={() => setShowAddAccount(true)}
                   >
-                    ＋ {t('settings.addAccount')}
+                    <PlusGlyph />
+                    <span>{t('settings.addAccount')}</span>
                   </button>
                 </div>
               </div>
 
               <div class="model-config-overview-stats">
                 <div class="model-config-stat-chip default-provider" title={t('settings.activeDefaultModel')}>
-                  <span>🎯 {t('settings.activeDefaultModel')}:</span>
+                  <StarGlyph filled />
                   <strong>{config.default_provider || t('settings.notSet')}</strong>
                 </div>
                 <div class="model-config-stat-chip">
-                  <span>🏢</span>
                   <span>{t('settings.statsProviders', { n: accountGroups.length })}</span>
                 </div>
                 <div class="model-config-stat-chip">
-                  <span>🤖</span>
                   <span>{t('settings.statsModels', { n: config.providers?.length ?? 0 })}</span>
                 </div>
                 {config.path && (
                   <div class="model-config-stat-chip config-path" title={config.path}>
-                    <span>📄</span>
                     <span>{config.path}</span>
                   </div>
                 )}
@@ -588,7 +673,12 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
             {/* Toolbar: Search + Controls */}
             <div class="model-config-toolbar">
               <div class="model-config-search-box">
-                <span class="model-config-search-icon">🔍</span>
+                <span class="model-config-search-icon" aria-hidden="true">
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+                    <circle cx="7" cy="7" r="4.5" />
+                    <path d="M10.5 10.5L14 14" />
+                  </svg>
+                </span>
                 <input
                   class="model-config-search-input"
                   type="text"
@@ -610,11 +700,13 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
 
               <div class="model-config-toolbar-actions">
                 <button
-                  class="provider-group-btn"
+                  class="model-config-fold-btn"
                   type="button"
                   onClick={toggleAllCollapse}
+                  title={allCollapsed ? t('settings.expandAll') : t('settings.collapseAll')}
+                  aria-label={allCollapsed ? t('settings.expandAll') : t('settings.collapseAll')}
                 >
-                  {allCollapsed ? `▼ ${t('settings.expandAll')}` : `▲ ${t('settings.collapseAll')}`}
+                  <ChevronGlyph up={!allCollapsed} />
                 </button>
               </div>
             </div>
@@ -623,7 +715,6 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
             <div class="provider-list">
               {filteredAccountGroups.length === 0 && (
                 <div class="model-config-empty">
-                  <span style={{ fontSize: '26px' }}>🔍</span>
                   <span>{t('settings.noSearchResults')}</span>
                   {searchQuery && (
                     <button
@@ -640,6 +731,7 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
 
               {filteredAccountGroups.map(({ account, models }) => {
                 const isCollapsed = Boolean(collapsedAccounts[account.id]);
+                const tag = protocolTag(account.type);
                 return (
                   <div key={account.id} class="provider-group">
                     <div
@@ -650,53 +742,55 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
                         <span class={`provider-group-toggle ${!isCollapsed ? 'open' : ''}`}>
                           ▶
                         </span>
-                        <span class="provider-group-title" title={account.id}>
+                        <span class="provider-group-title" title={account.base_url || account.id}>
                           {account.id}
                         </span>
-                        <span class="provider-group-badge">{account.type}</span>
-                        {account.base_url && (
-                          <span class="provider-group-url" title={account.base_url}>
-                            🔗 {account.base_url}
+                        {tag && (
+                          <span class={`provider-group-badge proto-${tag.tone}`} title={account.type}>
+                            {tag.label}
                           </span>
                         )}
                       </div>
 
                       <div class="provider-group-meta-actions" onClick={(e) => e.stopPropagation()}>
-                        <span class={`provider-status-badge ${account.has_api_key ? 'ok' : 'nok'}`}>
-                          <span style={{ fontSize: '9px' }}>●</span>
-                          <span>{account.has_api_key ? t('settings.apiKeyConfigured') : t('settings.apiKeyNotConfigured')}</span>
-                        </span>
-                        <span class="provider-group-count">
-                          {t('settings.modelsCount', { n: models.length })}
+                        <span
+                          class="provider-group-count"
+                          title={t('settings.modelsCount', { n: models.length })}
+                          aria-label={t('settings.modelsCount', { n: models.length })}
+                        >
+                          {models.length}
                         </span>
 
                         <div class="provider-group-actions">
                           <button
-                            class="provider-group-btn btn-accent"
+                            class="provider-group-icon-btn btn-accent"
                             type="button"
                             onClick={() => {
                               setAddModelDefaultAccount(account.id);
                               setShowAddModel(true);
                             }}
                             title={t('settings.addModel')}
+                            aria-label={t('settings.addModel')}
                           >
-                            ＋ {t('settings.model')}
+                            <PlusGlyph />
                           </button>
                           <button
-                            class="provider-group-btn"
+                            class="provider-group-icon-btn"
                             type="button"
                             onClick={() => setEditAccountTarget(account)}
                             title={t('settings.edit')}
+                            aria-label={t('settings.edit')}
                           >
-                            {t('settings.edit')}
+                            <PencilGlyph />
                           </button>
                           <button
-                            class="provider-group-btn danger"
+                            class="provider-group-icon-btn danger"
                             type="button"
                             onClick={() => setDeleteAccountTarget(account.id)}
                             title={t('settings.delete')}
+                            aria-label={t('settings.delete')}
                           >
-                            {t('settings.delete')}
+                            <TrashGlyph />
                           </button>
                         </div>
                       </div>
@@ -706,7 +800,6 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
                       <div class="provider-group-models">
                         {models.length === 0 ? (
                           <div class="provider-group-empty">
-                            <span>ℹ️</span>
                             <span>{t('settings.noModels')}</span>
                           </div>
                         ) : (
@@ -718,74 +811,94 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
                             .map((p) => (
                               <div
                                 key={p.name}
-                                class={`model-card ${p.is_default ? 'default' : ''}`}
+                                class={`model-card ${p.is_default ? 'default' : ''}${p.is_default ? '' : ' is-selectable'}`}
+                                title={p.is_default ? undefined : t('settings.setAsDefault')}
+                                onClick={async (e) => {
+                                  if (p.is_default) return;
+                                  if ((e.target as HTMLElement).closest('button')) return;
+                                  const selection = window.getSelection?.();
+                                  if (selection && selection.toString().trim()) return;
+                                  await setDefaultProvider(p.name);
+                                  reload(true);
+                                }}
                               >
                                 <div class="model-card-head">
                                   <div class="model-card-name-row">
                                     <span class="model-card-name">{p.name}</span>
                                     {p.is_default && (
-                                      <span class="model-card-badge">★ {t('settings.default')}</span>
+                                      <span class="model-card-default-star" title={t('settings.default')}>
+                                        <StarGlyph filled />
+                                      </span>
                                     )}
-                                    <span class="model-card-id" title={p.model}>ID: {p.model}</span>
+                                    {p.model && p.model !== p.name && (
+                                      <span class="model-card-id" title={p.model}>{p.model}</span>
+                                    )}
                                   </div>
-                                  <div class="model-card-actions">
+                                  <div class="model-card-actions" onClick={(e) => e.stopPropagation()}>
                                     {!p.is_default && (
                                       <button
-                                        class="provider-group-btn btn-accent"
+                                        class="model-card-icon-btn btn-accent"
                                         type="button"
                                         onClick={async () => {
                                           await setDefaultProvider(p.name);
                                           reload(true);
                                         }}
                                         title={t('settings.setAsDefault')}
+                                        aria-label={t('settings.setAsDefault')}
                                       >
-                                        {t('settings.setAsDefault')}
+                                        <StarGlyph />
                                       </button>
                                     )}
                                     <button
-                                      class="provider-group-btn"
+                                      class="model-card-icon-btn"
                                       type="button"
                                       onClick={() => setEditModelTarget(p)}
                                       title={t('settings.edit')}
+                                      aria-label={t('settings.edit')}
                                     >
-                                      {t('settings.edit')}
+                                      <PencilGlyph />
                                     </button>
                                     <button
-                                      class="provider-group-btn danger"
+                                      class="model-card-icon-btn danger"
                                       type="button"
                                       onClick={() => setDeleteModelTarget(p.name)}
                                       title={t('settings.delete')}
+                                      aria-label={t('settings.delete')}
                                     >
-                                      {t('settings.delete')}
+                                      <TrashGlyph />
                                     </button>
                                   </div>
                                 </div>
 
-                                <div class="model-card-meta">
-                                  {p.context_window && (
-                                    <div class="model-card-meta-item">
-                                      <span class="pk">⚡ {t('settings.contextWindow')}:</span>
-                                      <span class="pv">{fmtContextWindow(p.context_window)}</span>
-                                    </div>
-                                  )}
-                                  <div class="model-card-meta-item">
-                                    <span class="pk">🖼️ {t('settings.supportsVision')}:</span>
-                                    <span class="pv">{p.supports_vision ? t('settings.yes') : t('settings.no')}</span>
-                                  </div>
-                                  <div class="model-card-meta-item">
-                                    <span class="pk">🧠 {t('settings.reasoningModel')}:</span>
-                                    <span class="pv">{p.reasoning_model ? t('settings.yes') : t('settings.no')}</span>
-                                    {p.reasoning_model && p.reasoning_effort && (
-                                      <span class="pv" style={{ marginLeft: '4px' }}>({p.reasoning_effort})</span>
+                                {(p.context_window || p.supports_vision || p.reasoning_model || p.reasoning_history) && (
+                                  <div class="model-card-meta">
+                                    {p.context_window && (
+                                      <span class="model-card-meta-item" title={t('settings.contextWindow')}>
+                                        <ContextGlyph />
+                                        <span class="pv">{fmtContextWindow(p.context_window)}</span>
+                                      </span>
+                                    )}
+                                    {p.supports_vision && (
+                                      <span class="model-card-meta-item" title={t('settings.supportsVision')}>
+                                        <ImageGlyph />
+                                      </span>
+                                    )}
+                                    {p.reasoning_model && (
+                                      <span class="model-card-meta-item" title={t('settings.reasoningModel')}>
+                                        <ReasoningGlyph />
+                                        {p.reasoning_effort && (
+                                          <span class="pv mono">{p.reasoning_effort}</span>
+                                        )}
+                                      </span>
+                                    )}
+                                    {p.reasoning_history && (
+                                      <span class="model-card-meta-item" title={t('settings.reasoningHistory')}>
+                                        <HistoryGlyph />
+                                        <span class="pv mono">{p.reasoning_history}</span>
+                                      </span>
                                     )}
                                   </div>
-                                  {p.reasoning_history && (
-                                    <div class="model-card-meta-item">
-                                      <span class="pk">💭 {t('settings.reasoningHistory')}:</span>
-                                      <span class="pv">{p.reasoning_history}</span>
-                                    </div>
-                                  )}
-                                </div>
+                                )}
                               </div>
                             ))
                         )}
@@ -1374,7 +1487,6 @@ function ProviderFormDialog({
             onClick={() => setSupportsVision((v) => !v)}
           >
             <span class="pill-dot" />
-            <span class="pill-icon">👁️</span>
             <span class="pill-text">{t('settings.supportsVision')}</span>
           </button>
 
@@ -1390,7 +1502,6 @@ function ProviderFormDialog({
             }}
           >
             <span class="pill-dot" />
-            <span class="pill-icon">🧠</span>
             <span class="pill-text">{t('settings.reasoningModel')}</span>
           </button>
         </div>
@@ -1477,14 +1588,14 @@ function ProviderFormDialog({
                     class={'history-pill' + (reasoningHistory === 'include' ? ' active' : '')}
                     onClick={() => setReasoningHistory('include')}
                   >
-                    💭 {t('settings.historyInclude')}
+                    {t('settings.historyInclude')}
                   </button>
                   <button
                     type="button"
                     class={'history-pill' + (reasoningHistory === 'exclude' ? ' active' : '')}
                     onClick={() => setReasoningHistory('exclude')}
                   >
-                    🚫 {t('settings.historyExclude')}
+                    {t('settings.historyExclude')}
                   </button>
                 </div>
               </div>

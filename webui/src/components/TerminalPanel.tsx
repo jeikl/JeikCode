@@ -1139,7 +1139,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
                 }}
                 title={tab.name + ' (双击关闭标签)'}
               >
-                <span class="terminal-tab-icon">💻</span>
+                <span class="terminal-tab-icon" aria-hidden="true">›</span>
                 <span class="terminal-tab-name">{tab.name}</span>
                 <button
                   type="button"
@@ -1215,7 +1215,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
             onClick={toggleScratchpad}
             title={t('terminal.scratchpad')}
           >
-            📝
+            ✎
           </button>
         </div>
       </div>
@@ -1233,7 +1233,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
                 setScratchpadText('');
               }}
             >
-              {`🚀 ${t('terminal.send')}`}
+              {t('terminal.send')}
             </button>
           </div>
           <textarea

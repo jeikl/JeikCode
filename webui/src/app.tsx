@@ -22,17 +22,21 @@ import { parseFilePathAndLines } from './lib/displayPath';
 import { dropEditorTabSnapshot, mainEditorStateKey } from './lib/editorTabState';
 import { languageOptions } from './i18n';
 
-// 动态按需懒加载非首屏必需的独立弹窗，削减冷启动初始 JS 解析开销。
-// 注意：**每次启动都会渲染**的弹窗绝不能放进这里——懒加载它们没有收益，
-// 反而会在启动时和同一边界内的其它 lazy 组件竞争，Preact 可能把被抛出的
-// Suspense Promise 记成 Uncaught (in promise)。这两个组件改为静态导入。
-const ThemeDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.ThemeDialog })));
-const LanguageDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.LanguageDialog })));
-const ModelConfigDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.ModelConfigDialog })));
+// 设置类弹窗体积小且高频直达，静态导入可彻底消除首次冷启动点击左下角齿轮时的 Suspense 骨架切换闪动。
+import { ThemeDialog, LanguageDialog, ModelConfigDialog } from './components/SettingsDialogs';
+import { SystemSettingsDialog } from './components/SystemSettingsDialog';
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard').then((m) => ({ default: m.OnboardingWizard })));
 const UpdateDialog = lazy(() => import('./components/UpdateDialog').then((m) => ({ default: m.UpdateDialog })));
 const ConfigSyncModal = lazy(() => import('./components/ConfigSyncModal').then((m) => ({ default: m.ConfigSyncModal })));
-const SystemSettingsDialog = lazy(() => import('./components/SystemSettingsDialog').then((m) => ({ default: m.SystemSettingsDialog })));
+
+/** 移动端标签菜单的对话图标（线性，共用侧栏的视觉语言）。 */
+function MobileChatGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M2.5 4.5A2 2 0 0 1 4.5 2.5h7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-4.5L4 14v-2.5h-.5a2 2 0 0 1-2-2v-5z" />
+    </svg>
+  );
+}
 
 /** 每个懒加载弹窗独占一个 Suspense 边界：共享边界时，一次 import 解析后的
  *  retry 会连带重渲染仍 pending 的兄弟 lazy 组件，Preact 在分离子树上可能把
@@ -45,39 +49,6 @@ function LazyBoundary({
   fallback?: ComponentChildren;
 }) {
   return <Suspense fallback={fallback}>{children}</Suspense>;
-}
-
-/** 点击设置/模型配置时立即呈现可交互弹窗骨架，杜绝 `fallback={null}` 导致点击后弹窗“凭空消失”。 */
-function SettingsModalFallback({ onClose }: { onClose: () => void }) {
-  const t = useT();
-  return (
-    <div
-      class="modal-overlay system-settings-modal-overlay"
-      role="dialog"
-      aria-modal="true"
-      onClick={onClose}
-    >
-      <div class="modal-card modal-card-lg system-settings-card" onClick={(e) => e.stopPropagation()}>
-        <div class="modal-header system-settings-header">
-          <div class="system-settings-header-title">
-            <span class="system-settings-header-icon" aria-hidden="true">⚙️</span>
-            <h3>{t('settings.systemSettings')}</h3>
-          </div>
-          <button
-            type="button"
-            class="modal-close btn btn-ghost"
-            onClick={onClose}
-            aria-label={t('common.dismiss')}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
-        </div>
-        <div class="modal-loading" style={{ padding: '48px 24px' }}>{t('settings.loading')}</div>
-      </div>
-    </div>
-  );
 }
 import {
   getBootstrap,
@@ -823,6 +794,11 @@ export function App() {
     let desktop = false;
     try {
       desktop = new URLSearchParams(window.location.search).get('desktop') === '1';
+      if (desktop) {
+        window.sessionStorage.setItem('jeikcode_desktop', '1');
+      } else {
+        desktop = window.sessionStorage.getItem('jeikcode_desktop') === '1';
+      }
     } catch {
       desktop = false;
     }
@@ -1030,13 +1006,6 @@ export function App() {
       fetchConfigUpgrade();
     }, 1500);
 
-    // 4 秒空闲预热设置/模型配置弹窗分包，防止点击模型配置时临时拉取卡顿消失
-    const preloadSettingsTimer = setTimeout(() => {
-      if (cancelled) return;
-      void import('./components/SystemSettingsDialog').catch(() => {});
-      void import('./components/SettingsDialogs').catch(() => {});
-    }, 4000);
-
     // 每 15 分钟后台自动静默检测一次，保持更新时效性
     const updateInterval = setInterval(fetchLatestUpdate, 15 * 60 * 1000);
 
@@ -1049,7 +1018,6 @@ export function App() {
     return () => {
       cancelled = true;
       clearTimeout(updateTimer);
-      clearTimeout(preloadSettingsTimer);
       clearInterval(updateInterval);
       window.removeEventListener('focus', onWindowFocus);
       try {
@@ -1485,7 +1453,7 @@ export function App() {
                     aria-label={t('sidebar.running')}
                   />
                 ) : activeMainTabId === 'chat' ? (
-                  <span class="mobile-tab-icon">💬</span>
+                  <span class="mobile-tab-icon"><MobileChatGlyph /></span>
                 ) : (
                   <span
                     class={
@@ -1533,7 +1501,7 @@ export function App() {
                       setMobileTabsDropdownOpen(false);
                     }}
                   >
-                    <span class="mobile-tabs-row-icon">💬</span>
+                    <span class="mobile-tabs-row-icon"><MobileChatGlyph /></span>
                     <span class="mobile-tabs-row-name">{activeSession.name}</span>
                     {activeMainTabId === 'chat' && <span class="mobile-tabs-active-check">✓</span>}
                   </button>
@@ -2098,33 +2066,23 @@ export function App() {
         />
       )}
       {settingsSection === 'theme' && (
-        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
-          <ThemeDialog onClose={() => setSettingsSection(null)} />
-        </LazyBoundary>
+        <ThemeDialog onClose={() => setSettingsSection(null)} />
       )}
       {settingsSection === 'language' && (
-        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
-          <LanguageDialog onClose={() => setSettingsSection(null)} />
-        </LazyBoundary>
+        <LanguageDialog onClose={() => setSettingsSection(null)} />
       )}
       {settingsSection === 'model' && (
-        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
-          <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
-        </LazyBoundary>
+        <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
       )}
       {settingsSection === 'system' && (
-        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
-          <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
-        </LazyBoundary>
+        <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
       )}
       {settingsSection === 'agent_mode' && (
-        <LazyBoundary fallback={<SettingsModalFallback onClose={() => setSettingsSection(null)} />}>
-          <SystemSettingsDialog
-            initialTab="desktop"
-            focusSection="agent_mode"
-            onClose={() => setSettingsSection(null)}
-          />
-        </LazyBoundary>
+        <SystemSettingsDialog
+          initialTab="desktop"
+          focusSection="agent_mode"
+          onClose={() => setSettingsSection(null)}
+        />
       )}
       {headerDialog === 'rename' && activeSession && (
         <RenameDialog

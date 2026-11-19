@@ -758,7 +758,12 @@ export function NotificationDock({
           onClick={() => setMobileExpanded(true)}
           aria-label={t('notify.action.expand')}
         >
-          <span class="mobile-notify-bell">🔔</span>
+          <span class="mobile-notify-bell" aria-hidden="true">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 6.5a4 4 0 0 1 8 0c0 3 1 4 1 4H3s1-1 1-4z" />
+              <path d="M6.5 12.5a1.5 1.5 0 0 0 3 0" />
+            </svg>
+          </span>
           <div class="mobile-notify-pill-content">
             <span class="mobile-notify-pill-session">
               {labelFor(currentCard.card.sessionId)}

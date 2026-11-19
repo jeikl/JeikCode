@@ -107,34 +107,26 @@ function getFileIcon(name: string, isDir: boolean, expanded = false) {
   }
   const ext = name.split('.').pop()?.toLowerCase() || '';
   switch (ext) {
-    case 'rs':
-      return '🦀';
+    case 'rs': return '🦀';
     case 'ts':
-    case 'tsx':
-      return '🔷';
+    case 'tsx': return '🔷';
     case 'js':
-    case 'jsx':
-      return '🟨';
-    case 'json':
-      return '📋';
+    case 'jsx': return '🟨';
+    case 'json': return '📋';
     case 'md':
-    case 'markdown':
-      return '📝';
+    case 'markdown': return '📝';
     case 'css':
-    case 'scss':
-      return '🎨';
-    case 'html':
-      return '🌐';
+    case 'scss': return '🎨';
+    case 'html': return '🌐';
     case 'toml':
     case 'yaml':
-    case 'yml':
-      return '⚙️';
+    case 'yml': return '⚙️';
     case 'png':
     case 'jpg':
-    case 'svg':
-      return '🖼️';
-    default:
-      return '📄';
+    case 'jpeg':
+    case 'gif':
+    case 'svg': return '🖼️';
+    default: return '📄';
   }
 }
 
@@ -852,7 +844,9 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
               onClick={() => setSearchMode('tree')}
               title={t('explorer.files') || '文件列表'}
             >
-              📁
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
+                <path d="M1.8 4c0-.55.45-1 1-1h3l1.4 1.5h5c.55 0 1 .45 1 1V12c0 .55-.45 1-1 1h-9.4c-.55 0-1-.45-1-1V4z" />
+              </svg>
             </button>
             <button
               type="button"
@@ -863,7 +857,10 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
               }}
               title="全局搜索与替换 (Ctrl+F / Ctrl+H)"
             >
-              🔍
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.5" />
+                <path d="M10.5 10.5L14 14" />
+              </svg>
             </button>
             <button
               type="button"
@@ -875,7 +872,10 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
               }}
               title="刷新文件树"
             >
-              🔄
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+                <path d="M13.5 2.5V6h-3.5" />
+              </svg>
             </button>
           </div>
         </div>
@@ -1027,7 +1027,7 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
                       onClick={() => showToast(t('editor.replaceAllSuccess', { n: 0 }), 'success')}
                       title="全部替换 (Ctrl+Alt+Enter)"
                     >
-                      🔁
+                      ALL
                     </button>
                   </div>
                 </div>
@@ -1131,7 +1131,6 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
                         onClick={() => toggleGroupExpand(group.file)}
                       >
                         <span class="group-caret">{group.expanded ? '▼' : '▶'}</span>
-                        <span class="group-file-icon">📄</span>
                         <span class="group-file-name" title={group.file}>{group.fileName}</span>
                         <span class="group-match-count">{group.items.length}</span>
                       </div>

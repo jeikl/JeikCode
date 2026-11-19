@@ -177,7 +177,6 @@ export function DeleteDialog({
     >
       <div class="modal-card modal-card-sm">
         <div class="modal-header">
-          <span>🗑</span>
           <h3>{t('delete.title')}</h3>
           <button class="ghost-btn modal-close" onClick={onClose} aria-label={t('common.cancel')}>
             ×

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import {
+  ApprovalMode,
   ProjectInfo,
   ScheduleRule,
   ScheduleTask,
@@ -16,7 +17,9 @@ import {
 } from '../api';
 import { useT } from '../settings';
 import { Select, SelectOption } from './Select';
+import { ModeSelector } from './ModeSelector';
 import { ModelSelector } from './ModelSelector';
+import { Markdown } from './Markdown';
 import { CwdPicker } from './CwdPicker';
 import { ConfirmDialog } from './ConfirmDialog';
 import { getPageZoom } from '../lib/pageZoom';
@@ -36,6 +39,7 @@ import {
 export type ScheduleEditorMode = 'calendar' | 'interval' | 'ai';
 export type DayPreset = 'everyday' | 'weekdays' | 'custom_week' | 'specific_dates';
 export type IntervalUnit = 'minutes' | 'hours' | 'days';
+export type SchedulePermissionMode = 'auto' | 'accept_edits' | 'plan' | 'build';
 
 interface ScheduleFormState {
   id: string | null;
@@ -46,7 +50,7 @@ interface ScheduleFormState {
   oneShot: boolean;
   sessionMode: 'isolated' | 'reuse';
   overlapPolicy: 'skip' | 'queue';
-  permissionMode: 'auto' | 'accept_edits' | 'plan';
+  permissionMode: SchedulePermissionMode;
   model: string | null;
   mode: ScheduleEditorMode;
   dayPreset: DayPreset;
@@ -56,6 +60,29 @@ interface ScheduleFormState {
   intervalValue: number;
   intervalUnit: IntervalUnit;
   reuseSessionId: string | null;
+}
+
+function sanitizeSchedulePermissionMode(raw?: string | null): SchedulePermissionMode {
+  const clean = (raw || '').trim();
+  if (clean === 'build' || clean === 'plan' || clean === 'accept_edits') return clean;
+  return 'auto';
+}
+
+function toApprovalMode(mode: SchedulePermissionMode): ApprovalMode {
+  return mode === 'auto' ? 'bypass' : mode;
+}
+
+function fromApprovalMode(mode: ApprovalMode): SchedulePermissionMode {
+  return mode === 'bypass' ? 'auto' : mode;
+}
+
+/** 复用侧栏项目文件夹（资源管理器）图标，代表独立选择任务工作区。 */
+function ScheduleFolderIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </svg>
+  );
 }
 
 interface ScheduleDialogProps {
@@ -138,10 +165,7 @@ function taskToFormState(task: ScheduleTask): ScheduleFormState {
     oneShot: Boolean(task.one_shot),
     sessionMode: task.session_mode === 'reuse' ? 'reuse' : 'isolated',
     overlapPolicy: task.overlap_policy === 'queue' ? 'queue' : 'skip',
-    permissionMode:
-      task.permission_mode === 'plan' || task.permission_mode === 'accept_edits'
-        ? task.permission_mode
-        : 'auto',
+    permissionMode: sanitizeSchedulePermissionMode(task.permission_mode),
     model: task.model || null,
     mode,
     dayPreset,
@@ -164,10 +188,10 @@ function createEmptyForm(defaultCwd: string, defaultModel: string | null = null)
     oneShot: false,
     sessionMode: 'isolated',
     overlapPolicy: 'skip',
-    // 定时任务默认选用 auto 模式
+    // 定时任务默认选用 auto 模式，新建与打开弹窗默认进入 AI 智能设定
     permissionMode: 'auto',
     model: defaultModel,
-    mode: 'calendar',
+    mode: 'ai',
     dayPreset: 'everyday',
     weekdays: [1, 2, 3, 4, 5],
     dates: [],
@@ -274,9 +298,6 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
     listSchedules()
       .then((list) => {
         setTasks(list);
-        if (list.length > 0) {
-          setForm(taskToFormState(list[0]));
-        }
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -292,7 +313,7 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
     if (form.mode === 'ai') {
       aiMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [activeThread.messages.length, form.mode]);
+  }, [activeThread.messages.length, aiSending, form.mode]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -344,9 +365,11 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
       opts.push({
         value: p.working_dir,
         selectedLabel: (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-            <strong style={{ color: 'var(--app-primary-foreground)' }}>{p.name || p.working_dir}</strong>
-            <span class="git-input-hint" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, width: '100%' }}>
+            <strong style={{ color: 'var(--app-primary-foreground)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+              {p.name || p.working_dir}
+            </strong>
+            <span class="git-input-hint" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
               {p.working_dir}
             </span>
           </div>
@@ -388,67 +411,10 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
     return opts;
   }, [projects, form.cwd, t]);
 
-  const modeOptions: SelectOption<ScheduleEditorMode>[] = useMemo(() => [
-    {
-      value: 'calendar',
-      selectedLabel: <strong style={{ color: 'var(--app-primary-foreground)' }}>{t('schedules.modeCalendar')}</strong>,
-      label: (
-        <div class="git-select-rich-option">
-          <div class="git-select-rich-top">
-            <span class="git-select-rich-title">{t('schedules.modeCalendar')}</span>
-          </div>
-          <span class="git-select-rich-desc">{t('schedules.modeCalendarDesc')}</span>
-        </div>
-      ),
-    },
-    {
-      value: 'interval',
-      selectedLabel: <strong style={{ color: 'var(--app-primary-foreground)' }}>{t('schedules.modeInterval')}</strong>,
-      label: (
-        <div class="git-select-rich-option">
-          <div class="git-select-rich-top">
-            <span class="git-select-rich-title">{t('schedules.modeInterval')}</span>
-          </div>
-          <span class="git-select-rich-desc">{t('schedules.modeIntervalDesc')}</span>
-        </div>
-      ),
-    },
-    {
-      value: 'ai',
-      selectedLabel: (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <strong style={{ color: 'var(--app-primary-foreground)' }}>{t('schedules.modeAi')}</strong>
-          <span class="git-channel-status-badge active">AI</span>
-        </div>
-      ),
-      label: (
-        <div class="git-select-rich-option">
-          <div class="git-select-rich-top">
-            <span class="git-select-rich-title">{t('schedules.modeAi')}</span>
-            <span class="git-channel-status-badge active">AI</span>
-          </div>
-          <span class="git-select-rich-desc">{t('schedules.modeAiDesc')}</span>
-        </div>
-      ),
-    },
-  ], [t]);
-
-  const permissionOptions: SelectOption<'auto' | 'accept_edits' | 'plan'>[] = useMemo(() => [
-    {
-      value: 'auto',
-      selectedLabel: <strong style={{ color: '#34d399' }}>{t('schedules.permissionAuto')}</strong>,
-      label: <div class="git-select-rich-option"><span class="git-select-rich-title">{t('schedules.permissionAuto')}</span></div>,
-    },
-    {
-      value: 'accept_edits',
-      selectedLabel: <strong>{t('schedules.permissionAcceptEdits')}</strong>,
-      label: <div class="git-select-rich-option"><span class="git-select-rich-title">{t('schedules.permissionAcceptEdits')}</span></div>,
-    },
-    {
-      value: 'plan',
-      selectedLabel: <strong>{t('schedules.permissionPlan')}</strong>,
-      label: <div class="git-select-rich-option"><span class="git-select-rich-title">{t('schedules.permissionPlan')}</span></div>,
-    },
+  const modeTabs: Array<{ value: ScheduleEditorMode; label: string; desc: string; badge?: string }> = useMemo(() => [
+    { value: 'ai', label: t('schedules.modeAi'), desc: t('schedules.modeAiDesc'), badge: 'AI' },
+    { value: 'calendar', label: t('schedules.modeCalendar'), desc: t('schedules.modeCalendarDesc') },
+    { value: 'interval', label: t('schedules.modeInterval'), desc: t('schedules.modeIntervalDesc') },
   ], [t]);
 
   const intervalUnitOptions: SelectOption<IntervalUnit>[] = useMemo(() => [
@@ -686,6 +652,15 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
     return status;
   };
 
+  /** 映射任务最近一次执行状态对应的语义徽标类名。 */
+  const statusBadgeClass = (status?: string | null): string => {
+    if (status === 'ok') return 'ok';
+    if (status === 'error') return 'err';
+    if (status === 'running' || status === 'queued') return 'running';
+    if (status === 'stopped') return 'warn';
+    return '';
+  };
+
   return (
     <div class="modal-overlay git-webhook-modal-overlay" {...backdropDismiss}>
       <div
@@ -787,7 +762,7 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                           {t('schedules.running')}
                         </span>
                       ) : item.last_status ? (
-                        <span class={'schedule-pill-badge ' + (item.last_status === 'ok' ? 'ok' : item.last_status === 'error' ? 'err' : '')}>
+                        <span class={'schedule-pill-badge ' + statusBadgeClass(item.last_status)}>
                           {renderStatusLabel(item.last_status)}
                         </span>
                       ) : null}
@@ -800,15 +775,25 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
 
           {/* 右侧：规则编辑区 / AI 对话区 */}
           <section class="schedule-main">
-            {/* 模式切换器 */}
-            <div class="git-form-section">
-              <div class="git-section-title">{t('schedules.modeLabel')}</div>
-              <Select
-                class="git-adapter-select"
-                value={form.mode}
-                options={modeOptions}
-                onChange={(v) => setForm((prev) => ({ ...prev, mode: v }))}
-              />
+            {/* 顶部对称分段模式切换器 */}
+            <div class="schedule-mode-bar">
+              <span class="schedule-mode-bar-label">{t('schedules.modeLabel')}</span>
+              <div class="schedule-mode-segmented" role="tablist" aria-label={t('schedules.modeLabel')}>
+                {modeTabs.map((tab) => (
+                  <button
+                    key={tab.value}
+                    type="button"
+                    role="tab"
+                    aria-selected={form.mode === tab.value}
+                    class={`schedule-mode-tab ${form.mode === tab.value ? 'active' : ''}`}
+                    title={tab.desc}
+                    onClick={() => setForm((prev) => ({ ...prev, mode: tab.value }))}
+                  >
+                    <span>{tab.label}</span>
+                    {tab.badge && <span class="schedule-mode-pill-badge">{tab.badge}</span>}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {form.mode === 'ai' ? (
@@ -874,42 +859,99 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                       </div>
                     </div>
                   ) : (
-                    activeThread.messages.map((msg) => (
-                      <div key={msg.id} class={'schedule-ai-msg ' + msg.role + (msg.error ? ' error' : '')}>
-                        <div class="schedule-ai-msg-bubble">
-                          <div class="schedule-ai-msg-text">{msg.content}</div>
-                          {msg.createdTasks && msg.createdTasks.length > 0 && (
-                            <div class="schedule-ai-created-list">
-                              {msg.createdTasks.map((ct) => (
-                                <div key={ct.id} class="schedule-ai-created-card">
-                                  <div class="schedule-ai-created-head">
-                                    <span>✅ {t('schedules.aiCreatedCardTitle')}</span>
-                                    <span class="git-channel-status-badge active">{ct.permission_mode.toUpperCase()}</span>
-                                  </div>
-                                  <div class="schedule-ai-created-body">
-                                    <strong>{ct.title}</strong>
-                                    <span>{summarizeSchedule(ct)} · {ct.cwd}</span>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    class="git-text-action-btn"
-                                    onClick={() => setForm(taskToFormState(ct))}
-                                  >
-                                    {t('schedules.aiInspectTask')}
-                                  </button>
+                    <>
+                      {activeThread.messages.map((msg) => (
+                        <div key={msg.id} class={'schedule-ai-msg ' + msg.role + (msg.error ? ' error' : '')}>
+                          <div class="schedule-ai-msg-bubble">
+                            {msg.role === 'assistant' && !msg.error ? (
+                              msg.content ? (
+                                <div class="schedule-ai-msg-markdown">
+                                  <Markdown
+                                    content={msg.content}
+                                    cwd={form.cwd || defaultWorkspace}
+                                    targetContext="chat"
+                                  />
                                 </div>
-                              ))}
-                            </div>
-                          )}
+                              ) : null
+                            ) : (
+                              <div class="schedule-ai-msg-text">{msg.content}</div>
+                            )}
+                            {msg.createdTasks && msg.createdTasks.length > 0 && (
+                              <div class="schedule-ai-created-list">
+                                {msg.createdTasks.map((ct) => (
+                                  <div key={ct.id} class="schedule-ai-created-card">
+                                    <div class="schedule-ai-created-head">
+                                      <span>✅ {t('schedules.aiCreatedCardTitle')}</span>
+                                      <span class="git-channel-status-badge active">{ct.permission_mode.toUpperCase()}</span>
+                                    </div>
+                                    <div class="schedule-ai-created-body">
+                                      <strong>{ct.title}</strong>
+                                      <span>{summarizeSchedule(ct)} · {ct.cwd}</span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      class="git-text-action-btn"
+                                      onClick={() => setForm(taskToFormState(ct))}
+                                    >
+                                      {t('schedules.aiInspectTask')}
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ))
+                      ))}
+                      {aiSending && (
+                        <div class="schedule-ai-msg assistant">
+                          <div class="schedule-ai-msg-bubble schedule-ai-thinking">
+                            <span class="session-item-running" />
+                            <span>{t('schedules.aiSending')}</span>
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                   <div ref={aiMessagesEndRef} />
                 </div>
 
                 <div class="schedule-ai-composer">
-                  <div class="schedule-ai-composer-tools">
+                  {/* 目标工作区独占一行，完整展示路径并配备资源管理器图标 */}
+                  <div class="schedule-ai-workspace-row">
+                    <span class="schedule-ai-workspace-label">{t('schedules.workspaceLabel')}</span>
+                    <div class="schedule-ai-cwd-pill" title={form.cwd || defaultWorkspace}>
+                      <span class="schedule-ai-cwd-path">{form.cwd || defaultWorkspace}</span>
+                    </div>
+                    <button
+                      type="button"
+                      class="schedule-folder-picker-btn"
+                      onClick={handlePickIsolatedWorkspace}
+                      title={t('schedules.addWorkspaceBtn')}
+                      aria-label={t('schedules.addWorkspaceBtn')}
+                    >
+                      <ScheduleFolderIcon />
+                    </button>
+                  </div>
+
+                  {/* 输入框 */}
+                  <textarea
+                    class="git-textarea schedule-ai-textarea"
+                    rows={2}
+                    placeholder={t('schedules.aiInputPlaceholder')}
+                    value={aiInput}
+                    disabled={aiSending}
+                    onInput={(e) => setAiInput((e.target as HTMLTextAreaElement).value)}
+                    onKeyDown={(e) => {
+                      if (e.isComposing) return;
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        void handleSendAiPrompt();
+                      }
+                    }}
+                  />
+
+                  {/* 底栏：左侧模型与思考强度，右侧发送按钮 */}
+                  <div class="schedule-ai-bottom-bar">
                     <div class="git-model-selector-wrapper">
                       <ModelSelector
                         value={activeThread.model}
@@ -920,39 +962,9 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                         direction="up"
                       />
                     </div>
-                    <div class="schedule-ai-cwd-pill" title={form.cwd || defaultWorkspace}>
-                      <span>📁</span>
-                      <span>{form.cwd || defaultWorkspace}</span>
-                    </div>
                     <button
                       type="button"
-                      class="git-aux-btn"
-                      style={{ height: '30px', padding: '0 8px' }}
-                      onClick={handlePickIsolatedWorkspace}
-                      title={t('schedules.addWorkspaceBtn')}
-                    >
-                      +
-                    </button>
-                  </div>
-                  <div class="schedule-ai-input-row">
-                    <textarea
-                      class="git-textarea schedule-ai-textarea"
-                      rows={2}
-                      placeholder={t('schedules.aiInputPlaceholder')}
-                      value={aiInput}
-                      disabled={aiSending}
-                      onInput={(e) => setAiInput((e.target as HTMLTextAreaElement).value)}
-                      onKeyDown={(e) => {
-                        if (e.isComposing) return;
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          void handleSendAiPrompt();
-                        }
-                      }}
-                    />
-                    <button
-                      type="button"
-                      class="git-save-btn"
+                      class="git-save-btn schedule-ai-send-btn"
                       disabled={aiSending || !aiInput.trim()}
                       onClick={() => void handleSendAiPrompt()}
                     >
@@ -974,32 +986,38 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                       <span class="git-enable-toggle-thumb" />
                     </div>
                     <div class="git-enable-hero-text">
-                      <div class="git-enable-hero-title">
-                        <strong>{t('schedules.enableHeroLabel')}</strong>
-                      </div>
                       <span class="git-enable-hero-desc">{t('schedules.enableHeroDesc')}</span>
                     </div>
                   </div>
-                  <div class={`git-enable-status-chip ${form.enabled ? 'active' : 'disabled'}`}>
-                    <span class="git-status-dot" />
-                    <span>{form.enabled ? t('schedules.statusActive') : t('schedules.statusInactive')}</span>
-                  </div>
                 </div>
 
-                {/* 运行时间摘要卡片 */}
+                {/* 对称运行时间摘要双列卡片 */}
                 {currentEditingTask && (
-                  <div class="git-project-info-banner">
-                    <div class="git-banner-row">
-                      <span class="git-banner-label">{t('schedules.nextRun')}</span>
-                      <strong class="git-banner-val">
-                        {formatEpoch(currentEditingTask.next_run_at, '—')}
-                      </strong>
+                  <div class="schedule-run-summary-grid">
+                    <div class="schedule-run-stat-card">
+                      <span class="schedule-run-stat-label">{t('schedules.nextRun')}</span>
+                      <div class="schedule-run-stat-value-row">
+                        <span class="schedule-run-stat-value">
+                          {formatEpoch(currentEditingTask.next_run_at, '—')}
+                        </span>
+                      </div>
                     </div>
-                    <div class="git-banner-row">
-                      <span class="git-banner-label">{t('schedules.lastRun')}</span>
-                      <span class="git-banner-path">
-                        {formatEpoch(currentEditingTask.last_run_at, t('schedules.neverRun'))} · {renderStatusLabel(currentEditingTask.last_status)}
-                      </span>
+                    <div class="schedule-run-stat-card">
+                      <span class="schedule-run-stat-label">{t('schedules.lastRun')}</span>
+                      <div class="schedule-run-stat-value-row">
+                        {currentEditingTask.last_run_at ? (
+                          <span class="schedule-run-stat-value">
+                            {formatEpoch(currentEditingTask.last_run_at, '—')}
+                          </span>
+                        ) : !currentEditingTask.last_status ? (
+                          <span class="schedule-run-stat-muted">{t('schedules.neverRun')}</span>
+                        ) : null}
+                        {currentEditingTask.last_status && (
+                          <span class={'schedule-pill-badge ' + statusBadgeClass(currentEditingTask.last_status)}>
+                            {renderStatusLabel(currentEditingTask.last_status)}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1160,7 +1178,7 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                         />
                         <div style={{ minWidth: '130px' }}>
                           <Select
-                            class="git-adapter-select"
+                            class="schedule-compact-select"
                             value={form.intervalUnit}
                             options={intervalUnitOptions}
                             onChange={(u) => setForm((prev) => ({ ...prev, intervalUnit: u }))}
@@ -1193,7 +1211,7 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                     <div class="git-input-with-actions">
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <Select
-                          class="git-adapter-select"
+                          class="git-adapter-select schedule-workspace-select"
                           value={form.cwd}
                           options={workspaceOptions}
                           onChange={(v) => setForm((prev) => ({ ...prev, cwd: v }))}
@@ -1201,12 +1219,12 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                       </div>
                       <button
                         type="button"
-                        class="git-aux-btn"
-                        style={{ minHeight: '48px' }}
+                        class="schedule-folder-picker-btn is-form"
                         onClick={handlePickIsolatedWorkspace}
                         title={t('schedules.addWorkspaceBtn')}
+                        aria-label={t('schedules.addWorkspaceBtn')}
                       >
-                        {t('schedules.addWorkspaceBtn')}
+                        <ScheduleFolderIcon />
                       </button>
                     </div>
                     <span class="git-input-hint">{t('schedules.workspaceIsolatedHint')}</span>
@@ -1266,29 +1284,29 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                     )}
                   </div>
 
-                  {/* 权限模式（默认 auto）与模型选择 */}
-                  <div class="git-model-trigger-panel" style={{ marginTop: '4px' }}>
-                    <div class="git-form-grid">
-                      <div class="git-form-item">
-                        <label class="git-form-label">{t('schedules.permissionLabel')}</label>
-                        <Select
-                          class="git-adapter-select"
-                          value={form.permissionMode}
-                          options={permissionOptions}
-                          onChange={(v) => setForm((prev) => ({ ...prev, permissionMode: v }))}
-                        />
+                  {/* 运行模式（复用主对话纯英文 ModeSelector，默认选中 Auto）与执行模型 */}
+                  <div class="git-model-trigger-panel schedule-exec-panel" style={{ marginTop: '4px' }}>
+                    <div class="schedule-exec-grid">
+                      <div class="schedule-exec-col">
+                        <div class="schedule-exec-col-head">
+                          <span class="git-form-label">{t('schedules.permissionLabel')}</span>
+                        </div>
+                        <div class="schedule-mode-selector-wrap">
+                          <ModeSelector
+                            value={toApprovalMode(form.permissionMode)}
+                            onChange={(m) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                permissionMode: fromApprovalMode(m),
+                              }))
+                            }
+                          />
+                        </div>
                       </div>
 
-                      <div class="git-form-item">
-                        <label class="git-form-label">{t('schedules.modelLabel')}</label>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                          <div class="git-model-selector-wrapper">
-                            <ModelSelector
-                              value={form.model}
-                              onChange={(m) => setForm((prev) => ({ ...prev, model: m }))}
-                              direction="up"
-                            />
-                          </div>
+                      <div class="schedule-exec-col">
+                        <div class="schedule-exec-col-head">
+                          <span class="git-form-label">{t('schedules.modelLabel')}</span>
                           {form.model && (
                             <button
                               type="button"
@@ -1298,6 +1316,15 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                               {t('schedules.modelFollowDefault')}
                             </button>
                           )}
+                        </div>
+                        <div class="schedule-model-row">
+                          <div class="git-model-selector-wrapper">
+                            <ModelSelector
+                              value={form.model}
+                              onChange={(m) => setForm((prev) => ({ ...prev, model: m }))}
+                              direction="up"
+                            />
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1332,12 +1359,16 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                 </button>
               </>
             )}
-            {toast && <span class={`git-footer-toast ${toast.type}`}>{toast.msg}</span>}
+            {toast ? (
+              <span class={`git-footer-toast ${toast.type}`}>{toast.msg}</span>
+            ) : form.mode === 'ai' ? (
+              <span class="git-input-hint">{t('schedules.modeAiDesc')}</span>
+            ) : null}
           </div>
 
           <div class="git-footer-right">
             <button type="button" class="git-cancel-btn" onClick={onClose}>
-              {t('common.cancel')}
+              {form.mode === 'ai' ? t('settings.close') : t('common.cancel')}
             </button>
             {form.mode !== 'ai' && (
               <button

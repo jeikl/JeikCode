@@ -3,6 +3,7 @@ import { useT } from '../../settings';
 import { toolMatchesSearch } from '../../lib/canvasSearch';
 import { copyTextToClipboard } from '../../lib/clipboard';
 import {
+  compactToolDetail,
   computeToolDiffStats,
   formatToolDetail,
   formatToolPayload,
@@ -49,7 +50,6 @@ export function ToolGroupView({ tools, search }: { tools: ToolRow[]; search: str
       {tools.length > 1 && (
         <div class="tool-group-header">
           <span class="tool-group-summary">
-            <span class="tool-group-icon" aria-hidden="true">⚡</span>
             <span>
               {hasWritingTools && writingTools.length === tools.length
                 ? t('tool.filesChanged', { count: String(writingTools.length) })
@@ -116,14 +116,23 @@ export function ToolGroupView({ tools, search }: { tools: ToolRow[]; search: str
 }
 
 /**
- * Per-tool observability chip: `switch` (frozen gap from the previous activity
- * edge) and `cost` (live execution stopwatch, frozen at the persisted duration).
+ * 收起态只保留「耗时 + 状态」：完成 `1.3s ✓`，失败 `1.3s ×`，运行中计时器 + 转圈。
+ * `switch` 延迟不占主行，展开后在 tool-detail-meta 中展示，避免主行被参数挤爆。
  *
  * The ticker lives in this leaf component so a running tool re-renders only its
  * own badge, never the chat timeline. `cost` uses the server clock offset so a
  * skewed browser/device still matches every other instance and the on-disk log.
  */
-export function ToolTimingBadge({ tool }: { tool: ToolRow }) {
+function formatToolSeconds(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  const s = Math.max(0, ms) / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${Math.round(s % 60)}s`;
+}
+
+export function ToolStatusTime({ tool }: { tool: ToolRow }) {
   const t = useT();
   const running =
     tool.status === 'pending' && tool.duration_ms == null && tool.started_at != null;
@@ -138,52 +147,37 @@ export function ToolTimingBadge({ tool }: { tool: ToolRow }) {
 
   const costMs = resolveToolCostMs(tool, nowMs);
   const switchMs = tool.switch_ms;
-  // A settled row whose duration was lost (hard kill before the terminal frame)
-  // still gets an honest `cost: —` instead of a silently growing fake value.
   const showCost = costMs != null || (tool.started_at != null && tool.status !== 'pending');
-  if (switchMs == null && !showCost) return null;
+  if (!running && tool.status !== 'waiting_approval' && !showCost) return null;
 
+  // 运行中保持提示文本稳定，避免 500ms 刷新 `title` 导致原生悬浮提示反复闪烁消失。
   const title = t('tool.metricsTip', {
     switch: switchMs == null ? '—' : formatToolTiming(switchMs),
-    cost: costMs == null ? '—' : formatToolTiming(costMs),
+    cost: running ? t('tool.running') : costMs == null ? '—' : formatToolTiming(costMs),
   });
+  const settledSeconds = formatToolSeconds(costMs);
+  const cls =
+    tool.status === 'done'
+      ? 'success'
+      : tool.status === 'error'
+        ? 'error'
+        : tool.status === 'incomplete'
+          ? 'warning'
+          : running || tool.status === 'pending'
+            ? 'live'
+            : 'muted';
 
   return (
-    <span
-      class={'tool-timing' + (running ? ' is-live' : '')}
-      title={title}
-      aria-label={title}
-    >
-      <svg
-        class="tool-timing-clock"
-        viewBox="0 0 16 16"
-        fill="none"
-        aria-hidden="true"
-      >
-        <circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.3" />
-        <path
-          d="M8 4.6v3.7l2.5 1.5"
-          stroke="currentColor"
-          stroke-width="1.3"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
-      {switchMs != null && (
-        <span class="tool-timing-item">
-          <span class="tool-timing-key">{t('tool.switch')}</span>
-          <span class="tool-timing-val">{formatToolTiming(switchMs)}</span>
-        </span>
-      )}
-      {switchMs != null && showCost && (
-        <span class="tool-timing-sep" aria-hidden="true" />
-      )}
-      {showCost && (
-        <span class="tool-timing-item">
-          <span class="tool-timing-key">{t('tool.cost')}</span>
-          <span class="tool-timing-val tool-timing-cost">{formatToolTiming(costMs)}</span>
-        </span>
-      )}
+    <span class={'tool-status-time ' + cls} title={title} aria-label={title}>
+      {running || tool.status === 'waiting_approval' ? (
+        <ToolStatusIcon cls="pending" />
+      ) : null}
+      {tool.status === 'done' && <span class="tool-status-mark" aria-hidden="true">✓</span>}
+      {tool.status === 'error' && <span class="tool-status-mark" aria-hidden="true">×</span>}
+      {tool.status === 'incomplete' && <span class="tool-status-mark" aria-hidden="true">!</span>}
+      <span class="tool-status-time-value">
+        {tool.status === 'waiting_approval' ? t('tool.waiting') : settledSeconds}
+      </span>
     </span>
   );
 }
@@ -274,19 +268,6 @@ export function ToolRowView({
     outputRef.current.scrollTop = outputRef.current.scrollHeight;
   }, [expanded, tool.output]);
 
-  let annotation: { cls: string; label: string } | null = null;
-  if (tool.status === 'waiting_approval') {
-    annotation = { cls: 'waiting', label: t('tool.waiting') };
-  } else if (tool.status === 'pending') {
-    annotation = { cls: 'pending', label: t('tool.running') };
-  } else if (tool.status === 'done') {
-    annotation = { cls: 'success', label: t('tool.done') };
-  } else if (tool.status === 'error') {
-    annotation = { cls: 'error', label: t('tool.failed') };
-  } else if (tool.status === 'incomplete') {
-    annotation = { cls: 'warning', label: t('tool.incomplete') };
-  }
-
   const hasDetail = hasSubtasks ? false : !!(tool.args || tool.output);
   const showFlatProgress =
     tool.status === 'pending' && !!tool.progress && !hasSubtasks;
@@ -301,6 +282,7 @@ export function ToolRowView({
         failed: String(counts.failed),
       })
     : formatToolDetail(tool.name, tool.args);
+  const compactDetail = counts ? headerDetail : compactToolDetail(tool.name, tool.args);
 
   return (
     <div class={'tool-body kind-' + category + ' notranslate'} translate={false}>
@@ -319,17 +301,14 @@ export function ToolRowView({
       >
         <span class="tool-glyph" aria-hidden="true">{glyph}</span>
         <span class="tool-name notranslate" translate={false}>{displayToolName(tool.name)}</span>
+        {compactDetail && (
+          <span class="tool-compact-detail" title={headerDetail}>{compactDetail}</span>
+        )}
         <ToolArgPreview text={headerDetail} search={search} />
         {diffStats && (
           <DiffStatBadge additions={diffStats.additions} deletions={diffStats.deletions} />
         )}
-        <ToolTimingBadge tool={tool} />
-        {annotation && (
-          <span class={'tool-annotation ' + annotation.cls}>
-            <ToolStatusIcon cls={annotation.cls} />
-            {annotation.label}
-          </span>
-        )}
+        <ToolStatusTime tool={tool} />
         {hasDetail && (
           <span class={'tool-chevron' + (expanded ? ' expanded' : '')}>▾</span>
         )}
@@ -339,7 +318,13 @@ export function ToolRowView({
         <div class="tool-progress" title={tool.progress}>{highlightText(tool.progress || '', search)}</div>
       )}
       {expanded && hasDetail && (
-        <ToolExpandedBody tool={tool} outputRef={outputRef} search={search} />
+        <>
+          <div class="tool-detail-meta">
+            <span>{t('tool.switch')}: {tool.switch_ms == null ? '—' : formatToolTiming(tool.switch_ms)}</span>
+            <span>{t('tool.cost')}: {formatToolTiming(resolveToolCostMs(tool, serverNowMs()))}</span>
+          </div>
+          <ToolExpandedBody tool={tool} outputRef={outputRef} search={search} />
+        </>
       )}
     </div>
   );

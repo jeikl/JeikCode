@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { useT } from '../../settings';
 import { formatTurnElapsed } from '../../lib/turnTimer';
+import { ElapsedBadge } from './ElapsedBadge';
 
 /**
  * 隔离的 1 秒实时用时读秒组件：仅在本行叶子节点内触发重渲染，
@@ -28,9 +29,11 @@ export function LiveElapsedText({
 
   return (
     <span class={className ? `msg-time is-live ${className}` : 'msg-time is-live'}>
-      <span class="msg-turn-elapsed">
-        {t('chat.turnElapsedLive', { time: formatTurnElapsed(elapsed) })}
-      </span>
+      <ElapsedBadge
+        ms={elapsed}
+        live
+        label={t('chat.turnElapsedLive', { time: formatTurnElapsed(elapsed) })}
+      />
     </span>
   );
 }

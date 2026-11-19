@@ -4,6 +4,7 @@ import { useSettings } from '../settings';
 import { modalConfirm, modalPrompt } from './ConfirmDialog';
 import { showToast } from './Toast';
 import { getPageZoom } from '../lib/pageZoom';
+import { formatGitCommitBanner } from '../lib/gitCommitBanner';
 import {
   fetchGitBranches,
   fetchGitGraph,
@@ -320,7 +321,6 @@ export function GitPanel({
       title: t('git.ctxCreateBranch'),
       body: t('git.promptBranchName'),
       placeholder: 'feature/xxx',
-      icon: '🌱',
       confirmLabel: t('common.create') || '创建',
       cancelLabel: t('common.cancel') || '取消',
     });
@@ -341,7 +341,6 @@ export function GitPanel({
       title: t('git.ctxCreateTag'),
       body: t('git.promptTagName'),
       placeholder: 'v1.0.0',
-      icon: '🏷️',
       confirmLabel: t('common.create') || '创建',
       cancelLabel: t('common.cancel') || '取消',
     });
@@ -361,7 +360,6 @@ export function GitPanel({
     const ok = await modalConfirm({
       title: t('git.ctxCherryPick'),
       body: `Cherry pick ${commit.short_hash} "${commit.message}"?`,
-      icon: '🍒',
       danger: false,
       confirmLabel: t('git.ctxCherryPick'),
       cancelLabel: t('common.cancel'),
@@ -475,7 +473,6 @@ export function GitPanel({
     const ok = await modalConfirm({
       title: isRemote ? t('git.ctxDeleteRemoteBranch') : t('git.ctxDeleteBranch'),
       body: confirmPrompt,
-      icon: '🗑',
       danger: true,
       confirmLabel: t('common.delete') || '删除',
       cancelLabel: t('common.cancel') || '取消',
@@ -497,7 +494,6 @@ export function GitPanel({
     const ok = await modalConfirm({
       title: t('git.ctxMergeBranch').replace('{b}', currentBranch),
       body: `Merge "${branch}" into "${currentBranch}"?`,
-      icon: '🔀',
       danger: false,
       confirmLabel: t('common.confirm') || '合并',
       cancelLabel: t('common.cancel') || '取消',
@@ -541,7 +537,6 @@ export function GitPanel({
       title: t('git.ctxCreateBranchFrom').replace('{b}', branch),
       body: t('git.promptBranchName'),
       placeholder: 'feature/xxx',
-      icon: '🌱',
       confirmLabel: t('common.create') || '创建',
       cancelLabel: t('common.cancel') || '取消',
     });
@@ -924,8 +919,7 @@ export function GitPanel({
       const ok = await modalConfirm({
         title: t('git.commitBtn'),
         body: t('git.commitNoStagedPrompt'),
-        icon: '📦',
-        danger: false,
+          danger: false,
         confirmLabel: t('git.stageAllAndCommit'),
         cancelLabel: t('common.cancel'),
       });
@@ -954,7 +948,8 @@ export function GitPanel({
         };
       });
 
-      setSuccessMsg(res.message || 'Commit successful');
+      const fallbackCount = stagedCount > 0 ? stagedCount : unstagedCount;
+      setSuccessMsg(formatGitCommitBanner(res, t, fallbackCount));
       setCommitMessage('');
       // 提交后主动异步触发一次绿色刷新（拉取本地与远程图谱，使提交记录立即可见）
       void handleFullRefresh();
@@ -1588,7 +1583,6 @@ export function GitPanel({
                         <div class="git-expanded-details-card">
                           <div class="git-expanded-meta-row">
                             <span class="git-meta-author-group">
-                              <span class="git-hover-user-icon">👤</span>
                               <span class="git-expanded-author">{c.author_name}</span>
                               {c.author_email && (
                                 <span class="git-hover-email">&lt;{c.author_email}&gt;</span>
@@ -1621,7 +1615,6 @@ export function GitPanel({
                               </button>
                             </span>
                             <span class="git-meta-time-group">
-                              <span class="git-hover-clock-icon">🕒</span>
                               <span class="git-expanded-time">
                                 {formatRelativeTimeI18n(c.timestamp, isZh)} ({formatCommitDateTime(c.timestamp, isZh)})
                               </span>

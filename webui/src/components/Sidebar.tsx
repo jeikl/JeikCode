@@ -5,7 +5,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
-import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getBootstrap, invalidateBootstrapCache, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, listSchedules, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getConfig, getDesktopSettings, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getBootstrap, invalidateBootstrapCache, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, listSchedules, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
 import { mergeSessionRow, onGlobalEvent, removeSessionRows } from '../lib/globalEvents';
 import { deleteSessionCache } from '../lib/sessionCache';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
@@ -166,12 +166,14 @@ function FolderRailIcon() {
   );
 }
 
-/** Sparkles glyph for the Skills action. */
-function SparklesIcon() {
+/** Stacked blocks glyph for the Skills action (no sparkle). */
+function SkillIcon() {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-      <path d="M8 1.3l1.15 3.1a2 2 0 0 0 1.2 1.2L13.4 6.8l-3.05 1.15a2 2 0 0 0-1.2 1.2L8 12.2 6.85 9.15a2 2 0 0 0-1.2-1.2L2.6 6.8l3.05-1.2a2 2 0 0 0 1.2-1.2z" />
-      <path d="M12.7 10.4l.5 1.35.5-1.35 1.35-.5-1.35-.5-.5-1.35-.5 1.35-1.35.5z" />
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="2" y="2" width="5" height="5" rx="1" />
+      <rect x="9" y="2" width="5" height="5" rx="1" />
+      <rect x="2" y="9" width="5" height="5" rx="1" />
+      <rect x="9" y="9" width="5" height="5" rx="1" />
     </svg>
   );
 }
@@ -2590,6 +2592,10 @@ export function Sidebar({
           )}
           <button
             class="sidebar-rail-btn"
+            onMouseEnter={() => {
+              void getConfig().catch(() => {});
+              void getDesktopSettings().catch(() => {});
+            }}
             onClick={() => {
               onCloseDrawer?.();
               onOpenSettings('system');
@@ -2655,7 +2661,7 @@ export function Sidebar({
             }
           }}
         >
-          <span>💬</span>
+          <ChatBubbleIcon />
           <span>{t('sidebar.chats') || '对话'}</span>
         </button>
         <button
@@ -2663,7 +2669,7 @@ export function Sidebar({
           class={'sidebar-segment-btn' + (sidebarTab === 'files' ? ' active' : '')}
           onClick={() => setSidebarTab('files')}
         >
-          <span>📁</span>
+          <FolderIcon />
           <span>{t('sidebar.files') || '资源管理'}</span>
         </button>
       </div>
@@ -2684,7 +2690,7 @@ export function Sidebar({
               aria-haspopup="menu"
               aria-expanded={skillsMenuOpen}
             >
-              <span class="sidebar-action-icon"><SparklesIcon /></span>
+              <span class="sidebar-action-icon"><SkillIcon /></span>
               <span class="sidebar-action-label">{t('sidebar.skills')}</span>
               {skillCount > 0 && <span class="sidebar-action-badge">{skillCount}</span>}
               <span class="sidebar-action-caret"><ChevronDownIcon /></span>
@@ -3092,6 +3098,10 @@ export function Sidebar({
         <span class="sidebar-bottom-spacer" />
         <button
           class="sidebar-icon-btn sidebar-settings-btn"
+          onMouseEnter={() => {
+            void getConfig().catch(() => {});
+            void getDesktopSettings().catch(() => {});
+          }}
           onClick={() => {
             onCloseDrawer?.();
             onOpenSettings('system');

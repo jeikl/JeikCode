@@ -323,7 +323,6 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
     >
       <div class="modal-card update-modal-card" role="dialog" aria-labelledby="update-dialog-title">
         <div class="modal-header">
-          <span style="font-size: 16px;">🚀</span>
           <h3 id="update-dialog-title">{t('update.modalTitle')}</h3>
           {!updating && (
             <button class="ghost-btn modal-close" onClick={onClose} aria-label={t('common.cancel')}>
@@ -391,22 +390,18 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
                 </div>
               ) : checkError ? (
                 <div class="update-status-row error">
-                  <span class="update-status-error-icon">⚠️</span>
                   <span>{t('update.failed', { error: checkError })}</span>
                 </div>
               ) : !isLatestPick && targetVersion ? (
                 <div class="update-status-row has-update">
-                  <span class="update-status-sparkle">✨</span>
                   <span>{t('update.dialogDescTarget', { version: targetVersion })}</span>
                 </div>
               ) : hasUpdate ? (
                 <div class="update-status-row has-update">
-                  <span class="update-status-sparkle">✨</span>
                   <span>{t('update.dialogDesc', { version: info?.latest_version || '' })}</span>
                 </div>
               ) : forceReinstall ? (
                 <div class="update-status-row has-update">
-                  <span class="update-status-sparkle">🔁</span>
                   <span>{t('update.dialogDescForce', { version: info?.latest_version || '' })}</span>
                 </div>
               ) : (

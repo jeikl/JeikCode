@@ -50,8 +50,8 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
   const backdropDismiss = useBackdropDismiss(onClose);
 
   const tabs: ModuleTab[] = [
-    { key: 'models', labelKey: 'settings.tabModels', defaultLabel: '模型与配置', icon: '⚡' },
-    { key: 'desktop', labelKey: 'settings.tabDesktop', defaultLabel: '行为与快捷键', icon: '⌨️' },
+    { key: 'models', labelKey: 'settings.tabModels', defaultLabel: '提供商与模型', icon: '⚡' },
+    { key: 'desktop', labelKey: 'settings.tabDesktop', defaultLabel: '系统设置', icon: '⌨️' },
     { key: 'about', labelKey: 'settings.tabAbout', defaultLabel: '关于与版本', icon: 'ℹ️' },
   ];
 
@@ -143,7 +143,7 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
       const settings = (event as CustomEvent<{ settings?: DesktopSettings }>).detail
         ?.settings;
       if (!settings) return;
-      setCloseAction(settings.close_action);
+      if (settings.close_action) setCloseAction(settings.close_action);
       if (settings.agent_mode_policy) setAgentModePolicy(settings.agent_mode_policy);
       if (settings.agent_global_mode) setAgentGlobalMode(settings.agent_global_mode);
       if (typeof settings.runtime_model_switch === 'boolean') {
@@ -221,7 +221,7 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
             {activeTab === 'desktop' && (
               <div class="system-settings-pane">
                 <h4 class="system-settings-pane-title">
-                  {t('settings.tabDesktop') || '行为与快捷键'}
+                  {t('settings.tabDesktop') || '系统设置'}
                 </h4>
 
                 <div class="system-settings-card-box">

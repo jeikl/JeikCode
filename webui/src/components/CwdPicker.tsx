@@ -167,15 +167,15 @@ export function CwdPicker({ current, onPick, onClose, title, skipChangeDir, subt
   function getShortcutIcon(id: string) {
     switch (id) {
       case 'home':
-        return '🏠';
+        return '~';
       case 'desktop':
-        return '🖥️';
+        return 'dt';
       case 'downloads':
-        return '📥';
+        return '↓';
       case 'documents':
-        return '📄';
+        return 'doc';
       default:
-        return '📁';
+        return '/';
     }
   }
 
@@ -193,7 +193,6 @@ export function CwdPicker({ current, onPick, onClose, title, skipChangeDir, subt
     >
       <div class="modal-card cwd-picker-modal">
         <div class="modal-header">
-          <span>📁</span>
           <h3>{title || t('cwd.title')}</h3>
           <span class="modal-sub" style="margin-left:auto">{subtitle ?? t('cwd.affectsSession')}</span>
         </div>
@@ -237,7 +236,6 @@ export function CwdPicker({ current, onPick, onClose, title, skipChangeDir, subt
                   title={`${t('cwd.drives')}: ${d}`}
                   onClick={() => handleDriveClick(d)}
                 >
-                  <span>💽</span>
                   <span>{d}</span>
                 </button>
               ))}
@@ -278,7 +276,7 @@ export function CwdPicker({ current, onPick, onClose, title, skipChangeDir, subt
             {/* Instant Filter Bar */}
             {dirs.length > 5 && (
               <div class="dir-filter-bar">
-                <span style="opacity:0.6;font-size:11px;">🔍</span>
+                <span style="opacity:0.6;font-size:11px;">/</span>
                 <input
                   type="text"
                   class="dir-filter-input"
@@ -318,7 +316,7 @@ export function CwdPicker({ current, onPick, onClose, title, skipChangeDir, subt
               {!dirLoading &&
                 filteredDirs.map((d) => (
                   <button key={d} class="dir-item" onClick={() => handleSubdirClick(d)}>
-                    <span>📁</span>
+                    <span>/</span>
                     <span>{d}</span>
                   </button>
                 ))}
