@@ -1667,6 +1667,8 @@ export interface SessionMeta {
   /** Per-session reasoning effort; absent means "inherit the provider default". */
   reasoning_effort?: string | null;
   thinking_budget?: number | null;
+  origin?: 'manual' | 'scheduled' | 'protocol' | string;
+  is_scheduled?: boolean;
 }
 
 export interface SessionMetaWithProject extends SessionMeta {
@@ -2417,7 +2419,6 @@ export async function getProject(): Promise<ProjectState> {
   return resp.json();
 }
 
-
 // --- MCP server status ---
 
 export interface McpServerInfo {
@@ -3115,7 +3116,9 @@ export type GlobalWireEvent =
   /** MCP / 技能等能力开关或信任状态变更（跨实例广播）。 */
   | { type: 'capabilities_changed'; working_dir?: string | null }
   /** Desktop/runtime settings changed in another instance. */
-  | { type: 'desktop_settings'; settings: DesktopSettings };
+  | { type: 'desktop_settings'; settings: DesktopSettings }
+  /** Scheduled task configs/status changed, notify all clients to refresh schedules. */
+  | { type: 'schedules_updated' };
 
 const GLOBAL_EVENTS_IDLE_TIMEOUT_MS = 30_000;
 
@@ -4276,5 +4279,143 @@ export async function testGitBinding(
   return resp.json();
 }
 
+// --- Scheduled Tasks API ---
 
+export type ScheduleRule =
+  | { kind: 'calendar'; dates: string[]; weekdays: number[]; times: string[] }
+  | { kind: 'interval'; every_minutes: number }
+  | { kind: 'daily'; time: string }
+  | { kind: 'weekly'; weekday: number; time: string }
+  | { kind: 'hourly' }
+  | { kind: 'cron'; expr: string };
+
+export interface ScheduleTask {
+  id: string;
+  title: string;
+  prompt: string;
+  cwd: string;
+  schedule: ScheduleRule;
+  permission_mode: 'auto' | 'accept_edits' | 'plan' | string;
+  notify: string;
+  enabled: boolean;
+  one_shot: boolean;
+  session_mode: 'isolated' | 'reuse' | string;
+  reuse_session_id?: string | null;
+  last_session_id?: string | null;
+  model?: string | null;
+  overlap_policy?: 'skip' | 'queue' | string;
+  created_at: number;
+  last_run_at?: number | null;
+  last_status?: string | null;
+  next_run_at?: number | null;
+}
+
+export interface ScheduleUpsertPayload {
+  title: string;
+  prompt: string;
+  cwd: string;
+  schedule: ScheduleRule;
+  permission_mode?: 'auto' | 'accept_edits' | 'plan' | string;
+  notify?: string;
+  enabled?: boolean;
+  one_shot?: boolean;
+  session_mode?: 'isolated' | 'reuse' | string;
+  reuse_session_id?: string | null;
+  model?: string | null;
+  overlap_policy?: 'skip' | 'queue' | string;
+}
+
+export interface AiScheduleDialogMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface AiScheduleDialogResponse {
+  reply: string;
+  created_tasks: ScheduleTask[];
+  created_task?: ScheduleTask | null;
+}
+
+async function readApiError(resp: Response, fallback: string): Promise<string> {
+  try {
+    const err = await resp.json();
+    if (err && typeof err === 'object') {
+      return (err as { error?: string; message?: string }).error ||
+        (err as { message?: string }).message ||
+        fallback;
+    }
+  } catch {
+    const txt = await resp.text().catch(() => '');
+    if (txt) return txt;
+  }
+  return fallback;
+}
+
+export async function listSchedules(): Promise<ScheduleTask[]> {
+  const resp = await apiFetch('/api/schedules', { headers: authHeaders() });
+  if (!resp.ok) throw new Error(await readApiError(resp, `HTTP ${resp.status}`));
+  const data = await resp.json();
+  return Array.isArray(data) ? (data as ScheduleTask[]) : [];
+}
+
+export async function createSchedule(payload: ScheduleUpsertPayload): Promise<ScheduleTask> {
+  const resp = await apiFetch('/api/schedules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) throw new Error(await readApiError(resp, `HTTP ${resp.status}`));
+  return resp.json();
+}
+
+export async function updateSchedule(id: string, payload: ScheduleUpsertPayload): Promise<ScheduleTask> {
+  const resp = await apiFetch(`/api/schedules/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) throw new Error(await readApiError(resp, `HTTP ${resp.status}`));
+  return resp.json();
+}
+
+export async function deleteSchedule(id: string): Promise<void> {
+  const resp = await apiFetch(`/api/schedules/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error(await readApiError(resp, `HTTP ${resp.status}`));
+}
+
+export async function toggleSchedule(id: string, enabled?: boolean): Promise<ScheduleTask> {
+  const resp = await apiFetch(`/api/schedules/${encodeURIComponent(id)}/toggle`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(enabled === undefined ? {} : { enabled }),
+  });
+  if (!resp.ok) throw new Error(await readApiError(resp, `HTTP ${resp.status}`));
+  return resp.json();
+}
+
+export async function runScheduleNow(id: string): Promise<ScheduleTask> {
+  const resp = await apiFetch(`/api/schedules/${encodeURIComponent(id)}/run`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error(await readApiError(resp, `HTTP ${resp.status}`));
+  return resp.json();
+}
+
+export async function sendScheduleAiDialog(payload: {
+  messages: AiScheduleDialogMessage[];
+  model?: string | null;
+  cwd?: string;
+}): Promise<AiScheduleDialogResponse> {
+  const resp = await apiFetch('/api/schedules/ai-dialog', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) throw new Error(await readApiError(resp, `HTTP ${resp.status}`));
+  return resp.json();
+}
 

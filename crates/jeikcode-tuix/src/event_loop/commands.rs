@@ -5344,6 +5344,7 @@ mod schedule_list_text_tests {
             created_at: 0,
             last_run_at: None,
             last_status: last_status.map(|s| s.to_string()),
+            ..Default::default()
         }
     }
 

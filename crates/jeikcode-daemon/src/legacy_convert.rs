@@ -3454,7 +3454,7 @@ mod tests {
 
     #[test]
     fn native_rename_preserves_user_priority_over_ai_naming() {
-        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence};
+        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence, SessionOrigin};
 
         let dir = tempfile::tempdir().unwrap();
         let bucket = "0123456789abcdef";
@@ -3477,6 +3477,7 @@ mod tests {
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: SessionOrigin::Manual,
             presence: CatalogPresence::NativeOnly,
         };
 
@@ -3552,7 +3553,7 @@ mod tests {
 
     #[test]
     fn catalog_session_view_uses_strict_native_aggregate() {
-        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence};
+        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence, SessionOrigin};
 
         let dir = tempfile::tempdir().unwrap();
         let bucket = "0123456789abcdef";
@@ -3582,6 +3583,7 @@ mod tests {
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: SessionOrigin::Manual,
             presence: CatalogPresence::NativeOnly,
         };
 
@@ -3596,7 +3598,7 @@ mod tests {
 
     #[test]
     fn catalog_session_view_repairs_complete_native_placeholder_name() {
-        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence};
+        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence, SessionOrigin};
 
         let dir = tempfile::tempdir().unwrap();
         let bucket = "0123456789abcdef";
@@ -3627,6 +3629,7 @@ mod tests {
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: SessionOrigin::Manual,
             presence: CatalogPresence::NativeOnly,
         };
 
@@ -3786,7 +3789,7 @@ mod tests {
 
     #[test]
     fn catalog_session_view_adopts_pre_owner_native_without_presentation() {
-        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence};
+        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence, SessionOrigin};
 
         let dir = tempfile::tempdir().unwrap();
         let bucket = "0123456789abcdef";
@@ -3811,6 +3814,7 @@ mod tests {
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: SessionOrigin::Manual,
             presence: CatalogPresence::NativeOnly,
         };
 
@@ -3829,7 +3833,7 @@ mod tests {
 
     #[test]
     fn legacy_catalog_session_view_is_read_only() {
-        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence};
+        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence, SessionOrigin};
 
         let dir = tempfile::tempdir().unwrap();
         let bucket = "0123456789abcdef";
@@ -3856,6 +3860,7 @@ mod tests {
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: SessionOrigin::Manual,
             presence: CatalogPresence::LegacyOnly,
         };
 
@@ -3871,7 +3876,7 @@ mod tests {
 
     #[test]
     fn legacy_rename_cuts_over_once_then_writes_only_native_meta() {
-        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence};
+        use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence, SessionOrigin};
 
         let dir = tempfile::tempdir().unwrap();
         let bucket = "0123456789abcdef";
@@ -3895,6 +3900,7 @@ mod tests {
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: SessionOrigin::Manual,
             presence: CatalogPresence::LegacyOnly,
         };
 

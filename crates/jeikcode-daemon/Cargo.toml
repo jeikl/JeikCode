@@ -64,6 +64,7 @@ socket2 = "0.6"
 portable-pty = "0.9"
 jsonwebtoken = "9"
 httpdate = "1"
+chrono = "0.4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

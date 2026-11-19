@@ -233,6 +233,8 @@ pub struct CatalogEntry {
     pub approval_mode: Option<String>,
     pub reasoning_effort: Option<String>,
     pub thinking_budget: Option<u32>,
+    #[serde(default)]
+    pub origin: SessionOrigin,
     pub presence: CatalogPresence,
 }
 
@@ -4299,6 +4301,7 @@ fn catalog_entry(
             approval_mode: native.approval_mode.clone(),
             reasoning_effort: native.reasoning_effort.clone(),
             thinking_budget: native.thinking_budget,
+            origin: native.origin,
             presence: if legacy.is_some() {
                 CatalogPresence::Both
             } else {
@@ -4319,6 +4322,7 @@ fn catalog_entry(
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: SessionOrigin::Manual,
             presence: CatalogPresence::LegacyOnly,
         }),
         (None, None) => None,

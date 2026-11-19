@@ -29,6 +29,7 @@ mod api_config;
 mod api_git;
 pub mod api_git_webhook;
 mod api_provider;
+pub mod api_schedule;
 mod api_update;
 pub mod approval_mode;
 mod commands;
@@ -1271,6 +1272,7 @@ mod session_window_tests {
             approval_mode: None,
             reasoning_effort: Some("high".into()),
             thinking_budget: Some(4096),
+            origin: jeikcode_capabilities::session::SessionOrigin::Manual,
             presence: jeikcode_capabilities::session::CatalogPresence::NativeOnly,
         };
         let summary = catalog_entry_to_session_summary(&entry);
@@ -2134,6 +2136,7 @@ mod global_events_tests {
                 updated_at: 2,
                 message_count: 3,
                 origin: "manual".into(),
+                is_scheduled: false,
                 approval_mode: None,
                 preferred_model: None,
                 reasoning_effort: None,
@@ -4792,6 +4795,9 @@ pub(crate) enum GlobalWireEvent {
     DesktopSettingsChanged {
         settings: crate::api_config::DesktopSettingsPayload,
     },
+    /// 定时任务配置、开关或执行状态变更，通知所有前端实例刷新定时任务列表
+    #[serde(rename = "schedules_updated")]
+    SchedulesUpdated,
 }
 
 /// 一次模型参数变更里携带的思考强度/预算快照（两字段都序列化，`null` 即清空）。
@@ -4834,6 +4840,8 @@ pub(crate) struct SessionRowWire {
     pub updated_at: u64,
     pub message_count: u32,
     pub origin: String,
+    #[serde(default)]
+    pub is_scheduled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4852,6 +4860,7 @@ pub(crate) fn session_row_wire(
 ) -> Option<SessionRowWire> {
     let manager = NativeSessionManager::for_project(working_dir);
     let meta = manager.read_meta(session_id).ok()?;
+    let is_scheduled = meta.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled;
     let origin = match meta.origin {
         jeikcode_capabilities::session::SessionOrigin::Manual => "manual",
         jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled",
@@ -4866,6 +4875,7 @@ pub(crate) fn session_row_wire(
         updated_at: u64::try_from(meta.updated_at.max(0)).unwrap_or(0),
         message_count: meta.message_count,
         origin: origin.to_string(),
+        is_scheduled,
         approval_mode: Some(live_api::live_display_approval_mode_wire(
             session_id,
             meta.approval_mode.as_deref(),
@@ -4885,6 +4895,7 @@ pub(crate) fn session_row_wire_in_bucket(
     let manager =
         NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(project_bucket));
     let meta = manager.read_meta(session_id).ok()?;
+    let is_scheduled = meta.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled;
     let origin = match meta.origin {
         jeikcode_capabilities::session::SessionOrigin::Manual => "manual",
         jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled",
@@ -4899,6 +4910,7 @@ pub(crate) fn session_row_wire_in_bucket(
         updated_at: u64::try_from(meta.updated_at.max(0)).unwrap_or(0),
         message_count: meta.message_count,
         origin: origin.to_string(),
+        is_scheduled,
         approval_mode: Some(live_api::live_display_approval_mode_wire(
             session_id,
             meta.approval_mode.as_deref(),
@@ -7690,6 +7702,10 @@ pub struct SessionSummary {
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub is_scheduled: bool,
     /// Internal protocol-key lookup only; never exposed on the session wire.
     #[serde(skip)]
     pub protocol_key: Option<String>,
@@ -7719,6 +7735,12 @@ fn catalog_entry_to_session_summary(
     // 全局开关优先，其余情况磁盘元数据 > 内存热态（不再回扫会话目录）。
     let approval_mode =
         live_api::live_display_approval_mode_wire(&entry.id, entry.approval_mode.as_deref());
+    let origin = match entry.origin {
+        jeikcode_capabilities::session::SessionOrigin::Manual => "manual",
+        jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled",
+        jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol",
+    };
+    let is_scheduled = entry.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled;
     SessionSummary {
         id: entry.id.clone(),
         name: entry.name.clone(),
@@ -7731,6 +7753,8 @@ fn catalog_entry_to_session_summary(
         preferred_model,
         reasoning_effort: entry.reasoning_effort.clone(),
         thinking_budget: entry.thinking_budget,
+        origin: Some(origin.to_string()),
+        is_scheduled,
         protocol_key: None,
     }
 }
@@ -12411,6 +12435,9 @@ pub struct ChatRequest {
     /// Optional display name for a newly created session (OpenAI `user` / user_title).
     #[serde(default)]
     pub session_title: Option<String>,
+    /// 标记本次请求是否源自后台定时任务触发（用于打上 SessionOrigin::Scheduled 标签）
+    #[serde(default)]
+    pub is_scheduled: bool,
 }
 
 /// One attached image from the webui (base64-encoded), mapped to core `ImagePart`.
@@ -16198,7 +16225,7 @@ async fn chat_stream(
 
 /// Await the inner chat task, translating its outcome into SSE events and
 /// always calling `active_chats.complete()` afterwards — even on panic.
-async fn finalize_chat_task(
+pub(crate) async fn finalize_chat_task(
     inner: tokio::task::JoinHandle<anyhow::Result<()>>,
     event_tx: &mpsc::UnboundedSender<ChatEvent>,
     cleanup_chats: &ActiveChatRegistry,
@@ -16442,15 +16469,46 @@ pub(crate) async fn process_chat_request(
         Some(&req.message),
         initial_preferred.as_deref(),
         Some(approval_mode),
+        req.is_scheduled,
     )?;
-    if !is_new_session
-        && req
+    if !is_new_session {
+        if req.is_scheduled {
+            let trimmed_title = req
+                .session_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty());
+            let mgr = NativeSessionManager::for_project(&working_dir);
+            let now_ms = jeikcode_capabilities::session::now_ms();
+            let _ = mgr.update_meta(&session_id, |meta| {
+                meta.origin = jeikcode_capabilities::session::SessionOrigin::Scheduled;
+                if let Some(title) = trimmed_title {
+                    meta.name = title.to_string();
+                    meta.user_renamed = true;
+                }
+                meta.updated_at = now_ms;
+            });
+            if let Some(title) = trimmed_title {
+                let _ = event_tx.send(ChatEvent::SessionRenamed {
+                    session_id: session_id.clone(),
+                    name: title.to_string(),
+                });
+            }
+            publish_session_upsert(&working_dir, &session_id);
+            publish_global(GlobalWireEvent::Activity {
+                session_id: session_id.clone(),
+                running: true,
+                terminal: None,
+                status: None,
+            });
+        } else if req
             .session_title
             .as_deref()
             .map(str::trim)
             .is_some_and(|title| !title.is_empty())
-    {
-        mark_protocol_origin(&working_dir, &session_id, req.session_title.as_deref());
+        {
+            mark_protocol_origin(&working_dir, &session_id, req.session_title.as_deref());
+        }
     }
 
     // AI session title is owned exclusively by CodingRuntime (first-submit
@@ -16664,7 +16722,9 @@ pub(crate) async fn process_chat_request(
         live_api::apply_session_effort_override(&mut runtime_cfg, &working_dir, Some(&session_id));
         runtime_cfg.shared_mcp_registry = shared_mcp_reg;
         runtime_cfg.extra_system_append = req.extra_system_append.clone();
-        runtime_cfg.session_display_name = req.session_title.clone();
+        runtime_cfg.session_display_name = (!req.is_scheduled)
+            .then(|| req.session_title.clone())
+            .flatten();
         runtime_cfg.dangerously_skip_permissions = approval_mode
             == crate::approval_mode::ApprovalMode::Auto
             || (approval_mode == crate::approval_mode::ApprovalMode::Build
@@ -16730,7 +16790,7 @@ pub(crate) async fn process_chat_request(
 
     while let Some(event) = runtime_event_rx.recv().await {
         for mut chat_event in projector.project_runtime(event, &perm_session_key) {
-            if !first_ttft_promoted && is_first_turn_for_default {
+            if !first_ttft_promoted && is_first_turn_for_default && !req.is_scheduled {
                 if matches!(
                     chat_event,
                     ChatEvent::TextDelta { .. }
@@ -16967,6 +17027,7 @@ fn publish_chat_session_assignment(
     first_user_prompt: Option<&str>,
     preferred_model: Option<&str>,
     resolved_approval_mode: Option<crate::approval_mode::ApprovalMode>,
+    is_scheduled: bool,
 ) -> anyhow::Result<()> {
     let mut provisional_name = None;
     if is_new_session {
@@ -16984,10 +17045,13 @@ fn publish_chat_session_assignment(
             .map(str::trim)
             .is_some_and(|title| !title.is_empty());
         // Protocol sessions are automation-owned: their durable mode is Auto.
+        // Scheduled sessions honor resolved_approval_mode (which defaults to Auto).
         // Native WebUI sessions persist the turn's resolved session/global mode
         // so creating or chatting from a draft session remembers the chosen mode
         // across restarts and cross-instance upserts.
-        let persisted_mode = if has_protocol_title {
+        let persisted_mode = if is_scheduled {
+            resolved_approval_mode.unwrap_or(crate::approval_mode::ApprovalMode::Auto)
+        } else if has_protocol_title {
             crate::approval_mode::ApprovalMode::Auto
         } else {
             let mode = resolved_approval_mode
@@ -16999,16 +17063,25 @@ fn publish_chat_session_assignment(
         meta.message_count = 1;
         if let Some(title) = session_title.map(str::trim).filter(|t| !t.is_empty()) {
             meta.name = title.to_string();
-            // Pin API / client-provided titles (including ephemeral api-<uuid>
-            // keys) so turn-complete auto-name and AI naming leave them alone.
+            // Pin API / client-provided / scheduled timestamped titles so
+            // turn-complete auto-name and AI naming leave them alone.
             meta.user_renamed = true;
-            meta.protocol_key = Some(title.to_string());
-            meta.origin = jeikcode_capabilities::session::SessionOrigin::Protocol;
-        } else if let Some(provisional) = first_user_prompt
-            .and_then(jeikcode_coding::session_title::provisional_title_from_user_input)
-        {
-            meta.name = provisional.clone();
-            provisional_name = Some(provisional);
+            if is_scheduled {
+                meta.origin = jeikcode_capabilities::session::SessionOrigin::Scheduled;
+            } else {
+                meta.protocol_key = Some(title.to_string());
+                meta.origin = jeikcode_capabilities::session::SessionOrigin::Protocol;
+            }
+        } else {
+            if is_scheduled {
+                meta.origin = jeikcode_capabilities::session::SessionOrigin::Scheduled;
+            }
+            if let Some(provisional) = first_user_prompt
+                .and_then(jeikcode_coding::session_title::provisional_title_from_user_input)
+            {
+                meta.name = provisional.clone();
+                provisional_name = Some(provisional);
+            }
         }
         manager.commit_native_import(
             &lease,
@@ -24072,6 +24145,27 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             "/provider-accounts/:id",
             put(api_provider::create_or_update_provider_account)
                 .delete(api_provider::delete_provider_account),
+        )
+        // Scheduled Tasks API（定时任务调度 CRUD + 隔离式 AI 设定对话区）
+        .route(
+            "/api/schedules",
+            get(api_schedule::list_schedules_api).post(api_schedule::create_schedule_api),
+        )
+        .route(
+            "/api/schedules/ai-dialog",
+            post(api_schedule::ai_schedule_dialog_api),
+        )
+        .route(
+            "/api/schedules/:id",
+            put(api_schedule::update_schedule_api).delete(api_schedule::delete_schedule_api),
+        )
+        .route(
+            "/api/schedules/:id/toggle",
+            post(api_schedule::toggle_schedule_api),
+        )
+        .route(
+            "/api/schedules/:id/run",
+            post(api_schedule::run_schedule_now_api),
         );
     let protected = api_update::register_update_routes(protected)
         .route_layer(axum::middleware::from_fn_with_state(
@@ -24110,6 +24204,9 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         })
         .await;
     });
+
+    // 启动 daemon 后台定时任务调度引擎（仅单点执行，防止多端重复触发）
+    api_schedule::start_schedule_engine(state.clone());
 
     // Spawn idle timeout watchdog task
     spawn_idle_timeout_task(
@@ -25069,6 +25166,7 @@ mod tests {
             None,
             None,
             Some(crate::approval_mode::ApprovalMode::Plan),
+            false,
         )
         .unwrap();
 
@@ -25119,6 +25217,7 @@ mod tests {
             Some("帮我写一个快速排序算法"),
             None,
             Some(crate::approval_mode::ApprovalMode::AcceptEdits),
+            false,
         )
         .unwrap();
 
@@ -25156,6 +25255,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert!(result.is_err());
@@ -25673,6 +25773,7 @@ mod tests {
             approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
             extra_system_append: None,
             session_title: None,
+            is_scheduled: false,
         };
 
         let first = chat_stream(
@@ -25725,6 +25826,7 @@ mod tests {
                 approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
                 extra_system_append: None,
                 session_title: None,
+                is_scheduled: false,
             }),
         )
         .await
@@ -26461,6 +26563,7 @@ mod tests {
                 approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
                 extra_system_append: None,
                 session_title: None,
+                is_scheduled: false,
             },
             event_tx,
             admission.cancellation,
@@ -26897,6 +27000,7 @@ mod tests {
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: jeikcode_capabilities::session::SessionOrigin::Manual,
             presence: CatalogPresence::NativeOnly,
         };
 
@@ -27191,6 +27295,7 @@ mod tests {
                 approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
                 extra_system_append: None,
                 session_title: None,
+                is_scheduled: false,
             },
             event_tx,
             admission.cancellation,

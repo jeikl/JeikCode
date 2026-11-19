@@ -544,6 +544,14 @@ fn list_project_sessions(working_dir: &std::path::Path) -> Vec<(String, SessionS
             preferred_model: meta.as_ref().and_then(|m| m.preferred_model.clone()),
             reasoning_effort: meta.as_ref().and_then(|m| m.reasoning_effort.clone()),
             thinking_budget: meta.as_ref().and_then(|m| m.thinking_budget),
+            origin: meta.as_ref().map(|m| match m.origin {
+                jeikcode_capabilities::session::SessionOrigin::Manual => "manual".to_string(),
+                jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled".to_string(),
+                jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol".to_string(),
+            }),
+            is_scheduled: meta.as_ref().is_some_and(|m| {
+                m.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled
+            }),
             protocol_key: meta.as_ref().and_then(|m| m.protocol_key.clone()),
         };
         out.push((entry.project_bucket, summary));
@@ -980,6 +988,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         // On create, native runtime names the session exactly as this key
         // (`user_renamed=true`) so later lookups by `user` stay stable.
         session_title: Some(session_key_raw.clone()),
+        is_scheduled: false,
     };
 
     let occupancy = format!("compat-user:{session_key_raw}");

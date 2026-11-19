@@ -5,7 +5,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
-import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getBootstrap, invalidateBootstrapCache, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getBootstrap, invalidateBootstrapCache, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, listSchedules, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
 import { mergeSessionRow, onGlobalEvent, removeSessionRows } from '../lib/globalEvents';
 import { deleteSessionCache } from '../lib/sessionCache';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
@@ -14,6 +14,7 @@ import { MsgKey, Lang, languageOptions } from '../i18n';
 import { RenameDialog, DeleteDialog } from './SessionDialogs';
 import { ConfirmDialog } from './ConfirmDialog';
 import { GitWebhookDialog } from './GitWebhookDialog';
+import { ScheduleDialog } from './ScheduleDialog';
 import { showToast } from './Toast';
 import { CwdPicker } from './CwdPicker';
 import { foldProjectSessions, mergeOptimisticSession, mergeOptimisticSessions, mergeProjectSessions, sessionIdRange, uniqueSessionsById } from '../lib/sessionList';
@@ -435,6 +436,16 @@ function SettingsGlyph() {
   );
 }
 
+/** Clock glyph for Scheduled Tasks menu entry and project sub-group. */
+function ClockIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <polyline points="12 7 12 12 15.5 14" />
+    </svg>
+  );
+}
+
 /** Git 自动同步 glyph（分支 + 汇合弧线）。 */
 function GitSyncGlyph() {
   return (
@@ -588,6 +599,9 @@ export function Sidebar({
   );
   const [removeProjectTarget, setRemoveProjectTarget] = useState<ProjectInfo | null>(null);
   const [gitWebhookProject, setGitWebhookProject] = useState<ProjectInfo | null>(null);
+  const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
+  const [activeScheduleCount, setActiveScheduleCount] = useState(0);
+  const [collapsedScheduleGroups, setCollapsedScheduleGroups] = useState<Set<string>>(() => new Set());
   const [webPickerOpen, setWebPickerOpen] = useState(false);
   const pendingHideRef = useRef<Set<string>>(new Set());
   const pendingRevealRef = useRef<Set<string>>(new Set());
@@ -861,6 +875,15 @@ export function Sidebar({
           if (!list) return prev; // 未展开/未加载的项目不凭空造列表
           return { ...prev, [row.project_hash]: mergeSessionRow(list, row) };
         });
+        // 若新会话激活了一个尚不在侧栏项目列表里的工作区，增量拉取一次项目列表使其即时归档展示
+        if (row.project_hash) {
+          setProjects((prev) => {
+            if (!prev.some((p) => p.hash === row.project_hash)) {
+              getProjects().then(setProjects).catch(() => {});
+            }
+            return prev;
+          });
+        }
         return;
       }
       if (event.type === 'session_mode') {
@@ -1708,6 +1731,17 @@ export function Sidebar({
     onCloseDrawer?.();
     onOpenSettings(section);
   }
+
+  useEffect(() => {
+    const syncScheduleCount = () => {
+      listSchedules()
+        .then((list) => setActiveScheduleCount(list.filter((item) => item.enabled).length))
+        .catch(() => {});
+    };
+    syncScheduleCount();
+    window.addEventListener('jeikcode:schedules_updated', syncScheduleCount);
+    return () => window.removeEventListener('jeikcode:schedules_updated', syncScheduleCount);
+  }, []);
 
   // Fetch the unified capability list (MCP + skills) once; both menus reuse it.
   // The `/mcp/status` ride-along only feeds the silent project-trust auto-confirm.
@@ -2667,6 +2701,17 @@ export function Sidebar({
               {mcpCount > 0 && <span class="sidebar-action-badge">{mcpCount}</span>}
               <span class="sidebar-action-caret"><ChevronDownIcon /></span>
             </button>
+            <button
+              type="button"
+              class={'sidebar-action' + (scheduleDialogOpen ? ' open' : '')}
+              onClick={() => setScheduleDialogOpen(true)}
+            >
+              <span class="sidebar-action-icon"><ClockIcon /></span>
+              <span class="sidebar-action-label">{t('schedules.menuTitle')}</span>
+              {activeScheduleCount > 0 && (
+                <span class="sidebar-action-badge">{activeScheduleCount}</span>
+              )}
+            </button>
           </div>
 
           <div class="session-group-header">
@@ -2829,17 +2874,37 @@ export function Sidebar({
               const pSessions = projectOptimistics.length > 0
                 ? mergeOptimisticSessions(projectOptimistics, baseSessions)
                 : baseSessions;
-              const sorted = sortSessions(pSessions);
-              // 折叠态最少展示 5 条，并保留当前选中行与所有运行中会话；
-              // 展开态返回全量，因此“展开更多”不会漏掉任何蓝圈会话。
-              const folded = foldProjectSessions(sorted, {
+              const isScheduledSession = (s: SessionMetaWithProject) =>
+                Boolean(s.is_scheduled || s.origin === 'scheduled');
+              const toMs = (s: SessionMetaWithProject) => {
+                const ts = s.updated_at || s.created_at || 0;
+                return ts > 0 && ts < 1e11 ? ts * 1000 : ts;
+              };
+              const ownedAll = pSessions.filter((s) => projectOwnerById.get(s.id) === p.hash);
+              // 定时任务栏严格按时间降序排序；普通会话保持原有运行优先 + 时间降序排序
+              const scheduledSessions = ownedAll
+                .filter(isScheduledSession)
+                .slice()
+                .sort((a, b) => toMs(b) - toMs(a));
+              const normalSessions = sortSessions(ownedAll.filter((s) => !isScheduledSession(s)));
+              const folded = foldProjectSessions(normalSessions, {
                 showAll: isShowAll,
                 activeSessionId,
                 // 折叠态永不隐藏正在运行的会话：蓝圈优先于条数上限。
                 keepIds: activeSet,
               });
               const displayList = folded.visible;
-              const count = pSessions.length;
+              const schedRunning = scheduledSessions.some((s) => activeSet.has(s.id));
+              const schedCompleted = !schedRunning && scheduledSessions.some((s) => completedSet.has(s.id));
+              const isScheduleExpanded = !collapsedScheduleGroups.has(p.hash);
+              const toggleScheduleGroup = () => {
+                setCollapsedScheduleGroups((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(p.hash)) next.delete(p.hash);
+                  else next.add(p.hash);
+                  return next;
+                });
+              };
 
               return (
                 <div key={p.hash} class="project-group">
@@ -2913,12 +2978,57 @@ export function Sidebar({
                     </span>
                   </div>
                   {isExpanded && (() => {
-                    const ownedSessions = displayList.filter((s) => projectOwnerById.get(s.id) === p.hash);
+                    const ownedSessions = displayList;
                     const cap = expandedRenderCap[p.hash] ?? SIDEBAR_EXPAND_STEP;
                     const hasMoreWindow = isShowAll && ownedSessions.length > cap;
                     const windowedSessions = hasMoreWindow ? ownedSessions.slice(0, cap) : ownedSessions;
                     return (
                       <div class="project-sessions-list">
+                        {/* 有定时任务会话才出现聚合折叠菜单，没有则完全隐藏 */}
+                        {scheduledSessions.length > 0 && (
+                          <div class="schedule-subgroup">
+                            <div
+                              role="button"
+                              tabIndex={0}
+                              class="schedule-subgroup-header"
+                              onClick={toggleScheduleGroup}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  toggleScheduleGroup();
+                                }
+                              }}
+                              aria-expanded={isScheduleExpanded}
+                            >
+                              <span class="schedule-subgroup-icon"><ClockIcon /></span>
+                              <span class="schedule-subgroup-title">{t('schedules.sidebarSubgroup')}</span>
+                              <span class="schedule-subgroup-count">{scheduledSessions.length}</span>
+                              {schedRunning ? (
+                                <span
+                                  class="session-item-running"
+                                  title={t('schedules.running')}
+                                  aria-label={t('schedules.running')}
+                                />
+                              ) : schedCompleted ? (
+                                <span
+                                  class="session-item-completed schedule-subgroup-completed"
+                                  title={t('schedules.completed')}
+                                  aria-label={t('schedules.completed')}
+                                >
+                                  <CompletedCheckIcon />
+                                </span>
+                              ) : null}
+                              <span class="schedule-subgroup-caret">
+                                {isScheduleExpanded ? '▾' : '▸'}
+                              </span>
+                            </div>
+                            {isScheduleExpanded && (
+                              <div class="schedule-subgroup-items">
+                                {scheduledSessions.map(renderItem)}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         {windowedSessions.map(renderItem)}
                         {hasMoreWindow && (
                           <button
@@ -2938,7 +3048,7 @@ export function Sidebar({
                             <span>{isShowAll ? t('sidebar.showLess') : t('sidebar.showMore')}</span>
                           </button>
                         )}
-                        {folded.total === 0 && (
+                        {ownedAll.length === 0 && (
                           <div class="session-empty" style={{ padding: '6px 12px', fontSize: '11.5px' }}>
                             {t('sidebar.empty')}
                           </div>
@@ -3129,6 +3239,14 @@ export function Sidebar({
         <GitWebhookDialog
           project={gitWebhookProject}
           onClose={() => setGitWebhookProject(null)}
+        />,
+        document.body,
+      )}
+      {scheduleDialogOpen && createPortal(
+        <ScheduleDialog
+          projects={allProjects}
+          currentCwd={cwd || ''}
+          onClose={() => setScheduleDialogOpen(false)}
         />,
         document.body,
       )}

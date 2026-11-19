@@ -68,6 +68,11 @@ export function emitGlobalEvent(event: GlobalWireEvent): void {
       );
     } catch {}
   }
+  if (event.type === 'schedules_updated') {
+    try {
+      window.dispatchEvent(new CustomEvent('jeikcode:schedules_updated'));
+    } catch {}
+  }
   for (const listener of [...listeners]) {
     try {
       listener(event);
