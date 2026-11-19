@@ -2022,10 +2022,11 @@ impl CodingRuntime {
 
         let (handle, controls) = coding_runtime_control_channel();
         let (raw_event_tx, _raw_events) = mpsc::unbounded_channel();
-        // Wire the provider hot-swap slot to the runtime event stream so a queued
-        // switch announces the exact round boundary (`ModelSwitched`).
+        let (swap_event_tx, mut swap_events) = mpsc::unbounded_channel();
+        // 将 provider 热切换通道接到运行态事件转发循环，保证下一轮生效时的
+        // `ModelSwitched` 事件能够准确送达订阅端，而不会被丢弃的通道吞掉。
         if let Some(swap) = parts.primary_provider_swap.as_ref() {
-            swap.set_event_sender(raw_event_tx.clone());
+            swap.set_event_sender(swap_event_tx.clone());
         }
         let (tagged_event_tx, mut tagged_events) = mpsc::unbounded_channel();
         let adapter = spawn_runtime_owner_with_optional_agent(
@@ -2051,6 +2052,7 @@ impl CodingRuntime {
                 image_preprocessor,
             }),
             Some(wakeup_rx),
+            Some(swap_event_tx),
         );
         let KernelRuntimeAdapter {
             commands: kernel_commands,
@@ -2064,6 +2066,7 @@ impl CodingRuntime {
             let _owner_lifetime = (kernel_commands, owner_tx);
             let mut sequence = 0u64;
             let mut raw_open = true;
+            let mut swap_open = true;
             let mut kernel_open = true;
             let mut receiver_dropped = false;
 
@@ -2073,6 +2076,21 @@ impl CodingRuntime {
                         receiver_dropped = true;
                         break;
                     }
+                    event = swap_events.recv(), if swap_open => match event {
+                        Some(swap_event) => {
+                            let envelope = SequencedRuntimeEvent {
+                                generation: task_handle.status().generation,
+                                sequence,
+                                event: swap_event,
+                            };
+                            sequence = sequence.wrapping_add(1);
+                            if event_tx.send(envelope).is_err() {
+                                receiver_dropped = true;
+                                break;
+                            }
+                        }
+                        None => swap_open = false,
+                    },
                     event = tagged_events.recv(), if raw_open => match event {
                         Some(tagged) => {
                             let envelope = SequencedRuntimeEvent {
@@ -2090,6 +2108,23 @@ impl CodingRuntime {
                     },
                     event = kernel_events.recv(), if kernel_open => match event {
                         Some(event) => {
+                            // 先排空热切换通知，保证 `ModelSwitched` 一定先于新一轮的
+                            // `AssistantMessage` / 首块内容到达投影器。
+                            while let Ok(swap_event) = swap_events.try_recv() {
+                                let envelope = SequencedRuntimeEvent {
+                                    generation: task_handle.status().generation,
+                                    sequence,
+                                    event: swap_event,
+                                };
+                                sequence = sequence.wrapping_add(1);
+                                if event_tx.send(envelope).is_err() {
+                                    receiver_dropped = true;
+                                    break;
+                                }
+                            }
+                            if receiver_dropped {
+                                break;
+                            }
                             let envelope = SequencedRuntimeEvent {
                                 generation: task_handle.status().generation,
                                 sequence,
@@ -2697,6 +2732,7 @@ fn spawn_runtime_owner_with_protocol(
         tagged_event_tx,
         resources,
         wakeup_rx,
+        None,
     )
 }
 
@@ -2710,6 +2746,7 @@ fn spawn_runtime_owner_with_optional_agent(
     tagged_event_tx: Option<mpsc::UnboundedSender<GenerationTaggedRuntimeEvent>>,
     mut resources: Option<RuntimeResources>,
     wakeup_rx: Option<mpsc::UnboundedReceiver<WakeupRequest>>,
+    swap_event_tx: Option<mpsc::UnboundedSender<CodingRuntimeEvent>>,
 ) -> KernelRuntimeAdapter {
     let (kernel_command_tx, mut kernel_command_rx) = mpsc::unbounded_channel();
     let (kernel_event_tx, kernel_event_rx) = mpsc::unbounded_channel();
@@ -4455,6 +4492,12 @@ fn spawn_runtime_owner_with_optional_agent(
                         let old_config = runtime.config.clone();
                         match assemble(&mut runtime.parts, &next, candidate_provider) {
                             Ok(candidate) => {
+                                if let (Some(swap), Some(tx)) = (
+                                    runtime.parts.primary_provider_swap.as_ref(),
+                                    swap_event_tx.as_ref(),
+                                ) {
+                                    swap.set_event_sender(tx.clone());
+                                }
                                 if let Some(config) = refresh_routing {
                                     crate::provider_factory::refresh_subagent_tiers(
                                         runtime.provider_factory.clone(),
@@ -4602,7 +4645,30 @@ fn spawn_runtime_owner_with_optional_agent(
                             )));
                             continue;
                         };
-                        let requested_at = swap.swap_pending(candidate, provider_name, model);
+                        if let Some(tx) = swap_event_tx.as_ref() {
+                            swap.set_event_sender(tx.clone());
+                        }
+                        let (snapshot_hook, trace_hook) = runtime.parts.clone_attribution_hooks();
+                        let attr_provider = provider_name.clone();
+                        let attr_model = model.clone();
+                        let attr_pricing = next.pricing;
+                        let requested_at = swap.swap_pending_with_hook(
+                            candidate,
+                            provider_name,
+                            model,
+                            Some(Box::new(move || {
+                                if let Some(hook) = snapshot_hook {
+                                    hook.set_model_attribution(
+                                        &attr_provider,
+                                        &attr_model,
+                                        attr_pricing,
+                                    );
+                                }
+                                if let Some(hook) = trace_hook {
+                                    hook.set_model_attribution(&attr_provider, &attr_model);
+                                }
+                            })),
+                        );
                         // Keep the runtime's provider projection in sync for the next
                         // status/telemetry pass without rebuilding the agent or the
                         // active turn's tool/persona graph.
@@ -14853,5 +14919,168 @@ mod tests {
             "empty input must NOT re-engage the goal (classifier skipped)"
         );
         handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_swap_provider_for_next_round_emits_model_switched_before_next_round() {
+        use jeikcode_kernel::stream::StreamEvent;
+        use jeikcode_kernel::tool::ToolCall;
+
+        struct GatedRoundOneProvider {
+            round1_streaming: Arc<tokio::sync::Notify>,
+            round1_release: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmProvider for GatedRoundOneProvider {
+            fn model_name(&self) -> &str {
+                "model-a"
+            }
+
+            async fn chat_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[jeikcode_kernel::tool::ToolDef],
+                _options: &jeikcode_kernel::provider::ChatOptions,
+            ) -> Result<
+                futures::stream::BoxStream<'static, StreamEvent>,
+                jeikcode_kernel::stream::ProviderError,
+            > {
+                use futures::StreamExt as _;
+                let round1_streaming = Arc::clone(&self.round1_streaming);
+                let round1_release = Arc::clone(&self.round1_release);
+                let tail = futures::stream::once(async move {
+                    round1_streaming.notify_one();
+                    round1_release.notified().await;
+                    StreamEvent::ToolCall(ToolCall {
+                        id: "call-swap-1".into(),
+                        name: "glob".into(),
+                        arguments: r#"{"pattern":"*.rs"}"#.into(),
+                    })
+                })
+                .chain(futures::stream::iter([StreamEvent::Done {
+                    truncated: false,
+                }]));
+                let stream =
+                    futures::stream::once(async { StreamEvent::TextDelta("round1".into()) })
+                        .chain(tail);
+                Ok(Box::pin(stream))
+            }
+        }
+
+        struct RoundTwoProvider;
+
+        #[async_trait::async_trait]
+        impl LlmProvider for RoundTwoProvider {
+            fn model_name(&self) -> &str {
+                "model-b"
+            }
+
+            async fn chat_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[jeikcode_kernel::tool::ToolDef],
+                _options: &jeikcode_kernel::provider::ChatOptions,
+            ) -> Result<
+                futures::stream::BoxStream<'static, StreamEvent>,
+                jeikcode_kernel::stream::ProviderError,
+            > {
+                Ok(Box::pin(futures::stream::iter(vec![
+                    StreamEvent::TextDelta("round2-from-b".into()),
+                    StreamEvent::Done { truncated: false },
+                ])))
+            }
+        }
+
+        struct SwapTestFactory {
+            round1_streaming: Arc<tokio::sync::Notify>,
+            round1_release: Arc<tokio::sync::Notify>,
+        }
+
+        impl CodingProviderFactory for SwapTestFactory {
+            fn build(
+                &self,
+                config: &CodingAgentConfig,
+                _session_id: Option<&str>,
+            ) -> Result<Arc<dyn LlmProvider>, crate::ProviderBuildError> {
+                if config.model == "model-b" {
+                    Ok(Arc::new(RoundTwoProvider))
+                } else {
+                    Ok(Arc::new(GatedRoundOneProvider {
+                        round1_streaming: Arc::clone(&self.round1_streaming),
+                        round1_release: Arc::clone(&self.round1_release),
+                    }))
+                }
+            }
+        }
+
+        let round1_streaming = Arc::new(tokio::sync::Notify::new());
+        let round1_release = Arc::new(tokio::sync::Notify::new());
+        let mut start = native_start(false);
+        start.agent.provider_name = "provider-a".into();
+        start.agent.model = "model-a".into();
+        start.provider_factory = Arc::new(SwapTestFactory {
+            round1_streaming: Arc::clone(&round1_streaming),
+            round1_release: Arc::clone(&round1_release),
+        });
+
+        let mut runtime = CodingRuntime::start(start).await.unwrap();
+        runtime
+            .handle
+            .submit(UserInput::from("run a tool then switch"))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            round1_streaming.notified(),
+        )
+        .await
+        .expect("round 1 did not start streaming");
+
+        let next_cfg = CodingAgentConfig::new("key", "https://example.test/v1", "model-b", ".");
+        runtime
+            .handle
+            .swap_provider_for_next_round(next_cfg, "provider-b".into(), "model-b".into())
+            .await
+            .expect("queue runtime model switch");
+        round1_release.notify_one();
+
+        let mut observed = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(envelope) = runtime.events.recv().await {
+                match &envelope.event {
+                    CodingRuntimeEvent::ModelSwitched {
+                        provider, model, ..
+                    } => {
+                        observed.push(format!("switched:{provider}:{model}"));
+                    }
+                    CodingRuntimeEvent::Agent(AgentEvent::TextDelta(text)) => {
+                        observed.push(format!("text:{text}"));
+                    }
+                    CodingRuntimeEvent::TurnFinished(_) => {
+                        observed.push("finished".into());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("turn did not finish after model switch");
+
+        let switched_idx = observed
+            .iter()
+            .position(|item| item == "switched:provider-b:model-b")
+            .expect("CodingRuntime.events 必须发出 ModelSwitched");
+        let round2_idx = observed
+            .iter()
+            .position(|item| item == "text:round2-from-b")
+            .expect("第二轮必须使用 model-b 输出");
+        assert!(
+            switched_idx < round2_idx,
+            "ModelSwitched 必须在第二轮正文前到达：{observed:?}"
+        );
+        runtime.handle.shutdown().await.unwrap();
     }
 }

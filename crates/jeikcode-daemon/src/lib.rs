@@ -3502,6 +3502,8 @@ struct ActiveChatOperation {
     /// A submit on this channel is folded at the next round boundary; it does not
     /// cancel the in-flight model call or tool batch.
     steer_tx: Option<mpsc::UnboundedSender<live_api::ChatSteerSignal>>,
+    /// 正在执行的 `/chat` 回合所持有的原生运行时句柄，供运行期热切模型（`/live/provider`）排队。
+    runtime_handle: Option<jeikcode_coding::CodingRuntimeHandle>,
     /// FIFO of client correlation ids for `/chat/steer` submits awaiting fold.
     /// Drained by the projection when a `Steered` event lands, so the wire can
     /// echo the id and let the WebUI reconcile an in-flight steer after refresh.
@@ -3655,6 +3657,7 @@ impl ActiveChatRegistry {
                 replay: Arc::new(std::sync::Mutex::new(ReplayLog::new(seq_base))),
                 seq_base,
                 steer_tx: None,
+                runtime_handle: None,
                 steer_client_ids: std::collections::VecDeque::new(),
                 steer_timestamps: std::collections::VecDeque::new(),
             },
@@ -4289,6 +4292,27 @@ impl ActiveChatRegistry {
         let index = self.inner.read().await;
         let operation_id = index.aliases.get(alias)?;
         index.operations.get(operation_id)?.steer_tx.clone()
+    }
+
+    /// 绑定当前 `/chat` 回合的运行时句柄，确保 `/live/provider` 能命中纯 WebUI 对话流。
+    async fn install_runtime_handle(
+        &self,
+        operation_id: &str,
+        handle: jeikcode_coding::CodingRuntimeHandle,
+    ) {
+        let mut index = self.inner.write().await;
+        if let Some(operation) = index.operations.get_mut(operation_id) {
+            operation.runtime_handle = Some(handle);
+        }
+    }
+
+    pub(crate) async fn runtime_handle(
+        &self,
+        alias: &str,
+    ) -> Option<jeikcode_coding::CodingRuntimeHandle> {
+        let index = self.inner.read().await;
+        let operation_id = index.aliases.get(alias)?;
+        index.operations.get(operation_id)?.runtime_handle.clone()
     }
 
     /// Record a `/chat/steer` submit's client correlation id and timestamp (FIFO)
@@ -13419,6 +13443,51 @@ mod chat_event_type_tests {
     }
 
     #[test]
+    fn turn_finished_clears_unapplied_pending_model_switch() {
+        use jeikcode_coding::runtime::{CodingRuntimeEvent, RuntimeTurnStats};
+        use jeikcode_coding::TurnCompletion;
+        use jeikcode_kernel::event::{AgentEvent, StopReason};
+        use jeikcode_kernel::message::SessionSnapshot;
+        use std::sync::Arc;
+
+        let mut projector = ChatRuntimeProjector::default();
+        projector.project_runtime(
+            CodingRuntimeEvent::ModelSwitched {
+                provider: "provider-b".into(),
+                model: "model-b".into(),
+                requested_at: 10,
+                applied_at: 20,
+            },
+            "sess-clear",
+        );
+        let _ = projector.project_runtime(
+            CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed {
+                turn_id: 1,
+                reason: StopReason::Stopped,
+                snapshot: Arc::new(SessionSnapshot::new(Vec::new())),
+                stats: RuntimeTurnStats::default(),
+            }),
+            "sess-clear",
+        );
+        projector.project_runtime(
+            CodingRuntimeEvent::Agent(AgentEvent::AssistantMessage {
+                message_id: "m-next-turn".into(),
+            }),
+            "sess-clear",
+        );
+        let next = projector.project_runtime(
+            CodingRuntimeEvent::Agent(AgentEvent::TextDelta("hi".into())),
+            "sess-clear",
+        );
+        assert!(
+            !next
+                .iter()
+                .any(|event| matches!(event, ChatEvent::ModelSwitch { .. })),
+            "上一轮未消费的切换标记不得泄漏到下一轮"
+        );
+    }
+
+    #[test]
     fn tool_timing_frames_carry_persistable_switch_and_frozen_cost() {
         use jeikcode_kernel::event::AgentEvent;
         use jeikcode_kernel::tool::{ToolCall, ToolResult};
@@ -15137,6 +15206,7 @@ impl ChatRuntimeProjector {
                 }
                 self.terminal_seen = true;
                 self.terminal_reason = Some(reason);
+                self.pending_model_switch = None;
                 // 回合已到达终态，清理本回合登记的压缩阶段，避免 /chat/runtime 在 complete() 之前继续报告 running。
                 let _ = crate::note_compaction_finished_for_prefix(
                     permission_session_id,
@@ -15176,6 +15246,7 @@ impl ChatRuntimeProjector {
                 }
                 self.terminal_seen = true;
                 self.terminal_reason = Some(reason);
+                self.pending_model_switch = None;
                 // 异常终态同样需要清理本回合登记的压缩阶段。
                 let _ = crate::note_compaction_finished_for_prefix(
                     permission_session_id,
@@ -15371,8 +15442,9 @@ impl ChatRuntimeProjector {
         match event {
             Agent::AssistantMessage { message_id } => {
                 // Boundary marker: tag subsequent deltas with this identity.
+                // 不在此处刷新活动时间戳，与 `SessionTraceHook` 保持一致（仅在真实用户消息、
+                // 思考/文本增量与工具完成处记活动边沿），避免实时 `switch_ms` 与落盘口径不一致。
                 self.current_message_id = Some(message_id.clone());
-                self.note_activity();
                 self.part_seq = 0;
                 self.part_rev = 0;
                 self.last_part_kind = None;
@@ -16809,6 +16881,16 @@ pub(crate) async fn process_chat_request(
         let runtime_user_inputs = pending_user_inputs.clone();
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         active_chats.install_steer(&operation_id, steer_tx).await;
+        let (runtime_handle_tx, runtime_handle_rx) = tokio::sync::oneshot::channel();
+        {
+            let active_chats = active_chats.clone();
+            let op_id = operation_id.clone();
+            tokio::spawn(async move {
+                if let Ok(handle) = runtime_handle_rx.await {
+                    active_chats.install_runtime_handle(&op_id, handle).await;
+                }
+            });
+        }
         // 本回合的客户端关联键 = 落盘消息 id：在 spawn 之前取出，供内核沿用。
         let turn_client_input_id = active_chats
             .admitted_user_message(&operation_id)
@@ -16832,6 +16914,7 @@ pub(crate) async fn process_chat_request(
                     approval_mode,
                     steer_rx,
                     turn_client_input_id,
+                    Some(runtime_handle_tx),
                 )
                 .await;
             })

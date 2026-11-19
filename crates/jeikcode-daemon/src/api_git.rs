@@ -1703,6 +1703,52 @@ pub async fn git_discard(
     .await
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct GitCommitSummary {
+    message: String,
+    files_changed: Option<usize>,
+    insertions: Option<usize>,
+    deletions: Option<usize>,
+}
+
+/// 解析 `git commit` 标准输出为单行摘要，剥离全量 `create/delete/rename mode` 文件列表，避免大型提交刷屏。
+fn summarize_git_commit_output(stdout: &str) -> GitCommitSummary {
+    let (files_changed, insertions, deletions) = parse_shortstat(stdout);
+    let trimmed_lines: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let header = trimmed_lines
+        .iter()
+        .find(|line| line.starts_with('['))
+        .copied()
+        .or_else(|| trimmed_lines.first().copied())
+        .unwrap_or("Commit succeeded");
+
+    let message = match files_changed {
+        Some(files) => {
+            let mut msg = format!("{header} ({files} files changed");
+            if let Some(ins) = insertions.filter(|v| *v > 0) {
+                msg.push_str(&format!(", +{ins}"));
+            }
+            if let Some(del) = deletions.filter(|v| *v > 0) {
+                msg.push_str(&format!(", -{del}"));
+            }
+            msg.push(')');
+            msg
+        }
+        None => header.to_string(),
+    };
+
+    GitCommitSummary {
+        message,
+        files_changed,
+        insertions,
+        deletions,
+    }
+}
+
 /// POST /git/commit
 pub async fn git_commit(
     State(_state): State<AppState>,
@@ -1741,9 +1787,40 @@ pub async fn git_commit(
                     fetch: false,
                 });
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let mut summary = summarize_git_commit_output(&stdout);
+                if summary.files_changed.is_none() {
+                    // 兜底查询 `HEAD` 短统计，兼容首个提交、仅改权限模式或本地化 Git 输出
+                    if let Ok(stat_out) = git_cmd(&dir)
+                        .args([
+                            "diff-tree",
+                            "--root",
+                            "--no-commit-id",
+                            "--shortstat",
+                            "HEAD",
+                        ])
+                        .output()
+                    {
+                        if stat_out.status.success() {
+                            let stat_text = String::from_utf8_lossy(&stat_out.stdout);
+                            let (files, ins, del) = parse_shortstat(&stat_text);
+                            if files.is_some() {
+                                summary.files_changed = files;
+                                summary.insertions = ins;
+                                summary.deletions = del;
+                                if let Some(n) = files {
+                                    summary.message =
+                                        format!("{} ({n} files changed)", summary.message);
+                                }
+                            }
+                        }
+                    }
+                }
                 Json(serde_json::json!({
                     "success": true,
-                    "message": stdout.trim().to_string(),
+                    "message": summary.message,
+                    "files_changed": summary.files_changed,
+                    "insertions": summary.insertions,
+                    "deletions": summary.deletions,
                 }))
                 .into_response()
             }
@@ -2273,5 +2350,24 @@ mod discard_tests {
             unquote_git_path(r#""file with spaces.txt""#),
             "file with spaces.txt"
         );
+    }
+
+    #[test]
+    fn summarize_git_commit_output_strips_bulk_mode_lines() {
+        let raw = "\
+[beta 69e85680d] 文档清除和最新重构方向新增治理
+ 99 files changed, 2147 insertions(+), 31682 deletions(-)
+ delete mode 100644 docs/architecture.md
+ delete mode 100644 docs/plans/2026-07-23-windows-qr-rendering.md
+ create mode 100644 docs/sqlite-storage-concurrency-migration-report-2026-11-19.md
+";
+        let summary = summarize_git_commit_output(raw);
+        assert_eq!(summary.files_changed, Some(99));
+        assert_eq!(summary.insertions, Some(2147));
+        assert_eq!(summary.deletions, Some(31682));
+        assert!(!summary.message.contains("delete mode"));
+        assert!(!summary.message.contains("create mode"));
+        assert!(!summary.message.contains("docs/architecture.md"));
+        assert!(summary.message.contains("99 files changed"));
     }
 }

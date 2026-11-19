@@ -778,7 +778,9 @@ impl LifecycleHooks for SessionTraceHook {
     }
 
     async fn on_model_response(&self, response: &mut Message) {
-        self.shared.touch_activity();
+        // 切勿在此处重置活动时间戳：工具参数流式输出与模型整轮汇总发生在 `on_text_delta`
+        // 之后、工具真正 `before()` 之前；若在此刷新，落盘的 `switch_ms` 会被压成几毫秒，
+        // 回合结束后回刷磁盘指标时就会覆盖实时投影到的真实切换延迟。
         let Some(meta) = &response.meta else {
             return;
         };
@@ -1679,5 +1681,25 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         assert_eq!(remaining.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn model_response_does_not_reset_tool_switch_latency() {
+        let (hook, _mgr, _dir) = hook_with_tempdir("s-switch");
+        let mut convo = Conversation::new();
+        hook.turn_start(&mut convo).await;
+        let mut delta = "准备调用工具".to_string();
+        hook.on_text_delta(&mut delta).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+
+        let mut resp = Message::assistant("准备调用工具", vec![]);
+        hook.on_model_response(&mut resp).await;
+
+        let switch_ms = hook.shared.take_switch_ms();
+        assert!(
+            switch_ms >= 25,
+            "on_model_response 不得覆写上一段活动时间戳导致 switch_ms 塌缩（实际={switch_ms}ms）"
+        );
     }
 }

@@ -1289,6 +1289,7 @@ pub(crate) async fn run_chat_turn_v2(
     approval_mode: ApprovalMode,
     mut steer_rx: mpsc::UnboundedReceiver<ChatSteerSignal>,
     client_input_id: Option<String>,
+    runtime_handle_tx: Option<tokio::sync::oneshot::Sender<jeikcode_coding::CodingRuntimeHandle>>,
 ) {
     use jeikcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
     use jeikcode_coding::TurnCompletion;
@@ -1345,6 +1346,9 @@ pub(crate) async fn run_chat_turn_v2(
         coding_cfg,
         owned_task,
     } = prepared;
+    if let Some(tx) = runtime_handle_tx {
+        let _ = tx.send(handle.clone());
+    }
     // The non-sync `/chat` path creates a short-lived runtime for every turn
     // when this view is the first owner. Do not block send on MCP: a stalled
     // catalog used to drop the user message. Soft-wait a warm cache, then
@@ -1803,6 +1807,9 @@ pub(crate) async fn run_chat_turn_v2(
             CodingRuntimeEvent::SessionTitleSeeded { name } => {
                 // Disk title was already seeded at publish; forward so live views see the provisional title.
                 let _ = runtime_event_tx.send(CodingRuntimeEvent::SessionTitleSeeded { name });
+            }
+            event @ CodingRuntimeEvent::ModelSwitched { .. } => {
+                let _ = runtime_event_tx.send(event);
             }
             CodingRuntimeEvent::RuntimeStopped(_) => {
                 send_chat_runtime_error(
@@ -3737,6 +3744,41 @@ async fn queue_runtime_model_switch(
     Ok((requested_at, provider_name, model))
 }
 
+/// 若已开启运行中切换模型，则在活跃运行态上排队登记下一小轮的模型切换。
+async fn try_queue_active_runtime_switch(
+    handle: &jeikcode_coding::CodingRuntimeHandle,
+    config: &Config,
+    provider_selection: &str,
+    requested_provider: &str,
+    requested_fingerprint: Option<&str>,
+    working_dir: &std::path::Path,
+    session_id: Option<&str>,
+    telemetry: Arc<crate::Telemetry>,
+    record_registry_fp: bool,
+) -> Json<serde_json::Value> {
+    if crate::api_config::runtime_model_switch_enabled() {
+        if let Some(sid) = session_id {
+            let mut runtime_config =
+                chat_runtime_config(config, provider_selection, working_dir, telemetry);
+            apply_session_effort_override(&mut runtime_config, working_dir, Some(sid));
+            if let Ok((requested_at, provider_name, model)) =
+                queue_runtime_model_switch(handle, &runtime_config).await
+            {
+                log_model_switch_queued(working_dir, sid, &provider_name, &model, requested_at);
+                if record_registry_fp {
+                    jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                        .set_provider_fingerprint(
+                            &sid.to_string(),
+                            requested_fingerprint.map(str::to_string),
+                        );
+                }
+                return model_config_queued(Some(sid), requested_provider);
+            }
+        }
+    }
+    model_config_ok(session_id, requested_provider, true)
+}
+
 fn log_model_switch_queued(
     working_dir: &std::path::Path,
     session_id: &str,
@@ -3864,36 +3906,23 @@ pub(crate) async fn live_provider(
             // (same conversation); otherwise the selection stays deferred to the next
             // turn exactly as before.
             Err(crate::live_hub::HubError::ActiveTurn) => {
-                if crate::api_config::runtime_model_switch_enabled() {
-                    if let Some(sid) = requested_session_id.as_deref() {
-                        let session_key = sid.to_string();
-                        if let Some(handle) = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                            .handle(&session_key)
-                        {
-                            let runtime_config = chat_runtime_config(
-                                &config,
-                                &req.provider,
-                                &join.binding.working_dir,
-                                state.telemetry.clone(),
-                            );
-                            if let Ok((requested_at, provider_name, model)) =
-                                queue_runtime_model_switch(&handle, &runtime_config).await
-                            {
-                                log_model_switch_queued(
-                                    &join.binding.working_dir,
-                                    sid,
-                                    &provider_name,
-                                    &model,
-                                    requested_at,
-                                );
-                                jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                                    .set_provider_fingerprint(
-                                        &sid.to_string(),
-                                        Some(requested_fingerprint.clone()),
-                                    );
-                                return model_config_queued(Some(sid), &requested_provider);
-                            }
-                        }
+                if let Some(sid) = requested_session_id.as_deref() {
+                    if let Some(handle) =
+                        jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                            .handle(&sid.to_string())
+                    {
+                        return try_queue_active_runtime_switch(
+                            &handle,
+                            &config,
+                            &req.provider,
+                            &requested_provider,
+                            Some(&requested_fingerprint),
+                            &join.binding.working_dir,
+                            Some(sid),
+                            state.telemetry.clone(),
+                            true,
+                        )
+                        .await;
                     }
                 }
                 return model_config_ok(requested_session_id.as_deref(), &requested_provider, true);
@@ -3915,62 +3944,71 @@ pub(crate) async fn live_provider(
     }
 
     // Hub VIEW is on another session (or unbound), but this process still owns
-    // the unique runtime — typical TUI `/webui` then WebUI sidebar back onto
-    // that TUI session. Reload that handle instead of returning ok and letting
-    // the next `/chat` spawn a second runtime (SessionInUse).
-    let unique = requested_session_id
+    // a session runtime — either via `SessionRuntimeRegistry` (TUI / shared view)
+    // or directly inside `ActiveChatRegistry` (pure WebUI `/chat` turn).
+    let (handle, registry_managed) = match requested_session_id
         .as_deref()
-        .and_then(crate::native_live::existing_runner_handle);
-    let Some(handle) = unique else {
-        return model_config_ok(requested_session_id.as_deref(), &requested_provider, false);
+        .and_then(crate::native_live::existing_runner_handle)
+    {
+        Some(handle) => (handle, true),
+        None => match requested_session_id.as_deref() {
+            Some(sid) => match state.active_chats.runtime_handle(sid).await {
+                Some(handle) => (handle, false),
+                None => {
+                    return model_config_ok(
+                        requested_session_id.as_deref(),
+                        &requested_provider,
+                        false,
+                    );
+                }
+            },
+            None => {
+                return model_config_ok(
+                    requested_session_id.as_deref(),
+                    &requested_provider,
+                    false,
+                );
+            }
+        },
     };
-    let cached_fp = requested_session_id.as_deref().and_then(|id| {
-        jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-            .provider_fingerprint(&id.to_string())
-    });
-    if cached_fp.as_deref() == Some(requested_fingerprint.as_str()) {
-        return model_config_ok(requested_session_id.as_deref(), &requested_provider, false);
+    if registry_managed {
+        let cached_fp = requested_session_id.as_deref().and_then(|id| {
+            jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                .provider_fingerprint(&id.to_string())
+        });
+        if cached_fp.as_deref() == Some(requested_fingerprint.as_str()) {
+            return model_config_ok(requested_session_id.as_deref(), &requested_provider, false);
+        }
     }
     match handle.status().phase {
         jeikcode_coding::RuntimePhase::InTurn
         | jeikcode_coding::RuntimePhase::WaitingApproval
         | jeikcode_coding::RuntimePhase::Reconfiguring => {
-            if crate::api_config::runtime_model_switch_enabled() {
-                if let Some(sid) = requested_session_id.as_deref() {
-                    let runtime_config = chat_runtime_config(
-                        &config,
-                        &req.provider,
-                        &working_dir,
-                        state.telemetry.clone(),
-                    );
-                    if let Ok((requested_at, provider_name, model)) =
-                        queue_runtime_model_switch(&handle, &runtime_config).await
-                    {
-                        log_model_switch_queued(
-                            &working_dir,
-                            sid,
-                            &provider_name,
-                            &model,
-                            requested_at,
-                        );
-                        jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                            .set_provider_fingerprint(
-                                &sid.to_string(),
-                                Some(requested_fingerprint.clone()),
-                            );
-                        return model_config_queued(Some(sid), &requested_provider);
-                    }
-                }
-            }
-            return model_config_ok(requested_session_id.as_deref(), &requested_provider, true);
+            return try_queue_active_runtime_switch(
+                &handle,
+                &config,
+                &req.provider,
+                &requested_provider,
+                Some(&requested_fingerprint),
+                &working_dir,
+                requested_session_id.as_deref(),
+                state.telemetry.clone(),
+                registry_managed,
+            )
+            .await;
         }
         _ => {}
     }
-    let runtime_config = chat_runtime_config(
+    let mut runtime_config = chat_runtime_config(
         &config,
         &req.provider,
         &working_dir,
         state.telemetry.clone(),
+    );
+    apply_session_effort_override(
+        &mut runtime_config,
+        &working_dir,
+        requested_session_id.as_deref(),
     );
     match handle
         .reassemble_provider(crate::kernel_runtime::coding_config_from_runtime(
@@ -3979,14 +4017,30 @@ pub(crate) async fn live_provider(
         .await
     {
         Ok(_) => {
-            if let Some(session_id) = requested_session_id.as_deref() {
-                jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                    .set_provider_fingerprint(&session_id.to_string(), Some(requested_fingerprint));
+            if registry_managed {
+                if let Some(session_id) = requested_session_id.as_deref() {
+                    jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                        .set_provider_fingerprint(
+                            &session_id.to_string(),
+                            Some(requested_fingerprint),
+                        );
+                }
             }
             model_config_ok(requested_session_id.as_deref(), &requested_provider, false)
         }
         Err(jeikcode_coding::RuntimeError::Busy) => {
-            model_config_ok(requested_session_id.as_deref(), &requested_provider, true)
+            try_queue_active_runtime_switch(
+                &handle,
+                &config,
+                &req.provider,
+                &requested_provider,
+                Some(&requested_fingerprint),
+                &working_dir,
+                requested_session_id.as_deref(),
+                state.telemetry.clone(),
+                registry_managed,
+            )
+            .await
         }
         Err(error) => Json(serde_json::json!({
             "ok": false,

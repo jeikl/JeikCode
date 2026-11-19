@@ -243,6 +243,7 @@ fn sanitize_schedule(sched: Schedule) -> Result<Schedule, String> {
 
 fn sanitize_permission_mode(raw: Option<&str>) -> String {
     match raw.map(str::trim).unwrap_or("auto") {
+        "build" => "build".to_string(),
         "plan" => "plan".to_string(),
         "accept_edits" => "accept_edits".to_string(),
         _ => "auto".to_string(),
@@ -656,6 +657,7 @@ async fn dispatch_schedule_task_inner(
     }
 
     let approval_mode = match task.permission_mode.as_str() {
+        "build" => ApprovalMode::Build,
         "plan" => ApprovalMode::Plan,
         "accept_edits" => ApprovalMode::AcceptEdits,
         _ => ApprovalMode::Auto,
@@ -1564,5 +1566,18 @@ mod tests {
 
         let persisted = schedule::load(&created.task.id).expect("saved on disk");
         assert_eq!(persisted.permission_mode, "auto");
+    }
+
+    #[test]
+    fn sanitize_permission_mode_preserves_valid_modes_and_defaults_to_auto() {
+        assert_eq!(sanitize_permission_mode(None), "auto");
+        assert_eq!(sanitize_permission_mode(Some("auto")), "auto");
+        assert_eq!(sanitize_permission_mode(Some("bypass")), "auto");
+        assert_eq!(sanitize_permission_mode(Some("build")), "build");
+        assert_eq!(
+            sanitize_permission_mode(Some("accept_edits")),
+            "accept_edits"
+        );
+        assert_eq!(sanitize_permission_mode(Some("plan")), "plan");
     }
 }

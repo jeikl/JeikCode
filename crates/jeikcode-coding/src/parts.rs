@@ -955,6 +955,15 @@ fn apply_pinned_session_display_name(meta: &mut SessionMeta, display_name: Optio
 }
 
 impl CodingParts {
+    pub(crate) fn clone_attribution_hooks(
+        &self,
+    ) -> (
+        Option<Arc<SnapshotHook>>,
+        Option<Arc<jeikcode_capabilities::session::SessionTraceHook>>,
+    ) {
+        (self.snapshot_hook.clone(), self.trace_hook.clone())
+    }
+
     /// The host-owned CodingPlan quota source, if any. Used at `/goal` start to
     /// size the round budget from the live request quota.
     pub(crate) fn rate_limit_source(&self) -> Option<&Arc<dyn RateLimitWindowSource>> {

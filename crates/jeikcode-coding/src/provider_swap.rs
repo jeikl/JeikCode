@@ -29,6 +29,7 @@ struct PendingSwap {
     provider_name: String,
     model: String,
     requested_at_ms: u64,
+    on_applied: Option<Box<dyn FnOnce() + Send>>,
 }
 
 pub struct SwappableProvider {
@@ -81,6 +82,17 @@ impl SwappableProvider {
         provider_name: impl Into<String>,
         model: impl Into<String>,
     ) -> u64 {
+        self.swap_pending_with_hook(provider, provider_name, model, None)
+    }
+
+    /// 排队登记下一轮切换的目标 provider，并附带切换真正生效时才触发的归属回调。
+    pub fn swap_pending_with_hook(
+        &self,
+        provider: Arc<dyn LlmProvider>,
+        provider_name: impl Into<String>,
+        model: impl Into<String>,
+        on_applied: Option<Box<dyn FnOnce() + Send>>,
+    ) -> u64 {
         let requested_at_ms = now_ms();
         *self
             .pending
@@ -90,6 +102,7 @@ impl SwappableProvider {
             provider_name: provider_name.into(),
             model: model.into(),
             requested_at_ms,
+            on_applied,
         });
         requested_at_ms
     }
@@ -142,6 +155,9 @@ impl SwappableProvider {
             .model_name
             .write()
             .unwrap_or_else(|error| error.into_inner()) = leak_model(&swap.model);
+        if let Some(on_applied) = swap.on_applied {
+            on_applied();
+        }
         let applied_at = now_ms();
         let tx = self
             .event_tx
