@@ -144,6 +144,9 @@ pub mod plugin;
 
 // Shared argument repair module; preserves tools::repair alias without implicitly enabling tools.
 #[cfg(any(feature = "tools", feature = "provider", feature = "session"))]
+pub(crate) mod call_signals;
+
+#[cfg(any(feature = "tools", feature = "provider", feature = "session"))]
 pub mod argument_repair;
 
 #[cfg(any(feature = "tools", feature = "provider", feature = "session"))]

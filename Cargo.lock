@@ -2129,6 +2129,7 @@ dependencies = [
  "tower",
  "tower-http 0.5.2",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "windows",
  "windows-sys 0.61.2",
@@ -2146,6 +2147,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "tracing",
  "uuid",
 ]
 

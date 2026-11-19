@@ -374,6 +374,8 @@ pub enum SessionOrigin {
     /// Started (or continued) by the OpenAI / Anthropic / Responses HTTP API.
     /// WebUI observes these in Auto; the API turn itself never opens modals.
     Protocol,
+    /// `task` 工具派生的隔离子 Agent 会话；默认从用户会话历史侧栏与 `/resume` 列表隐藏，通过父会话级联评测联查。
+    Subagent,
 }
 
 /// Persisted pending interactive permission checkpoint.
@@ -473,6 +475,12 @@ pub struct SessionMeta {
     /// Mode last chosen for this session (e.g. "build", "accept_edits", "bypass", "plan").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<String>,
+    /// 若本会话为 `task` 子 agent 会话，记录其父会话 ID（主对话溯源与级联评测用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    /// 若本会话为 `task` 子 agent 会话，记录触发它的父工具调用 `call_id`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_call_id: Option<String>,
 }
 
 impl SessionMeta {
@@ -504,6 +512,8 @@ impl SessionMeta {
             reasoning_effort: None,
             thinking_budget: None,
             approval_mode: None,
+            parent_session_id: None,
+            parent_call_id: None,
         }
     }
 
@@ -686,7 +696,7 @@ struct CatalogAggregate {
 }
 
 /// One completed turn's stats — drives a resume-time `✓ … tokens` divider.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TurnStat {
     /// Legacy mutable message-position anchor. Kept during the transition for old
     /// metadata/readers; native ownership and pruning decisions use `turn_id`.
@@ -723,6 +733,9 @@ pub struct TurnStat {
     /// total under "unattributed" rather than assigning it to the active model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_usage: Vec<ModelUsageStat>,
+    /// Terminal stop reason slug (`"stopped"`, `"max_rounds"`, `"tool_loop_detected"`, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -1131,6 +1144,10 @@ impl SessionManager {
 
     pub fn snapshot_path(&self, id: &str) -> SessionResult<PathBuf> {
         self.path_for(id, "snapshot")
+    }
+
+    pub fn trace_path(&self, id: &str) -> SessionResult<PathBuf> {
+        self.path_for(id, "trace.jsonl")
     }
 
     fn todo_board_path(&self, id: &str) -> SessionResult<PathBuf> {
@@ -3309,12 +3326,15 @@ impl SessionManager {
     }
 
     /// Sessions for normal pickers (/resume, webui sidebar): excludes scheduled-run
-    /// sessions so recurring tasks don't flood the user's manual history. Use `list()`
-    /// for the full set (e.g. a scheduled-tasks view).
+    /// sessions and subagent child sessions so background or child runs don't flood the user's manual history.
+    /// Use `list()` for the full set (e.g. scheduled tasks or cascade eval metrics).
     pub fn list_visible(&self) -> Vec<SessionMeta> {
         self.list()
             .into_iter()
-            .filter(|m| m.origin != SessionOrigin::Scheduled)
+            .filter(|m| {
+                !matches!(m.origin, SessionOrigin::Scheduled | SessionOrigin::Subagent)
+                    && m.parent_session_id.is_none()
+            })
             .collect()
     }
 
@@ -4991,7 +5011,7 @@ fn io_at(path: &Path, source: io::Error) -> SessionStoreError {
 /// power loss. A crash mid-write never leaves a half-written (corrupt) session file.
 /// The tmp's extension (`…tmp`) is ignored by [`SessionManager::list`]'s `*.meta`
 /// filter, so a leftover tmp from a crash never appears as a session.
-fn atomic_write(path: &Path, bytes: &[u8]) -> SessionResult<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> SessionResult<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -5280,6 +5300,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         }];
         mgr.write_meta(&meta).unwrap();
         mgr.write_presentation("s1", &PresentationFile::default())
@@ -5438,6 +5459,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         };
         meta.turn_stats = vec![stat(0, 1), stat(1, 2), stat(2, 3)];
         mgr.write_meta(&meta).unwrap();
@@ -7998,6 +8020,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 10,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
             TurnStat {
                 after_message: 99,
@@ -8011,6 +8034,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 10,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
         ];
         mgr.write_meta(&meta).unwrap();
@@ -8198,6 +8222,7 @@ mod tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: usage,
+            stop_reason: None,
         };
         let paid = Some(ModelPricing {
             input_per_million: 1.0,
@@ -8276,6 +8301,7 @@ mod tests {
                 },
                 pricing: Some(free),
             }],
+            stop_reason: None,
         });
 
         let report = aggregate_session_cost(&meta);
@@ -8330,6 +8356,7 @@ mod tests {
                 },
                 pricing: None,
             }],
+            stop_reason: None,
         });
         meta.turn_stats.push(TurnStat {
             after_message: 4,
@@ -8343,6 +8370,7 @@ mod tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: Vec::new(),
+            stop_reason: None,
         });
 
         let archived = meta.archive_turn_stats_where(|_| true);

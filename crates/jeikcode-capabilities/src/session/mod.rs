@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod context;
 pub mod display;
+pub mod eval_trace;
 pub mod inputs;
 pub mod instructions;
 pub mod manager;
@@ -46,6 +47,12 @@ pub use context::SessionContextHook;
 pub use display::{
     DisplayHook, DisplayImage, DisplayIndexRow, DisplayMeta, DisplayRecord, DisplayToolCall,
     DISPLAY_VERSION,
+};
+pub use eval_trace::{
+    default_bundles_dir_for, evaluate_session_metrics, prune_eval_storage, read_trace_records,
+    reconstruct_turn_round_upstream_request, reconstruct_upstream_request, ContextBundle,
+    LatencyStats, ReconstructedUpstreamRequest, SessionEvalReport, SessionTraceEndMiddleware,
+    SessionTraceHook, SessionTraceStartMiddleware, TraceRecord,
 };
 pub use inputs::SessionInput;
 pub use manager::{

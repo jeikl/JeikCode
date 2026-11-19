@@ -1428,5 +1428,7 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
             format!("tool loop detected: the same call or read-only batch returned the same result(s) {threshold} times; stopping before another model request").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("stopped: the model repeated the same tool-call pattern for {rounds} consecutive rounds").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Round limit ({cap}) reached; paused tool execution to summarize progress and next steps.").into(),
     }
 }

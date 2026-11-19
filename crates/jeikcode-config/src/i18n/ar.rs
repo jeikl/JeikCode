@@ -228,6 +228,8 @@ pub(super) fn ar(msg: Msg<'_>) -> Cow<'static, str> {
             format!("تم اكتشاف حلقة أدوات: أعاد الاستدعاء نفسه أو دفعة القراءة فقط نفس النتيجة {threshold} مرات؛ تم الإيقاف قبل إرسال طلب جديد").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("تم الإيقاف: كرر النموذج نفس نمط استدعاءات الأدوات لمدة {rounds} جولات متتالية").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("تم بلوغ الحد الأقصى للجولات ({cap})؛ تم إيقاف استدعاء الأدوات لتلخيص التقدم والخطوات التالية.").into(),
         _ => super::en::en(msg),
     }
 }

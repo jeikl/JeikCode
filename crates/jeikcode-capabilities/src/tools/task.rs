@@ -400,6 +400,9 @@ pub struct TaskTool {
     max_rounds: Option<u32>,
     tool_loop_policy: Option<ToolLoopPolicy>,
     inherited_worker_middlewares: Vec<Arc<dyn ToolMiddleware>>,
+    /// 父会话绑定句柄（由宿主装配后写入，使每个子 agent 也能按父会话+调用 ID 落盘持久化追踪）。
+    #[cfg(feature = "session")]
+    parent_session: Option<Arc<std::sync::OnceLock<(Arc<crate::session::SessionManager>, String)>>>,
 }
 
 impl TaskTool {
@@ -419,7 +422,32 @@ impl TaskTool {
             max_rounds: Some(super::DEFAULT_CHILD_MAX_ROUNDS),
             tool_loop_policy: Some(ToolLoopPolicy::default()),
             inherited_worker_middlewares: Vec::new(),
+            #[cfg(feature = "session")]
+            parent_session: None,
         }
+    }
+
+    /// 绑定延迟初始化的父会话槽位，供宿主在会话准备完成后填充 `SessionManager` 与父会话 ID。
+    #[cfg(feature = "session")]
+    pub fn with_parent_session_slot(
+        mut self,
+        slot: Arc<std::sync::OnceLock<(Arc<crate::session::SessionManager>, String)>>,
+    ) -> Self {
+        self.parent_session = Some(slot);
+        self
+    }
+
+    /// 直接绑定父会话存储与父会话 ID，启用子 agent 会话持久化、指标与追踪。
+    #[cfg(feature = "session")]
+    pub fn with_parent_session(
+        mut self,
+        mgr: Arc<crate::session::SessionManager>,
+        parent_session_id: impl Into<String>,
+    ) -> Self {
+        let slot = Arc::new(std::sync::OnceLock::new());
+        let _ = slot.set((mgr, parent_session_id.into()));
+        self.parent_session = Some(slot);
+        self
     }
 
     /// Bound how many children run at once. `0` removes the bound entirely —
@@ -569,6 +597,13 @@ impl Tool for TaskTool {
             ctx.progress
                 .emit(format!("dispatching {} subtask(s)…", parsed.tasks.len()));
         }
+        #[cfg(feature = "session")]
+        let parent_call_id = ctx.progress.call_id().map(str::to_string);
+        #[cfg(feature = "session")]
+        let parent_session_info = self
+            .parent_session
+            .as_ref()
+            .and_then(|slot| slot.get().cloned());
 
         for (idx, t) in parsed.tasks.into_iter().enumerate() {
             let is_worker = t.is_worker();
@@ -610,6 +645,51 @@ impl Tool for TaskTool {
             let sem = sem.clone();
             let progress = ctx.progress.clone();
             let inherited_worker_middlewares = inherited_worker_middlewares.clone();
+            #[cfg(feature = "session")]
+            let child_session_setup = parent_session_info.as_ref().map(|(mgr, parent_sid)| {
+                use crate::session::{
+                    now_ms, SessionMeta, SessionOrigin, SessionTraceHook, SnapshotHook,
+                    StorageOwner,
+                };
+                static CHILD_SEQ: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(1);
+                let raw_call = parent_call_id.as_deref().unwrap_or("");
+                let call_slug: String = raw_call
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .take(24)
+                    .collect();
+                let call_tag = if call_slug.is_empty() {
+                    format!("t{}", now_ms().max(0))
+                } else {
+                    call_slug
+                };
+                let seq = CHILD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let child_id = format!("sub-{call_tag}-{}-{seq}", idx + 1);
+                let now = now_ms();
+                let wd_str = wd.to_string_lossy().into_owned();
+                let mut meta = SessionMeta::new(&child_id, &wd_str, now);
+                meta.owner = StorageOwner::Native;
+                meta.origin = SessionOrigin::Subagent;
+                meta.name = desc.clone();
+                meta.user_renamed = true;
+                meta.parent_session_id = Some(parent_sid.clone());
+                meta.parent_call_id = parent_call_id.clone();
+                let _ = mgr.write_meta(&meta);
+                let provider_label = if is_hard {
+                    "subagent-capable"
+                } else {
+                    "subagent-fast"
+                };
+                let trace_hook = Arc::new(SessionTraceHook::new(
+                    mgr.clone(),
+                    &child_id,
+                    provider_label,
+                    &model,
+                ));
+                let snap_hook = Arc::new(SnapshotHook::new(mgr.clone(), &child_id, &wd_str));
+                (child_id, trace_hook, snap_hook)
+            });
             // Advertise the selected model while this child is still queued.
             // Marker-prefixed means retained UIs update the fixed panel without
             // committing an extra transcript row. The later ↻ event is the sole
@@ -652,6 +732,14 @@ impl Tool for TaskTool {
                     .working_dir(wd.clone())
                     .cancel_token(child_cancel)
                     .hook(progress_hook.clone());
+                #[cfg(feature = "session")]
+                if let Some((ref child_id, ref trace_hook, ref snap_hook)) = child_session_setup {
+                    builder = builder
+                        .session_id(child_id)
+                        .hook(snap_hook.clone())
+                        .hook(trace_hook.clone())
+                        .middleware(Arc::new(trace_hook.start_middleware()));
+                }
                 if let Some(policy) = tool_loop_policy {
                     builder = builder.tool_loop_policy(policy);
                 }
@@ -663,6 +751,10 @@ impl Tool for TaskTool {
                 // child (#1); additionally confine a `worker`'s WRITES to its declared scope.
                 for mw in child_middlewares(is_worker, &scope, &wd, &inherited_worker_middlewares) {
                     builder = builder.middleware(mw);
+                }
+                #[cfg(feature = "session")]
+                if let Some((_, ref trace_hook, _)) = child_session_setup {
+                    builder = builder.middleware(Arc::new(trace_hook.end_middleware()));
                 }
                 let child = builder.build();
                 // DETACH: inner spawn lets the child run independent of this future;
@@ -1739,7 +1831,7 @@ mod tests {
 
     #[test]
     fn child_round_limit_is_configurable_and_zero_means_unbounded() {
-        assert_eq!(dummy().max_rounds, Some(230));
+        assert_eq!(dummy().max_rounds, Some(300));
         assert_eq!(dummy().with_max_rounds(500).max_rounds, Some(500));
         assert_eq!(dummy().with_max_rounds(0).max_rounds, None);
     }
@@ -3394,5 +3486,101 @@ mod tests {
         seed_offline_verdict(OfflineMode::Off, None);
         let outcome_restored = gate.before(&mut fetch_call, &mock_tool, &rt).await;
         assert!(matches!(outcome_restored, BeforeOutcome::Proceed));
+    }
+}
+
+#[cfg(all(test, feature = "session"))]
+mod session_persistence_tests {
+    use super::*;
+    use crate::session::{
+        evaluate_session_metrics, read_trace_records, SessionManager, SessionMeta, SessionOrigin,
+        StorageOwner,
+    };
+    use futures::stream;
+    use futures::StreamExt;
+    use jeikcode_kernel::message::Message;
+    use jeikcode_kernel::provider::ChatOptions;
+    use jeikcode_kernel::stream::{ProviderError, StreamEvent};
+    use jeikcode_kernel::tool::{ProgressSink, ToolDef, ToolRegistry};
+    use tokio_util::sync::CancellationToken;
+
+    struct OneShotTextProvider(&'static str);
+
+    #[async_trait]
+    impl LlmProvider for OneShotTextProvider {
+        fn model_name(&self) -> &str {
+            "mock-child"
+        }
+        async fn chat_stream(
+            &self,
+            _m: &[Message],
+            _t: &[ToolDef],
+            _o: &ChatOptions,
+        ) -> Result<futures::stream::BoxStream<'static, StreamEvent>, ProviderError> {
+            Ok(stream::iter(vec![
+                StreamEvent::TextDelta(self.0.into()),
+                StreamEvent::Done { truncated: false },
+            ])
+            .boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_persists_child_session_links_parent_and_hides_from_sidebar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(SessionManager::with_root(dir.path()));
+        mgr.write_meta(&SessionMeta::new("parent-session", "/workspace", 1_000))
+            .unwrap();
+
+        let task_tool = TaskTool::new(
+            || Arc::new(OneShotTextProvider("explore answer")),
+            || Arc::new(OneShotTextProvider("capable answer")),
+            || {
+                let reg = ToolRegistry::new();
+                reg.mount(&[])
+            },
+            || {
+                let reg = ToolRegistry::new();
+                reg.mount(&[])
+            },
+        )
+        .with_parent_session(mgr.clone(), "parent-session");
+
+        let ctx = ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            cancel: CancellationToken::new(),
+            progress: ProgressSink::noop().with_call_id("call-sub-42"),
+            requester: None,
+        };
+        let out = task_tool
+            .execute(
+                r#"{"tasks":[{"description":"inspect modules","prompt":"Check lib","subagent_type":"explore"}]}"#,
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "subagent failed: {}", out.content);
+
+        // 对用户侧历史选择器隐藏子会话，但评测可从父会话自动关联并汇总全部子会话。
+        let visible_ids: Vec<String> = mgr.list_visible().into_iter().map(|m| m.id).collect();
+        assert_eq!(visible_ids, vec!["parent-session".to_string()]);
+
+        let eval = evaluate_session_metrics(&mgr, "parent-session").unwrap();
+        assert_eq!(eval.child_session_ids.len(), 1);
+        let child_id = &eval.child_session_ids[0];
+        assert!(child_id.starts_with("sub-call-sub-42-1-"));
+
+        let child_meta = mgr.read_meta(child_id).unwrap();
+        assert_eq!(child_meta.owner, StorageOwner::Native);
+        assert_eq!(child_meta.origin, SessionOrigin::Subagent);
+        assert_eq!(
+            child_meta.parent_session_id.as_deref(),
+            Some("parent-session")
+        );
+        assert_eq!(child_meta.parent_call_id.as_deref(), Some("call-sub-42"));
+
+        let child_trace = read_trace_records(&mgr, child_id).unwrap();
+        assert!(!child_trace.is_empty(), "child session must persist trace");
+        let child_eval = evaluate_session_metrics(&mgr, child_id).unwrap();
+        assert_eq!(child_eval.round_count, 1);
     }
 }

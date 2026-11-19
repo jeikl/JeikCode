@@ -228,6 +228,8 @@ pub(super) fn fr(msg: Msg<'_>) -> Cow<'static, str> {
             format!("boucle d'outils détectée : le même appel ou lot en lecture seule a renvoyé les mêmes résultats {threshold} fois ; arrêt avant une nouvelle requête").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("arrêté : le modèle a répété le même motif d'appels d'outils pendant {rounds} tours consécutifs").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Limite de tours atteinte ({cap}) ; exécution des outils arrêtée pour résumer l'avancement et les prochaines étapes.").into(),
         _ => super::en::en(msg),
     }
 }

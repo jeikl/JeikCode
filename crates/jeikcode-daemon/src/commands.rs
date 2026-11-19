@@ -1115,6 +1115,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 10,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
             TurnStat {
                 after_message: 2,
@@ -1128,6 +1129,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 10,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
             TurnStat {
                 after_message: 4,
@@ -1141,6 +1143,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 10,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
         ];
         manager.write_meta(&meta).unwrap();
@@ -1251,6 +1254,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         };
         let mut meta = NativeSessionMeta::new(id, "/p", 1);
         meta.owner = StorageOwner::Native;
@@ -1409,6 +1413,7 @@ mod tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: Vec::new(),
+            stop_reason: None,
         });
         meta.turn_stats.push(TurnStat {
             after_message: 4,
@@ -1422,6 +1427,7 @@ mod tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: Vec::new(),
+            stop_reason: None,
         });
         let report = jeikcode_capabilities::session::aggregate_session_cost(&meta);
         assert_eq!(report.total_tokens, 350);

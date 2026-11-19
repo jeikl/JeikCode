@@ -342,7 +342,9 @@ mod tests {
 
     #[tokio::test]
     async fn max_rounds_stops_runaway_review() {
-        let mut c = cfg();
+        // 使用独立空临时目录，避免在共享 OS temp 目录上递归 grep 导致测试超时。
+        let workdir = tempfile::tempdir().unwrap();
+        let mut c = ReviewAgentConfig::new("k", "https://x.test", "mock-model", workdir.path());
         c.max_rounds = Some(2);
         let (agent, _report) = build_review_agent_with(&c, Arc::new(LoopingProvider));
         let outcome = agent
@@ -357,7 +359,9 @@ mod tests {
 
     #[tokio::test]
     async fn exact_no_progress_loop_is_stopped_when_rounds_are_unbounded() {
-        let (agent, _report) = build_review_agent_with(&cfg(), Arc::new(LoopingProvider));
+        let workdir = tempfile::tempdir().unwrap();
+        let c = ReviewAgentConfig::new("k", "https://x.test", "mock-model", workdir.path());
+        let (agent, _report) = build_review_agent_with(&c, Arc::new(LoopingProvider));
         let outcome = agent
             .run_to_completion("Review this diff:\n+ x", AutoRespond::AllowAll)
             .await;
@@ -370,7 +374,8 @@ mod tests {
 
     #[tokio::test]
     async fn exact_guard_can_be_disabled_for_an_intentional_repetition_policy() {
-        let mut c = cfg();
+        let workdir = tempfile::tempdir().unwrap();
+        let mut c = ReviewAgentConfig::new("k", "https://x.test", "mock-model", workdir.path());
         c.max_rounds = Some(5);
         c.tool_loop_policy = None;
         let (agent, _report) = build_review_agent_with(&c, Arc::new(LoopingProvider));

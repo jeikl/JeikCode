@@ -290,8 +290,8 @@ fn load_records(dir: &Path) -> SessionResult<Vec<TurnRecord>> {
         if file_name.ends_with(".toolmetrics.jsonl") {
             continue;
         }
-        // Model-switch observability sidecar: same rationale as toolmetrics.
-        if file_name.ends_with(".model-switches.jsonl") {
+        // Model-switch & eval trace observability sidecars: same rationale as toolmetrics.
+        if file_name.ends_with(".model-switches.jsonl") || file_name.ends_with(".trace.jsonl") {
             continue;
         }
         if let Some(base) = file_name.strip_suffix(".display.jsonl") {

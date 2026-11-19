@@ -228,6 +228,8 @@ pub(super) fn de(msg: Msg<'_>) -> Cow<'static, str> {
             format!("Werkzeugschleife erkannt: derselbe Aufruf oder schreibgeschützte Stapel hat {threshold}-mal dasselbe Ergebnis geliefert; Abbruch vor einer weiteren Modellantfrage").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("gestoppt: das Modell hat dasselbe Werkzeugaufrufmuster {rounds} Runden in Folge wiederholt").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Rundenlimit ({cap}) erreicht; Werkzeugausführung gestoppt, um den Fortschritt und die nächsten Schritte zusammenzufassen.").into(),
         _ => super::en::en(msg),
     }
 }

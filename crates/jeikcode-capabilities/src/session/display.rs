@@ -242,6 +242,26 @@ impl DisplayRecord {
                 .as_ref()
                 .map(|meta| meta.elapsed_ms)
                 .filter(|elapsed| *elapsed > 0),
+            event_id: message
+                .notice
+                .as_ref()
+                .and_then(|notice| notice.event_id.clone()),
+            part_id: message
+                .notice
+                .as_ref()
+                .and_then(|notice| notice.part_id.clone()),
+            anchor_message_id: message
+                .notice
+                .as_ref()
+                .and_then(|notice| notice.anchor_message_id.clone()),
+            anchor_part_id: message
+                .notice
+                .as_ref()
+                .and_then(|notice| notice.anchor_part_id.clone()),
+            notice_kind: message.notice.as_ref().map(|notice| notice.kind),
+            revision: message.notice.as_ref().and_then(|notice| notice.revision),
+            severity: message.notice.as_ref().map(|notice| notice.severity),
+            status: message.notice.as_ref().map(|notice| notice.status),
             ..Self::default()
         }
     }
@@ -661,6 +681,13 @@ impl DisplayHook {
                 .mgr
                 .upsert_display_notice_record(&self.session_id, record)
             {
+                tracing::warn!(
+                    target: "jeikcode_capabilities::session::display",
+                    session_id = %self.session_id,
+                    turn_id,
+                    error = %error,
+                    "flush dirty display notice failed"
+                );
                 eprintln!("[DisplayHook] upsert display notice failed: {error}");
             } else {
                 flushed_pairs.push((notice.event_id, notice.revision, notice.status));
@@ -921,6 +948,13 @@ impl LifecycleHooks for DisplayHook {
             .mgr
             .upsert_display_notice_record(&self.session_id, record)
         {
+            tracing::warn!(
+                target: "jeikcode_capabilities::session::display",
+                session_id = %self.session_id,
+                turn_id,
+                error = %error,
+                "post_compaction display notice failed"
+            );
             eprintln!("[DisplayHook] post_compaction notice failed: {error}");
         }
     }
@@ -984,6 +1018,13 @@ impl LifecycleHooks for DisplayHook {
                 .mgr
                 .upsert_display_notice_record(&self.session_id, record)
             {
+                tracing::warn!(
+                    target: "jeikcode_capabilities::session::display",
+                    session_id = %self.session_id,
+                    turn_id = ctx.turn_id,
+                    error = %error,
+                    "final flush display notice failed"
+                );
                 eprintln!("[DisplayHook] final flush notice failed: {error}");
             }
         }
@@ -1580,18 +1621,23 @@ impl SessionManager {
                 "display meta",
             )? {
                 Some(meta) => meta,
-                None => {
-                    if notice.turn_id <= 1 {
-                        DisplayMeta {
-                            complete: true,
-                            ..DisplayMeta::default()
-                        }
-                    } else {
-                        return Ok(None);
-                    }
-                }
+                // 若 `.display.meta.json` 尚未建立（即便 turn_id > 1），按完备初始元数据落盘，
+                // 避免首张通知被静默丢弃并退化为仅靠快照兜底。
+                None => DisplayMeta {
+                    complete: true,
+                    ..DisplayMeta::default()
+                },
             };
             if meta.v != DISPLAY_VERSION || !meta.complete {
+                tracing::warn!(
+                    target: "jeikcode_capabilities::session::display",
+                    session_id = id,
+                    turn_id = notice.turn_id,
+                    meta_version = meta.v,
+                    complete = meta.complete,
+                    event_id = notice.event_id.as_deref().unwrap_or(""),
+                    "skipping display notice upsert because display meta is incomplete or mismatched"
+                );
                 return Ok(None);
             }
             if notice.turn_id == 0 {
@@ -2660,6 +2706,37 @@ mod tests {
             1,
             "v5 同 event_id 在账本里只保留单一权威记录"
         );
+    }
+
+    #[test]
+    fn display_notice_initializes_missing_meta_when_turn_id_gt_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        mgr.write_meta(&crate::session::SessionMeta::new("s-turn2", "/tmp", 1))
+            .unwrap();
+        // Deliberately do NOT write `.display.meta.json` yet, and upsert with turn_id = 2.
+        let inserted = mgr
+            .upsert_display_notice_record(
+                "s-turn2",
+                DisplayRecord {
+                    turn_id: 2,
+                    id: Some("warn-max-rounds:2".into()),
+                    event_id: Some("warn-max-rounds:2".into()),
+                    content: "Round limit reached".into(),
+                    notice_kind: Some(NoticeKind::Warning),
+                    severity: Some(NoticeSeverity::Warning),
+                    status: Some(NoticeStatus::Settled),
+                    ..DisplayRecord::default()
+                },
+            )
+            .unwrap();
+        let inserted = inserted
+            .expect("missing display meta on turn_id > 1 must initialize and persist notice");
+        assert_eq!(inserted.id.as_deref(), Some("warn-max-rounds:2"));
+        assert_eq!(inserted.turn_id, 2);
+        let (_, rows) = mgr.read_display("s-turn2").unwrap().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, Some(NoticeSeverity::Warning));
     }
 
     #[test]

@@ -1401,5 +1401,7 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
             format!("检测到工具调用死循环：相同调用或只读批处理连续 {threshold} 次返回相同结果，已在下次请求前停止").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("已停止：模型连续 {rounds} 轮重复相同的工具调用模式").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("已达到最大轮次上限（{cap} 轮）；已停止调用工具并生成进度总结与后续建议。").into(),
     }
 }

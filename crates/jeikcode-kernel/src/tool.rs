@@ -71,7 +71,7 @@ pub struct ToolResult {
 }
 
 /// What the LLM sees for a mounted tool.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,
@@ -106,17 +106,33 @@ pub struct ToolDef {
 #[derive(Clone)]
 pub struct ProgressSink {
     inner: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    call_id: Option<String>,
 }
 
 impl ProgressSink {
     /// A sink that discards (no driver listening). The default.
     pub fn noop() -> Self {
-        Self { inner: None }
+        Self {
+            inner: None,
+            call_id: None,
+        }
     }
     /// A sink backed by `f`. The kernel installs one that forwards to the driver event
     /// stream, tagging each message with the executing call's id.
     pub fn new(f: Arc<dyn Fn(String) + Send + Sync>) -> Self {
-        Self { inner: Some(f) }
+        Self {
+            inner: Some(f),
+            call_id: None,
+        }
+    }
+    /// Attach the executing tool call's id for internal context correlation.
+    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
+        self.call_id = Some(call_id.into());
+        self
+    }
+    /// Returns the executing tool call's id when bound by the kernel dispatcher.
+    pub fn call_id(&self) -> Option<&str> {
+        self.call_id.as_deref()
     }
     /// Report incremental progress to the driver. No-op if no driver is listening.
     pub fn emit(&self, message: impl Into<String>) {

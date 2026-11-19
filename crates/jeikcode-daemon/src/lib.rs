@@ -40,6 +40,7 @@ mod git_intent;
 pub(crate) mod kernel_runtime;
 pub mod legacy_convert;
 pub mod live_hub;
+pub mod logging;
 pub mod native_live;
 mod runtime_host;
 mod shell_open;
@@ -1060,6 +1061,7 @@ mod session_window_tests {
                 used_tokens: 0,
                 ctx_window: 0,
                 model_usage: Vec::new(),
+                stop_reason: None,
             }
         }
 
@@ -4865,6 +4867,7 @@ pub(crate) fn session_row_wire(
         jeikcode_capabilities::session::SessionOrigin::Manual => "manual",
         jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled",
         jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol",
+        jeikcode_capabilities::session::SessionOrigin::Subagent => "subagent",
     };
     Some(SessionRowWire {
         id: session_id.to_string(),
@@ -4900,6 +4903,7 @@ pub(crate) fn session_row_wire_in_bucket(
         jeikcode_capabilities::session::SessionOrigin::Manual => "manual",
         jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled",
         jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol",
+        jeikcode_capabilities::session::SessionOrigin::Subagent => "subagent",
     };
     Some(SessionRowWire {
         id: session_id.to_string(),
@@ -6679,6 +6683,90 @@ fn annotate_model_switches(
     }
 }
 
+/// Infer structured notice classification for legacy `turn_diagnostic` rows saved without
+/// explicit `NoticeKind`/`NoticeSeverity`, preventing historical errors/warnings from rendering
+/// as generic info cards.
+fn infer_legacy_notice_meta(
+    id: Option<&str>,
+    text: &str,
+) -> (
+    jeikcode_kernel::event::NoticeKind,
+    jeikcode_kernel::event::NoticeSeverity,
+) {
+    use jeikcode_kernel::event::{NoticeKind, NoticeSeverity};
+    let id_str = id.unwrap_or("");
+    let lower = text.to_ascii_lowercase();
+    if id_str.starts_with("rl:") || lower.contains("rate limit") || text.contains("429") {
+        return (NoticeKind::RateLimit, NoticeSeverity::Warning);
+    }
+    if id_str.starts_with("trunc:") || lower.contains("truncated") || text.contains("截断") {
+        return (NoticeKind::Truncation, NoticeSeverity::Warning);
+    }
+    if id_str.starts_with("warn-max-rounds:")
+        || (lower.contains("round limit (") && !id_str.starts_with("err-"))
+        || text.contains("最大轮次上限")
+    {
+        return (NoticeKind::Warning, NoticeSeverity::Warning);
+    }
+    if id_str.starts_with("err-tool-loop:")
+        || id_str.starts_with("tool-loop-warn:")
+        || lower.contains("tool loop")
+        || text.contains("工具调用死循环")
+        || text.contains("工具循环")
+    {
+        return (NoticeKind::Warning, NoticeSeverity::Warning);
+    }
+    if id_str.starts_with("err-ttft:")
+        || id_str.starts_with("err-stall:")
+        || lower.contains("timeout")
+        || text.contains("超时")
+    {
+        return (NoticeKind::Timeout, NoticeSeverity::Error);
+    }
+    if id_str.starts_with("over-window:") || id_str.starts_with("warn-") {
+        return (NoticeKind::Warning, NoticeSeverity::Warning);
+    }
+    (NoticeKind::Error, NoticeSeverity::Error)
+}
+
+/// Convert a kernel [`jeikcode_kernel::message::Message`] notice (or legacy diagnostic)
+/// into [`MessageNoticeInfo`] for API/WebUI projection.
+fn notice_info_from_kernel_message(
+    msg: &jeikcode_kernel::message::Message,
+) -> Option<MessageNoticeInfo> {
+    if let Some(meta) = &msg.notice {
+        let eid = meta.event_id.clone().or_else(|| msg.id.clone());
+        return Some(MessageNoticeInfo {
+            part_id: meta
+                .part_id
+                .clone()
+                .or_else(|| eid.as_ref().map(|id| format!("{id}:1:notice"))),
+            event_id: eid,
+            anchor_message_id: meta.anchor_message_id.clone(),
+            anchor_part_id: meta.anchor_part_id.clone(),
+            notice_kind: Some(meta.kind),
+            revision: meta.revision,
+            severity: Some(meta.severity),
+            status: Some(meta.status),
+        });
+    }
+    if msg.internal_origin.as_deref() == Some("turn_diagnostic") {
+        let eid = msg.id.clone();
+        let (kind, severity) = infer_legacy_notice_meta(eid.as_deref(), &msg.text);
+        return Some(MessageNoticeInfo {
+            part_id: eid.as_ref().map(|id| format!("{id}:1:notice")),
+            event_id: eid,
+            anchor_message_id: None,
+            anchor_part_id: None,
+            notice_kind: Some(kind),
+            revision: None,
+            severity: Some(severity),
+            status: Some(jeikcode_kernel::event::NoticeStatus::Settled),
+        });
+    }
+    None
+}
+
 impl MessageInfo {
     fn from_kernel(msg: &jeikcode_kernel::message::Message) -> Self {
         Self::from_kernel_in(msg, None)
@@ -6778,7 +6866,7 @@ impl MessageInfo {
             created_at: (msg.created_at_ms > 0).then_some(msg.created_at_ms),
             elapsed_ms: msg.meta.as_ref().map(|m| m.elapsed_ms).filter(|&ms| ms > 0),
             switch_to: None,
-            notice: None,
+            notice: notice_info_from_kernel_message(msg),
         }
     }
 }
@@ -7739,6 +7827,7 @@ fn catalog_entry_to_session_summary(
         jeikcode_capabilities::session::SessionOrigin::Manual => "manual",
         jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled",
         jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol",
+        jeikcode_capabilities::session::SessionOrigin::Subagent => "subagent",
     };
     let is_scheduled = entry.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled;
     SessionSummary {
@@ -7814,6 +7903,10 @@ fn catalog_entry_is_visible(
     entry: &jeikcode_capabilities::session::CatalogEntry,
     active: Option<&jeikcode_capabilities::session::CatalogLocation>,
 ) -> bool {
+    // `task` 衍生的子 Agent 会话不占用常规侧边栏或会话选择器；仅通过父会话评测联查访问。
+    if entry.origin == jeikcode_capabilities::session::SessionOrigin::Subagent {
+        return false;
+    }
     if entry.message_count > 0 {
         return true;
     }
@@ -9891,6 +9984,7 @@ fn display_record_to_message_info(
         || record.event_id.is_some())
     .then(|| {
         let eid = record.event_id.clone().or_else(|| record.id.clone());
+        let (inferred_kind, inferred_severity) = infer_legacy_notice_meta(eid.as_deref(), &content);
         MessageNoticeInfo {
             part_id: record
                 .part_id
@@ -9899,10 +9993,14 @@ fn display_record_to_message_info(
             event_id: eid,
             anchor_message_id: record.anchor_message_id.clone(),
             anchor_part_id: record.anchor_part_id.clone(),
-            notice_kind: record.notice_kind,
+            notice_kind: Some(record.notice_kind.unwrap_or(inferred_kind)),
             revision: record.revision,
-            severity: record.severity,
-            status: record.status,
+            severity: Some(record.severity.unwrap_or(inferred_severity)),
+            status: Some(
+                record
+                    .status
+                    .unwrap_or(jeikcode_kernel::event::NoticeStatus::Settled),
+            ),
         }
     });
     message_info! {
@@ -12933,6 +13031,7 @@ mod session_token_usage_tests {
                 },
                 pricing: None,
             }],
+            stop_reason: None,
         }
     }
 
@@ -12973,6 +13072,7 @@ mod session_token_usage_tests {
                 used_tokens: 10_000,
                 ctx_window: 0,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
             TurnStat {
                 after_message: 2,
@@ -12986,6 +13086,7 @@ mod session_token_usage_tests {
                 used_tokens: 38_555,
                 ctx_window: 1_000_000,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
         ];
         let usage = session_token_usage_from_meta(&meta).unwrap();
@@ -13023,6 +13124,7 @@ mod session_token_usage_tests {
                     },
                     pricing: None,
                 }],
+                stop_reason: None,
             },
         ];
         let usage = session_token_usage_from_meta(&meta).unwrap();
@@ -13068,6 +13170,7 @@ mod session_token_usage_tests {
                 },
                 pricing: None,
             }],
+            stop_reason: None,
         }];
         assert_eq!(session_token_usage_from_meta(&meta), None);
     }
@@ -13113,6 +13216,7 @@ mod session_token_usage_tests {
                 },
                 pricing: None,
             }],
+            stop_reason: None,
         }];
 
         let usage = session_token_usage_from_session(&meta, &snapshot).unwrap();
@@ -16316,44 +16420,6 @@ mod admission_identity_tests {
 /// Persist one `tool_timing` frame to `<session>.toolmetrics.jsonl`.
 ///
 /// Observability-only sidecar: nothing here is ever read back into the model
-/// context. Returns `false` so the caller can disable further writes for this
-/// turn after the first IO failure instead of spamming stderr per tool.
-fn persist_tool_timing_metric(
-    manager: &NativeSessionManager,
-    session_id: &str,
-    event: &ChatEvent,
-) -> bool {
-    let ChatEvent::ToolTiming {
-        id,
-        name,
-        status,
-        started_at,
-        finished_at,
-        duration_ms,
-        switch_ms,
-    } = event
-    else {
-        return true;
-    };
-    let status = match status.as_str() {
-        "done" => jeikcode_capabilities::session::ToolMetricStatus::Done,
-        "error" => jeikcode_capabilities::session::ToolMetricStatus::Error,
-        "incomplete" => jeikcode_capabilities::session::ToolMetricStatus::Incomplete,
-        _ => jeikcode_capabilities::session::ToolMetricStatus::Running,
-    };
-    let record = jeikcode_capabilities::session::ToolMetricRecord {
-        v: jeikcode_capabilities::session::tool_metrics::TOOL_METRIC_VERSION,
-        call_id: id.clone(),
-        name: name.clone(),
-        started_at: *started_at,
-        finished_at: *finished_at,
-        duration_ms: *duration_ms,
-        switch_ms: *switch_ms,
-        status,
-    };
-    manager.append_tool_metric(session_id, &record).is_ok()
-}
-
 /// Process a chat request and stream events
 pub(crate) async fn process_chat_request(
     req: ChatRequest,
@@ -16777,10 +16843,8 @@ pub(crate) async fn process_chat_request(
         keep_raw_markdown,
         ..ChatRuntimeProjector::default()
     };
-    // Tool timing sidecar: written as events happen so a second instance or a
-    // cold start can rehydrate the exact timers without touching model context.
-    let tool_metrics_manager = NativeSessionManager::for_project(&working_dir);
-    let mut tool_metrics_writable = true;
+    // 模型切换旁路账本复用同一会话存储管理器；工具指标由 SessionTraceHook 在统一底座落盘。
+    let switch_metrics_manager = NativeSessionManager::for_project(&working_dir);
     let mut first_ttft_promoted = false;
     let effective_provider_for_default = provider_name.clone();
     let opening_client_input_id = active_chats
@@ -16874,39 +16938,14 @@ pub(crate) async fn process_chat_request(
             ) {
                 terminal_sent.store(true, std::sync::atomic::Ordering::Release);
                 // Freeze any tool that never returned BEFORE the terminal frame, so
-                // every observer (and a later cold start) sees the same cost.
+                // 工具指标的权威落盘（含 incomplete 兜底）已由 `SessionTraceHook` 在内核生命周期钩子统一完成；
+                // 此处仅保留 SSE `ToolTiming` 事件推送，维持前端实时计时卡片兼容。
                 for timing in projector.drain_unfinished_tool_timings() {
-                    if tool_metrics_writable
-                        && !persist_tool_timing_metric(
-                            &tool_metrics_manager,
-                            &perm_session_key,
-                            &timing,
-                        )
-                    {
-                        tool_metrics_writable = false;
-                        eprintln!(
-                            "[tool-metrics] failed to persist timing (session {perm_session_key}); \
-                             further writes disabled for this turn"
-                        );
-                    }
                     let _ = event_tx.send(timing);
                 }
                 // Record the terminal frame on the session before the flag becomes
                 // visible, so a watcher attaching right now can always be told.
                 active_chats.mark_terminal(&operation_id, &chat_event).await;
-            }
-            if matches!(&chat_event, ChatEvent::ToolTiming { .. }) && tool_metrics_writable {
-                if !persist_tool_timing_metric(
-                    &tool_metrics_manager,
-                    &perm_session_key,
-                    &chat_event,
-                ) {
-                    tool_metrics_writable = false;
-                    eprintln!(
-                        "[tool-metrics] failed to persist timing (session {perm_session_key}); \
-                         further writes disabled for this turn"
-                    );
-                }
             }
             if let ChatEvent::ModelSwitch {
                 provider,
@@ -16927,7 +16966,7 @@ pub(crate) async fn process_chat_request(
                     wait_ms: Some(applied_at.saturating_sub(*requested_at)),
                 };
                 if let Err(error) =
-                    tool_metrics_manager.append_model_switch(&perm_session_key, &record)
+                    switch_metrics_manager.append_model_switch(&perm_session_key, &record)
                 {
                     eprintln!(
                         "[model-switch] failed to persist applied switch (session {perm_session_key}): {error}"
@@ -16951,11 +16990,6 @@ pub(crate) async fn process_chat_request(
     // TurnFinished event can authorize `done`.
     if !projector.terminal_seen {
         for timing in projector.drain_unfinished_tool_timings() {
-            if tool_metrics_writable
-                && !persist_tool_timing_metric(&tool_metrics_manager, &perm_session_key, &timing)
-            {
-                tool_metrics_writable = false;
-            }
             let _ = event_tx.send(timing);
         }
         if let Some(event) = projector.finish() {
@@ -22547,6 +22581,7 @@ pub async fn ensure_webui(
     fixed_token: Option<&str>,
     session_id: Option<&str>,
 ) -> String {
+    crate::logging::init_process_file_logging("jeikcode-daemon.log", "jeikcode-daemon");
     // 1) 短临界区判定能否复用仍在运行的 server（std Mutex guard 不可跨 .await）。
     //    复用时连同其绑定地址一起取出：换绑需先 /webui stop。
     let reuse = {
@@ -23681,6 +23716,7 @@ pub struct ServerOpts {
 /// calling this; see `src/main.rs`.
 pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     use axum::routing::{patch, put};
+    crate::logging::init_process_file_logging("jeikcode-daemon.log", "jeikcode-daemon");
 
     let ServerOpts {
         host,
@@ -27456,6 +27492,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 1,
                 model_usage: vec![],
+                stop_reason: None,
             },
             TurnStat {
                 after_message: 5,
@@ -27469,6 +27506,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 1,
                 model_usage: vec![],
+                stop_reason: None,
             },
         ];
         stamp_turn_elapsed_on_last_assistants(&mut messages, &stats);
@@ -27543,6 +27581,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 1,
             model_usage: vec![],
+            stop_reason: None,
         }];
         stamp_turn_elapsed_on_last_assistants(&mut messages, &stats);
         // messages[1]（中间阶段 Assistant）保留自身单轮耗时，不被整体覆盖
@@ -27608,6 +27647,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 1,
             model_usage: vec![],
+            stop_reason: None,
         }];
         stamp_turn_elapsed_on_last_assistants(&mut messages, &stats_single_last);
         assert_eq!(
@@ -29597,6 +29637,7 @@ mod rewind_consistency_tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: Vec::new(),
+            stop_reason: None,
         }
     }
 
@@ -29781,6 +29822,7 @@ mod v4_coverage_tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: Vec::new(),
+            stop_reason: None,
         }
     }
 
@@ -30183,5 +30225,43 @@ mod client_identity_tests {
                 .and_then(|v| v.to_str().ok()),
             Some("/?token=abc-123-xyz")
         );
+    }
+
+    #[test]
+    fn from_kernel_in_preserves_notice_meta_and_infers_legacy_diagnostics() {
+        use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus};
+        use jeikcode_kernel::message::{Message, MessageNoticeMeta, TURN_DIAGNOSTIC_ORIGIN};
+
+        let mut structured = Message::assistant("Round limit (300) reached", Vec::new());
+        structured.id = Some("warn-max-rounds:4".into());
+        structured.internal_origin = Some(TURN_DIAGNOSTIC_ORIGIN.into());
+        structured.notice = Some(MessageNoticeMeta {
+            kind: NoticeKind::Warning,
+            severity: NoticeSeverity::Warning,
+            status: NoticeStatus::Settled,
+            event_id: Some("warn-max-rounds:4".into()),
+            part_id: Some("warn-max-rounds:4:1:notice".into()),
+            anchor_message_id: Some("m-anchor-1".into()),
+            anchor_part_id: None,
+            revision: Some(1),
+        });
+        let projected = MessageInfo::from_kernel_in(&structured, None);
+        let n = projected
+            .notice
+            .expect("structured Message.notice must project");
+        assert_eq!(n.event_id.as_deref(), Some("warn-max-rounds:4"));
+        assert_eq!(n.notice_kind, Some(NoticeKind::Warning));
+        assert_eq!(n.severity, Some(NoticeSeverity::Warning));
+        assert_eq!(n.status, Some(NoticeStatus::Settled));
+        assert_eq!(n.anchor_message_id.as_deref(), Some("m-anchor-1"));
+
+        let mut legacy = Message::assistant("max rounds (230) reached", Vec::new());
+        legacy.internal_origin = Some(TURN_DIAGNOSTIC_ORIGIN.into());
+        let projected_legacy = MessageInfo::from_kernel_in(&legacy, None);
+        let ln = projected_legacy
+            .notice
+            .expect("legacy turn_diagnostic must not degrade to notice: None");
+        assert_eq!(ln.severity, Some(NoticeSeverity::Error));
+        assert_eq!(ln.status, Some(NoticeStatus::Settled));
     }
 }

@@ -1861,6 +1861,10 @@ fn parse_desktop_webui_args(args: &[String]) -> Option<DesktopWebuiLaunch> {
 async fn async_main() {
     let inherited_token = jeikcode_updater::take_restart_token();
     if let Some(mut launch) = desktop_webui_fast_launch() {
+        jeikcode_daemon::logging::init_process_file_logging(
+            "jeikcode-daemon.log",
+            "jeikcode-desktop-webui",
+        );
         if let Some(h) = jeikcode_updater::restart_listen_host_from_env() {
             launch.host = h;
         }
@@ -3087,79 +3091,14 @@ fn redirect_stderr_to_log_file() {
 /// (which is `JEIKCODE_HOME`- AND sudo-aware via `real_home_dir`), so the log lands
 /// next to config/sessions instead of diverging under `sudo` — plain `dirs::home_dir()`
 /// there points at root's home, where the user would never find the log.
+#[cfg(test)]
 fn jeikcode_log_path(config_dir: std::path::PathBuf) -> std::path::PathBuf {
-    config_dir.join("logs").join("jeikcode.log")
-}
-
-/// The default `RUST_LOG` directive when the env var is unset: `info` for everything,
-/// with the chatty transport crates pinned to `warn` so the log stays about jeikcode.
-const DEFAULT_LOG_DIRECTIVES: &str =
-    "info,hyper=warn,hyper_util=warn,h2=warn,rustls=warn,reqwest=warn,tower=warn,mio=warn";
-
-/// Roll size cap for the tracing log. Above this the live file is rotated to a single
-/// `.old` generation, bounding on-disk usage at ~2× this (an always-on `info` log
-/// would otherwise append forever across every session).
-const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
-
-/// If the log already exceeds [`LOG_ROTATE_BYTES`], move it aside to `<path>.old`
-/// (single generation) so the live file restarts small. Best-effort; errors ignored.
-fn rotate_log_if_large(path: &std::path::Path) {
-    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > LOG_ROTATE_BYTES {
-        let mut old = path.as_os_str().to_owned();
-        old.push(".old"); // jeikcode.log -> jeikcode.log.old
-        let _ = std::fs::rename(path, std::path::PathBuf::from(old));
-    }
+    jeikcode_daemon::logging::process_log_path(&config_dir, "jeikcode.log")
 }
 
 /// Install a global tracing subscriber that writes to `<config_dir>/logs/jeikcode.log`.
-///
-/// The whole workspace emits `tracing::` diagnostics but historically installed NO
-/// subscriber, so every line (including the `jeikcode-label:` middleware trace) went
-/// to the no-op dispatcher and vanished. This wires them to a file.
-///
-/// FILE-ONLY BY DESIGN: the TUI owns the terminal, and the stderr redirect only runs
-/// in the detached-daemon path — writing tracing output to real stderr would corrupt
-/// the interactive display. So we always write to our own file handle, never stderr.
-///
-/// Fail-open: any error (can't create dir/file, subscriber already set) leaves the
-/// process running with logging simply disabled. Called once, early.
 fn init_file_logging() {
-    use std::io::Write as _;
-    let path = jeikcode_log_path(Config::config_dir());
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-    }
-    rotate_log_if_large(&path);
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
-        return;
-    };
-    // Session marker so users can tell one run's lines from another's when grepping.
-    let epoch_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let _ = writeln!(file, "--- jeikcode session start (unix={epoch_secs}) ---");
-
-    let filter = std::env::var("RUST_LOG")
-        .ok()
-        .and_then(|v| tracing_subscriber::EnvFilter::try_new(v).ok())
-        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_DIRECTIVES));
-
-    // `Mutex<File>` is tracing-subscriber's OWN built-in `MakeWriter`: its
-    // `MutexGuardWriter` holds the lock for the WHOLE formatted event, so concurrent
-    // traces from tokio workers can't interleave mid-line (a per-`write()` re-lock
-    // would). No custom writer needed.
-    let _ = tracing_subscriber::fmt()
-        .with_ansi(false) // file, not a terminal
-        .with_env_filter(filter)
-        .with_writer(std::sync::Mutex::new(file))
-        .try_init(); // Err only if a subscriber is already set — fine, ignore.
+    jeikcode_daemon::logging::init_process_file_logging("jeikcode.log", "jeikcode");
 }
 
 /// Apply launch-time provider/model overrides to the process-owned config.

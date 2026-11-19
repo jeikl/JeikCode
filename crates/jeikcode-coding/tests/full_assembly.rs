@@ -112,6 +112,15 @@ async fn drive(
 // parked child's stdout pipe — the suite hung and had to be `#[ignore]`d.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_assembly_lifecycle() {
+    // 兜底守卫：即使断言中途 panic，也在 Tokio Runtime drop 前同步终止所有 MCP 子进程，防止管道阻塞卡死。
+    struct McpTeardownGuard;
+    impl Drop for McpTeardownGuard {
+        fn drop(&mut self) {
+            jeikcode_capabilities::mcp::kill_all_mcp_children_now();
+        }
+    }
+    let _mcp_guard = McpTeardownGuard;
+
     // ---- Isolated world: $JEIKCODE_HOME + a project dir, both temp. Skill dirs
     // are pinned to a temp dir too — the home-based default would scan the HOST
     // machine's real ~/.claude/skills and leak host state into this test.
@@ -385,4 +394,13 @@ async fn full_assembly_lifecycle() {
         "allow-always grant survives the respawn (parts own the store)"
     );
     shutdown(&mut h4, "P4 respawn").await;
+    drop(h4);
+    drop(h3);
+    drop(h2);
+    drop(h1b);
+    drop(h1);
+    drop(parts3);
+    drop(parts2);
+    // 显式关闭全局/项目/会话三级 MCP 进程池，确保 GlobalMcpPool 拉起的子进程（如 seed 的 ddg-search）完全退出后再退出 Runtime。
+    jeikcode_capabilities::mcp::shutdown_all_mcp_pools().await;
 }

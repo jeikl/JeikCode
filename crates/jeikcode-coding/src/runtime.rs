@@ -7847,17 +7847,17 @@ mod tests {
     // `config::tests::round_caps_have_generous_defaults`); an env override would
     // short-circuit to the config default.
     #[tokio::test]
-    async fn goal_round_cap_derives_from_live_plan_quota() {
-        // Pro window (call_limit 1000) → 30% = 300, overriding the passed default.
+    async fn goal_round_cap_stays_unbounded_for_plan_quota_without_override() {
+        // Without explicit JEIKCODE_GOAL_MAX_ROUNDS, live Pro/Lite quotas do not
+        // impose a 240/300 hard round cutoff (0 = unbounded).
         let pro: Arc<dyn crate::rate_limit::RateLimitWindowSource> = Arc::new(FakeQuotaSource {
             result: Ok(vec![quota_window(1000)]),
         });
-        assert_eq!(resolve_goal_round_cap(Some(&pro), 777).await, 300);
-        // Lite window (800) → 240.
+        assert_eq!(resolve_goal_round_cap(Some(&pro), 777).await, 0);
         let lite: Arc<dyn crate::rate_limit::RateLimitWindowSource> = Arc::new(FakeQuotaSource {
             result: Ok(vec![quota_window(800)]),
         });
-        assert_eq!(resolve_goal_round_cap(Some(&lite), 777).await, 240);
+        assert_eq!(resolve_goal_round_cap(Some(&lite), 777).await, 0);
     }
 
     #[tokio::test]
@@ -13915,6 +13915,7 @@ mod tests {
                 used_tokens: 10,
                 ctx_window: 1_000,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
             TurnStat {
                 after_message: 4,
@@ -13928,6 +13929,7 @@ mod tests {
                 used_tokens: 20,
                 ctx_window: 1_000,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
         ];
         let at_start = PresentationEntry {

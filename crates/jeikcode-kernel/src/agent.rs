@@ -9,7 +9,8 @@ use crate::hook::{
 };
 use crate::message::{
     CompactTrigger, CompactionStrategy, CompactionView, Conversation, ImageContent, Message,
-    MessageMeta, NoCompaction, SessionSnapshot, SNAPSHOT_VERSION, TURN_DIAGNOSTIC_ORIGIN,
+    MessageMeta, MessageNoticeMeta, NoCompaction, SessionSnapshot, SNAPSHOT_VERSION,
+    TURN_DIAGNOSTIC_ORIGIN,
 };
 use crate::middleware::{AfterOutcome, BeforeOutcome, ToolMiddleware};
 use crate::provider::{ChatOptions, LlmProvider};
@@ -313,6 +314,27 @@ const TRUNCATION_RESUME_NUDGE: &str =
      already complete, reply with a short summary and stop (no tool calls). Otherwise resume \
      where you left off, writing the remaining content INCREMENTALLY to a file (append the \
      next section with edit) rather than re-emitting it all in one response.";
+
+/// Explicit round-cap soft-landing prompt injected once when `round > max_rounds`.
+/// Tool execution is disabled via `ToolChoice::None`, forcing a concise wrap-up summary.
+const SOFT_LANDING_MAX_ROUNDS_PROMPT: &str = "\
+You have reached the maximum round limit for this turn. Tool execution is now disabled for this final response.\n\
+Do NOT invoke any tools. Summarize clearly in a concise final response:\n\
+1. State that the round limit has been reached.\n\
+2. Summarize completed work and verified changes/findings.\n\
+3. List remaining incomplete items or unverified checks.\n\
+4. Suggest concrete next steps for the user to continue.";
+
+fn truncate_notice_preview(text: &str, max_chars: usize) -> String {
+    let clean = text.replace('\n', " ");
+    let mut chars = clean.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
+}
 
 // Provider adapters can emit these placeholder strings when no usable reasoning
 // was captured. Keep the neutral kernel cleanup list aligned with adapter output.
@@ -2352,7 +2374,7 @@ impl RunningAgent {
         text: impl Into<String>,
         explicit_anchor: Option<String>,
         persist: bool,
-    ) {
+    ) -> SystemNotice {
         let event_id = event_id.into();
         let text = text.into();
         let rev = revisions.entry(event_id.clone()).or_insert(0);
@@ -2375,10 +2397,62 @@ impl RunningAgent {
             turn_id: Some(turn_ctx.turn_id),
             persist,
         };
+        // 运维边沿日志：所有系统通知在首次触发（revision == 1）或收敛终态（Settled）时
+        // 一律写入默认日志，即使 `persist = false` 的隐性预警也不会丢；中间进度更新跳过防刷屏。
+        if notice.revision == 1 || notice.status == NoticeStatus::Settled {
+            let preview = truncate_notice_preview(&notice.text, 160);
+            let sid = turn_ctx.session_id.as_deref().unwrap_or("");
+            let anchor = notice.anchor_message_id.as_deref().unwrap_or("");
+            match notice.severity {
+                NoticeSeverity::Error => tracing::error!(
+                    target: "jeikcode_kernel::notice",
+                    session_id = sid,
+                    turn_id = turn_ctx.turn_id,
+                    round = turn_ctx.round,
+                    event_id = %notice.event_id,
+                    kind = ?notice.kind,
+                    status = ?notice.status,
+                    revision = notice.revision,
+                    persist = notice.persist,
+                    anchor_message_id = anchor,
+                    text = %preview,
+                    "system notice"
+                ),
+                NoticeSeverity::Warning => tracing::warn!(
+                    target: "jeikcode_kernel::notice",
+                    session_id = sid,
+                    turn_id = turn_ctx.turn_id,
+                    round = turn_ctx.round,
+                    event_id = %notice.event_id,
+                    kind = ?notice.kind,
+                    status = ?notice.status,
+                    revision = notice.revision,
+                    persist = notice.persist,
+                    anchor_message_id = anchor,
+                    text = %preview,
+                    "system notice"
+                ),
+                NoticeSeverity::Info => tracing::info!(
+                    target: "jeikcode_kernel::notice",
+                    session_id = sid,
+                    turn_id = turn_ctx.turn_id,
+                    round = turn_ctx.round,
+                    event_id = %notice.event_id,
+                    kind = ?notice.kind,
+                    status = ?notice.status,
+                    revision = notice.revision,
+                    persist = notice.persist,
+                    anchor_message_id = anchor,
+                    text = %preview,
+                    "system notice"
+                ),
+            }
+        }
         if persist {
             self.hooks.on_system_notice(&notice, convo, turn_ctx).await;
         }
-        self.rt.emit(AgentEvent::SystemNotice(notice));
+        self.rt.emit(AgentEvent::SystemNotice(notice.clone()));
+        notice
     }
 
     async fn emit_retry_notice(
@@ -2478,6 +2552,30 @@ impl RunningAgent {
         }
         convo.push(partial);
         convo.backfill_interrupted_tool_results();
+    }
+
+    /// Store a structured system-notice diagnostic into `Conversation` using the exact
+    /// same `event_id` and `MessageNoticeMeta` as the live `SystemNotice` / `DisplayHook`
+    /// track, preventing snapshot replay from degrading into an unclassified blue card.
+    fn persist_system_notice_message(convo: &mut Conversation, notice: &SystemNotice) {
+        let text = notice.text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let meta = MessageNoticeMeta::from(notice);
+        if let Some(existing) = convo.messages.iter_mut().rev().find(|message| {
+            message.internal_origin.as_deref() == Some(TURN_DIAGNOSTIC_ORIGIN)
+                && message.id.as_deref() == Some(notice.event_id.as_str())
+        }) {
+            existing.text = text.to_string();
+            existing.notice = Some(meta);
+            return;
+        }
+        let mut msg = Message::assistant(text, Vec::new());
+        msg.id = Some(notice.event_id.clone());
+        msg.internal_origin = Some(TURN_DIAGNOSTIC_ORIGIN.to_string());
+        msg.notice = Some(meta);
+        convo.push(msg);
     }
 
     /// Store a user-visible diagnostic so error / rate-limit / timeout terminals
@@ -2669,6 +2767,8 @@ impl RunningAgent {
         // Re-armable round cap: on each checkpoint "continue" this grows by the base
         // `max_rounds`, giving a CONSTANT interval between confirmations.
         let mut round_cap = self.max_rounds;
+        // 轮次上限触顶后进入“仅总结、禁用工具”的软着陆状态锁，防重试重入叠加卡片与提示词。
+        let mut soft_landing_active = false;
         loop {
             round += 1;
             // 同一逻辑轮的稳定身份：重试时 `round -= 1; continue` 会回到同一个值，
@@ -2692,10 +2792,11 @@ impl RunningAgent {
                 context_window: ctx_window,
                 used_tokens,
             };
-            // Hard cap (safety fuse). With `round_cap_checkpoint`, this becomes an
-            // interactive checkpoint instead of a hard error.
+            // Explicit round cap: with `round_cap_checkpoint`, ask TUI first; on stop or
+            // non-checkpoint callers, transition once into a tool-disabled soft-landing round.
             if let Some(cap) = round_cap {
-                if round > cap {
+                if round > cap && !soft_landing_active {
+                    let mut enter_soft_landing = true;
                     if self.round_cap_checkpoint {
                         let resp = self
                             .rt
@@ -2719,6 +2820,7 @@ impl RunningAgent {
                             // Re-arm by the configured base (guaranteed Some here).
                             let base = self.max_rounds.unwrap_or(cap);
                             round_cap = Some(cap.saturating_add(base));
+                            enter_soft_landing = false;
                             // fall through: this round (== cap+1 <= new cap) proceeds.
                         } else if cancel.is_cancelled() {
                             // The `false` came from a Cancel that resolved the
@@ -2728,54 +2830,30 @@ impl RunningAgent {
                             // mid-turn cancel arm — not MaxRounds.
                             self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
                             return;
-                        } else {
-                            // Explicit stop (Esc / picker) OR fail-closed default
-                            // (no requester / timeout): the round cap is the reason.
-                            let msg = format!("max rounds ({cap}) reached");
-                            self.emit_system_notice(
+                        }
+                    }
+                    if enter_soft_landing {
+                        soft_landing_active = true;
+                        let msg = i18n::format_agent_max_rounds_reached(cap);
+                        let notice = self
+                            .emit_system_notice(
                                 convo,
                                 &turn_ctx,
                                 &mut notice_revisions,
                                 &mut notice_anchors,
-                                format!("err-max-rounds:{}", turn_ctx.turn_id),
-                                NoticeKind::Error,
-                                NoticeSeverity::Error,
+                                format!("warn-max-rounds:{}", turn_ctx.turn_id),
+                                NoticeKind::Warning,
+                                NoticeSeverity::Warning,
                                 NoticeStatus::Settled,
-                                msg.clone(),
+                                msg,
                                 None,
                                 true,
                             )
                             .await;
-                            Self::persist_turn_diagnostic(convo, &msg);
-                            self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
-                                .await;
-                            return;
-                        }
-                    } else {
-                        let msg = format!("max rounds ({cap}) reached");
-                        self.emit_system_notice(
-                            convo,
-                            &turn_ctx,
-                            &mut notice_revisions,
-                            &mut notice_anchors,
-                            format!("err-max-rounds:{}", turn_ctx.turn_id),
-                            NoticeKind::Error,
-                            NoticeSeverity::Error,
-                            NoticeStatus::Settled,
-                            msg.clone(),
-                            None,
-                            true,
-                        )
-                        .await;
-                        self.rt.emit(AgentEvent::Error {
-                            message: msg.clone(),
-                            http_status: None,
-                            code: None,
-                        });
-                        Self::persist_turn_diagnostic(convo, &msg);
-                        self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
-                            .await;
-                        return;
+                        Self::persist_system_notice_message(convo, &notice);
+                        convo.push(Message::synthetic_user(
+                            SOFT_LANDING_MAX_ROUNDS_PROMPT.to_string(),
+                        ));
                     }
                 }
             }
@@ -2825,6 +2903,7 @@ impl RunningAgent {
                 // 用户成功转换 steer 转向状态：刷新重置轮次计数与上限，开启全新轮次预算！
                 round = 1;
                 round_cap = self.max_rounds;
+                soft_landing_active = false;
                 turn_ctx.round = 1;
                 let n = steered.len();
                 let mut inputs = Vec::with_capacity(n);
@@ -3074,9 +3153,13 @@ impl RunningAgent {
             self.hooks
                 .pre_request_options(&messages, &mut request_options, &turn_ctx)
                 .await;
+            if soft_landing_active {
+                request_options.tool_choice = crate::provider::ToolChoice::None;
+            }
             self.hooks
                 .on_request(&messages, &defs, &request_options, &turn_ctx)
                 .await;
+            let open_started_at = self.clock.now_millis();
             // A failed OPEN cleanly fails the turn — no bogus assistant message,
             // no empty-success illusion. The session-level `chat_options` (the
             // neutral SLOT) ride along as a sideband request param — NOT part of
@@ -3119,6 +3202,19 @@ impl RunningAgent {
                     }
                     overflow_attempt = 0; // a successful open resets the per-round counter
                     s
+                }
+                Err(e) if soft_landing_active => {
+                    tracing::warn!(
+                        target: "jeikcode_kernel::agent",
+                        session_id = self.session_id.as_deref().unwrap_or(""),
+                        turn_id = turn_ctx.turn_id,
+                        round = turn_ctx.round,
+                        error = %e.message,
+                        "soft_landing: summary request open failed; finishing as MaxRounds"
+                    );
+                    self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
+                        .await;
+                    return;
                 }
                 // HARD OVERFLOW recovery (OFF the normal path): the prompt exceeded the
                 // window and was rejected wholesale. That prompt was never cached, so the
@@ -3196,24 +3292,22 @@ impl RunningAgent {
                                 let pause_text = i18n::format_agent_rate_limited_paused(
                                     server_message.as_deref().unwrap_or(""),
                                 );
-                                self.emit_system_notice(
-                                    convo,
-                                    &turn_ctx,
-                                    &mut notice_revisions,
-                                    &mut notice_anchors,
-                                    rl_event_id,
-                                    NoticeKind::RateLimit,
-                                    NoticeSeverity::Warning,
-                                    NoticeStatus::Settled,
-                                    pause_text,
-                                    None,
-                                    true,
-                                )
-                                .await;
-                                Self::persist_turn_diagnostic(
-                                    convo,
-                                    server_message.as_deref().unwrap_or("rate limited"),
-                                );
+                                let notice = self
+                                    .emit_system_notice(
+                                        convo,
+                                        &turn_ctx,
+                                        &mut notice_revisions,
+                                        &mut notice_anchors,
+                                        rl_event_id,
+                                        NoticeKind::RateLimit,
+                                        NoticeSeverity::Warning,
+                                        NoticeStatus::Settled,
+                                        pause_text,
+                                        None,
+                                        true,
+                                    )
+                                    .await;
+                                Self::persist_system_notice_message(convo, &notice);
                                 self.rt.emit(AgentEvent::RateLimited {
                                     reset_at_display: String::new(),
                                     reset_label: String::new(),
@@ -3274,24 +3368,22 @@ impl RunningAgent {
                             let pause_text = i18n::format_agent_rate_limited_paused(
                                 server_message.as_deref().unwrap_or(""),
                             );
-                            self.emit_system_notice(
-                                convo,
-                                &turn_ctx,
-                                &mut notice_revisions,
-                                &mut notice_anchors,
-                                rl_event_id,
-                                NoticeKind::RateLimit,
-                                NoticeSeverity::Warning,
-                                NoticeStatus::Settled,
-                                pause_text,
-                                None,
-                                true,
-                            )
-                            .await;
-                            Self::persist_turn_diagnostic(
-                                convo,
-                                server_message.as_deref().unwrap_or("rate limited"),
-                            );
+                            let notice = self
+                                .emit_system_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    rl_event_id,
+                                    NoticeKind::RateLimit,
+                                    NoticeSeverity::Warning,
+                                    NoticeStatus::Settled,
+                                    pause_text,
+                                    None,
+                                    true,
+                                )
+                                .await;
+                            Self::persist_system_notice_message(convo, &notice);
                             self.rt.emit(AgentEvent::RateLimited {
                                 reset_at_display,
                                 reset_label,
@@ -3356,28 +3448,29 @@ impl RunningAgent {
                         .map(|(id, _, _)| id)
                         .or_else(|| retry_engine.incident_id().map(str::to_string))
                         .unwrap_or_else(|| format!("err-open:{}:r{round}", turn_ctx.turn_id));
-                    self.emit_system_notice(
-                        convo,
-                        &turn_ctx,
-                        &mut notice_revisions,
-                        &mut notice_anchors,
-                        incident_id,
-                        NoticeKind::Error,
-                        NoticeSeverity::Error,
-                        NoticeStatus::Settled,
-                        e.message.clone(),
-                        None,
-                        true,
-                    )
-                    .await;
+                    let notice = self
+                        .emit_system_notice(
+                            convo,
+                            &turn_ctx,
+                            &mut notice_revisions,
+                            &mut notice_anchors,
+                            incident_id,
+                            NoticeKind::Error,
+                            NoticeSeverity::Error,
+                            NoticeStatus::Settled,
+                            e.message.clone(),
+                            None,
+                            true,
+                        )
+                        .await;
                     self.hooks.on_error(&e.message).await;
                     self.rt.emit(AgentEvent::Error {
                         message: e.message.clone(),
                         http_status: e.http_status,
                         code: e.code,
                     });
-                    // 终态始终落一条诊断：同 incident_id 已在上方收口，此处保留 convo 快照兜底。
-                    Self::persist_turn_diagnostic(convo, &e.message);
+                    // 终态始终落一条结构化诊断：与上方 SystemNotice 共享同一 event_id 与元数据。
+                    Self::persist_system_notice_message(convo, &notice);
                     self.finish_turn(convo, StopReason::ProviderError, &turn_ctx)
                         .await;
                     return;
@@ -3397,6 +3490,7 @@ impl RunningAgent {
             );
             let mut reasoning_started_at: Option<u64> = None;
             let mut reasoning_elapsed_ms: u64 = 0;
+            let mut ttft_ms: Option<u64> = None;
             // ACCUMULATE the model's reasoning/thinking across the stream alongside
             // the visible text. It is STORED on the assistant Message (the live
             // `AgentEvent::Reasoning` channel below is kept too) so a provider
@@ -3483,6 +3577,30 @@ impl RunningAgent {
                                 }
                             }
                         }
+                        if soft_landing_active {
+                            if saw_stream_content {
+                                Self::persist_partial_assistant(
+                                    convo,
+                                    &assistant_text,
+                                    &reasoning,
+                                    &reasoning_blocks,
+                                    &pending_calls,
+                                    suppress_internal_stream,
+                                    Some(&assistant_message_id),
+                                );
+                                self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
+                            }
+                            tracing::warn!(
+                                target: "jeikcode_kernel::agent",
+                                session_id = self.session_id.as_deref().unwrap_or(""),
+                                turn_id = turn_ctx.turn_id,
+                                round = turn_ctx.round,
+                                "soft_landing: summary stream timed out; finishing as MaxRounds"
+                            );
+                            self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
+                                .await;
+                            return;
+                        }
                         if !saw_text_or_tool && !saw_stream_content {
                             if self.timeouts.ttft.is_some() {
                                 let first_token_secs = self
@@ -3530,23 +3648,24 @@ impl RunningAgent {
                                     .incident_id()
                                     .map(str::to_string)
                                     .unwrap_or_else(|| format!("err-ttft:{}:r{round}", turn_ctx.turn_id));
-                                self.emit_system_notice(
-                                    convo,
-                                    &turn_ctx,
-                                    &mut notice_revisions,
-                                    &mut notice_anchors,
-                                    incident_id,
-                                    NoticeKind::Timeout,
-                                    NoticeSeverity::Error,
-                                    NoticeStatus::Settled,
-                                    msg.clone(),
-                                    None,
-                                    true,
-                                )
-                                .await;
+                                let notice = self
+                                    .emit_system_notice(
+                                        convo,
+                                        &turn_ctx,
+                                        &mut notice_revisions,
+                                        &mut notice_anchors,
+                                        incident_id,
+                                        NoticeKind::Timeout,
+                                        NoticeSeverity::Error,
+                                        NoticeStatus::Settled,
+                                        msg.clone(),
+                                        None,
+                                        true,
+                                    )
+                                    .await;
                                 self.hooks.on_error(&msg).await;
                                 self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
-                                Self::persist_turn_diagnostic(convo, &msg);
+                                Self::persist_system_notice_message(convo, &notice);
                                 self.finish_turn(convo, StopReason::Timeout, &turn_ctx).await;
                                 return;
                             }
@@ -3584,23 +3703,24 @@ impl RunningAgent {
                                 .incident_id()
                                 .map(str::to_string)
                                 .unwrap_or_else(|| format!("err-stall:{}:r{round}", turn_ctx.turn_id));
-                            self.emit_system_notice(
-                                convo,
-                                &turn_ctx,
-                                &mut notice_revisions,
-                                &mut notice_anchors,
-                                incident_id,
-                                NoticeKind::Timeout,
-                                NoticeSeverity::Error,
-                                NoticeStatus::Settled,
-                                msg.clone(),
-                                None,
-                                true,
-                            )
-                            .await;
+                            let notice = self
+                                .emit_system_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    incident_id,
+                                    NoticeKind::Timeout,
+                                    NoticeSeverity::Error,
+                                    NoticeStatus::Settled,
+                                    msg.clone(),
+                                    None,
+                                    true,
+                                )
+                                .await;
                             self.hooks.on_error(&msg).await;
                             self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
-                            Self::persist_turn_diagnostic(convo, &msg);
+                            Self::persist_system_notice_message(convo, &notice);
                             self.finish_turn(convo, StopReason::Timeout, &turn_ctx).await;
                             return;
                         }
@@ -3672,27 +3792,29 @@ impl RunningAgent {
                             &pending_calls,
                             suppress_internal_stream,
                             Some(&assistant_message_id),
-                            Some(&msg),
+                            None,
                         );
                         self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
                         let incident_id = retry_engine
                             .incident_id()
                             .map(str::to_string)
                             .unwrap_or_else(|| format!("err-stall:{}:r{round}", turn_ctx.turn_id));
-                        self.emit_system_notice(
-                            convo,
-                            &turn_ctx,
-                            &mut notice_revisions,
-                            &mut notice_anchors,
-                            incident_id,
-                            NoticeKind::Timeout,
-                            NoticeSeverity::Error,
-                            NoticeStatus::Settled,
-                            msg.clone(),
-                            Some(assistant_message_id.clone()),
-                            true,
-                        )
-                        .await;
+                        let notice = self
+                            .emit_system_notice(
+                                convo,
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                incident_id,
+                                NoticeKind::Timeout,
+                                NoticeSeverity::Error,
+                                NoticeStatus::Settled,
+                                msg.clone(),
+                                Some(assistant_message_id.clone()),
+                                true,
+                            )
+                            .await;
+                        Self::persist_system_notice_message(convo, &notice);
                         self.hooks.on_error(&msg).await;
                         self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
                         self.finish_turn(convo, StopReason::Timeout, &turn_ctx).await;
@@ -3704,10 +3826,16 @@ impl RunningAgent {
                     },
                 };
                 if ev.is_thinking() {
+                    if ttft_ms.is_none() {
+                        ttft_ms = Some(self.clock.now_millis().saturating_sub(open_started_at));
+                    }
                     saw_stream_content = true;
                     phase = crate::timeouts::StreamPhase::Thinking;
                     last_content = tokio::time::Instant::now();
                 } else if ev.is_visible_output() {
+                    if ttft_ms.is_none() {
+                        ttft_ms = Some(self.clock.now_millis().saturating_sub(open_started_at));
+                    }
                     saw_stream_content = true;
                     saw_text_or_tool = true;
                     phase = crate::timeouts::StreamPhase::Streaming;
@@ -3926,20 +4054,21 @@ impl RunningAgent {
                             let pause_text = i18n::format_agent_rate_limited_paused(
                                 server_message.as_deref().unwrap_or(""),
                             );
-                            self.emit_system_notice(
-                                convo,
-                                &turn_ctx,
-                                &mut notice_revisions,
-                                &mut notice_anchors,
-                                rl_event_id,
-                                NoticeKind::RateLimit,
-                                NoticeSeverity::Warning,
-                                NoticeStatus::Settled,
-                                pause_text,
-                                Some(assistant_message_id.clone()),
-                                true,
-                            )
-                            .await;
+                            let notice = self
+                                .emit_system_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    rl_event_id,
+                                    NoticeKind::RateLimit,
+                                    NoticeSeverity::Warning,
+                                    NoticeStatus::Settled,
+                                    pause_text,
+                                    Some(assistant_message_id.clone()),
+                                    true,
+                                )
+                                .await;
                             self.rt.emit(AgentEvent::RateLimited {
                                 reset_at_display,
                                 reset_label,
@@ -3947,10 +4076,7 @@ impl RunningAgent {
                                 auto_resuming: false,
                                 server_message: server_message.clone(),
                             });
-                            Self::persist_turn_diagnostic(
-                                convo,
-                                server_message.as_deref().unwrap_or("rate limited"),
-                            );
+                            Self::persist_system_notice_message(convo, &notice);
                             self.finish_turn(convo, StopReason::RateLimited, &turn_ctx)
                                 .await;
                             return;
@@ -3964,20 +4090,21 @@ impl RunningAgent {
                                     let pause_text = i18n::format_agent_rate_limited_paused(
                                         server_message.as_deref().unwrap_or(""),
                                     );
-                                    self.emit_system_notice(
-                                        convo,
-                                        &turn_ctx,
-                                        &mut notice_revisions,
-                                        &mut notice_anchors,
-                                        rl_event_id,
-                                        NoticeKind::RateLimit,
-                                        NoticeSeverity::Warning,
-                                        NoticeStatus::Settled,
-                                        pause_text,
-                                        None,
-                                        true,
-                                    )
-                                    .await;
+                                    let notice = self
+                                        .emit_system_notice(
+                                            convo,
+                                            &turn_ctx,
+                                            &mut notice_revisions,
+                                            &mut notice_anchors,
+                                            rl_event_id,
+                                            NoticeKind::RateLimit,
+                                            NoticeSeverity::Warning,
+                                            NoticeStatus::Settled,
+                                            pause_text,
+                                            None,
+                                            true,
+                                        )
+                                        .await;
                                     self.rt.emit(AgentEvent::RateLimited {
                                         reset_at_display: String::new(),
                                         reset_label: String::new(),
@@ -3985,10 +4112,7 @@ impl RunningAgent {
                                         auto_resuming: false,
                                         server_message: server_message.clone(),
                                     });
-                                    Self::persist_turn_diagnostic(
-                                        convo,
-                                        server_message.as_deref().unwrap_or("rate limited"),
-                                    );
+                                    Self::persist_system_notice_message(convo, &notice);
                                     self.finish_turn(convo, StopReason::RateLimited, &turn_ctx)
                                         .await;
                                     return;
@@ -4042,20 +4166,21 @@ impl RunningAgent {
                                 let pause_text = i18n::format_agent_rate_limited_paused(
                                     server_message.as_deref().unwrap_or(""),
                                 );
-                                self.emit_system_notice(
-                                    convo,
-                                    &turn_ctx,
-                                    &mut notice_revisions,
-                                    &mut notice_anchors,
-                                    rl_event_id,
-                                    NoticeKind::RateLimit,
-                                    NoticeSeverity::Warning,
-                                    NoticeStatus::Settled,
-                                    pause_text,
-                                    None,
-                                    true,
-                                )
-                                .await;
+                                let notice = self
+                                    .emit_system_notice(
+                                        convo,
+                                        &turn_ctx,
+                                        &mut notice_revisions,
+                                        &mut notice_anchors,
+                                        rl_event_id,
+                                        NoticeKind::RateLimit,
+                                        NoticeSeverity::Warning,
+                                        NoticeStatus::Settled,
+                                        pause_text,
+                                        None,
+                                        true,
+                                    )
+                                    .await;
                                 self.rt.emit(AgentEvent::RateLimited {
                                     reset_at_display,
                                     reset_label,
@@ -4063,10 +4188,7 @@ impl RunningAgent {
                                     auto_resuming: false,
                                     server_message: server_message.clone(),
                                 });
-                                Self::persist_turn_diagnostic(
-                                    convo,
-                                    server_message.as_deref().unwrap_or("rate limited"),
-                                );
+                                Self::persist_system_notice_message(convo, &notice);
                                 self.finish_turn(convo, StopReason::RateLimited, &turn_ctx)
                                     .await;
                                 return;
@@ -4074,6 +4196,31 @@ impl RunningAgent {
                         }
                     }
                     StreamEvent::Error(e) => {
+                        if soft_landing_active {
+                            if saw_stream_content {
+                                Self::persist_partial_assistant(
+                                    convo,
+                                    &assistant_text,
+                                    &reasoning,
+                                    &reasoning_blocks,
+                                    &pending_calls,
+                                    suppress_internal_stream,
+                                    Some(&assistant_message_id),
+                                );
+                                self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
+                            }
+                            tracing::warn!(
+                                target: "jeikcode_kernel::agent",
+                                session_id = self.session_id.as_deref().unwrap_or(""),
+                                turn_id = turn_ctx.turn_id,
+                                round = turn_ctx.round,
+                                error = %e.message,
+                                "soft_landing: stream error; finishing as MaxRounds"
+                            );
+                            self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
+                                .await;
+                            return;
+                        }
                         // 已开流后断流：按统一阶梯接续。已经产出的内容原样保留，
                         // 下一次请求把它作为 assistant 前缀带上（新气泡继续写）；
                         // 没拼完的工具调用从未进入 `pending_calls`，天然被丢弃。
@@ -4147,7 +4294,7 @@ impl RunningAgent {
                             &pending_calls,
                             suppress_internal_stream,
                             Some(&assistant_message_id),
-                            Some(e.message.as_str()),
+                            None,
                         );
                         if saw_stream_content {
                             self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
@@ -4156,20 +4303,22 @@ impl RunningAgent {
                             .incident_id()
                             .map(str::to_string)
                             .unwrap_or_else(|| format!("err-stream:{}:r{round}", turn_ctx.turn_id));
-                        self.emit_system_notice(
-                            convo,
-                            &turn_ctx,
-                            &mut notice_revisions,
-                            &mut notice_anchors,
-                            incident_id,
-                            NoticeKind::Error,
-                            NoticeSeverity::Error,
-                            NoticeStatus::Settled,
-                            e.message.clone(),
-                            content_anchor,
-                            true,
-                        )
-                        .await;
+                        let notice = self
+                            .emit_system_notice(
+                                convo,
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                incident_id,
+                                NoticeKind::Error,
+                                NoticeSeverity::Error,
+                                NoticeStatus::Settled,
+                                e.message.clone(),
+                                content_anchor,
+                                true,
+                            )
+                            .await;
+                        Self::persist_system_notice_message(convo, &notice);
                         self.hooks.on_error(&e.message).await;
                         self.rt.emit(AgentEvent::Error {
                             message: e.message,
@@ -4255,6 +4404,18 @@ impl RunningAgent {
                 (!saw_stream_content || filler_only_reasoning || thinking_only || blank_text_only)
                     && !truncated;
             if empty_completion {
+                if soft_landing_active {
+                    tracing::warn!(
+                        target: "jeikcode_kernel::agent",
+                        session_id = self.session_id.as_deref().unwrap_or(""),
+                        turn_id = turn_ctx.turn_id,
+                        round = turn_ctx.round,
+                        "soft_landing: summary stream returned empty completion; finishing as MaxRounds"
+                    );
+                    self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
+                        .await;
+                    return;
+                }
                 if let Some(step) = retry_engine.next(
                     RetryClass::EmptyResponse,
                     &request_seed,
@@ -4329,27 +4490,28 @@ impl RunningAgent {
                     .incident_id()
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("err-empty:{}:r{round}", turn_ctx.turn_id));
-                self.emit_system_notice(
-                    convo,
-                    &turn_ctx,
-                    &mut notice_revisions,
-                    &mut notice_anchors,
-                    incident_id,
-                    NoticeKind::Error,
-                    NoticeSeverity::Error,
-                    NoticeStatus::Settled,
-                    msg.clone(),
-                    None,
-                    true,
-                )
-                .await;
+                let notice = self
+                    .emit_system_notice(
+                        convo,
+                        &turn_ctx,
+                        &mut notice_revisions,
+                        &mut notice_anchors,
+                        incident_id,
+                        NoticeKind::Error,
+                        NoticeSeverity::Error,
+                        NoticeStatus::Settled,
+                        msg.clone(),
+                        None,
+                        true,
+                    )
+                    .await;
                 self.hooks.on_error(&msg).await;
                 self.rt.emit(AgentEvent::Error {
                     message: msg.clone(),
                     http_status: None,
                     code: None,
                 });
-                Self::persist_turn_diagnostic(convo, &msg);
+                Self::persist_system_notice_message(convo, &notice);
                 self.finish_turn(convo, StopReason::ProviderError, &turn_ctx)
                     .await;
                 return;
@@ -4413,6 +4575,7 @@ impl RunningAgent {
                 provider_model: response_model,
                 session_id: self.session_id.as_deref().map(str::to_string),
                 finish_reason,
+                ttft_ms,
             };
             let current_internal_continuation = active_internal_continuation.take();
             let mut assistant_msg =
@@ -4463,6 +4626,14 @@ impl RunningAgent {
             self.hooks.on_turn_progress(convo).await;
             self.hooks.on_turn_checkpoint(convo, &turn_ctx).await;
             if pending_calls.is_empty() {
+                if soft_landing_active {
+                    // Preserve tool_loop_state & coarse streak across kernel-forced
+                    // `ToolChoice::None` soft-landing summaries so `/goal` or synthetic
+                    // follow-up turns cannot reset loop evidence via hitting max_rounds.
+                    self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
+                        .await;
+                    return;
+                }
                 // Exact-loop evidence is consecutive across tool rounds only. A
                 // no-tool assistant reply is an observable break in that sequence,
                 // even if a host later opens a synthetic follow-up turn.
@@ -4508,26 +4679,27 @@ impl RunningAgent {
                         if continuations >= max {
                             let msg =
                                 format!("max offer_continuation continuations ({max}) reached");
-                            self.emit_system_notice(
-                                convo,
-                                &turn_ctx,
-                                &mut notice_revisions,
-                                &mut notice_anchors,
-                                format!("err-max-cont:{}", turn_ctx.turn_id),
-                                NoticeKind::Error,
-                                NoticeSeverity::Error,
-                                NoticeStatus::Settled,
-                                msg.clone(),
-                                None,
-                                true,
-                            )
-                            .await;
+                            let notice = self
+                                .emit_system_notice(
+                                    convo,
+                                    &turn_ctx,
+                                    &mut notice_revisions,
+                                    &mut notice_anchors,
+                                    format!("err-max-cont:{}", turn_ctx.turn_id),
+                                    NoticeKind::Error,
+                                    NoticeSeverity::Error,
+                                    NoticeStatus::Settled,
+                                    msg.clone(),
+                                    None,
+                                    true,
+                                )
+                                .await;
                             self.rt.emit(AgentEvent::Error {
                                 message: msg.clone(),
                                 http_status: None,
                                 code: None,
                             });
-                            Self::persist_turn_diagnostic(convo, &msg);
+                            Self::persist_system_notice_message(convo, &notice);
                             self.finish_turn(convo, StopReason::MaxContinuations, &turn_ctx)
                                 .await;
                             return;
@@ -4576,6 +4748,38 @@ impl RunningAgent {
                     .await;
                 }
                 self.finish_turn(convo, StopReason::Stopped, &turn_ctx)
+                    .await;
+                return;
+            }
+            if soft_landing_active {
+                tracing::warn!(
+                    target: "jeikcode_kernel::agent",
+                    session_id = self.session_id.as_deref().unwrap_or(""),
+                    turn_id = turn_ctx.turn_id,
+                    round = turn_ctx.round,
+                    rejected_calls = pending_calls.len(),
+                    "soft_landing: model returned tool calls despite ToolChoice::None; rejecting"
+                );
+                let mut seen_ids = std::collections::HashSet::new();
+                for call in &pending_calls {
+                    if !seen_ids.insert(call.id.clone()) {
+                        continue;
+                    }
+                    let result = ToolResult {
+                        call_id: call.id.clone(),
+                        content:
+                            "Tool execution disabled: maximum round limit reached for this turn."
+                                .to_string(),
+                        is_error: true,
+                        images: vec![],
+                    };
+                    self.rt.emit(AgentEvent::ToolResult {
+                        result: result.clone(),
+                    });
+                    convo.push(Message::tool_result(call.id.clone(), result.content, true));
+                }
+                self.hooks.on_turn_progress(convo).await;
+                self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
                     .await;
                 return;
             }
@@ -4963,6 +5167,7 @@ impl RunningAgent {
                                     message,
                                 });
                             }))
+                            .with_call_id(call.id.clone())
                         },
                         requester: Some(self.rt.requester()),
                     };
@@ -5213,21 +5418,22 @@ impl RunningAgent {
                 });
             }
             if policy_denied {
-                self.emit_system_notice(
-                    convo,
-                    &turn_ctx,
-                    &mut notice_revisions,
-                    &mut notice_anchors,
-                    format!("err-policy:{}", turn_ctx.turn_id),
-                    NoticeKind::Error,
-                    NoticeSeverity::Error,
-                    NoticeStatus::Settled,
-                    "policy denied",
-                    None,
-                    true,
-                )
-                .await;
-                Self::persist_turn_diagnostic(convo, "policy denied");
+                let notice = self
+                    .emit_system_notice(
+                        convo,
+                        &turn_ctx,
+                        &mut notice_revisions,
+                        &mut notice_anchors,
+                        format!("err-policy:{}", turn_ctx.turn_id),
+                        NoticeKind::Error,
+                        NoticeSeverity::Error,
+                        NoticeStatus::Settled,
+                        "policy denied",
+                        None,
+                        true,
+                    )
+                    .await;
+                Self::persist_system_notice_message(convo, &notice);
                 self.finish_turn(convo, StopReason::PolicyDenied, &turn_ctx)
                     .await;
                 return;
@@ -5283,26 +5489,27 @@ impl RunningAgent {
             }
             if echo_rounds >= ECHO_STOP_AT {
                 let message = i18n::format_agent_echo_loop_terminal(echo_rounds);
-                self.emit_system_notice(
-                    convo,
-                    &turn_ctx,
-                    &mut notice_revisions,
-                    &mut notice_anchors,
-                    format!("err-echo:{}", turn_ctx.turn_id),
-                    NoticeKind::Error,
-                    NoticeSeverity::Error,
-                    NoticeStatus::Settled,
-                    message.clone(),
-                    None,
-                    true,
-                )
-                .await;
+                let notice = self
+                    .emit_system_notice(
+                        convo,
+                        &turn_ctx,
+                        &mut notice_revisions,
+                        &mut notice_anchors,
+                        format!("err-echo:{}", turn_ctx.turn_id),
+                        NoticeKind::Error,
+                        NoticeSeverity::Error,
+                        NoticeStatus::Settled,
+                        message.clone(),
+                        None,
+                        true,
+                    )
+                    .await;
                 self.rt.emit(AgentEvent::Error {
                     message: message.clone(),
                     http_status: None,
                     code: None,
                 });
-                Self::persist_turn_diagnostic(convo, &message);
+                Self::persist_system_notice_message(convo, &notice);
                 self.finish_turn(convo, StopReason::RepeatLoop, &turn_ctx)
                     .await;
                 return;
@@ -5366,21 +5573,22 @@ impl RunningAgent {
                     }
                     ToolLoopDecision::Stop => {
                         let warning = tool_loop_terminal_warning(policy);
-                        self.emit_system_notice(
-                            convo,
-                            &turn_ctx,
-                            &mut notice_revisions,
-                            &mut notice_anchors,
-                            format!("err-tool-loop:{}", turn_ctx.turn_id),
-                            NoticeKind::Warning,
-                            NoticeSeverity::Warning,
-                            NoticeStatus::Settled,
-                            warning.clone(),
-                            None,
-                            true,
-                        )
-                        .await;
-                        Self::persist_turn_diagnostic(convo, &warning);
+                        let notice = self
+                            .emit_system_notice(
+                                convo,
+                                &turn_ctx,
+                                &mut notice_revisions,
+                                &mut notice_anchors,
+                                format!("err-tool-loop:{}", turn_ctx.turn_id),
+                                NoticeKind::Warning,
+                                NoticeSeverity::Warning,
+                                NoticeStatus::Settled,
+                                warning.clone(),
+                                None,
+                                true,
+                            )
+                            .await;
+                        Self::persist_system_notice_message(convo, &notice);
                         self.finish_turn(convo, StopReason::ToolLoopDetected, &turn_ctx)
                             .await;
                         return;
@@ -5418,26 +5626,27 @@ impl RunningAgent {
             // similarly owns a replay of the model's own narrative.
             if !exact_streak_active && !echo_streak_active && repeat_rounds >= MAX_REPEAT_ROUNDS {
                 let message = i18n::format_agent_repeat_loop_terminal(repeat_rounds);
-                self.emit_system_notice(
-                    convo,
-                    &turn_ctx,
-                    &mut notice_revisions,
-                    &mut notice_anchors,
-                    format!("err-repeat:{}", turn_ctx.turn_id),
-                    NoticeKind::Error,
-                    NoticeSeverity::Error,
-                    NoticeStatus::Settled,
-                    message.clone(),
-                    None,
-                    true,
-                )
-                .await;
+                let notice = self
+                    .emit_system_notice(
+                        convo,
+                        &turn_ctx,
+                        &mut notice_revisions,
+                        &mut notice_anchors,
+                        format!("err-repeat:{}", turn_ctx.turn_id),
+                        NoticeKind::Error,
+                        NoticeSeverity::Error,
+                        NoticeStatus::Settled,
+                        message.clone(),
+                        None,
+                        true,
+                    )
+                    .await;
                 self.rt.emit(AgentEvent::Error {
                     message: message.clone(),
                     http_status: None,
                     code: None,
                 });
-                Self::persist_turn_diagnostic(convo, &message);
+                Self::persist_system_notice_message(convo, &notice);
                 self.finish_turn(convo, StopReason::RepeatLoop, &turn_ctx)
                     .await;
                 return;
@@ -5596,9 +5805,9 @@ impl AgentBuilder {
     pub fn hooks(self, h: Arc<dyn LifecycleHooks>) -> Self {
         self.hook(h)
     }
-    /// Hard cap on LLM rounds per turn (safety fuse; None = unlimited).
+    /// Hard cap on LLM rounds per turn (`0` or `None` = unlimited).
     pub fn max_rounds(mut self, n: u32) -> Self {
-        self.max_rounds = Some(n);
+        self.max_rounds = (n != 0).then_some(n);
         self
     }
     /// See `AgentBuilder.round_cap_checkpoint`. Default false.
@@ -6433,7 +6642,10 @@ mod internal_continuation_compaction_tests {
                     }),
                     StreamEvent::Done { truncated: false },
                 ],
-                vec![StreamEvent::Done { truncated: false }],
+                vec![
+                    StreamEvent::TextDelta("done".into()),
+                    StreamEvent::Done { truncated: false },
+                ],
             ])
             .with_ctx_window(1_000),
         );

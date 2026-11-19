@@ -548,6 +548,7 @@ fn list_project_sessions(working_dir: &std::path::Path) -> Vec<(String, SessionS
                 jeikcode_capabilities::session::SessionOrigin::Manual => "manual".to_string(),
                 jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled".to_string(),
                 jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol".to_string(),
+                jeikcode_capabilities::session::SessionOrigin::Subagent => "subagent".to_string(),
             }),
             is_scheduled: meta.as_ref().is_some_and(|m| {
                 m.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled

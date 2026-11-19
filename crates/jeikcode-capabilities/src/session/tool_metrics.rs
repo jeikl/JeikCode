@@ -71,6 +71,91 @@ pub struct ToolMetricRecord {
     pub switch_ms: u64,
     #[serde(default)]
     pub status: ToolMetricStatus,
+    /// 等待人工或策略审批的耗时（毫秒，不含工具本身执行耗时）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_wait_ms: Option<u64>,
+    /// 本次调用是否命中本地 JSON 参数自动修复。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repaired_args: Option<bool>,
+    /// 脱敏且截断至 80 字符以内的操作目标摘要（路径/命令/检索词/URL）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_hint: Option<String>,
+    /// 工具返回在折叠或长度上限截断前的原始字节大小。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_bytes: Option<usize>,
+    /// 返回内容是否发生过产物折叠或长度截断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// 关联的 Turn ID（与快照及显示账本关联）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<u64>,
+    /// 关联的 Turn 内 Round 序号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<u32>,
+}
+
+const MAX_TARGET_HINT_CHARS: usize = 80;
+
+fn mask_inline_secret(raw: &str) -> String {
+    let mut out = raw.to_string();
+    for marker in ["Bearer ", "token=", "password=", "api_key=", "apikey="] {
+        let lower = out.to_ascii_lowercase();
+        let needle = marker.to_ascii_lowercase();
+        if let Some(pos) = lower.find(&needle) {
+            let start = pos + marker.len();
+            let end = out[start..]
+                .find(|c: char| c.is_whitespace() || matches!(c, '&' | ';' | '"' | '\''))
+                .map(|off| start + off)
+                .unwrap_or(out.len());
+            if end > start {
+                out.replace_range(start..end, "***");
+            }
+        }
+    }
+    out
+}
+
+/// 从工具调用参数中抽取单行、脱敏、不超过 80 字符的目标摘要，避免把大段代码或凭据写入指标账本。
+pub fn sanitize_target_hint(tool_name: &str, args_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(args_json).ok()?;
+    let obj = value.as_object()?;
+    if tool_name.eq_ignore_ascii_case("task") {
+        if let Some(arr) = obj.get("tasks").and_then(|v| v.as_array()) {
+            return Some(format!("{} subtask(s)", arr.len()));
+        }
+    }
+    let raw = [
+        "file_path",
+        "path",
+        "target",
+        "command",
+        "cmd",
+        "pattern",
+        "query",
+        "url",
+        "uri",
+        "symbol",
+    ]
+    .iter()
+    .find_map(|key| obj.get(*key).and_then(|v| v.as_str()))?;
+    let single_line: String = mask_inline_secret(raw)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = single_line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let count = trimmed.chars().count();
+    if count <= MAX_TARGET_HINT_CHARS {
+        Some(trimmed.to_string())
+    } else {
+        let head: String = trimmed
+            .chars()
+            .take(MAX_TARGET_HINT_CHARS.saturating_sub(1))
+            .collect();
+        Some(format!("{head}…"))
+    }
 }
 
 impl ToolMetricRecord {
@@ -89,6 +174,13 @@ impl ToolMetricRecord {
             duration_ms: None,
             switch_ms,
             status: ToolMetricStatus::Running,
+            approval_wait_ms: None,
+            repaired_args: None,
+            target_hint: None,
+            result_bytes: None,
+            truncated: None,
+            turn_id: None,
+            round: None,
         }
     }
 
@@ -123,14 +215,12 @@ impl SessionManager {
         self.append_jsonl_line_at(id, &path, "tool metrics", &line)
     }
 
-    /// Read the tail of the metrics log and return the LAST record per call id.
-    /// Malformed/partial lines are skipped: this is auxiliary observability data
-    /// and must never break session loading.
-    pub fn read_tool_metrics(&self, id: &str) -> SessionResult<HashMap<String, ToolMetricRecord>> {
+    /// 按时序读取会话工具指标账本中的合法记录（尾部定界读取，跳过损坏或半截行）。
+    pub fn read_tool_metrics_events(&self, id: &str) -> SessionResult<Vec<ToolMetricRecord>> {
         let path = self.tool_metrics_path(id)?;
         let mut file = match std::fs::File::open(&path) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(source) => return Err(SessionStoreError::Io { path, source }),
         };
         let len = file
@@ -152,7 +242,7 @@ impl SessionManager {
         file.read_to_end(&mut bytes)
             .map_err(|source| SessionStoreError::Io { path, source })?;
         let text = String::from_utf8_lossy(&bytes);
-        let mut out: HashMap<String, ToolMetricRecord> = HashMap::new();
+        let mut out = Vec::new();
         for (index, line) in text.lines().enumerate() {
             // A tail read can begin mid-line; drop that first partial fragment.
             if index == 0 && start > 0 && !line.trim_start().starts_with('{') {
@@ -164,6 +254,17 @@ impl SessionManager {
             if record.call_id.is_empty() {
                 continue;
             }
+            out.push(record);
+        }
+        Ok(out)
+    }
+
+    /// Read the tail of the metrics log and return the LAST record per call id.
+    /// Malformed/partial lines are skipped: this is auxiliary observability data
+    /// and must never break session loading.
+    pub fn read_tool_metrics(&self, id: &str) -> SessionResult<HashMap<String, ToolMetricRecord>> {
+        let mut out: HashMap<String, ToolMetricRecord> = HashMap::new();
+        for record in self.read_tool_metrics_events(id)? {
             out.insert(record.call_id.clone(), record);
         }
         Ok(out)

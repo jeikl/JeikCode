@@ -228,6 +228,8 @@ pub(super) fn zh_tw(msg: Msg<'_>) -> Cow<'static, str> {
             format!("偵測到工具呼叫死迴圈：相同呼叫或唯讀批次處理連續 {threshold} 次回傳相同結果，已在下次請求前停止").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("已停止：模型連續 {rounds} 輪重複相同的工具呼叫模式").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("已達到最大輪次上限（{cap} 輪）；已停止呼叫工具並產生進度總結與後續建議。").into(),
         _ => super::zh_cn::zh_cn(msg),
     }
 }

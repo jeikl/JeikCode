@@ -413,6 +413,7 @@ fn normalize_legacy_turns(session: &LegacySession) -> anyhow::Result<NormalizedL
             used_tokens: checked_u32(stat.used_tokens, "used_tokens")?,
             ctx_window: checked_u32(stat.ctx_window, "ctx_window")?,
             model_usage: Vec::new(),
+            stop_reason: None,
         });
         previous_after = stat.after_message;
     }
@@ -548,6 +549,8 @@ fn convert_legacy_session_with_diagnostic(
         reasoning_effort: None,
         thinking_budget: None,
         approval_mode: None,
+        parent_session_id: None,
+        parent_call_id: None,
     };
     meta.auto_name_from_messages(&snapshot.messages);
 
@@ -2806,6 +2809,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 128,
             model_usage: Vec::new(),
+            stop_reason: None,
         });
         let native_presentation = PresentationEntry {
             anchor: DisplayAnchor::AfterTurn {
@@ -3082,6 +3086,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 128,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
         );
         let original_meta = meta.clone();
@@ -3990,6 +3995,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         });
         let lease = manager.acquire_lease(id).unwrap();
         manager

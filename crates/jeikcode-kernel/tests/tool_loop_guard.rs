@@ -263,7 +263,7 @@ async fn intentional_exact_repetition_can_raise_the_policy_threshold() {
 
 #[tokio::test]
 async fn coarse_repeat_fuse_remains_on_when_exact_policy_is_disabled() {
-    let mut rounds = (1..=7)
+    let mut rounds = (1..=8)
         .map(|round| tool_round(&format!("c{round}"), r#"{"path":"same"}"#))
         .collect::<Vec<_>>();
     rounds.push(stop_round("must never be requested"));
@@ -280,9 +280,9 @@ async fn coarse_repeat_fuse_remains_on_when_exact_policy_is_disabled() {
     shutdown(handle).await;
 
     assert_eq!(terminal_reason(&events), Some(StopReason::RepeatLoop));
-    assert_eq!(calls.lock().unwrap().len(), 6);
-    assert_eq!(started_ids(&events).len(), 6);
-    assert_eq!(result_ids(&events).len(), 6);
+    assert_eq!(calls.lock().unwrap().len(), 7);
+    assert_eq!(started_ids(&events).len(), 7);
+    assert_eq!(result_ids(&events).len(), 7);
 }
 
 #[tokio::test]
@@ -294,6 +294,7 @@ async fn repeated_call_with_changing_results_hits_the_coarse_repeat_fuse() {
         tool_round("c4", r#"{"path":"same"}"#),
         tool_round("c5", r#"{"path":"same"}"#),
         tool_round("c6", r#"{"path":"same"}"#),
+        tool_round("c7", r#"{"path":"same"}"#),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -306,6 +307,7 @@ async fn repeated_call_with_changing_results_hits_the_coarse_repeat_fuse() {
             "version-4",
             "version-5",
             "version-6",
+            "version-7",
         ])))
         .tool_loop_policy(ToolLoopPolicy::default())
         .max_rounds(20)
@@ -316,9 +318,9 @@ async fn repeated_call_with_changing_results_hits_the_coarse_repeat_fuse() {
     shutdown(handle).await;
 
     assert_eq!(terminal_reason(&events), Some(StopReason::RepeatLoop));
-    assert_eq!(calls.lock().unwrap().len(), 6);
-    assert_eq!(started_ids(&events).len(), 6);
-    assert_eq!(result_ids(&events).len(), 6);
+    assert_eq!(calls.lock().unwrap().len(), 7);
+    assert_eq!(started_ids(&events).len(), 7);
+    assert_eq!(result_ids(&events).len(), 7);
 }
 
 #[tokio::test]
@@ -328,6 +330,7 @@ async fn exact_stable_loop_warns_on_third_and_stops_after_fourth_without_fifth_r
         tool_round("c2", r#"{"path":"same"}"#),
         tool_round("c3", r#"{"path":"same"}"#),
         tool_round("c4", r#"{"path":"same"}"#),
+        tool_round("c5", r#"{"path":"same"}"#),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -345,20 +348,20 @@ async fn exact_stable_loop_warns_on_third_and_stops_after_fourth_without_fifth_r
     assert_eq!(
         terminal_reason(&events),
         Some(StopReason::ToolLoopDetected),
-        "the fourth unchanged execution must end the turn as a detected tool loop"
+        "the fifth unchanged execution must end the turn as a detected tool loop"
     );
     assert_eq!(
         calls.lock().unwrap().len(),
-        4,
-        "termination after the fourth result must prevent a fifth provider request"
+        5,
+        "termination after the fifth result must prevent a sixth provider request"
     );
 
     let started = started_ids(&events);
     let results = result_ids(&events);
-    assert_eq!(started, vec!["c1", "c2", "c3", "c4"]);
+    assert_eq!(started, vec!["c1", "c2", "c3", "c4", "c5"]);
     assert_eq!(
         results, started,
-        "all four executed calls must have exactly one matching ToolResult"
+        "all five executed calls must have exactly one matching ToolResult"
     );
 
     let loop_warnings = warnings(&events);
@@ -380,8 +383,8 @@ async fn exact_stable_loop_warns_on_third_and_stops_after_fourth_without_fifth_r
     );
     assert_eq!(
         results_before_warning(loop_warnings[1].0),
-        4,
-        "the terminal diagnostic must be emitted only after the fourth result is applied"
+        5,
+        "the terminal diagnostic must be emitted only after the fifth result is applied"
     );
 }
 
@@ -392,6 +395,7 @@ async fn exact_stable_read_only_batch_is_detected_without_a_coarse_signature_gua
         tool_batch_round(2),
         tool_batch_round(3),
         tool_batch_round(4),
+        tool_batch_round(5),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -411,9 +415,9 @@ async fn exact_stable_read_only_batch_is_detected_without_a_coarse_signature_gua
         Some(StopReason::ToolLoopDetected),
         "an unchanged all-read-only batch must not bypass loop detection"
     );
-    assert_eq!(calls.lock().unwrap().len(), 4);
-    assert_eq!(started_ids(&events).len(), 8);
-    assert_eq!(result_ids(&events).len(), 8);
+    assert_eq!(calls.lock().unwrap().len(), 5);
+    assert_eq!(started_ids(&events).len(), 10);
+    assert_eq!(result_ids(&events).len(), 10);
 }
 
 #[tokio::test]
@@ -423,6 +427,7 @@ async fn repeated_mutating_call_with_identical_observation_is_detected() {
         tool_round("c2", r#"{"path":"same"}"#),
         tool_round("c3", r#"{"path":"same"}"#),
         tool_round("c4", r#"{"path":"same"}"#),
+        tool_round("c5", r#"{"path":"same"}"#),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -440,7 +445,7 @@ async fn repeated_mutating_call_with_identical_observation_is_detected() {
     shutdown(handle).await;
 
     assert_eq!(terminal_reason(&events), Some(StopReason::ToolLoopDetected));
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
     assert_eq!(warnings(&events).len(), 2);
 }
 
@@ -451,6 +456,7 @@ async fn repeated_failed_mutating_call_is_also_detected() {
         tool_round("c2", r#"{"command":"same"}"#),
         tool_round("c3", r#"{"command":"same"}"#),
         tool_round("c4", r#"{"command":"same"}"#),
+        tool_round("c5", r#"{"command":"same"}"#),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -468,7 +474,7 @@ async fn repeated_failed_mutating_call_is_also_detected() {
     shutdown(handle).await;
 
     assert_eq!(terminal_reason(&events), Some(StopReason::ToolLoopDetected));
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
     assert_eq!(warnings(&events).len(), 2);
 }
 
@@ -555,19 +561,21 @@ async fn real_user_steer_resets_the_consecutive_streak() {
 #[tokio::test]
 async fn synthetic_continuation_preserves_streak_across_turn_boundary() {
     let provider = Arc::new(RecordingProvider::new(vec![
-        // Initial user turn establishes a streak of two and is cut by the round fuse.
+        // 首轮在上限 3 内建立连续 3 次重复（并在第 3 次触发提醒）后进入软着陆。
         tool_round("c1", r#"{"path":"same"}"#),
         tool_round("c2", r#"{"path":"same"}"#),
-        // Goal-mode synthetic continuation retains the streak: c3 warns, c4 stops.
         tool_round("c3", r#"{"path":"same"}"#),
+        stop_round("soft-landing summary after hitting cap 3"),
+        // goal 模式的合成续跑保留连续计数：c4 继续，c5 触发停止阈值 5。
         tool_round("c4", r#"{"path":"same"}"#),
+        tool_round("c5", r#"{"path":"same"}"#),
     ]));
     let calls = provider.calls();
     let mut handle = Agent::builder()
         .provider(provider)
         .tools(mounted_probe(ReadProbeTool::stable("unchanged")))
         .tool_loop_policy(ToolLoopPolicy::default())
-        .max_rounds(2)
+        .max_rounds(3)
         .build()
         .spawn();
 
@@ -589,31 +597,42 @@ async fn synthetic_continuation_preserves_streak_across_turn_boundary() {
     );
     assert_eq!(
         calls.lock().unwrap().len(),
-        4,
-        "the synthetic turn must terminate after c4 without its fallback request"
+        6,
+        "3 tool rounds + 1 soft landing round + 2 synthetic loop rounds"
     );
-    assert_eq!(started_ids(&first), vec!["c1", "c2"]);
-    assert_eq!(result_ids(&first), vec!["c1", "c2"]);
-    assert_eq!(started_ids(&second), vec!["c3", "c4"]);
-    assert_eq!(result_ids(&second), vec!["c3", "c4"]);
+    assert_eq!(started_ids(&first), vec!["c1", "c2", "c3"]);
+    assert_eq!(result_ids(&first), vec!["c1", "c2", "c3"]);
+    assert_eq!(started_ids(&second), vec!["c4", "c5"]);
+    assert_eq!(result_ids(&second), vec!["c4", "c5"]);
 
-    let loop_warnings = warnings(&second);
-    assert_eq!(loop_warnings.len(), 2);
-    let results_before_warning = |warning_index| {
-        second[..warning_index]
+    let results_before = |events: &[AgentEvent], warning_index| {
+        events[..warning_index]
             .iter()
             .filter(|event| matches!(event, AgentEvent::ToolResult { .. }))
             .count()
     };
+    let first_warnings = warnings(&first);
     assert_eq!(
-        results_before_warning(loop_warnings[0].0),
-        1,
-        "c3 is the third execution in the preserved streak and must warn after its result"
+        first_warnings.len(),
+        2,
+        "Turn 1 emits loop warning after c3 plus MaxRounds soft-landing warning: {first_warnings:?}"
     );
     assert_eq!(
-        results_before_warning(loop_warnings[1].0),
+        results_before(&first, first_warnings[0].0),
+        3,
+        "c3 is the third execution and warns after its result"
+    );
+    assert_eq!(
+        results_before(&first, first_warnings[1].0),
+        3,
+        "MaxRounds notice fires after Turn 1 executes its 3 capped rounds"
+    );
+    let second_warnings = warnings(&second);
+    assert_eq!(second_warnings.len(), 1);
+    assert_eq!(
+        results_before(&second, second_warnings[0].0),
         2,
-        "c4 is the fourth execution in the preserved streak and must diagnose after its result"
+        "c5 is the fifth execution in the preserved streak and stops after its result"
     );
 }
 
@@ -661,7 +680,7 @@ async fn varied_arguments_are_bounded_by_max_rounds_not_exact_loop_detection() {
         tool_round("c2", r#"{"path":"two"}"#),
         tool_round("c3", r#"{"path":"three"}"#),
         tool_round("c4", r#"{"path":"four"}"#),
-        stop_round("must never be requested"),
+        stop_round("soft-landing summary"),
     ]));
     let calls = provider.calls();
     let mut handle = Agent::builder()
@@ -680,11 +699,14 @@ async fn varied_arguments_are_bounded_by_max_rounds_not_exact_loop_detection() {
         Some(StopReason::MaxRounds),
         "argument drift must bypass the exact guard but remain bounded by max_rounds"
     );
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
     assert_eq!(started_ids(&events).len(), 4);
     assert_eq!(result_ids(&events).len(), 4);
     assert!(
-        warnings(&events).is_empty(),
+        events.iter().all(|event| !matches!(
+            event,
+            AgentEvent::SystemNotice(notice) if notice.event_id.starts_with("tool-loop-warn:")
+        )),
         "different arguments must not trigger the exact-loop warning"
     );
 }
@@ -754,6 +776,7 @@ async fn echo_loop_reminds_twice_then_stops_on_the_fourth_replay() {
         echo_round("c2", r#"{"path":"same"}"#, ECHO_THINKING),
         echo_round("c3", r#"{"path":"same"}"#, ECHO_THINKING),
         echo_round("c4", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c5", r#"{"path":"same"}"#, ECHO_THINKING),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -771,34 +794,36 @@ async fn echo_loop_reminds_twice_then_stops_on_the_fourth_replay() {
     assert_eq!(
         terminal_reason(&events),
         Some(StopReason::RepeatLoop),
-        "two ignored reminders must stop as an echo, not wait for a fifth request"
+        "two ignored reminders must stop as an echo at round 5, not wait for a sixth request"
     );
     assert_eq!(
         calls.lock().unwrap().len(),
-        4,
-        "termination after the fourth identical execution must prevent a fifth provider request"
+        5,
+        "termination after the fifth identical execution must prevent a sixth provider request"
     );
-    assert_eq!(started_ids(&events), vec!["c1", "c2", "c3", "c4"]);
-    assert_eq!(result_ids(&events), vec!["c1", "c2", "c3", "c4"]);
+    assert_eq!(started_ids(&events), vec!["c1", "c2", "c3", "c4", "c5"]);
+    assert_eq!(result_ids(&events), vec!["c1", "c2", "c3", "c4", "c5"]);
 
     let loop_warnings = warnings(&events);
     assert_eq!(
         loop_warnings.len(),
         2,
-        "echo must remind on the second and third replay and not also fire the exact-guard warning"
+        "echo must remind on rounds 3 and 4 and not also fire the exact-guard warning"
     );
-    assert!(
-        loop_warnings[0].1.contains("你死循环了"),
-        "the first reminder must tell the model it is looping: {}",
+    assert_eq!(
+        loop_warnings[0].1,
+        jeikcode_config::i18n::format_agent_echo_loop_notice(false),
+        "the first reminder must emit the localized non-final echo notice: {}",
         loop_warnings[0].1
     );
-    assert!(
-        loop_warnings[1].1.contains("本回合将停止"),
-        "the last reminder must warn that the next replay stops the turn: {}",
+    assert_eq!(
+        loop_warnings[1].1,
+        jeikcode_config::i18n::format_agent_echo_loop_notice(true),
+        "the last reminder must emit the localized final echo notice: {}",
         loop_warnings[1].1
     );
-    assert_eq!(results_before(&events, loop_warnings[0].0), 2);
-    assert_eq!(results_before(&events, loop_warnings[1].0), 3);
+    assert_eq!(results_before(&events, loop_warnings[0].0), 3);
+    assert_eq!(results_before(&events, loop_warnings[1].0), 4);
 }
 
 #[tokio::test]
@@ -808,6 +833,7 @@ async fn echo_loop_still_fires_when_exact_policy_is_disabled() {
         echo_round("c2", r#"{"path":"same"}"#, ECHO_THINKING),
         echo_round("c3", r#"{"path":"same"}"#, ECHO_THINKING),
         echo_round("c4", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c5", r#"{"path":"same"}"#, ECHO_THINKING),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -822,7 +848,7 @@ async fn echo_loop_still_fires_when_exact_policy_is_disabled() {
     shutdown(handle).await;
 
     assert_eq!(terminal_reason(&events), Some(StopReason::RepeatLoop));
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
     assert_eq!(warnings(&events).len(), 2);
 }
 
@@ -833,6 +859,7 @@ async fn visible_text_echo_is_detected_without_a_reasoning_channel() {
         text_echo_round("c2", r#"{"path":"same"}"#, SHORT_ECHO),
         text_echo_round("c3", r#"{"path":"same"}"#, SHORT_ECHO),
         text_echo_round("c4", r#"{"path":"same"}"#, SHORT_ECHO),
+        text_echo_round("c5", r#"{"path":"same"}"#, SHORT_ECHO),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -851,7 +878,7 @@ async fn visible_text_echo_is_detected_without_a_reasoning_channel() {
         Some(StopReason::RepeatLoop),
         "models with no reasoning channel must still echo-match on visible text"
     );
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
     assert_eq!(warnings(&events).len(), 2);
 }
 
@@ -863,6 +890,7 @@ async fn whitespace_only_changes_still_count_as_an_echo() {
         echo_round("c2", r#"{"path":"same"}"#, &spaced),
         echo_round("c3", r#"{"path":"same"}"#, ECHO_THINKING),
         echo_round("c4", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c5", r#"{"path":"same"}"#, ECHO_THINKING),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -877,7 +905,7 @@ async fn whitespace_only_changes_still_count_as_an_echo() {
     shutdown(handle).await;
 
     assert_eq!(terminal_reason(&events), Some(StopReason::RepeatLoop));
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
 }
 
 #[tokio::test]
@@ -887,6 +915,7 @@ async fn short_reasoning_echo_reminds_twice_then_stops() {
         echo_round("c2", r#"{"path":"same"}"#, SHORT_ECHO),
         echo_round("c3", r#"{"path":"same"}"#, SHORT_ECHO),
         echo_round("c4", r#"{"path":"same"}"#, SHORT_ECHO),
+        echo_round("c5", r#"{"path":"same"}"#, SHORT_ECHO),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -906,7 +935,7 @@ async fn short_reasoning_echo_reminds_twice_then_stops() {
         Some(StopReason::RepeatLoop),
         "short thinking such as a section heading must still be an echo"
     );
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
     assert_eq!(warnings(&events).len(), 2);
 }
 
@@ -917,6 +946,7 @@ async fn silent_tool_only_rounds_stay_with_the_exact_guard() {
         tool_round("c2", r#"{"path":"same"}"#),
         tool_round("c3", r#"{"path":"same"}"#),
         tool_round("c4", r#"{"path":"same"}"#),
+        tool_round("c5", r#"{"path":"same"}"#),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -936,7 +966,7 @@ async fn silent_tool_only_rounds_stay_with_the_exact_guard() {
         Some(StopReason::ToolLoopDetected),
         "no thinking and no visible text must not be treated as an echo"
     );
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
 }
 
 #[tokio::test]
@@ -950,6 +980,7 @@ async fn changing_reasoning_does_not_trip_echo_even_with_identical_tools() {
             &format!("{ECHO_THINKING} three"),
         ),
         echo_round("c4", r#"{"path":"same"}"#, &format!("{ECHO_THINKING} four")),
+        echo_round("c5", r#"{"path":"same"}"#, &format!("{ECHO_THINKING} five")),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -967,9 +998,9 @@ async fn changing_reasoning_does_not_trip_echo_even_with_identical_tools() {
     assert_eq!(
         terminal_reason(&events),
         Some(StopReason::ToolLoopDetected),
-        "progress in the narrative is not an echo; exact stable-result detection still stops at 4"
+        "progress in the narrative is not an echo; exact stable-result detection still stops at 5"
     );
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
 }
 
 #[tokio::test]
@@ -977,7 +1008,8 @@ async fn echo_nudge_allows_course_correction_instead_of_stopping() {
     let provider = Arc::new(RecordingProvider::new(vec![
         echo_round("c1", r#"{"path":"same"}"#, ECHO_THINKING),
         echo_round("c2", r#"{"path":"same"}"#, ECHO_THINKING),
-        tool_round("c3", r#"{"path":"other"}"#),
+        echo_round("c3", r#"{"path":"same"}"#, ECHO_THINKING),
+        tool_round("c4", r#"{"path":"other"}"#),
         stop_round("changed approach after the echo warning"),
     ]));
     let calls = provider.calls();
@@ -993,12 +1025,12 @@ async fn echo_nudge_allows_course_correction_instead_of_stopping() {
     shutdown(handle).await;
 
     assert_eq!(terminal_reason(&events), Some(StopReason::Stopped));
-    assert_eq!(calls.lock().unwrap().len(), 4);
-    assert_eq!(started_ids(&events).len(), 3);
+    assert_eq!(calls.lock().unwrap().len(), 5);
+    assert_eq!(started_ids(&events).len(), 4);
     assert_eq!(
         warnings(&events).len(),
         1,
-        "the second identical narrative must warn, then a different call must be allowed to finish"
+        "the third identical narrative must warn, then a different call must be allowed to finish"
     );
 }
 
@@ -1048,6 +1080,7 @@ async fn repeated_failed_call_with_short_thinking_is_an_echo() {
         echo_round("c2", r#"{"path":"same"}"#, SHORT_ECHO),
         echo_round("c3", r#"{"path":"same"}"#, SHORT_ECHO),
         echo_round("c4", r#"{"path":"same"}"#, SHORT_ECHO),
+        echo_round("c5", r#"{"path":"same"}"#, SHORT_ECHO),
         stop_round("must never be requested"),
     ]));
     let calls = provider.calls();
@@ -1064,7 +1097,7 @@ async fn repeated_failed_call_with_short_thinking_is_an_echo() {
     shutdown(handle).await;
 
     assert_eq!(terminal_reason(&events), Some(StopReason::RepeatLoop));
-    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 5);
     assert_eq!(warnings(&events).len(), 2);
 }
 
@@ -1178,16 +1211,17 @@ async fn soft_intercept_with_normal_status_and_different_content_does_not_nudge_
 
 #[tokio::test]
 async fn exact_identical_calls_with_identical_output_triggers_repeat_nudge() {
-    // Round 1 and Round 2 have identical tool arguments AND identical output.
-    // This is a true dead loop suspect -> must trigger REPEAT_LOOP_NUDGE on round 2.
+    // 连续 3 轮参数和输出完全一致，达到 REPEAT_NUDGE_AT=3 时必须注入重复调用纠偏提示。
     let provider = Arc::new(RecordingProvider::new(vec![
         tool_round("c1", r#"{"path":"foo"}"#),
         tool_round("c2", r#"{"path":"foo"}"#),
+        tool_round("c3", r#"{"path":"foo"}"#),
         stop_round("stopped after nudge"),
     ]));
     let calls = provider.calls();
     let probe = Arc::new(TransitionProbeTool {
         results: Mutex::new(VecDeque::from(vec![
+            ("Identical output".into(), false),
             ("Identical output".into(), false),
             ("Identical output".into(), false),
         ])),
@@ -1205,8 +1239,8 @@ async fn exact_identical_calls_with_identical_output_triggers_repeat_nudge() {
     shutdown(handle).await;
 
     assert_eq!(terminal_reason(&events), Some(StopReason::Stopped));
-    assert_eq!(calls.lock().unwrap().len(), 3);
-    let history = &calls.lock().unwrap()[2].0;
+    assert_eq!(calls.lock().unwrap().len(), 4);
+    let history = &calls.lock().unwrap()[3].0;
     assert!(
         history
             .iter()

@@ -193,11 +193,25 @@ async fn max_rounds_stop_reason() {
 
     let mut events = handle.events;
     let mut reason: Option<StopReason> = None;
+    let mut saw_warn_notice = false;
+    let mut saw_error_event = false;
     let driven = tokio::time::timeout(OUTER_GUARD, async {
         while let Some(ev) = events.recv().await {
-            if let AgentEvent::TurnComplete { reason: r } = ev {
-                reason = Some(r);
-                break;
+            match ev {
+                AgentEvent::SystemNotice(notice)
+                    if notice.event_id.starts_with("warn-max-rounds:")
+                        && notice.kind == jeikcode_kernel::event::NoticeKind::Warning
+                        && notice.severity == jeikcode_kernel::event::NoticeSeverity::Warning
+                        && notice.status == jeikcode_kernel::event::NoticeStatus::Settled =>
+                {
+                    saw_warn_notice = true;
+                }
+                AgentEvent::Error { .. } => saw_error_event = true,
+                AgentEvent::TurnComplete { reason: r } => {
+                    reason = Some(r);
+                    break;
+                }
+                _ => {}
             }
         }
         reason
@@ -209,8 +223,16 @@ async fn max_rounds_stop_reason() {
         Some(StopReason::MaxRounds),
         "a max_rounds fuse must end the turn with StopReason::MaxRounds"
     );
+    assert!(
+        saw_warn_notice,
+        "soft landing must emit warn-max-rounds Warning notice"
+    );
+    assert!(
+        !saw_error_event,
+        "soft landing must NOT emit AgentEvent::Error"
+    );
 
-    // And via run_to_completion, the Outcome reports it.
+    // And via run_to_completion, the Outcome reports StopReason::MaxRounds cleanly (no Outcome.error).
     let mut turns2 = Vec::new();
     for i in 0..10 {
         turns2.push(vec![
@@ -238,11 +260,8 @@ async fn max_rounds_stop_reason() {
         "Outcome.stop must be MaxRounds"
     );
     assert!(
-        outcome
-            .error
-            .as_deref()
-            .is_some_and(|m| m.contains("max rounds")),
-        "the max-rounds error must be captured in Outcome.error; got {:?}",
+        outcome.error.is_none(),
+        "soft landing emits a warning notice, not a red Outcome.error; got {:?}",
         outcome.error
     );
 }
@@ -414,9 +433,9 @@ async fn timeout_reason() {
         .spawn();
     handle.commands.send(send("go")).unwrap();
 
-    // Virtual time: a partial-response stall now walks the unified ladder
-    // (0+1+2+2+3+10+15+20+30s) before clean-failing with Timeout.
-    let reason = tokio::time::timeout(Duration::from_secs(120), async {
+    // Virtual time: a partial-response stall walks the unified ladder
+    // (0+2+5+10+15+30+45+60+90 = 257s) before clean-failing with Timeout.
+    let reason = tokio::time::timeout(Duration::from_secs(300), async {
         let mut reason: Option<StopReason> = None;
         while let Some(ev) = handle.events.recv().await {
             if let AgentEvent::TurnComplete { reason: r } = ev {
@@ -625,9 +644,9 @@ async fn round_cap_checkpoint_cancel_stops_as_cancelled() {
 }
 
 #[tokio::test]
-async fn round_cap_checkpoint_off_keeps_hard_error() {
-    // Default (round_cap_checkpoint = false): hitting the cap still emits a red
-    // Error AND finishes MaxRounds AND never emits the checkpoint Request.
+async fn round_cap_checkpoint_off_enters_soft_landing_warning() {
+    // Default (round_cap_checkpoint = false): hitting the cap skips checkpoint,
+    // emits one Warning SystemNotice (NO AgentEvent::Error), and ends with MaxRounds.
     let provider = scripted_tool_rounds(5);
     let mut handle = Agent::builder()
         .provider(provider)
@@ -643,7 +662,8 @@ async fn round_cap_checkpoint_off_keeps_hard_error() {
         })
         .unwrap();
 
-    let mut saw_error = false;
+    let mut warn_notices = 0usize;
+    let mut error_events = 0usize;
     let mut requests = 0usize;
     let mut stop = None;
     let outcome = tokio::time::timeout(OUTER_GUARD, async {
@@ -654,8 +674,19 @@ async fn round_cap_checkpoint_off_keeps_hard_error() {
                 {
                     requests += 1;
                 }
-                AgentEvent::Error { message, .. } if message.contains("max rounds") => {
-                    saw_error = true;
+                AgentEvent::SystemNotice(notice)
+                    if notice.event_id.starts_with("warn-max-rounds:") =>
+                {
+                    assert_eq!(notice.kind, jeikcode_kernel::event::NoticeKind::Warning);
+                    assert_eq!(
+                        notice.severity,
+                        jeikcode_kernel::event::NoticeSeverity::Warning
+                    );
+                    assert_eq!(notice.status, jeikcode_kernel::event::NoticeStatus::Settled);
+                    warn_notices += 1;
+                }
+                AgentEvent::Error { .. } => {
+                    error_events += 1;
                 }
                 AgentEvent::TurnComplete { reason } => {
                     stop = Some(reason);
@@ -666,11 +697,15 @@ async fn round_cap_checkpoint_off_keeps_hard_error() {
         }
     })
     .await;
-    outcome.expect("round_cap_checkpoint_off_keeps_hard_error must not hang");
+    outcome.expect("round_cap_checkpoint_off_enters_soft_landing_warning must not hang");
     assert_eq!(requests, 0, "checkpoint must never be emitted when off");
-    assert!(
-        saw_error,
-        "hard Error must still be emitted when checkpoint is off"
+    assert_eq!(
+        warn_notices, 1,
+        "exactly one warn-max-rounds notice must be emitted"
+    );
+    assert_eq!(
+        error_events, 0,
+        "soft landing must not emit AgentEvent::Error"
     );
     assert!(
         matches!(stop, Some(StopReason::MaxRounds)),
@@ -706,4 +741,243 @@ async fn prompt_rejected_reason() {
         "the rejection reason must be captured in Outcome.error; got {:?}",
         outcome.error
     );
+}
+
+#[tokio::test]
+async fn max_rounds_zero_builder_is_unbounded() {
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(EchoTool));
+    let provider = Arc::new(MockProvider::new(vec![
+        vec![
+            StreamEvent::ToolCall(tool_call("c1", "echo", "{\"text\":\"1\"}")),
+            StreamEvent::Done { truncated: false },
+        ],
+        vec![
+            StreamEvent::ToolCall(tool_call("c2", "echo", "{\"text\":\"2\"}")),
+            StreamEvent::Done { truncated: false },
+        ],
+        vec![
+            StreamEvent::ToolCall(tool_call("c3", "echo", "{\"text\":\"3\"}")),
+            StreamEvent::Done { truncated: false },
+        ],
+        vec![
+            StreamEvent::TextDelta("all done".into()),
+            StreamEvent::Done { truncated: false },
+        ],
+    ]));
+    let outcome = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["echo"]))
+        .max_rounds(0)
+        .build()
+        .run_to_completion("run unbounded", AutoRespond::AllowAll)
+        .await;
+    assert_eq!(outcome.stop, StopReason::Stopped);
+    assert_eq!(outcome.tool_results.len(), 3);
+    assert!(outcome.text.contains("all done"));
+}
+
+#[tokio::test]
+async fn max_rounds_soft_landing_contract_and_tool_rejection() {
+    use futures::stream::BoxStream;
+    use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus};
+    use jeikcode_kernel::hook::TurnCtx;
+    use jeikcode_kernel::message::{Message, Role, TURN_DIAGNOSTIC_ORIGIN};
+    use jeikcode_kernel::provider::{ChatOptions, LlmProvider, ToolChoice};
+    use jeikcode_kernel::tool::ToolDef;
+    use std::sync::Mutex;
+
+    struct CaptureProvider {
+        responses: Mutex<Vec<Vec<StreamEvent>>>,
+        captured: Arc<Mutex<Vec<(Vec<Message>, Vec<ToolDef>, ChatOptions)>>>,
+    }
+    #[async_trait]
+    impl LlmProvider for CaptureProvider {
+        fn model_name(&self) -> &str {
+            "capture-mock"
+        }
+        async fn chat_stream(
+            &self,
+            messages: &[Message],
+            tools: &[ToolDef],
+            options: &ChatOptions,
+        ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
+            self.captured.lock().unwrap().push((
+                messages.to_vec(),
+                tools.to_vec(),
+                options.clone(),
+            ));
+            let evs = {
+                let mut g = self.responses.lock().unwrap();
+                if g.is_empty() {
+                    vec![StreamEvent::Done { truncated: false }]
+                } else {
+                    g.remove(0)
+                }
+            };
+            Ok(Box::pin(futures::stream::iter(evs)))
+        }
+    }
+
+    struct ContinuationAndSnapHook {
+        cont_calls: Arc<Mutex<usize>>,
+        snapshot_msgs: Arc<Mutex<Vec<Message>>>,
+    }
+    #[async_trait]
+    impl LifecycleHooks for ContinuationAndSnapHook {
+        async fn offer_continuation(&self, _convo: &Conversation) -> Option<String> {
+            *self.cont_calls.lock().unwrap() += 1;
+            Some("keep going".into())
+        }
+        async fn turn_complete(&self, convo: &Conversation, _r: &StopReason, _c: &TurnCtx) {
+            *self.snapshot_msgs.lock().unwrap() = convo.messages.clone();
+        }
+    }
+
+    // 场景 A：正常软着陆（模型遵守 ToolChoice::None 输出总结，跳过 continuation，快照单轨保留结构化通知）
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(EchoTool));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(CaptureProvider {
+        responses: Mutex::new(vec![
+            vec![
+                StreamEvent::ToolCall(tool_call("c1", "echo", "{\"text\":\"step1\"}")),
+                StreamEvent::Done { truncated: false },
+            ],
+            vec![
+                StreamEvent::TextDelta("Completed step 1; next check tests.".into()),
+                StreamEvent::Done { truncated: true }, // 验证软着陆不触发 truncation/continuation 续跑
+            ],
+        ]),
+        captured: captured.clone(),
+    });
+    let cont_calls = Arc::new(Mutex::new(0));
+    let snapshot_msgs = Arc::new(Mutex::new(Vec::new()));
+    let hook = Arc::new(ContinuationAndSnapHook {
+        cont_calls: cont_calls.clone(),
+        snapshot_msgs: snapshot_msgs.clone(),
+    });
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["echo"]))
+        .hooks(hook)
+        .max_rounds(1)
+        .build()
+        .spawn();
+    handle.commands.send(send("do work")).unwrap();
+
+    let mut notices = Vec::new();
+    let mut errs = 0usize;
+    let mut stop = None;
+    let mut final_text = String::new();
+    let mut saw_ttft = false;
+    while let Some(ev) = handle.events.recv().await {
+        match ev {
+            AgentEvent::TextDelta(t) => final_text.push_str(&t),
+            AgentEvent::Usage(m) => {
+                if m.ttft_ms.is_some() {
+                    saw_ttft = true;
+                }
+            }
+            AgentEvent::SystemNotice(n) => notices.push(n),
+            AgentEvent::Error { .. } => errs += 1,
+            AgentEvent::TurnComplete { reason } => {
+                stop = Some(reason);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let _ = handle.commands.send(AgentCommand::Shutdown);
+    let _ = handle.task.await;
+
+    assert_eq!(stop, Some(StopReason::MaxRounds));
+    assert_eq!(errs, 0, "soft landing must never emit AgentEvent::Error");
+    assert!(
+        saw_ttft,
+        "MessageMeta.ttft_ms must be populated on streamed round"
+    );
+    assert_eq!(
+        *cont_calls.lock().unwrap(),
+        0,
+        "offer_continuation must be skipped in soft landing"
+    );
+    assert!(final_text.contains("Completed step 1"));
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].event_id, "warn-max-rounds:1");
+    assert_eq!(notices[0].kind, NoticeKind::Warning);
+    assert_eq!(notices[0].severity, NoticeSeverity::Warning);
+    assert_eq!(notices[0].status, NoticeStatus::Settled);
+
+    let reqs = captured.lock().unwrap();
+    assert_eq!(reqs.len(), 2, "round 1 + 1 soft landing round");
+    assert_eq!(reqs[0].2.tool_choice, ToolChoice::Auto);
+    assert_eq!(
+        reqs[1].2.tool_choice,
+        ToolChoice::None,
+        "soft landing must force ToolChoice::None"
+    );
+    assert!(
+        !reqs[1].1.is_empty(),
+        "&defs tools slice must be preserved for prefix cache"
+    );
+    let injected = reqs[1].0.last().expect("injected landing prompt");
+    assert_eq!(injected.role, Role::User);
+    assert!(injected.synthetic);
+    assert!(injected.text.contains("Do NOT invoke any tools"));
+
+    let snap = snapshot_msgs.lock().unwrap();
+    let diag_msgs: Vec<_> = snap
+        .iter()
+        .filter(|m| m.internal_origin.as_deref() == Some(TURN_DIAGNOSTIC_ORIGIN))
+        .collect();
+    assert_eq!(
+        diag_msgs.len(),
+        1,
+        "snapshot must hold single structured diagnostic"
+    );
+    assert_eq!(diag_msgs[0].id.as_deref(), Some("warn-max-rounds:1"));
+    let meta = diag_msgs[0]
+        .notice
+        .as_ref()
+        .expect("Message.notice must be populated");
+    assert_eq!(meta.kind, NoticeKind::Warning);
+    assert_eq!(meta.severity, NoticeSeverity::Warning);
+    assert_eq!(meta.status, NoticeStatus::Settled);
+    assert_eq!(meta.event_id.as_deref(), Some("warn-max-rounds:1"));
+
+    // 场景 B：模型无视 ToolChoice::None 仍返回 tool_calls 时，必须硬拦截并不执行工具
+    let mut reg2 = ToolRegistry::new();
+    reg2.register(Arc::new(EchoTool));
+    let provider2 = Arc::new(CaptureProvider {
+        responses: Mutex::new(vec![
+            vec![
+                StreamEvent::ToolCall(tool_call("c1", "echo", "{\"text\":\"ok\"}")),
+                StreamEvent::Done { truncated: false },
+            ],
+            vec![
+                StreamEvent::ToolCall(tool_call("c2-rogue", "echo", "{\"text\":\"illegal\"}")),
+                StreamEvent::Done { truncated: false },
+            ],
+        ]),
+        captured: Arc::new(Mutex::new(Vec::new())),
+    });
+    let outcome2 = Agent::builder()
+        .provider(provider2)
+        .tools(reg2.mount(&["echo"]))
+        .max_rounds(1)
+        .build()
+        .run_to_completion("try rogue tool", AutoRespond::AllowAll)
+        .await;
+    assert_eq!(outcome2.stop, StopReason::MaxRounds);
+    assert_eq!(
+        outcome2.tool_results.len(),
+        2,
+        "c1 executed + c2 rejected paired error result"
+    );
+    assert!(!outcome2.tool_results[0].is_error);
+    assert!(outcome2.tool_results[1].is_error);
+    assert!(outcome2.tool_results[1]
+        .content
+        .contains("Tool execution disabled"));
 }

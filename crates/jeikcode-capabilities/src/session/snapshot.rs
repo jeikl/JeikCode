@@ -866,6 +866,23 @@ fn root_user_start_ms_for_steered_chain(convo: &Conversation) -> Option<u64> {
     saw_steer.then_some(fallback_ts).flatten()
 }
 
+pub(crate) fn stop_reason_slug(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::Stopped => "stopped",
+        StopReason::MaxRounds => "max_rounds",
+        StopReason::MaxContinuations => "max_continuations",
+        StopReason::RepeatLoop => "repeat_loop",
+        StopReason::ToolLoopDetected => "tool_loop_detected",
+        StopReason::ProviderError => "provider_error",
+        StopReason::Timeout => "timeout",
+        StopReason::Cancelled => "cancelled",
+        StopReason::PromptRejected => "prompt_rejected",
+        StopReason::PolicyDenied => "policy_denied",
+        StopReason::RateLimited => "rate_limited",
+        _ => "unknown",
+    }
+}
+
 #[async_trait]
 impl LifecycleHooks for SnapshotHook {
     /// Mark the turn's wall-clock start (for `duration_ms`) and reset per-turn counters.
@@ -1091,6 +1108,7 @@ impl LifecycleHooks for SnapshotHook {
             let _ = meta.archive_turn_stats_where(|stat| {
                 stat.turn_id == 0 && stat.position_valid && stat.after_message > msg_count
             });
+
             meta.turn_stats.push(TurnStat {
                 after_message: msg_count,
                 position_valid: true,
@@ -1103,6 +1121,7 @@ impl LifecycleHooks for SnapshotHook {
                 used_tokens,
                 ctx_window,
                 model_usage,
+                stop_reason: Some(stop_reason_slug(*reason).to_string()),
             });
         };
         let result = if let Some(lease) = &self.lease {
@@ -1414,6 +1433,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         };
         let mut meta = SessionMeta::new(id, "/p", 1);
         meta.owner = StorageOwner::Native;
@@ -1500,6 +1520,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         };
         let mut meta = SessionMeta::new(id, "/p", 1);
         meta.owner = StorageOwner::Native;

@@ -314,6 +314,11 @@ pub fn format_agent_repeat_loop_terminal(rounds: u32) -> String {
     t(Msg::AgentRepeatLoopTerminal { rounds }).into_owned()
 }
 
+/// 达到最大轮次上限进入禁用工具软着陆总结轮次的提示文案。
+pub fn format_agent_max_rounds_reached(cap: u32) -> String {
+    t(Msg::AgentMaxRoundsReached { cap }).into_owned()
+}
+
 /// 自动重连耗尽后的流超时终态文案。
 pub fn format_agent_stream_timeout_terminal() -> String {
     t(Msg::AgentStreamTimeoutTerminal).into_owned()
@@ -1273,6 +1278,7 @@ mod tests {
             Msg::AgentToolLoopWarning { threshold: 3 },
             Msg::AgentToolLoopTerminal { threshold: 5 },
             Msg::AgentRepeatLoopTerminal { rounds: 6 },
+            Msg::AgentMaxRoundsReached { cap: 300 },
         ];
 
         for msg in cases {

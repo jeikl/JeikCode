@@ -457,7 +457,7 @@ impl Default for ToolOutputConfig {
 impl Default for CodingConfig {
     fn default() -> Self {
         Self {
-            max_rounds: 230,
+            max_rounds: 0,
             connect_timeout_secs: 10,
             open_timeout_secs: 180,
             ttft_secs: 180,
@@ -479,7 +479,7 @@ pub struct LoopConfig {
 
 impl Default for LoopConfig {
     fn default() -> Self {
-        Self { max_rounds: 100 }
+        Self { max_rounds: 0 }
     }
 }
 
@@ -508,7 +508,7 @@ pub struct SubAgentConfig {
     /// Deprecated compatibility field. Subtasks no longer have a total wall-clock limit;
     /// provider idle timeouts, `max_rounds`, and explicit cancellation own liveness.
     pub timeout_secs: u64,
-    /// Per-subtask model-round high-water mark. Default 230; `0` means unbounded.
+    /// Per-subtask model-round high-water mark. Default 300; `0` means unbounded.
     /// Overridden by `JEIKCODE_SUBAGENT_MAX_ROUNDS` when set.
     pub max_rounds: u32,
 }
@@ -522,7 +522,7 @@ impl Default for SubAgentConfig {
             max_concurrent: 0,
             // Retained only so existing config files continue to deserialize unchanged.
             timeout_secs: 900,
-            max_rounds: 230,
+            max_rounds: 300,
         }
     }
 }
@@ -616,14 +616,14 @@ pub struct Config {
     #[serde(default)]
     pub auto_commit: bool,
     /// `task` subagent tool policy. Missing from older configs uses the defaults in
-    /// [`SubAgentConfig`], including a configurable 200-round high-water mark.
+    /// [`SubAgentConfig`], including a configurable 300-round high-water mark.
     #[serde(default)]
     pub subagent: SubAgentConfig,
-    /// /loop command policy. Missing from older configs → max_rounds=100.
+    /// /loop command policy. Missing from older configs → max_rounds=0 (unbounded).
     /// TOML section is `[loop_config]` (bare `loop` is a Rust keyword).
     #[serde(default)]
     pub loop_config: LoopConfig,
-    /// `[coding]` turn-level policy. Missing from older configs → max_rounds=230.
+    /// `[coding]` turn-level policy. Missing from older configs → max_rounds=0 (unbounded).
     #[serde(default)]
     pub coding: CodingConfig,
     /// Tool-specific behavior. Missing from older configs keeps todo enabled with

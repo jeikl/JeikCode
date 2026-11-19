@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 /// Last-resort per-turn high-water mark for composed child agents. Products can
 /// override it, including `0` for unbounded; exact no-progress loops are handled
 /// separately by the result-aware tool-loop policy.
-const DEFAULT_CHILD_MAX_ROUNDS: u32 = 230;
+const DEFAULT_CHILD_MAX_ROUNDS: u32 = 300;
 
 pub mod approval;
 pub mod artifact_watchdog;

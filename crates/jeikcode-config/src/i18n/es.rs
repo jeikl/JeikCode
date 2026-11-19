@@ -228,6 +228,8 @@ pub(super) fn es(msg: Msg<'_>) -> Cow<'static, str> {
             format!("bucle de herramientas detectado: la misma llamada o lote de solo lectura devolvió los mismos resultados {threshold} veces; deteniendo antes de otra solicitud").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("detenido: el modelo repitió el mismo patrón de llamadas a herramientas durante {rounds} rondas consecutivas").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Se alcanzó el límite de rondas ({cap}); se detuvo la ejecución de herramientas para resumir el progreso y los siguientes pasos.").into(),
         _ => super::en::en(msg),
     }
 }

@@ -104,7 +104,7 @@ eager = "auto"                  # Proactivity: "auto" (intent-based) | "preferre
 
 ```toml
 [coding]
-max_rounds = 230                # Maximum model interaction rounds per session (0 = unlimited)
+max_rounds = 0                  # Maximum model interaction rounds per session (0 = unlimited by default; >0 triggers soft-landing summary)
 connect_timeout_secs = 10       # TCP/TLS connection timeout
 open_timeout_secs = 180         # HTTP response header (TTFB) timeout; does not truncate streaming body
 ttft_secs = 180                 # Time to first thinking/content/tool token (alias first_token_timeout_secs)
@@ -140,7 +140,7 @@ One card per incident: every attempt overwrites the progress in place (`retry x/
 ```toml
 [subagent]
 max_concurrent = 0              # Maximum concurrent subagents (0 = unlimited, the default; >0 caps it)
-max_rounds = 230                # Maximum interaction rounds per subagent (0 = unlimited)
+max_rounds = 300                # Maximum interaction rounds per subagent (default 300; 0 = unlimited)
 ```
 
 ---

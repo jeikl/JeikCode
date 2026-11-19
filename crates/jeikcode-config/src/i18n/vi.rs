@@ -1354,5 +1354,7 @@ Msg::CmdDescBackground => "Chạy tác vụ một lần trong ngữ cảnh nền
             format!("phát hiện vòng lặp công cụ: cùng một lệnh gọi hoặc lô chỉ đọc đã trả về kết quả giống hệt {threshold} lần; đã dừng trước yêu cầu tiếp theo").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("đã dừng: mô hình lặp lại cùng một mẫu gọi công cụ trong {rounds} vòng liên tiếp").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Đã đạt giới hạn số vòng ({cap}); đã tạm dừng gọi công cụ để tóm tắt tiến độ và đề xuất bước tiếp theo.").into(),
     }
 }

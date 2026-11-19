@@ -326,6 +326,9 @@ import {
   dropSnapshotDuplicates,
   mergeAuthoritativeTail,
   findCausalGap,
+  isTerminalNoticeAlreadyExplained,
+  noticeAlreadyPresentInMessages,
+  filterUnpersistedLocalNotices,
   type ChatRecoveryEvent,
   type ChatRecoveryState,
 } from '../lib/chatTerminal';
@@ -3271,17 +3274,15 @@ export function Chat({
       return undefined;
     })();
 
-    // 保全本地尚未在磁盘落盘的系统命令通知（如压缩完成提示通知）
-    const unpersistedLocalNotices = canvas.filter(
-      (m) => m.role === 'system' && m.id && !diskTail.some((d) => d.id === m.id),
-    );
+    // 保全本地尚未在磁盘落盘的系统命令通知（如压缩完成提示通知），按 id/eventId/归一化文本兜底去重
+    const unpersistedLocalNotices = filterUnpersistedLocalNotices(canvas, diskTail);
 
     let clean = merged;
     if (unpersistedLocalUser && !clean.some((m) => m.id === unpersistedLocalUser.id)) {
       clean = [...clean, unpersistedLocalUser];
     }
     for (const note of unpersistedLocalNotices) {
-      if (!clean.some((m) => m.id === note.id)) {
+      if (!noticeAlreadyPresentInMessages(clean, note)) {
         clean = [...clean, note];
       }
     }
@@ -10090,21 +10091,13 @@ export function Chat({
             const noticeAnchor =
               event.message_id ??
               (doneSid ? turnUserAnchorBySessionRef.current.get(doneSid) : undefined);
-            // 已经用同一条详情或结构化 settled error 提示过的故障不再补一张
-            // “回合未完成”，否则一次故障会出现两张卡。
-            const alreadyExplained =
-              messagesRef.current.some((message) =>
-                message.parts.some(
-                  (part) =>
-                    part.kind === 'notice' &&
-                    ((!!terminal.detail && !!part.text && part.text.includes(terminal.detail)) ||
-                      (part.severity === 'error' &&
-                        part.status === 'settled' &&
-                        (!noticeAnchor ||
-                          !part.anchorMessageId ||
-                          part.anchorMessageId === noticeAnchor))),
-                ),
-              );
+            // 已经用同一条详情或结构化 settled 通知卡提示过的故障不再补一张
+            // “回合未完成”，全面兼容 11 种语言的 warn-max-rounds / err-tool-loop / rl 卡片。
+            const alreadyExplained = isTerminalNoticeAlreadyExplained(messagesRef.current, {
+              stopReason: event.stop_reason,
+              detail: terminal.detail,
+              noticeAnchor,
+            });
             if (!alreadyExplained) {
               pushNoticeToLastAssistant(
                 t('chat.incomplete', { msg: terminal.detail }),

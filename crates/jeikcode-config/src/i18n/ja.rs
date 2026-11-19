@@ -228,6 +228,8 @@ pub(super) fn ja(msg: Msg<'_>) -> Cow<'static, str> {
             format!("ツールループを検出：同じ呼び出しまたは読み取り専用バッチが {threshold} 回連続で同じ結果を返したため、次のリクエスト前に停止しました").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("停止しました：モデルが {rounds} ラウンド連続で同じツール呼び出しパターンを繰り返しました").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("最大ラウンド上限（{cap} ラウンド）に達したため、ツール呼び出しを停止して進捗と次のステップを要約します。").into(),
         _ => super::en::en(msg),
     }
 }

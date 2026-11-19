@@ -1908,4 +1908,9 @@ pub enum Msg<'a> {
     AgentRepeatLoopTerminal {
         rounds: u32,
     },
+    /// User-visible warning notice when the explicit max_rounds cap is reached
+    /// and the agent enters a tool-disabled soft-landing summary round.
+    AgentMaxRoundsReached {
+        cap: u32,
+    },
 }

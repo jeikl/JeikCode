@@ -228,6 +228,8 @@ pub(super) fn ko(msg: Msg<'_>) -> Cow<'static, str> {
             format!("도구 루프 감지됨: 동일한 호출 또는 읽기 전용 일괄 실행이 {threshold}회 연속 같은 결과를 반환하여 다음 요청 전에 중지합니다").into(),
         Msg::AgentRepeatLoopTerminal { rounds } =>
             format!("중지됨: 모델이 {rounds}라운드 연속으로 동일한 도구 호출 패턴을 반복했습니다").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("최대 라운드 한도({cap}라운드)에 도달하여 도구 호출을 중단하고 진행 상황과 다음 단계를 요약합니다.").into(),
         _ => super::en::en(msg),
     }
 }
