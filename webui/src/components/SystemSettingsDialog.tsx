@@ -6,11 +6,13 @@ import {
   getHealth,
   invalidateBootstrapCache,
   type ApprovalMode,
+  type DesktopSettings,
 } from '../api';
 import { bakedAppVersion, normalizeAppVersion } from '../lib/appVersion';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
 import { useSettings } from '../settings';
 import { ModelConfigView } from './SettingsDialogs';
+import { ShortcutRecorder } from './ShortcutRecorder';
 
 interface SystemSettingsDialogProps {
   onClose: () => void;
@@ -33,6 +35,9 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
   const [closeAction, setCloseAction] = useState<'ask' | 'tray' | 'quit'>('ask');
   const [agentModePolicy, setAgentModePolicy] = useState<'memory' | 'global'>('memory');
   const [agentGlobalMode, setAgentGlobalMode] = useState<ApprovalMode>('build');
+  const [runtimeModelSwitch, setRuntimeModelSwitch] = useState(false);
+  const [autostart, setAutostart] = useState(false);
+  const [toggleShortcut, setToggleShortcut] = useState('Ctrl+Alt+J');
   const [desktopLoaded, setDesktopLoaded] = useState(false);
   const [aboutLoaded, setAboutLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -61,6 +66,9 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
           if (res.close_action) setCloseAction(res.close_action);
           if (res.agent_mode_policy) setAgentModePolicy(res.agent_mode_policy);
           if (res.agent_global_mode) setAgentGlobalMode(res.agent_global_mode);
+          if (typeof res.runtime_model_switch === 'boolean') setRuntimeModelSwitch(res.runtime_model_switch);
+          if (typeof res.autostart === 'boolean') setAutostart(res.autostart);
+          if (typeof res.toggle_shortcut === 'string') setToggleShortcut(res.toggle_shortcut);
           setDesktopLoaded(true);
         }
       })
@@ -104,6 +112,9 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
         close_action: closeAction,
         agent_mode_policy: agentModePolicy,
         agent_global_mode: agentGlobalMode,
+        runtime_model_switch: runtimeModelSwitch,
+        autostart,
+        toggle_shortcut: toggleShortcut,
       });
       invalidateBootstrapCache();
       window.dispatchEvent(
@@ -122,6 +133,31 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
       setSaving(false);
     }
   }
+
+  // Cross-instance alignment: another WebUI may save these settings while this
+  // dialog is open. The daemon broadcasts the merged document; apply it in
+  // place so the shortcut/autostart/model-switch controls never show stale state.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onSettings = (event: Event) => {
+      const settings = (event as CustomEvent<{ settings?: DesktopSettings }>).detail
+        ?.settings;
+      if (!settings) return;
+      setCloseAction(settings.close_action);
+      if (settings.agent_mode_policy) setAgentModePolicy(settings.agent_mode_policy);
+      if (settings.agent_global_mode) setAgentGlobalMode(settings.agent_global_mode);
+      if (typeof settings.runtime_model_switch === 'boolean') {
+        setRuntimeModelSwitch(settings.runtime_model_switch);
+      }
+      if (typeof settings.autostart === 'boolean') setAutostart(settings.autostart);
+      if (typeof settings.toggle_shortcut === 'string') {
+        setToggleShortcut(settings.toggle_shortcut);
+      }
+      setDesktopLoaded(true);
+    };
+    window.addEventListener('jeikcode:desktop_settings_changed', onSettings);
+    return () => window.removeEventListener('jeikcode:desktop_settings_changed', onSettings);
+  }, []);
 
   const modal = (
     <div
@@ -187,6 +223,39 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
                 <h4 class="system-settings-pane-title">
                   {t('settings.tabDesktop') || '行为与快捷键'}
                 </h4>
+
+                <div class="system-settings-card-box">
+                  <div class="system-settings-box-title">
+                    {t('settings.startupTitle')}
+                  </div>
+                  <div class="system-settings-box-desc">
+                    {t('settings.startupDesc')}
+                  </div>
+
+                  <label class="system-settings-radio-label system-settings-switch-row">
+                    <input
+                      type="checkbox"
+                      checked={autostart}
+                      onChange={(e) => setAutostart((e.target as HTMLInputElement).checked)}
+                    />
+                    <span class="system-settings-switch-copy">
+                      <span class="system-settings-switch-label">
+                        {t('settings.autostartLabel')}
+                      </span>
+                      <span class="system-settings-inline-hint">
+                        {t('settings.autostartHint')}
+                      </span>
+                    </span>
+                  </label>
+
+                  <div class="system-settings-subtitle">
+                    {t('settings.shortcutTitle')}
+                  </div>
+                  <div class="system-settings-box-desc system-settings-box-desc-tight">
+                    {t('settings.shortcutDesc')}
+                  </div>
+                  <ShortcutRecorder value={toggleShortcut} onChange={setToggleShortcut} />
+                </div>
 
                 <div class="system-settings-card-box">
                   <div class="system-settings-box-title">
@@ -294,6 +363,30 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
                       </select>
                     </label>
                   </div>
+                </div>
+
+                <div class="system-settings-card-box">
+                  <div class="system-settings-box-title">
+                    {t('settings.runtimeModelSwitchTitle')}
+                  </div>
+                  <div class="system-settings-box-desc">
+                    {t('settings.runtimeModelSwitchDesc')}
+                  </div>
+                  <label class="system-settings-radio-label system-settings-switch-row">
+                    <input
+                      type="checkbox"
+                      checked={runtimeModelSwitch}
+                      onChange={(e) => setRuntimeModelSwitch((e.target as HTMLInputElement).checked)}
+                    />
+                    <span class="system-settings-switch-copy">
+                      <span class="system-settings-switch-label">
+                        {t('settings.runtimeModelSwitchLabel')}
+                      </span>
+                      <span class="system-settings-inline-hint">
+                        {t('settings.runtimeModelSwitchHint')}
+                      </span>
+                    </span>
+                  </label>
                 </div>
 
                 <div class="system-settings-card-box">

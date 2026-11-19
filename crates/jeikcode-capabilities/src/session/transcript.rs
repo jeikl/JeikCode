@@ -49,13 +49,22 @@ pub struct TurnRecord {
 }
 
 /// One tool call + its paired result within a turn.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolRecord {
     pub name: String,
     pub args: String,
     pub result: String,
     #[serde(default)]
     pub is_error: bool,
+    /// Epoch ms the tool execution started (observability sidecar join).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    /// Execution wall-clock measured by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Gap from the previous turn activity to this tool's start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_ms: Option<u64>,
 }
 
 /// Turn-aggregated token usage.
@@ -133,6 +142,13 @@ impl TranscriptHook {
                 }
             }
         }
+        // Observability timings live in the per-session sidecar; joining here
+        // keeps the raw turn log self-contained for later recall/debugging
+        // without ever feeding these numbers back to the model.
+        let timings = self
+            .mgr
+            .read_tool_metrics(&self.session_id)
+            .unwrap_or_default();
         let tools: Vec<ToolRecord> = b
             .tools
             .iter()
@@ -141,11 +157,15 @@ impl TranscriptHook {
                     .get(t.id.as_str())
                     .map(|(r, e)| (r.to_string(), *e))
                     .unwrap_or_default();
+                let timing = timings.get(&t.id);
                 ToolRecord {
                     name: t.name.clone(),
                     args: t.args.clone(),
                     result,
                     is_error,
+                    started_at: timing.map(|m| m.started_at),
+                    duration_ms: timing.and_then(|m| m.duration_ms),
+                    switch_ms: timing.map(|m| m.switch_ms),
                 }
             })
             .collect();

@@ -4992,6 +4992,113 @@ body {
 .tool-annotation.pending { color: var(--app-secondary-foreground); }
 .tool-annotation.waiting { color: var(--app-warning-accent); }
 
+/* Per-tool observability chip: switch latency + live execution cost.
+   Kept as a leaf so the 500ms ticker never re-renders the timeline. */
+.tool-timing {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 7px;
+  border: 1px solid var(--app-border-color, rgba(127, 127, 127, 0.22));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-secondary-foreground) 7%, transparent);
+  color: var(--app-secondary-foreground);
+  font-family: var(--app-monospace-font-family);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.tool-timing-clock {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.tool-timing-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.tool-timing-key { opacity: 0.62; }
+.tool-timing-key::after { content: ':'; margin-left: 1px; }
+.tool-timing-val {
+  font-weight: 600;
+  color: var(--app-primary-foreground, inherit);
+}
+.tool-timing-sep {
+  width: 1px;
+  height: 10px;
+  background: currentColor;
+  opacity: 0.18;
+}
+.tool-timing.is-live {
+  border-color: color-mix(in srgb, var(--app-info-foreground, #3b82f6) 45%, var(--app-border-color, transparent));
+}
+.tool-timing.is-live .tool-timing-cost {
+  color: var(--app-info-foreground, #3b82f6);
+}
+
+/* Inline runtime model-switch chip on the assistant round. Display-only. */
+.model-switch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  margin: 2px 0 8px;
+  padding: 3px 10px 3px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--app-brand, #3b82f6) 38%, var(--app-border-color, transparent));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--app-brand, #3b82f6) 16%, transparent),
+    color-mix(in srgb, var(--app-info-foreground, #3b82f6) 7%, transparent)
+  );
+  color: var(--app-brand, #3b82f6);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: nowrap;
+  user-select: none;
+  box-shadow: 0 1px 2px color-mix(in srgb, #000 12%, transparent);
+}
+.model-switch-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+.model-switch-label {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.model-switch-model {
+  max-width: min(58vw, 420px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-brand, #3b82f6) 12%, transparent);
+  color: var(--app-primary-foreground, inherit);
+  font-family: var(--app-monospace-font-family);
+  font-size: 11px;
+  font-weight: 600;
+}
+@media (max-width: 640px) {
+  .model-switch-badge {
+    white-space: normal;
+    flex-wrap: wrap;
+    row-gap: 3px;
+    border-radius: 12px;
+  }
+  .model-switch-model {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+}
+
 /* === Code Block (markdown / mono) === */
 .code-block-wrapper {
   position: relative;
@@ -8974,9 +9081,9 @@ html[data-keyboard-open] .chat-landing {
 
 .system-settings-tab-btn {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 10px 12px;
   border-radius: 8px;
   font-size: 13.5px;
   font-weight: 400;
@@ -8986,7 +9093,13 @@ html[data-keyboard-open] .chat-landing {
   cursor: pointer;
   text-align: left;
   transition: all 0.15s ease;
-  white-space: nowrap;
+  /* Long locales (DE/FR/RU/AR) wrap inside the 180px rail instead of
+     overflowing the rounded capsule. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+  min-width: 0;
+  max-width: 100%;
 }
 .system-settings-tab-btn:hover {
   background: color-mix(in srgb, var(--app-primary-foreground) 6%, transparent);
@@ -9058,6 +9171,9 @@ html[data-keyboard-open] .chat-landing {
   font-size: 13.5px;
   color: var(--app-primary-foreground);
   line-height: 1.4;
+  flex-wrap: wrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .system-settings-esc-hint {
@@ -9090,7 +9206,8 @@ html[data-keyboard-open] .chat-landing {
   flex-wrap: wrap;
 }
 .system-settings-mode-select {
-  min-width: 150px;
+  min-width: 120px;
+  max-width: 100%;
   padding: 5px 10px;
   border-radius: 8px;
   border: 1px solid var(--app-input-border, rgba(255, 255, 255, 0.14));
@@ -9102,6 +9219,132 @@ html[data-keyboard-open] .chat-landing {
 .system-settings-mode-select:focus-visible {
   outline: 2px solid var(--app-brand, #2563eb);
   outline-offset: 1px;
+}
+
+/* New settings blocks: startup / runtime model switch / shortcut recorder. */
+.system-settings-subtitle {
+  margin: 16px 0 6px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--app-primary-foreground);
+}
+.system-settings-box-desc-tight {
+  margin-bottom: 8px;
+}
+.system-settings-switch-row {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.system-settings-switch-row input[type='checkbox'] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.system-settings-switch-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 220px;
+}
+.system-settings-switch-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.system-settings-inline-hint {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--app-secondary-foreground, #9ca3af);
+  overflow-wrap: anywhere;
+}
+
+.shortcut-recorder-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.shortcut-recorder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 42px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px dashed var(--app-border-color, rgba(127, 127, 127, 0.3));
+  background: color-mix(in srgb, var(--app-primary-foreground) 3%, transparent);
+  cursor: pointer;
+  outline: none;
+  min-width: 0;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.shortcut-recorder:focus-visible,
+.shortcut-recorder.is-recording {
+  border-color: var(--app-brand, #3b82f6);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-brand, #3b82f6) 20%, transparent);
+}
+.shortcut-recorder.is-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.shortcut-caps {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+.shortcut-cap {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--app-border-color, rgba(127, 127, 127, 0.28));
+  border-bottom-width: 2px;
+  background: var(--app-menu-background, #181a20);
+  color: var(--app-primary-foreground);
+  font-family: var(--app-monospace-font-family);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.shortcut-placeholder {
+  color: var(--app-secondary-foreground, #9ca3af);
+  font-size: 12.5px;
+}
+.shortcut-recording-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--app-brand, #3b82f6);
+  animation: shortcut-recording-pulse 1.2s ease-in-out infinite;
+}
+@keyframes shortcut-recording-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+.shortcut-clear {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-secondary-foreground, #9ca3af);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+.shortcut-clear:hover {
+  background: color-mix(in srgb, var(--app-error-foreground, #dc2626) 14%, transparent);
+  color: var(--app-error-foreground, #dc2626);
+}
+.shortcut-hint {
+  font-size: 11.5px;
+  color: var(--app-secondary-foreground, #9ca3af);
+  overflow-wrap: anywhere;
 }
 
 .about-hero-row {
@@ -12112,12 +12355,23 @@ html[data-keyboard-open] .chat-landing {
     display: none;
   }
   .system-settings-tab-btn {
-    padding: 6px 14px !important;
+    padding: 6px 12px !important;
     font-size: 13px !important;
     border-radius: 999px !important;
     border: 1px solid color-mix(in srgb, var(--app-primary-foreground) 10%, transparent) !important;
     flex-shrink: 0 !important;
     background: color-mix(in srgb, var(--app-primary-foreground) 3%, transparent) !important;
+    max-width: min(78vw, 260px) !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    align-items: center !important;
+  }
+  .shortcut-recorder {
+    width: 100%;
+  }
+  .system-settings-switch-copy {
+    flex-basis: 100%;
   }
   .system-settings-tab-btn.active {
     background: color-mix(in srgb, var(--app-brand) 16%, transparent) !important;

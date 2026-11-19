@@ -278,6 +278,10 @@ pub struct CodingParts {
     /// [`CodingAgentConfig`].
     /// `None` when the `JEIKCODE_SUBAGENT` env gate is off.
     pub subagent_provider: Option<SharedReviewProvider>,
+    /// Hot-swap slot for the PRIMARY provider. Reused across `assemble`/respawn so
+    /// the runtime can queue a provider change for the next kernel round without
+    /// stopping the in-flight turn (`runtime model switch` setting).
+    pub(crate) primary_provider_swap: Option<Arc<crate::provider_swap::SwappableProvider>>,
     /// User/project CC external hooks (`$JEIKCODE_HOME/hooks.json` + `<root>/.hooks.json`).
     /// ONE instance is registered as BOTH a [`LifecycleHooks`] (already pushed into `hooks`)
     /// and a [`ToolMiddleware`](jeikcode_kernel::middleware::ToolMiddleware) (registered by
@@ -866,6 +870,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         session_mcp_registry,
         review_provider,
         subagent_provider,
+        primary_provider_swap: None,
         cc_external_hooks: cc_external,
         rate_limit_source: opts.rate_limit_source,
     })
@@ -1301,6 +1306,27 @@ pub fn assemble(
     parts
         .registry
         .register(Arc::new(ReadFileTool::new(cfg.supports_vision)));
+
+    // Runtime model switch: the primary provider lives in a stable hot-swap slot.
+    // A normal `/model` reassembly replaces the inner provider immediately; a
+    // mid-turn switch queues it and the next kernel `chat_stream` applies it,
+    // keeping the SAME conversation/context. The wrapper itself is reused across
+    // respawns so a queued switch is not lost by a transient reassembly.
+    let provider: Arc<dyn LlmProvider> = match parts.primary_provider_swap.clone() {
+        Some(swap) => {
+            // A full reassembly is an explicit authority: it clears any stale
+            // queued next-round switch and installs this provider immediately.
+            swap.replace_now(provider, &cfg.model);
+            swap
+        }
+        None => {
+            let swap = Arc::new(crate::provider_swap::SwappableProvider::new(
+                provider, &cfg.model,
+            ));
+            parts.primary_provider_swap = Some(swap.clone());
+            swap
+        }
+    };
 
     // Session-bound: reload the complete canonical aggregate. Only a fresh
     // runtime intentionally staged in memory is allowed to assemble before its

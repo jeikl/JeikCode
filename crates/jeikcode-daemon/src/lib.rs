@@ -649,6 +649,8 @@ fn read_display_tail_view(
         &session.meta.id,
     );
     repair_display_clock(&mut messages);
+    annotate_tool_metrics(&mut messages, manager, &session.meta.id);
+    annotate_model_switches(&mut messages, manager, &session.meta.id);
     Some(DisplayTailView {
         turns,
         message_count: prefix_len + total,
@@ -1724,6 +1726,7 @@ mod transcript_display_tests {
             args: "{\"path\":\"a\"}".into(),
             result: "R1".into(),
             is_error: false,
+            ..Default::default()
         });
         let second = turn(2, 200, "Q2", "A2");
 
@@ -4776,6 +4779,19 @@ pub(crate) enum GlobalWireEvent {
     /// 跟随 `mode`；为 false 时各会话恢复自己的模式。
     #[serde(rename = "mode_global")]
     ModeGlobal { enabled: bool, mode: String },
+    /// MCP / 技能等能力开关或信任状态变更（跨实例广播）。携带受影响的
+    /// 工作目录，客户端只刷新对应项目的面板，不做整页重载。
+    #[serde(rename = "capabilities_changed")]
+    CapabilitiesChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
+    /// 桌面/运行时设置（开机自启、快捷键、运行时模型切换、关闭动作、Agent 模式）
+    /// 变更后跨实例广播，打开设置弹窗的其它实例立即对齐。
+    #[serde(rename = "desktop_settings")]
+    DesktopSettingsChanged {
+        settings: crate::api_config::DesktopSettingsPayload,
+    },
 }
 
 /// 一次模型参数变更里携带的思考强度/预算快照（两字段都序列化，`null` 即清空）。
@@ -6358,21 +6374,44 @@ pub struct ArtifactInfo {
 }
 
 /// Tool call info for API response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ToolCallInfo {
     pub id: String,
     pub name: String,
     pub arguments: String,
     pub display: String,
+    /// Observability timings join from the session `toolmetrics.jsonl` sidecar.
+    /// Additive/optional: older daemons omit them and the UI hides the badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_ms: Option<u64>,
+    /// `running` | `done` | `error` | `incomplete` from the metrics sidecar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// Tool result info for API response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ToolResultInfo {
     pub call_id: String,
     pub success: bool,
     pub summary: String,
     pub line_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// Structured notice sidecar attached to `turn_diagnostic` display records
@@ -6481,6 +6520,11 @@ pub struct MessageInfo {
     /// span) so refresh / session switch still shows the live "用时" total.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    /// Display-only runtime model-switch marker for this assistant round.
+    /// Joined from `<session>.model-switches.jsonl` by message id; never part
+    /// of the kernel conversation or a provider request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<MessageNoticeInfo>,
 }
@@ -6556,6 +6600,73 @@ fn tool_result_summary(text: &str) -> String {
     }
 }
 
+/// Join the per-session `toolmetrics.jsonl` sidecar onto history rows.
+///
+/// The sidecar is observability-only: it is never part of the transcript sent to
+/// the model. Missing/corrupt metrics degrade to "no badge", never to a failed
+/// session load.
+fn annotate_tool_metrics(
+    messages: &mut [MessageInfo],
+    manager: &NativeSessionManager,
+    session_id: &str,
+) {
+    if messages.is_empty() {
+        return;
+    }
+    let Ok(metrics) = manager.read_tool_metrics(session_id) else {
+        return;
+    };
+    if metrics.is_empty() {
+        return;
+    }
+    for message in messages {
+        if let Some(calls) = message.tool_calls.as_mut() {
+            for call in calls {
+                if let Some(metric) = metrics.get(&call.id) {
+                    call.started_at = Some(metric.started_at);
+                    call.finished_at = metric.finished_at;
+                    call.duration_ms = metric.duration_ms;
+                    call.switch_ms = Some(metric.switch_ms);
+                    call.status = Some(metric.status.as_str().to_string());
+                }
+            }
+        }
+        if let Some(result) = message.tool_result.as_mut() {
+            if let Some(metric) = metrics.get(&result.call_id) {
+                result.started_at = Some(metric.started_at);
+                result.finished_at = metric.finished_at;
+                result.duration_ms = metric.duration_ms;
+                result.switch_ms = Some(metric.switch_ms);
+                result.status = Some(metric.status.as_str().to_string());
+            }
+        }
+    }
+}
+
+/// Join applied runtime model-switch markers onto their assistant rows.
+/// Display-only; the sidecar is never read into the model context.
+fn annotate_model_switches(
+    messages: &mut [MessageInfo],
+    manager: &NativeSessionManager,
+    session_id: &str,
+) {
+    let switches = manager.applied_model_switches(session_id);
+    if switches.is_empty() {
+        return;
+    }
+    for message in messages {
+        if !message.role.eq_ignore_ascii_case("assistant") {
+            continue;
+        }
+        let Some(id) = message.id.as_deref() else {
+            continue;
+        };
+        if let Some(model) = switches.get(id) {
+            message.switch_to = Some(model.clone());
+        }
+    }
+}
+
 impl MessageInfo {
     fn from_kernel(msg: &jeikcode_kernel::message::Message) -> Self {
         Self::from_kernel_in(msg, None)
@@ -6581,6 +6692,7 @@ impl MessageInfo {
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                     display: format_tool_args(&call.name, &call.arguments),
+                    ..Default::default()
                 })
                 .collect()
         });
@@ -6592,6 +6704,7 @@ impl MessageInfo {
                 // empty after multi-line SQL/table outputs. Full text remains in `content`.
                 summary: tool_result_summary(&msg.text),
                 line_count: msg.text.lines().count(),
+                ..Default::default()
             }
         });
         let artifacts = extract_artifacts_from_call_fields(
@@ -6652,6 +6765,7 @@ impl MessageInfo {
             images,
             created_at: (msg.created_at_ms > 0).then_some(msg.created_at_ms),
             elapsed_ms: msg.meta.as_ref().map(|m| m.elapsed_ms).filter(|&ms| ms > 0),
+            switch_to: None,
             notice: None,
         }
     }
@@ -8370,6 +8484,10 @@ async fn get_session_freshness(
 
 const SESSION_DETAIL_WARN_BYTES: usize = 8 * 1024 * 1024;
 
+/// Response header carrying the daemon's epoch-ms clock at response time.
+/// Kept out of the JSON body so the strong ETag stays stable across reads.
+const SESSION_SERVER_TIME_HEADER: &str = "x-jeikcode-server-time";
+
 /// Stable, dependency-free ETag for a JSON response body.
 pub(crate) fn response_etag(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
@@ -8394,6 +8512,10 @@ fn session_detail_response(headers: &HeaderMap, detail: SessionDetail) -> axum::
             return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
         }
     };
+    // A dedicated clock header (instead of a body field) keeps the strong ETag
+    // stable across reads while still letting a cold-start client convert the
+    // persisted epoch-ms tool anchors into its local clock without skew.
+    let server_ms = jeikcode_capabilities::session::now_ms().max(0).to_string();
     let etag = response_etag(&body);
     let not_modified = headers
         .get(header::IF_NONE_MATCH)
@@ -8413,6 +8535,12 @@ fn session_detail_response(headers: &HeaderMap, detail: SessionDetail) -> axum::
         if let Ok(value) = HeaderValue::from_str(&etag) {
             response.headers_mut().insert(header::ETAG, value);
         }
+        if let Ok(value) = HeaderValue::from_str(&server_ms) {
+            response.headers_mut().insert(
+                header::HeaderName::from_static(SESSION_SERVER_TIME_HEADER),
+                value,
+            );
+        }
         return response;
     }
 
@@ -8424,6 +8552,12 @@ fn session_detail_response(headers: &HeaderMap, detail: SessionDetail) -> axum::
     );
     if let Ok(value) = HeaderValue::from_str(&etag) {
         response.headers_mut().insert(header::ETAG, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&server_ms) {
+        response.headers_mut().insert(
+            header::HeaderName::from_static(SESSION_SERVER_TIME_HEADER),
+            value,
+        );
     }
     response
 }
@@ -8533,8 +8667,17 @@ async fn get_session_detail(
         None
     };
     let daemon_instance_id = state.daemon_instance_id.to_string();
+    // Test-only: `ScopedChatHome` installs a THREAD-LOCAL home override so
+    // parallel tests keep private config/session roots. Capture it BEFORE the
+    // blocking hop (a worker thread does not inherit thread-locals) and
+    // re-install it inside the closure; otherwise this path reads the
+    // process-wide test home and the session looks missing (404).
+    #[cfg(test)]
+    let test_home = jeikcode_config::test_util::overridden_home();
 
     tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _test_home = test_home.map(jeikcode_config::test_util::IsolatedHome::at);
         build_session_detail_response(
             &hash,
             &id,
@@ -8631,201 +8774,206 @@ fn build_session_detail_response(
             let display_is_v4 = display
                 .as_ref()
                 .is_some_and(|(meta, _)| meta.v == jeikcode_capabilities::session::DISPLAY_VERSION);
-            let (turns, message_count, offset, messages, pinned_user_index) = if let Some(view) =
-                tail_view
-            {
-                (
-                    view.turns,
-                    view.message_count,
-                    view.offset,
-                    view.messages,
-                    view.pinned_user_index,
-                )
-            } else if let Some((meta, records)) = display {
-                let elapsed = display_turn_elapsed_overrides(&records, &session.meta.turn_stats);
-                // A hook-created log begins at the first user turn; a backfill
-                // already contains the session-start prefix. Prepend the prefix
-                // only in the former case so indices stay stable across upgrades.
-                let already_prefixed = meta.backfilled
-                    || records.first().is_some_and(|record| {
-                        record.role.eq_ignore_ascii_case("system")
-                            || (record.role.eq_ignore_ascii_case("user") && record.synthetic)
-                    });
-                let prefix = if already_prefixed {
-                    Vec::new()
-                } else {
-                    display_prefix_messages(&session)
-                };
-                let prefix_len = prefix.len();
-
-                // 1. 全会话大纲零开销提取：直接从 DisplayRecord 提炼，确保右栏大纲与 "(13 questions left)" 100% 精确，
-                // 并且无需将整仓几千行无用工具行堆分配转化为 MessageInfo。
-                let mut turns = session_user_outline(&prefix);
-                let record_turns = session_records_user_outline(&records, prefix_len);
-                let turns_offset = turns.len();
-                turns.extend(record_turns.into_iter().map(|mut t| {
-                    t.ordinal += turns_offset;
-                    t
-                }));
-
-                let mut full_messages = prefix;
-                full_messages.extend(records.iter().enumerate().map(|(index, record)| {
-                    let mut message = display_record_to_message_info(record);
-                    if let Some(duration) = elapsed.get(&index) {
-                        message.elapsed_ms = Some(*duration);
-                    }
-                    message
-                }));
-                let snapshot_ids: std::collections::HashSet<&str> = session
-                    .snapshot
-                    .messages
-                    .iter()
-                    .filter_map(|message| message.id.as_deref())
-                    .collect();
-                mark_display_only_archive_rows(
-                    records.as_slice(),
-                    &mut full_messages[prefix_len..],
-                    &snapshot_ids,
-                    snapshot_last_turn,
-                    !turn_running && meta.last_turn_id <= snapshot_last_turn,
-                );
-                // 展示日志在 turn_complete 才落盘。运行中/刚停止/硬杀死的尾巴只存在于
-                // inflight 快照：按最后一条共享 id 之后整段投影，画布与大纲共用
-                // 同一套绝对下标，刷新后与直播看到的完全一致。
-                // The append is idempotent (only rows after the last shared id), so
-                // a fully settled v4 log is untouched; an idle crashed turn (no
-                // completed `turn_stat`, so `v4_display_covers...` cannot see it)
-                // still gets its checkpointed tail back.
-                append_snapshot_tail(
-                    &mut full_messages,
-                    &mut turns,
-                    &session.snapshot.messages,
-                    std::path::Path::new(&session.meta.working_dir),
-                );
-                if !display_is_v4 && !turn_running && !full_messages.is_empty() {
-                    // Lazy v3 -> v4 migration: the current merged projection is
-                    // complete enough to become the v4 source of truth. The next
-                    // read never re-enters this branch.
-                    let records: Vec<_> = full_messages
-                        .iter()
-                        .enumerate()
-                        .map(|(index, message)| {
-                            display_record_from_message_info(&session.meta.id, index, message)
-                        })
-                        .collect();
-                    let _ = display_manager.write_display_backfill(
-                        &session.meta.id,
-                        &records,
-                        snapshot_last_turn,
-                    );
-                }
-                append_streaming_before_pending(
-                    &mut full_messages,
-                    &mut turns,
-                    &session.meta.id,
-                    current_operation.as_deref(),
-                    std::path::Path::new(&session.meta.working_dir),
-                    0,
-                );
-                annotate_client_input_ids(&mut full_messages, &session.meta.id);
-                attach_display_images(
-                    &mut full_messages,
-                    std::path::Path::new(&session.meta.working_dir),
-                    &session.meta.id,
-                );
-                repair_display_clock(&mut full_messages);
-                let (message_count, offset, window, pinned) =
-                    if let Some(after_seq) = query.after_seq {
-                        take_session_after(full_messages, after_seq)
-                    } else {
-                        take_session_page(full_messages, &query)
-                    };
-                (turns, message_count, offset, window, pinned)
-            } else {
-                // v4 missing/incomplete: one-time migration or explicit-mutation
-                // rebuild. This branch writes v4 before returning; a normal
-                // settled session never re-enters it.
-                let mut messages = match merge_catalog_session_messages_for_display(&session) {
-                    Ok(messages) => messages,
-                    Err(error) => {
-                        let msg = format!("Failed to load session: {error}");
-                        return (StatusCode::NOT_FOUND, Json(msg)).into_response();
-                    }
-                };
-                // 旧快照可能没有 message id（功能引入前写入）：补确定性 id，
-                // 保证新契约下的右栏锚点 / 编辑 / 删除不退化。
-                mint_legacy_message_ids(&mut messages);
-                // Compaction drains model context from the snapshot, but the raw
-                // transcript is append-only. Rebuild the pre-compaction display
-                // prefix from it so the question rail and canvas never lose turns
-                // after a refresh. Presentation entries already merged into the
-                // list are display-only rows: the splice keeps any that are not
-                // covered by the rebuilt transcript.
-                if let Some(anchor) = messages.iter().position(|message| {
-                    message.role.eq_ignore_ascii_case("user")
-                        && message.synthetic
-                        && jeikcode_capabilities::compaction::is_compaction_anchor_text(
-                            &message.content,
-                        )
-                }) {
-                    if let Some(turns) = load_display_transcript(&hash, &session.meta.id) {
-                        let boundary = messages[anchor + 1..].iter().find(|message| {
-                            message.role.eq_ignore_ascii_case("user") && !message.synthetic
+            let (turns, message_count, offset, mut messages, pinned_user_index) =
+                if let Some(view) = tail_view {
+                    (
+                        view.turns,
+                        view.message_count,
+                        view.offset,
+                        view.messages,
+                        view.pinned_user_index,
+                    )
+                } else if let Some((meta, records)) = display {
+                    let elapsed =
+                        display_turn_elapsed_overrides(&records, &session.meta.turn_stats);
+                    // A hook-created log begins at the first user turn; a backfill
+                    // already contains the session-start prefix. Prepend the prefix
+                    // only in the former case so indices stay stable across upgrades.
+                    let already_prefixed = meta.backfilled
+                        || records.first().is_some_and(|record| {
+                            record.role.eq_ignore_ascii_case("system")
+                                || (record.role.eq_ignore_ascii_case("user") && record.synthetic)
                         });
-                        let prefix = display_prefix_from_transcript(
-                            &turns,
-                            boundary.and_then(|message| message.created_at),
-                            boundary.map(|message| message.content.as_str()),
-                        );
-                        messages = splice_compacted_display(messages, prefix);
-                    }
-                }
-                // One-time upgrade path for sessions created before the display
-                // log existed. Only settled sessions are materialized so a live
-                // turn is never frozen into the log half-way. If an existing log
-                // is already beyond the readable ceiling, do not rewrite it on
-                // every read (the next read would fail the same way).
-                let display_too_large = display_manager
-                    .display_path(&session.meta.id)
-                    .ok()
-                    .and_then(|path| std::fs::metadata(path).ok())
-                    .is_some_and(|metadata| {
-                        metadata.len()
-                            > jeikcode_capabilities::session::display::MAX_DISPLAY_READ_BYTES as u64
-                    });
-                if !turn_running && !messages.is_empty() && !display_too_large {
-                    let records: Vec<_> = messages
-                        .iter()
-                        .enumerate()
-                        .map(|(index, message)| {
-                            display_record_from_message_info(&session.meta.id, index, message)
-                        })
-                        .collect();
-                    let _ = display_manager.write_display_backfill(
-                        &session.meta.id,
-                        &records,
-                        snapshot_last_turn,
-                    );
-                }
-                let mut turns = session_user_outline(&messages);
-                append_streaming_before_pending(
-                    &mut messages,
-                    &mut turns,
-                    &id,
-                    current_operation.as_deref(),
-                    std::path::Path::new(&session.meta.working_dir),
-                    0,
-                );
-                annotate_client_input_ids(&mut messages, &id);
-                repair_display_clock(&mut messages);
-                let (message_count, offset, messages, pinned_user_index) =
-                    if let Some(after_seq) = query.after_seq {
-                        take_session_after(messages, after_seq)
+                    let prefix = if already_prefixed {
+                        Vec::new()
                     } else {
-                        take_session_page(messages, &query)
+                        display_prefix_messages(&session)
                     };
-                (turns, message_count, offset, messages, pinned_user_index)
-            };
+                    let prefix_len = prefix.len();
+
+                    // 1. 全会话大纲零开销提取：直接从 DisplayRecord 提炼，确保右栏大纲与 "(13 questions left)" 100% 精确，
+                    // 并且无需将整仓几千行无用工具行堆分配转化为 MessageInfo。
+                    let mut turns = session_user_outline(&prefix);
+                    let record_turns = session_records_user_outline(&records, prefix_len);
+                    let turns_offset = turns.len();
+                    turns.extend(record_turns.into_iter().map(|mut t| {
+                        t.ordinal += turns_offset;
+                        t
+                    }));
+
+                    let mut full_messages = prefix;
+                    full_messages.extend(records.iter().enumerate().map(|(index, record)| {
+                        let mut message = display_record_to_message_info(record);
+                        if let Some(duration) = elapsed.get(&index) {
+                            message.elapsed_ms = Some(*duration);
+                        }
+                        message
+                    }));
+                    let snapshot_ids: std::collections::HashSet<&str> = session
+                        .snapshot
+                        .messages
+                        .iter()
+                        .filter_map(|message| message.id.as_deref())
+                        .collect();
+                    mark_display_only_archive_rows(
+                        records.as_slice(),
+                        &mut full_messages[prefix_len..],
+                        &snapshot_ids,
+                        snapshot_last_turn,
+                        !turn_running && meta.last_turn_id <= snapshot_last_turn,
+                    );
+                    // 展示日志在 turn_complete 才落盘。运行中/刚停止/硬杀死的尾巴只存在于
+                    // inflight 快照：按最后一条共享 id 之后整段投影，画布与大纲共用
+                    // 同一套绝对下标，刷新后与直播看到的完全一致。
+                    // The append is idempotent (only rows after the last shared id), so
+                    // a fully settled v4 log is untouched; an idle crashed turn (no
+                    // completed `turn_stat`, so `v4_display_covers...` cannot see it)
+                    // still gets its checkpointed tail back.
+                    append_snapshot_tail(
+                        &mut full_messages,
+                        &mut turns,
+                        &session.snapshot.messages,
+                        std::path::Path::new(&session.meta.working_dir),
+                    );
+                    if !display_is_v4 && !turn_running && !full_messages.is_empty() {
+                        // Lazy v3 -> v4 migration: the current merged projection is
+                        // complete enough to become the v4 source of truth. The next
+                        // read never re-enters this branch.
+                        let records: Vec<_> = full_messages
+                            .iter()
+                            .enumerate()
+                            .map(|(index, message)| {
+                                display_record_from_message_info(&session.meta.id, index, message)
+                            })
+                            .collect();
+                        let _ = display_manager.write_display_backfill(
+                            &session.meta.id,
+                            &records,
+                            snapshot_last_turn,
+                        );
+                    }
+                    append_streaming_before_pending(
+                        &mut full_messages,
+                        &mut turns,
+                        &session.meta.id,
+                        current_operation.as_deref(),
+                        std::path::Path::new(&session.meta.working_dir),
+                        0,
+                    );
+                    annotate_client_input_ids(&mut full_messages, &session.meta.id);
+                    attach_display_images(
+                        &mut full_messages,
+                        std::path::Path::new(&session.meta.working_dir),
+                        &session.meta.id,
+                    );
+                    repair_display_clock(&mut full_messages);
+                    let (message_count, offset, window, pinned) =
+                        if let Some(after_seq) = query.after_seq {
+                            take_session_after(full_messages, after_seq)
+                        } else {
+                            take_session_page(full_messages, &query)
+                        };
+                    (turns, message_count, offset, window, pinned)
+                } else {
+                    // v4 missing/incomplete: one-time migration or explicit-mutation
+                    // rebuild. This branch writes v4 before returning; a normal
+                    // settled session never re-enters it.
+                    let mut messages = match merge_catalog_session_messages_for_display(&session) {
+                        Ok(messages) => messages,
+                        Err(error) => {
+                            let msg = format!("Failed to load session: {error}");
+                            return (StatusCode::NOT_FOUND, Json(msg)).into_response();
+                        }
+                    };
+                    // 旧快照可能没有 message id（功能引入前写入）：补确定性 id，
+                    // 保证新契约下的右栏锚点 / 编辑 / 删除不退化。
+                    mint_legacy_message_ids(&mut messages);
+                    // Compaction drains model context from the snapshot, but the raw
+                    // transcript is append-only. Rebuild the pre-compaction display
+                    // prefix from it so the question rail and canvas never lose turns
+                    // after a refresh. Presentation entries already merged into the
+                    // list are display-only rows: the splice keeps any that are not
+                    // covered by the rebuilt transcript.
+                    if let Some(anchor) = messages.iter().position(|message| {
+                        message.role.eq_ignore_ascii_case("user")
+                            && message.synthetic
+                            && jeikcode_capabilities::compaction::is_compaction_anchor_text(
+                                &message.content,
+                            )
+                    }) {
+                        if let Some(turns) = load_display_transcript(&hash, &session.meta.id) {
+                            let boundary = messages[anchor + 1..].iter().find(|message| {
+                                message.role.eq_ignore_ascii_case("user") && !message.synthetic
+                            });
+                            let prefix = display_prefix_from_transcript(
+                                &turns,
+                                boundary.and_then(|message| message.created_at),
+                                boundary.map(|message| message.content.as_str()),
+                            );
+                            messages = splice_compacted_display(messages, prefix);
+                        }
+                    }
+                    // One-time upgrade path for sessions created before the display
+                    // log existed. Only settled sessions are materialized so a live
+                    // turn is never frozen into the log half-way. If an existing log
+                    // is already beyond the readable ceiling, do not rewrite it on
+                    // every read (the next read would fail the same way).
+                    let display_too_large = display_manager
+                        .display_path(&session.meta.id)
+                        .ok()
+                        .and_then(|path| std::fs::metadata(path).ok())
+                        .is_some_and(|metadata| {
+                            metadata.len()
+                                > jeikcode_capabilities::session::display::MAX_DISPLAY_READ_BYTES
+                                    as u64
+                        });
+                    if !turn_running && !messages.is_empty() && !display_too_large {
+                        let records: Vec<_> = messages
+                            .iter()
+                            .enumerate()
+                            .map(|(index, message)| {
+                                display_record_from_message_info(&session.meta.id, index, message)
+                            })
+                            .collect();
+                        let _ = display_manager.write_display_backfill(
+                            &session.meta.id,
+                            &records,
+                            snapshot_last_turn,
+                        );
+                    }
+                    let mut turns = session_user_outline(&messages);
+                    append_streaming_before_pending(
+                        &mut messages,
+                        &mut turns,
+                        &id,
+                        current_operation.as_deref(),
+                        std::path::Path::new(&session.meta.working_dir),
+                        0,
+                    );
+                    annotate_client_input_ids(&mut messages, &id);
+                    repair_display_clock(&mut messages);
+                    let (message_count, offset, messages, pinned_user_index) =
+                        if let Some(after_seq) = query.after_seq {
+                            take_session_after(messages, after_seq)
+                        } else {
+                            take_session_page(messages, &query)
+                        };
+                    (turns, message_count, offset, messages, pinned_user_index)
+                };
+            // 跨实例 / 冷启动：把工具执行耗时与切换延迟从会话侧车回填到工具行。
+            // 只影响 API 响应，绝不进入模型上下文。
+            annotate_tool_metrics(&mut messages, &display_manager, &id);
+            annotate_model_switches(&mut messages, &display_manager, &id);
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
             let (todos, todos_revision) = session_todo_snapshot(&id);
             let cursor = SessionCursor {
@@ -9393,6 +9541,23 @@ fn display_prefix_from_transcript(
                 name: tool.name.clone(),
                 arguments: tool.args.clone(),
                 display: format_tool_args(&tool.name, &tool.args),
+                started_at: tool.started_at,
+                finished_at: tool
+                    .started_at
+                    .zip(tool.duration_ms)
+                    .map(|(started, duration)| started.saturating_add(duration)),
+                duration_ms: tool.duration_ms,
+                switch_ms: tool.switch_ms,
+                status: Some(
+                    if tool.is_error {
+                        "error"
+                    } else if tool.duration_ms.is_some() {
+                        "done"
+                    } else {
+                        "incomplete"
+                    }
+                    .to_string(),
+                ),
             })
             .collect();
         let has_tools = !calls.is_empty();
@@ -9435,6 +9600,23 @@ fn display_prefix_from_transcript(
                         success: !tool.is_error,
                         summary: tool_result_summary(&tool.result),
                         line_count: tool.result.lines().count(),
+                        started_at: tool.started_at,
+                        finished_at: tool
+                            .started_at
+                            .zip(tool.duration_ms)
+                            .map(|(started, duration)| started.saturating_add(duration)),
+                        duration_ms: tool.duration_ms,
+                        switch_ms: tool.switch_ms,
+                        status: Some(
+                            if tool.is_error {
+                                "error"
+                            } else if tool.duration_ms.is_some() {
+                                "done"
+                            } else {
+                                "incomplete"
+                            }
+                            .to_string(),
+                        ),
                     }),
                     artifacts: None,
                     images: None,
@@ -9648,6 +9830,7 @@ fn display_record_to_message_info(
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
                 display: format_tool_args(&call.name, &call.arguments),
+                ..Default::default()
             })
             .collect::<Vec<_>>()
     });
@@ -9659,6 +9842,7 @@ fn display_record_to_message_info(
             success: !record.is_error,
             summary: tool_result_summary(&record.content),
             line_count: record.content.lines().count(),
+            ..Default::default()
         });
     let artifacts = extract_artifacts_from_call_fields(
         record
@@ -12353,6 +12537,40 @@ pub enum ChatEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
     },
+    /// Observability-only timing frame for one tool row. Carries no model text
+    /// and is never persisted into the conversation: it lets every WebUI
+    /// instance paint the same live `cost` stopwatch (anchored on `started_at`)
+    /// and the frozen `switch` latency, and lets a cold start rehydrate the
+    /// exact same values from the session metrics sidecar.
+    #[serde(rename = "tool_timing")]
+    ToolTiming {
+        id: String,
+        name: String,
+        /// `running` | `done` | `error` | `incomplete`
+        status: String,
+        /// Epoch milliseconds (server clock) when execution started.
+        started_at: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finished_at: Option<u64>,
+        /// Daemon-measured execution wall-clock; frozen once terminal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// Gap from the previous turn activity to this tool's start.
+        #[serde(default)]
+        switch_ms: u64,
+    },
+    /// Display-only marker: a queued runtime model switch took effect at this
+    /// assistant message's round boundary. It is joined to `message_id`, never
+    /// written into the conversation, and persisted in the model-switch log so
+    /// refresh/cold start renders the same chip.
+    #[serde(rename = "model_switch")]
+    ModelSwitch {
+        provider: String,
+        model: String,
+        message_id: String,
+        requested_at: u64,
+        applied_at: u64,
+    },
     /// Real-time tool output chunk (stdout). `id` is the tool call id so parallel
     /// tools can be attributed correctly on the OpenAI/Anthropic compat surface.
     #[serde(rename = "tool_output")]
@@ -13016,6 +13234,187 @@ mod chat_event_type_tests {
 
         assert_eq!(json["type"], "session_assigned");
         assert_eq!(json["session_id"], "session-1");
+    }
+
+    #[test]
+    fn model_switch_marker_binds_to_the_next_assistant_round() {
+        use jeikcode_coding::runtime::CodingRuntimeEvent;
+        use jeikcode_kernel::event::AgentEvent;
+
+        let mut projector = ChatRuntimeProjector::default();
+        let applied = projector.project_runtime(
+            CodingRuntimeEvent::ModelSwitched {
+                provider: "provider-b".into(),
+                model: "model-b".into(),
+                requested_at: 10,
+                applied_at: 25,
+            },
+            "sess-switch",
+        );
+        assert!(applied.is_empty(), "the marker waits for the new round");
+
+        projector.project_runtime(
+            CodingRuntimeEvent::Agent(AgentEvent::AssistantMessage {
+                message_id: "m-next".into(),
+            }),
+            "sess-switch",
+        );
+        let events = projector.project_runtime(
+            CodingRuntimeEvent::Agent(AgentEvent::TextDelta("hello".into())),
+            "sess-switch",
+        );
+        let ChatEvent::ModelSwitch {
+            provider,
+            model,
+            message_id,
+            requested_at,
+            applied_at,
+        } = events
+            .iter()
+            .find(|event| matches!(event, ChatEvent::ModelSwitch { .. }))
+            .expect("switch marker")
+        else {
+            unreachable!()
+        };
+        assert_eq!(provider, "provider-b");
+        assert_eq!(model, "model-b");
+        assert_eq!(message_id, "m-next");
+        assert_eq!(*requested_at, 10);
+        assert_eq!(*applied_at, 25);
+        assert!(
+            matches!(events.last(), Some(ChatEvent::ModelSwitch { .. })),
+            "the marker follows the first visible part so the row already exists"
+        );
+    }
+
+    #[test]
+    fn tool_timing_frames_carry_persistable_switch_and_frozen_cost() {
+        use jeikcode_kernel::event::AgentEvent;
+        use jeikcode_kernel::tool::{ToolCall, ToolResult};
+
+        let mut projector = ChatRuntimeProjector::default();
+        projector.project_agent(
+            AgentEvent::UserMessage {
+                message_id: "u1".into(),
+                turn_ordinal: 1,
+                message_index: 0,
+            },
+            "sess-timing",
+        );
+        projector.project_agent(AgentEvent::TextDelta("thinking".into()), "sess-timing");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let started = projector.project_agent(
+            AgentEvent::ToolStarted {
+                call: ToolCall {
+                    id: "call-1".into(),
+                    name: "run_command".into(),
+                    arguments: "{\"command\":\"echo hi\"}".into(),
+                },
+            },
+            "sess-timing",
+        );
+        let ChatEvent::ToolTiming {
+            status,
+            started_at,
+            switch_ms,
+            duration_ms,
+            ..
+        } = started
+            .iter()
+            .find(|event| matches!(event, ChatEvent::ToolTiming { .. }))
+            .expect("running timing frame")
+        else {
+            unreachable!()
+        };
+        assert_eq!(status, "running");
+        assert!(*started_at > 0);
+        assert!(*switch_ms >= 5, "switch must span the text-to-tool gap");
+        assert_eq!(*duration_ms, None);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let finished = projector.project_agent(
+            AgentEvent::ToolFinished {
+                call_id: "call-1".into(),
+                is_error: false,
+            },
+            "sess-timing",
+        );
+        let ChatEvent::ToolTiming {
+            status,
+            finished_at,
+            duration_ms,
+            ..
+        } = finished
+            .iter()
+            .find(|event| matches!(event, ChatEvent::ToolTiming { .. }))
+            .expect("terminal timing frame")
+        else {
+            unreachable!()
+        };
+        assert_eq!(status, "done");
+        assert!(finished_at.is_some());
+        assert!(duration_ms.unwrap_or(0) >= 10);
+
+        // The authoritative result reuses the SAME duration; no second timing frame.
+        let result = projector.project_agent(
+            AgentEvent::ToolResult {
+                result: ToolResult {
+                    call_id: "call-1".into(),
+                    content: "hi".into(),
+                    is_error: false,
+                    images: Vec::new(),
+                },
+            },
+            "sess-timing",
+        );
+        let ChatEvent::ToolCallResult { duration_ms, .. } = result
+            .iter()
+            .find(|event| matches!(event, ChatEvent::ToolCallResult { .. }))
+            .expect("tool result")
+        else {
+            unreachable!()
+        };
+        assert!(*duration_ms >= 10);
+        assert!(!result
+            .iter()
+            .any(|event| matches!(event, ChatEvent::ToolTiming { .. })));
+    }
+
+    #[test]
+    fn unfinished_tools_freeze_as_incomplete_at_terminal() {
+        use jeikcode_kernel::event::AgentEvent;
+        use jeikcode_kernel::tool::ToolCall;
+
+        let mut projector = ChatRuntimeProjector::default();
+        projector.project_agent(
+            AgentEvent::ToolStarted {
+                call: ToolCall {
+                    id: "call-2".into(),
+                    name: "run_command".into(),
+                    arguments: "{}".into(),
+                },
+            },
+            "sess-incomplete",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let drained = projector.drain_unfinished_tool_timings();
+        assert_eq!(drained.len(), 1);
+        let ChatEvent::ToolTiming {
+            id,
+            status,
+            duration_ms,
+            finished_at,
+            ..
+        } = &drained[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(id, "call-2");
+        assert_eq!(status, "incomplete");
+        assert!(finished_at.is_some());
+        assert!(duration_ms.unwrap_or(0) >= 3);
+        assert!(projector.drain_unfinished_tool_timings().is_empty());
     }
 
     #[test]
@@ -14153,9 +14552,35 @@ mod agent_warning_i18n_tests {
     }
 }
 
+/// Per-call execution timing tracked by the projector. `started` (Instant) is
+/// the precise duration source; `started_at_ms` (epoch) is the cross-instance /
+/// cold-start anchor persisted in the session metrics sidecar.
+struct LiveToolTiming {
+    name: String,
+    started: std::time::Instant,
+    started_at_ms: u64,
+    switch_ms: u64,
+    finished_at_ms: Option<u64>,
+    duration_ms: Option<u64>,
+}
+
+/// A model switch that already applied at a round boundary; the projector emits
+/// its display marker on the first visible part of the new assistant message.
+struct PendingModelSwitch {
+    provider: String,
+    model: String,
+    requested_at: u64,
+    applied_at: u64,
+}
+
 struct ChatRuntimeProjector {
     artifacts: ArtifactDetector,
-    live_tools: HashMap<String, (String, std::time::Instant)>,
+    live_tools: HashMap<String, LiveToolTiming>,
+    /// Epoch ms of the last user-visible activity in this turn (user echo,
+    /// text/reasoning delta, tool completion). Drives the per-tool `switch`
+    /// latency: how long the agent took to move from that edge to the next tool.
+    last_activity_at_ms: u64,
+    pending_model_switch: Option<PendingModelSwitch>,
     total_tokens: usize,
     tool_call_count: usize,
     terminal_reason: Option<jeikcode_kernel::event::StopReason>,
@@ -14202,6 +14627,8 @@ impl Default for ChatRuntimeProjector {
         Self {
             artifacts: ArtifactDetector::new(),
             live_tools: HashMap::new(),
+            last_activity_at_ms: ChatRuntimeProjector::now_ms(),
+            pending_model_switch: None,
             total_tokens: 0,
             tool_call_count: 0,
             terminal_reason: None,
@@ -14280,6 +14707,51 @@ pub(crate) fn ensure_v4_display_for_session(
 }
 
 impl ChatRuntimeProjector {
+    /// Epoch-ms clock for the persisted timing anchors (the kernel stays
+    /// clock-free; observability time lives at the daemon boundary).
+    fn now_ms() -> u64 {
+        u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0)
+    }
+
+    /// Mark the latest user-visible activity edge. The next tool's `switch_ms`
+    /// is measured from here, so a tool following a long thinking/text stream
+    /// reports the real gap instead of a meaningless 0.
+    fn note_activity(&mut self) {
+        self.last_activity_at_ms = Self::now_ms();
+    }
+
+    /// Freeze the gap from the previous activity edge and move the edge to this
+    /// tool's start (parallel batch siblings therefore report near-zero gaps).
+    fn take_switch_ms(&mut self, now: u64) -> u64 {
+        let gap = now.saturating_sub(self.last_activity_at_ms);
+        self.last_activity_at_ms = now;
+        gap
+    }
+
+    /// Emit `incomplete` timing frames for tools whose execution never returned
+    /// (turn cancelled / runtime died between start and result). Called once at
+    /// the terminal so a cold start still shows a frozen cost instead of an
+    /// eternally growing one.
+    pub(crate) fn drain_unfinished_tool_timings(&mut self) -> Vec<ChatEvent> {
+        let now = Self::now_ms();
+        let events = self
+            .live_tools
+            .iter()
+            .filter(|(_, metric)| metric.finished_at_ms.is_none())
+            .map(|(id, metric)| ChatEvent::ToolTiming {
+                id: id.clone(),
+                name: metric.name.clone(),
+                status: "incomplete".to_string(),
+                started_at: metric.started_at_ms,
+                finished_at: Some(now),
+                duration_ms: Some(metric.started.elapsed().as_millis() as u64),
+                switch_ms: metric.switch_ms,
+            })
+            .collect();
+        self.live_tools.clear();
+        events
+    }
+
     fn reset_partial_stream(&mut self) {
         self.partial_text.clear();
         self.partial_reasoning.clear();
@@ -14363,7 +14835,25 @@ impl ChatRuntimeProjector {
         use jeikcode_coding::TurnCompletion;
 
         match event {
-            CodingRuntimeEvent::Agent(event) => self.project_agent(event, permission_session_id),
+            CodingRuntimeEvent::Agent(event) => {
+                self.project_agent_with_switch(event, permission_session_id)
+            }
+            CodingRuntimeEvent::ModelSwitched {
+                provider,
+                model,
+                requested_at,
+                applied_at,
+            } => {
+                // Applied at a real kernel round boundary. The visible marker is
+                // emitted with the first part of the NEW assistant message below.
+                self.pending_model_switch = Some(PendingModelSwitch {
+                    provider,
+                    model,
+                    requested_at,
+                    applied_at,
+                });
+                Vec::new()
+            }
             CodingRuntimeEvent::Request(request) => {
                 use jeikcode_capabilities::tools::{
                     request_user_input::REQUEST_USER_INPUT_KIND, ApprovalRequest, APPROVAL_KIND,
@@ -14700,6 +15190,45 @@ impl ChatRuntimeProjector {
             .or_else(|| self.current_user_message_id.clone())
     }
 
+    /// Project an agent event and, when a provider switch just applied, append
+    /// the display-only `ModelSwitch` marker after the first visible part of the
+    /// new round. The marker is bound to that round's stable assistant message id,
+    /// so no part ids are invented/misaligned.
+    fn project_agent_with_switch(
+        &mut self,
+        event: jeikcode_kernel::event::AgentEvent,
+        session_id: &str,
+    ) -> Vec<ChatEvent> {
+        let events = self.project_agent(event, session_id);
+        if self.pending_model_switch.is_some()
+            && events.iter().any(|event| {
+                matches!(
+                    event,
+                    ChatEvent::TextDelta { .. }
+                        | ChatEvent::ReasoningDelta { .. }
+                        | ChatEvent::ToolCallStarted { .. }
+                        | ChatEvent::ArtifactStart { .. }
+                        | ChatEvent::ArtifactContent { .. }
+                )
+            })
+        {
+            if let Some(message_id) = self.current_message_id.clone() {
+                if let Some(switch) = self.pending_model_switch.take() {
+                    let mut events = events;
+                    events.push(ChatEvent::ModelSwitch {
+                        provider: switch.provider,
+                        model: switch.model,
+                        message_id,
+                        requested_at: switch.requested_at,
+                        applied_at: switch.applied_at,
+                    });
+                    return events;
+                }
+            }
+        }
+        events
+    }
+
     fn project_agent(
         &mut self,
         event: jeikcode_kernel::event::AgentEvent,
@@ -14712,6 +15241,7 @@ impl ChatRuntimeProjector {
             Agent::AssistantMessage { message_id } => {
                 // Boundary marker: tag subsequent deltas with this identity.
                 self.current_message_id = Some(message_id.clone());
+                self.note_activity();
                 self.part_seq = 0;
                 self.part_rev = 0;
                 self.last_part_kind = None;
@@ -14732,6 +15262,7 @@ impl ChatRuntimeProjector {
                 // 否则会挂到上一轮回答底部 / 下一条 loop 下面。
                 self.current_user_message_id = Some(message_id.clone());
                 self.current_message_id = None;
+                self.note_activity();
                 // A new turn starts: the previous turn's partial must have been
                 // committed/cleared; drop any stale checkpoint.
                 self.reset_partial_stream();
@@ -14743,6 +15274,7 @@ impl ChatRuntimeProjector {
                 }]
             }
             Agent::TextDelta(text) => {
+                self.note_activity();
                 let (message_id, part_id, part_seq, part_rev) = self.next_part_stamp("text");
                 self.note_partial_delta("text", &message_id, &part_id, &text);
                 let mut events = if self.keep_raw_markdown {
@@ -14793,6 +15325,7 @@ impl ChatRuntimeProjector {
                 events
             }
             Agent::Reasoning(content) => {
+                self.note_activity();
                 let (message_id, part_id, part_seq, part_rev) = self.next_part_stamp("reasoning");
                 self.note_partial_delta("reasoning", &message_id, &part_id, &content);
                 vec![ChatEvent::ReasoningDelta {
@@ -14843,7 +15376,35 @@ impl ChatRuntimeProjector {
                 }
                 self.maybe_save_partial();
                 self.end_streaming_part();
-                self.project_tool_started(call)
+                // Capture the timing edges BEFORE `call` is moved into the projector:
+                // `started_at` is the cross-instance/cold-start anchor, `switch_ms`
+                // the frozen gap from the previous activity edge.
+                let started_at = Self::now_ms();
+                let switch_ms = self.take_switch_ms(started_at);
+                self.live_tools.insert(
+                    call.id.clone(),
+                    LiveToolTiming {
+                        name: call.name.clone(),
+                        started: std::time::Instant::now(),
+                        started_at_ms: started_at,
+                        switch_ms,
+                        finished_at_ms: None,
+                        duration_ms: None,
+                    },
+                );
+                let id = call.id.clone();
+                let name = call.name.clone();
+                let mut events = self.project_tool_started(call);
+                events.push(ChatEvent::ToolTiming {
+                    id,
+                    name,
+                    status: "running".to_string(),
+                    started_at,
+                    finished_at: None,
+                    duration_ms: None,
+                    switch_ms,
+                });
+                events
             }
             Agent::ToolCallStreaming {
                 index,
@@ -14891,22 +15452,71 @@ impl ChatRuntimeProjector {
                     }]
                 }
             }
-            Agent::ToolFinished { call_id, is_error } => vec![ChatEvent::ToolFinished {
-                id: call_id,
-                success: !is_error,
-            }],
+            Agent::ToolFinished { call_id, is_error } => {
+                let finished_at = Self::now_ms();
+                let duration_ms = self.live_tools.get_mut(&call_id).map(|metric| {
+                    let duration = metric.started.elapsed().as_millis() as u64;
+                    metric.finished_at_ms = Some(finished_at);
+                    metric.duration_ms = Some(duration);
+                    duration
+                });
+                // A tool returning is a real activity edge: the next tool's
+                // `switch` measures the agent's reaction after this completion.
+                self.last_activity_at_ms = finished_at;
+                let mut events = vec![ChatEvent::ToolFinished {
+                    id: call_id.clone(),
+                    success: !is_error,
+                }];
+                if let Some(metric) = self.live_tools.get(&call_id) {
+                    if let Some(duration_ms) = duration_ms {
+                        events.push(ChatEvent::ToolTiming {
+                            id: call_id,
+                            name: metric.name.clone(),
+                            status: if is_error { "error" } else { "done" }.to_string(),
+                            started_at: metric.started_at_ms,
+                            finished_at: Some(finished_at),
+                            duration_ms: Some(duration_ms),
+                            switch_ms: metric.switch_ms,
+                        });
+                    }
+                }
+                events
+            }
             Agent::ToolResult { result } => {
-                let (name, started) = self
-                    .live_tools
-                    .remove(&result.call_id)
-                    .unwrap_or_else(|| ("tool".into(), std::time::Instant::now()));
-                vec![ChatEvent::ToolCallResult {
-                    id: result.call_id,
+                let metric = self.live_tools.remove(&result.call_id);
+                let (name, duration_ms) = match &metric {
+                    Some(metric) => (
+                        metric.name.clone(),
+                        metric
+                            .duration_ms
+                            .unwrap_or_else(|| metric.started.elapsed().as_millis() as u64),
+                    ),
+                    None => ("tool".into(), 0),
+                };
+                let mut events = vec![ChatEvent::ToolCallResult {
+                    id: result.call_id.clone(),
                     name,
                     output: result.content,
                     success: !result.is_error,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                }]
+                    duration_ms,
+                }];
+                // Defensive: a result that never saw `ToolFinished` (driver
+                // restart / synthetic path) still gets one terminal timing frame
+                // so every client freezes at the same authoritative duration.
+                if let Some(metric) = metric.filter(|m| m.finished_at_ms.is_none()) {
+                    let finished_at = Self::now_ms();
+                    self.last_activity_at_ms = finished_at;
+                    events.push(ChatEvent::ToolTiming {
+                        id: result.call_id,
+                        name: metric.name.clone(),
+                        status: if result.is_error { "error" } else { "done" }.to_string(),
+                        started_at: metric.started_at_ms,
+                        finished_at: Some(finished_at),
+                        duration_ms: Some(duration_ms),
+                        switch_ms: metric.switch_ms,
+                    });
+                }
+                events
             }
             Agent::Usage(meta) => {
                 let prompt = meta.tokens.prompt as usize;
@@ -15093,10 +15703,6 @@ impl ChatRuntimeProjector {
 
     fn project_tool_started(&mut self, call: jeikcode_kernel::tool::ToolCall) -> Vec<ChatEvent> {
         self.tool_call_count += 1;
-        self.live_tools.insert(
-            call.id.clone(),
-            (call.name.clone(), std::time::Instant::now()),
-        );
         let mut events = vec![ChatEvent::ToolCallStarted {
             id: call.id,
             name: call.name.clone(),
@@ -15537,6 +16143,12 @@ async fn chat_stream(
         );
         let mut val = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
         if let serde_json::Value::Object(ref mut map) = val {
+            map.insert(
+                "server_ts".to_string(),
+                serde_json::Value::from(
+                    u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0),
+                ),
+            );
             if !map.contains_key("session_id") {
                 map.insert(
                     "session_id".to_string(),
@@ -15672,6 +16284,47 @@ mod admission_identity_tests {
         assert!(real.id.is_none());
         assert!(turn_input_is_real_user_message(&real));
     }
+}
+
+/// Persist one `tool_timing` frame to `<session>.toolmetrics.jsonl`.
+///
+/// Observability-only sidecar: nothing here is ever read back into the model
+/// context. Returns `false` so the caller can disable further writes for this
+/// turn after the first IO failure instead of spamming stderr per tool.
+fn persist_tool_timing_metric(
+    manager: &NativeSessionManager,
+    session_id: &str,
+    event: &ChatEvent,
+) -> bool {
+    let ChatEvent::ToolTiming {
+        id,
+        name,
+        status,
+        started_at,
+        finished_at,
+        duration_ms,
+        switch_ms,
+    } = event
+    else {
+        return true;
+    };
+    let status = match status.as_str() {
+        "done" => jeikcode_capabilities::session::ToolMetricStatus::Done,
+        "error" => jeikcode_capabilities::session::ToolMetricStatus::Error,
+        "incomplete" => jeikcode_capabilities::session::ToolMetricStatus::Incomplete,
+        _ => jeikcode_capabilities::session::ToolMetricStatus::Running,
+    };
+    let record = jeikcode_capabilities::session::ToolMetricRecord {
+        v: jeikcode_capabilities::session::tool_metrics::TOOL_METRIC_VERSION,
+        call_id: id.clone(),
+        name: name.clone(),
+        started_at: *started_at,
+        finished_at: *finished_at,
+        duration_ms: *duration_ms,
+        switch_ms: *switch_ms,
+        status,
+    };
+    manager.append_tool_metric(session_id, &record).is_ok()
 }
 
 /// Process a chat request and stream events
@@ -16064,6 +16717,10 @@ pub(crate) async fn process_chat_request(
         keep_raw_markdown,
         ..ChatRuntimeProjector::default()
     };
+    // Tool timing sidecar: written as events happen so a second instance or a
+    // cold start can rehydrate the exact timers without touching model context.
+    let tool_metrics_manager = NativeSessionManager::for_project(&working_dir);
+    let mut tool_metrics_writable = true;
     let mut first_ttft_promoted = false;
     let effective_provider_for_default = provider_name.clone();
     let opening_client_input_id = active_chats
@@ -16156,9 +16813,75 @@ pub(crate) async fn process_chat_request(
                 ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
             ) {
                 terminal_sent.store(true, std::sync::atomic::Ordering::Release);
+                // Freeze any tool that never returned BEFORE the terminal frame, so
+                // every observer (and a later cold start) sees the same cost.
+                for timing in projector.drain_unfinished_tool_timings() {
+                    if tool_metrics_writable
+                        && !persist_tool_timing_metric(
+                            &tool_metrics_manager,
+                            &perm_session_key,
+                            &timing,
+                        )
+                    {
+                        tool_metrics_writable = false;
+                        eprintln!(
+                            "[tool-metrics] failed to persist timing (session {perm_session_key}); \
+                             further writes disabled for this turn"
+                        );
+                    }
+                    let _ = event_tx.send(timing);
+                }
                 // Record the terminal frame on the session before the flag becomes
                 // visible, so a watcher attaching right now can always be told.
                 active_chats.mark_terminal(&operation_id, &chat_event).await;
+            }
+            if matches!(&chat_event, ChatEvent::ToolTiming { .. }) && tool_metrics_writable {
+                if !persist_tool_timing_metric(
+                    &tool_metrics_manager,
+                    &perm_session_key,
+                    &chat_event,
+                ) {
+                    tool_metrics_writable = false;
+                    eprintln!(
+                        "[tool-metrics] failed to persist timing (session {perm_session_key}); \
+                         further writes disabled for this turn"
+                    );
+                }
+            }
+            if let ChatEvent::ModelSwitch {
+                provider,
+                model,
+                message_id,
+                requested_at,
+                applied_at,
+            } = &chat_event
+            {
+                let record = jeikcode_capabilities::session::ModelSwitchRecord {
+                    v: jeikcode_capabilities::session::MODEL_SWITCH_VERSION,
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    status: "applied".to_string(),
+                    requested_at: *requested_at,
+                    applied_at: Some(*applied_at),
+                    message_id: Some(message_id.clone()),
+                    wait_ms: Some(applied_at.saturating_sub(*requested_at)),
+                };
+                if let Err(error) =
+                    tool_metrics_manager.append_model_switch(&perm_session_key, &record)
+                {
+                    eprintln!(
+                        "[model-switch] failed to persist applied switch (session {perm_session_key}): {error}"
+                    );
+                } else {
+                    tracing::info!(
+                        session_id = %perm_session_key,
+                        %provider,
+                        %model,
+                        %message_id,
+                        wait_ms = record.wait_ms.unwrap_or(0),
+                        "runtime model switch applied at round boundary"
+                    );
+                }
             }
             let _ = event_tx.send(chat_event);
         }
@@ -16167,6 +16890,14 @@ pub(crate) async fn process_chat_request(
     // A closed producer is not success by itself. Only the native runtime's
     // TurnFinished event can authorize `done`.
     if !projector.terminal_seen {
+        for timing in projector.drain_unfinished_tool_timings() {
+            if tool_metrics_writable
+                && !persist_tool_timing_metric(&tool_metrics_manager, &perm_session_key, &timing)
+            {
+                tool_metrics_writable = false;
+            }
+            let _ = event_tx.send(timing);
+        }
         if let Some(event) = projector.finish() {
             let _ = event_tx.send(event);
         }
@@ -16356,6 +17087,15 @@ fn chat_watch_frame_json_with_tail(
 ) -> String {
     let mut val = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
     if let serde_json::Value::Object(ref mut map) = val {
+        // Server clock cast with every frame: the WebUI derives a clock offset
+        // once and then paints `cost` from the persisted epoch-ms `started_at`,
+        // so tabs/devices with skewed clocks show the same elapsed time.
+        map.insert(
+            "server_ts".to_string(),
+            serde_json::Value::from(
+                u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0),
+            ),
+        );
         if !map.contains_key("session_id") {
             map.insert(
                 "session_id".to_string(),
@@ -20795,6 +21535,7 @@ pub(crate) async fn reload_mcp_and_live_runtime(
 
 async fn mcp_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
     let runtime_reloaded = reload_mcp_and_live_runtime(&state, true, None).await;
+    crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged { working_dir: None });
     Json(serde_json::json!({
         "ok": runtime_reloaded,
         "status": "reloading",
@@ -20916,7 +21657,11 @@ async fn mcp_add(
             .into_response();
     }
 
-    let runtime_reloaded = reload_mcp_and_live_runtime(&state, true, Some(project_dir)).await;
+    let runtime_reloaded =
+        reload_mcp_and_live_runtime(&state, true, Some(project_dir.clone())).await;
+    crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged {
+        working_dir: Some(project_dir.to_string_lossy().to_string()),
+    });
 
     (
         StatusCode::OK,
@@ -21011,7 +21756,11 @@ async fn mcp_remove_internal(
             .into_response();
     }
 
-    let runtime_reloaded = reload_mcp_and_live_runtime(state, true, Some(project_dir)).await;
+    let runtime_reloaded =
+        reload_mcp_and_live_runtime(state, true, Some(project_dir.clone())).await;
+    crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged {
+        working_dir: Some(project_dir.to_string_lossy().to_string()),
+    });
 
     (
         StatusCode::OK,
@@ -21191,9 +21940,14 @@ async fn capabilities_toggle(
     let runtime_reloaded = reload_mcp_and_live_runtime(
         &state,
         matches!(req.kind, jeikcode_capabilities::control::CapKind::Mcp),
-        Some(working_dir),
+        Some(working_dir.clone()),
     )
     .await;
+    // 能力开关是项目级持久化设置：广播给所有实例，其他 WebUI/TUI 面板立即刷新，
+    // 而不是等下一次手动打开或整页刷新。
+    crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged {
+        working_dir: Some(working_dir.to_string_lossy().to_string()),
+    });
     (
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "runtime_reloaded": runtime_reloaded })),
@@ -22886,6 +23640,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     } else {
         // 非 --yolo 启动时，按系统设置恢复默认权限模式策略（记忆模式 vs 全局指定模式）。
         live_api::init_agent_mode_from_desktop_settings();
+        crate::api_config::init_runtime_model_switch_from_desktop_settings();
     }
 
     // Step 1: Load config (R1.1, R1.5) — tolerate errors, fallback to default.

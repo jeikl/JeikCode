@@ -59,6 +59,15 @@ export function emitGlobalEvent(event: GlobalWireEvent): void {
       );
     } catch {}
   }
+  if (event.type === 'desktop_settings') {
+    try {
+      window.dispatchEvent(
+        new CustomEvent('jeikcode:desktop_settings_changed', {
+          detail: { settings: event.settings },
+        }),
+      );
+    } catch {}
+  }
   for (const listener of [...listeners]) {
     try {
       listener(event);

@@ -50,6 +50,8 @@ export interface ProjectionMessage {
    *  Deliberately separate from `seq`: disk DisplayRecord.seq and the replay
    *  cursor are different coordinate systems. Never persisted as display order. */
   streamSeq?: number;
+  /** Display-only runtime model-switch marker for this assistant round. */
+  switchTo?: string;
 }
 
 /**

@@ -28,6 +28,7 @@ pub mod display;
 pub mod inputs;
 pub mod instructions;
 pub mod manager;
+mod model_switch_log;
 mod mtime_file;
 pub mod partial;
 pub mod presentation;
@@ -35,6 +36,7 @@ pub mod recall;
 pub mod rewind;
 pub mod snapshot;
 pub mod status_reminder;
+pub mod tool_metrics;
 pub mod transcript;
 mod usage_provider;
 pub mod user_wrap;
@@ -54,6 +56,7 @@ pub use manager::{
     SessionLease, SessionLineage, SessionManager, SessionMeta, SessionOrigin, SessionResult,
     SessionStoreError, StorageOwner, TokenBreakdown, TurnStat,
 };
+pub use model_switch_log::{ModelSwitchRecord, MODEL_SWITCH_VERSION};
 pub use partial::{PartialStream, PartialToolCall};
 pub use presentation::{
     anchor_from_legacy_position, DisplayAnchor, LegacyTurnBoundary, PresentationEntry,
@@ -66,6 +69,7 @@ pub use rewind::{
 };
 pub use snapshot::{RewindTransactionReceipt, SnapshotHook};
 pub use status_reminder::StatusReminderHook;
+pub use tool_metrics::{ToolMetricRecord, ToolMetricStatus};
 pub use transcript::{ToolRecord, TranscriptHook, TurnRecord, UsageRecord};
 pub use usage_provider::UsageRecordingProvider;
 pub use user_wrap::UserWrapHook;

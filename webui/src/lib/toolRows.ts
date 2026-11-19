@@ -19,6 +19,12 @@ export interface ToolRow {
   args: string;
   status: 'pending' | 'done' | 'error' | 'incomplete' | 'waiting_approval';
   duration_ms?: number;
+  /** Observability anchors (server epoch ms). Kept out of the model context and
+   *  persisted per session so refresh/cold start rehydrates the same timers. */
+  started_at?: number;
+  finished_at?: number;
+  /** Gap from the previous activity edge to this tool start (frozen). */
+  switch_ms?: number;
   output?: string;
   /** Ephemeral latest activity for a long-running tool. Replaced in place, never persisted. */
   progress?: string;
@@ -109,6 +115,9 @@ function mergeToolRow(existing: ToolRow, incoming: ToolRow): ToolRow {
   }
   if (incoming.output === undefined) merged.output = existing.output;
   if (incoming.duration_ms === undefined) merged.duration_ms = existing.duration_ms;
+  if (incoming.started_at === undefined) merged.started_at = existing.started_at;
+  if (incoming.finished_at === undefined) merged.finished_at = existing.finished_at;
+  if (incoming.switch_ms === undefined) merged.switch_ms = existing.switch_ms;
   return merged;
 }
 

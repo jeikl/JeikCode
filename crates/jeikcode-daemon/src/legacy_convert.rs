@@ -1579,6 +1579,8 @@ fn catalog_diagnostic_session_id(path: &std::path::Path) -> Option<&str> {
         ".display.idx.jsonl",
         ".display.jsonl",
         ".display.meta.json",
+        ".toolmetrics.jsonl",
+        ".model-switches.jsonl",
         ".rewind.txn.json",
         ".rewind.json",
         ".snapshot",

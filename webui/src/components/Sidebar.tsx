@@ -844,8 +844,15 @@ export function Sidebar({
   // ── 跨实例增量订阅（无轮询、无整表重拉）──
   // 服务端只推“变了什么”（带 payload），这里按 id 就地 upsert/删行并同步失效缓存；
   // 刷新后仍以同一份本地缓存恢复，与后端保持最终一致。
+  const refreshCapabilitiesRef = useRef<() => void>(() => {});
   useEffect(() => {
     return onGlobalEvent((event) => {
+      if (event.type === 'capabilities_changed') {
+        // MCP / 技能开关是持久化系统设置：远端实例改动后立即重拉面板，
+        // 而不是等用户手动展开或整页刷新才看到新状态。
+        refreshCapabilitiesRef.current();
+        return;
+      }
       if (event.type === 'session_upsert') {
         const row = event.session;
         setSessions((cur) => mergeSessionRow(cur, row));
@@ -1720,6 +1727,7 @@ export function Sidebar({
       .then(maybeAutoTrustProjectMcp)
       .catch(() => {});
   }
+  refreshCapabilitiesRef.current = refreshCapabilities;
 
   // 用户偏好：项目级 MCP 的信任不做任何提示，检测到未信任就直接确认。
   // 判定规则见 `lib/mcpTrust`（只有 daemon 明确上报「未信任」且确实存在被拦截的项目级

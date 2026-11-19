@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Listener, Manager};
+use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 static DESKTOP_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
@@ -174,6 +176,22 @@ fn hide_window_to_tray(window: &tauri::WebviewWindow) {
     publish_host_away(window, true);
 }
 
+/// Tray click / global shortcut: hide when already visible+focused, otherwise
+/// warm-show the existing window (never rebuild the WebView).
+fn toggle_main_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let is_visible = window.is_visible().unwrap_or(false);
+    let is_minimized = window.is_minimized().unwrap_or(false);
+    let is_focused = window.is_focused().unwrap_or(false);
+    if is_visible && !is_minimized && is_focused {
+        hide_window_to_tray(&window);
+    } else {
+        show_main_window(&window);
+    }
+}
+
 fn send_desktop_shutdown(port: u16, token: Option<&str>) {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else {
@@ -308,10 +326,19 @@ fn handle_desktop_shell_action(url: &tauri::Url, app: &tauri::AppHandle) -> bool
                 .find(|(k, _)| k == "action")
                 .map(|(_, v)| v.to_string())
                 .unwrap_or_else(|| "ask".to_string());
-            let dir = jeikcode_dir();
-            let _ = std::fs::create_dir_all(&dir);
-            let body = format!("{{\n  \"close_action\": \"{action}\"\n}}\n");
-            let _ = std::fs::write(desktop_settings_path(), body);
+            save_close_action(&action);
+            true
+        }
+        // The shortcut recorder must be able to capture the currently registered
+        // combo (and combos that collide with it). Suspend globally while the
+        // field is recording; resume from the persisted value afterwards.
+        "/__desktop_action/suspend_shortcut" => {
+            let _ = app.global_shortcut().unregister_all();
+            true
+        }
+        "/__desktop_action/resume_shortcut" => {
+            let settings = load_shell_settings();
+            apply_toggle_shortcut(app, &settings.toggle_shortcut);
             true
         }
         _ => false,
@@ -538,6 +565,36 @@ fn desktop_settings_path() -> PathBuf {
     jeikcode_dir().join("desktop-settings.json")
 }
 
+/// Persist ONE field without clobbering the rest of `desktop-settings.json`.
+///
+/// The daemon owns `agent_mode_policy` / `agent_global_mode` in the same file.
+/// The old native handler rewrote the whole document with only `close_action`,
+/// so choosing "remember my choice" on the close prompt silently erased the
+/// global Agent mode policy — the setting then snapped back after a refresh or
+/// restart. Read-modify-write keeps native and daemon writers convergent.
+fn save_close_action(action: &str) {
+    let path = desktop_settings_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut root = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    root.insert(
+        "close_action".to_string(),
+        serde_json::Value::String(action.to_string()),
+    );
+    let body = serde_json::to_string_pretty(&serde_json::Value::Object(root))
+        .unwrap_or_else(|_| "{}".to_string());
+    // Atomic replace so the daemon never reads a half-written document.
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
 fn load_close_action() -> String {
     let Ok(text) = std::fs::read_to_string(desktop_settings_path()) else {
         return "ask".to_string();
@@ -553,6 +610,113 @@ fn load_close_action() -> String {
         .unwrap_or_else(|| "ask".to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellSettings {
+    autostart: bool,
+    toggle_shortcut: String,
+}
+
+impl Default for ShellSettings {
+    fn default() -> Self {
+        Self {
+            autostart: false,
+            toggle_shortcut: "Ctrl+Alt+J".to_string(),
+        }
+    }
+}
+
+/// Read only the two OS-level fields; a missing/blank shortcut means "disabled".
+fn load_shell_settings() -> ShellSettings {
+    let Ok(text) = std::fs::read_to_string(desktop_settings_path()) else {
+        return ShellSettings::default();
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return ShellSettings::default();
+    };
+    let defaults = ShellSettings::default();
+    ShellSettings {
+        autostart: root
+            .get("autostart")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(defaults.autostart),
+        toggle_shortcut: root
+            .get("toggle_shortcut")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .unwrap_or(defaults.toggle_shortcut.as_str())
+            .to_string(),
+    }
+}
+
+fn apply_autostart(app: &tauri::AppHandle, enabled: bool) {
+    let autolaunch = app.autolaunch();
+    let current = autolaunch.is_enabled().unwrap_or(false);
+    let result = if enabled && !current {
+        autolaunch.enable()
+    } else if !enabled && current {
+        autolaunch.disable()
+    } else {
+        Ok(())
+    };
+    if let Err(error) = result {
+        eprintln!("[desktop] autostart apply failed: {error}");
+    }
+}
+
+fn apply_toggle_shortcut(app: &tauri::AppHandle, accelerator: &str) {
+    let manager = app.global_shortcut();
+    let trimmed = accelerator.trim();
+    if trimmed.is_empty() {
+        let _ = manager.unregister_all();
+        return;
+    }
+    match trimmed.parse::<Shortcut>() {
+        Ok(shortcut) => {
+            // Parse first: an invalid edit must not tear down the working shortcut.
+            let _ = manager.unregister_all();
+            if let Err(error) = manager.register(shortcut) {
+                eprintln!("[desktop] global shortcut registration failed ({trimmed}): {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!("[desktop] invalid global shortcut `{trimmed}`: {error}");
+        }
+    }
+}
+
+/// Poll the shared settings file (saved by ANY WebUI instance via the daemon)
+/// and apply OS-level changes on the UI thread. One-second cadence, one small
+/// file — no busy loop and no cross-instance event plumbing needed.
+fn watch_desktop_shell_settings(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let path = desktop_settings_path();
+        let mut applied = load_shell_settings();
+        let mut last = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let current = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok();
+            if current == last {
+                continue;
+            }
+            last = current;
+            let settings = load_shell_settings();
+            if settings == applied {
+                continue;
+            }
+            applied = settings.clone();
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                apply_autostart(&handle, settings.autostart);
+                apply_toggle_shortcut(&handle, &settings.toggle_shortcut);
+            });
+        }
+    });
+}
+
 fn main() {
     #[cfg(target_os = "windows")]
     if ensure_single_instance_windows() {
@@ -560,9 +724,23 @@ fn main() {
     }
 
     let child = Mutex::new(None);
+    let start_minimized = std::env::args().any(|arg| arg == "--minimized");
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        toggle_main_window(app);
+                    }
+                })
+                .build(),
+        )
         .manage(ChildSlot(child))
-        .setup(|app| {
+        .setup(move |app| {
             let webui_origin = Arc::new(Mutex::new(None));
             let nav_origin = Arc::clone(&webui_origin);
             let nav_app_handle = app.handle().clone();
@@ -575,6 +753,10 @@ fn main() {
             .title("JeikCode Desktop")
             .inner_size(1280.0, 800.0)
             .resizable(true)
+            // Autostart must never flash: the window is created hidden and only
+            // shown for a normal (non `--minimized`) launch or a tray/shortcut
+            // warm-open. The WebView still loads in the background either way.
+            .visible(false)
             .on_navigation(move |url| {
                 if handle_desktop_shell_action(url, &nav_app_handle) {
                     return false;
@@ -612,6 +794,9 @@ fn main() {
             #[cfg(target_os = "windows")]
             let window_builder = window_builder.disable_drag_drop_handler().drag_and_drop(false);
             let window = window_builder.build()?;
+            if !start_minimized {
+                let _ = window.show();
+            }
 
             #[cfg(target_os = "windows")]
             spawn_single_instance_activation_listener(window.clone());
@@ -682,6 +867,10 @@ fn main() {
                 }
             });
             setup_system_tray(app).expect("初始化系统托盘图标失败");
+            let settings = load_shell_settings();
+            apply_autostart(app.handle(), settings.autostart);
+            apply_toggle_shortcut(app.handle(), &settings.toggle_shortcut);
+            watch_desktop_shell_settings(app.handle().clone());
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -841,16 +1030,7 @@ fn setup_system_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>>
             } = event
             {
                 let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let is_visible = window.is_visible().unwrap_or(false);
-                    let is_minimized = window.is_minimized().unwrap_or(false);
-                    let is_focused = window.is_focused().unwrap_or(false);
-                    if is_visible && !is_minimized && is_focused {
-                        hide_window_to_tray(&window);
-                    } else {
-                        show_main_window(&window);
-                    }
-                }
+                toggle_main_window(app);
             }
         })
         .build(app)?;

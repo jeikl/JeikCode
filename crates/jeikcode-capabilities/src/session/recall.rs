@@ -285,6 +285,15 @@ fn load_records(dir: &Path) -> SessionResult<Vec<TurnRecord>> {
         if file_name.ends_with(".display.idx.jsonl") {
             continue;
         }
+        // Per-tool observability sidecar: not a turn transcript. Parsing it as
+        // `TurnRecord` would fail and make recall report a false corruption.
+        if file_name.ends_with(".toolmetrics.jsonl") {
+            continue;
+        }
+        // Model-switch observability sidecar: same rationale as toolmetrics.
+        if file_name.ends_with(".model-switches.jsonl") {
+            continue;
+        }
         if let Some(base) = file_name.strip_suffix(".display.jsonl") {
             display_files.push((base.to_string(), path));
             continue;
@@ -716,6 +725,7 @@ mod tests {
             args: "{\"cmd\":\"grep refresh_token\"}".into(),
             result: "found in auth.rs".into(),
             is_error: false,
+            ..Default::default()
         });
         write_jsonl(dir.path(), "a.jsonl", &[r]);
         // A term only present in the tool args/result still matches.
@@ -725,6 +735,26 @@ mod tests {
         assert!(
             out.contains("Recalled 1 matching"),
             "tool text is searchable: {out}"
+        );
+    }
+
+    #[test]
+    fn tool_metrics_sidecar_is_not_parsed_as_a_turn_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("s1.toolmetrics.jsonl"),
+            b"{\"call_id\":\"c1\",\"name\":\"bash\",\"started_at\":1}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("s1.model-switches.jsonl"),
+            b"{\"provider\":\"p\",\"model\":\"m\",\"status\":\"applied\",\"requested_at\":1}\n",
+        )
+        .unwrap();
+        let records = load_records(dir.path()).expect("metrics must not look corrupt");
+        assert!(
+            records.is_empty(),
+            "only real turn transcripts are recalled"
         );
     }
 

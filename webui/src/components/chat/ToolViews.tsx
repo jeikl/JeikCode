@@ -17,6 +17,8 @@ import {
   type DiffPreviewLine,
 } from '../../lib/toolDisplay';
 import { subtaskCounts, type SubtaskItem } from '../../lib/subtasks';
+import { serverNowMs } from '../../lib/serverClock';
+import { formatToolTiming, resolveToolCostMs } from '../../lib/toolTiming';
 import type { ToolRow } from '../../lib/toolRows';
 import { showToast } from '../Toast';
 import { highlightText } from './highlight';
@@ -113,13 +115,85 @@ export function ToolGroupView({ tools, search }: { tools: ToolRow[]; search: str
   );
 }
 
+/**
+ * Per-tool observability chip: `switch` (frozen gap from the previous activity
+ * edge) and `cost` (live execution stopwatch, frozen at the persisted duration).
+ *
+ * The ticker lives in this leaf component so a running tool re-renders only its
+ * own badge, never the chat timeline. `cost` uses the server clock offset so a
+ * skewed browser/device still matches every other instance and the on-disk log.
+ */
+export function ToolTimingBadge({ tool }: { tool: ToolRow }) {
+  const t = useT();
+  const running =
+    tool.status === 'pending' && tool.duration_ms == null && tool.started_at != null;
+  const [nowMs, setNowMs] = useState(() => serverNowMs());
+
+  useEffect(() => {
+    if (!running) return;
+    setNowMs(serverNowMs());
+    const id = window.setInterval(() => setNowMs(serverNowMs()), 500);
+    return () => window.clearInterval(id);
+  }, [running, tool.started_at]);
+
+  const costMs = resolveToolCostMs(tool, nowMs);
+  const switchMs = tool.switch_ms;
+  // A settled row whose duration was lost (hard kill before the terminal frame)
+  // still gets an honest `cost: —` instead of a silently growing fake value.
+  const showCost = costMs != null || (tool.started_at != null && tool.status !== 'pending');
+  if (switchMs == null && !showCost) return null;
+
+  const title = t('tool.metricsTip', {
+    switch: switchMs == null ? '—' : formatToolTiming(switchMs),
+    cost: costMs == null ? '—' : formatToolTiming(costMs),
+  });
+
+  return (
+    <span
+      class={'tool-timing' + (running ? ' is-live' : '')}
+      title={title}
+      aria-label={title}
+    >
+      <svg
+        class="tool-timing-clock"
+        viewBox="0 0 16 16"
+        fill="none"
+        aria-hidden="true"
+      >
+        <circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.3" />
+        <path
+          d="M8 4.6v3.7l2.5 1.5"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+      {switchMs != null && (
+        <span class="tool-timing-item">
+          <span class="tool-timing-key">{t('tool.switch')}</span>
+          <span class="tool-timing-val">{formatToolTiming(switchMs)}</span>
+        </span>
+      )}
+      {switchMs != null && showCost && (
+        <span class="tool-timing-sep" aria-hidden="true" />
+      )}
+      {showCost && (
+        <span class="tool-timing-item">
+          <span class="tool-timing-key">{t('tool.cost')}</span>
+          <span class="tool-timing-val tool-timing-cost">{formatToolTiming(costMs)}</span>
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function ToolRowView({
   tool,
   search,
   forceExpanded = null,
   forceVersion = 0,
-}: {
-  tool: ToolRow;
+}: {  tool: ToolRow;
   search: string;
   forceExpanded?: boolean | null;
   forceVersion?: number;
@@ -249,6 +323,7 @@ export function ToolRowView({
         {diffStats && (
           <DiffStatBadge additions={diffStats.additions} deletions={diffStats.deletions} />
         )}
+        <ToolTimingBadge tool={tool} />
         {annotation && (
           <span class={'tool-annotation ' + annotation.cls}>
             <ToolStatusIcon cls={annotation.cls} />

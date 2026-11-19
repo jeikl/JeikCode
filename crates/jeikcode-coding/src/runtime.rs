@@ -85,6 +85,16 @@ pub enum CodingRuntimeEvent {
         provider: String,
         model: String,
     },
+    /// A queued provider switch actually took effect at a kernel round boundary
+    /// (the next `chat_stream`). The turn continues with the existing context;
+    /// drivers attach a display-only `Switch to <model>` marker to the next
+    /// assistant message. Never forwarded to the model.
+    ModelSwitched {
+        provider: String,
+        model: String,
+        requested_at: u64,
+        applied_at: u64,
+    },
     ProviderUnavailable {
         reason: ProviderUnavailableReason,
         forced: bool,
@@ -1520,6 +1530,28 @@ impl CodingRuntimeHandle {
         result.await.map_err(|_| RuntimeError::Unavailable)?
     }
 
+    /// Queue a provider change for the next model round without stopping the
+    /// in-flight turn. Returns the request timestamp used by the ops log.
+    pub async fn swap_provider_for_next_round(
+        &self,
+        next: CodingAgentConfig,
+        provider_name: String,
+        model: String,
+    ) -> Result<u64, RuntimeError> {
+        let state = self.state.load(Ordering::Acquire);
+        let (done, result) = oneshot::channel();
+        self.tx
+            .send(CodingRuntimeControl::SwapProviderForNextRound {
+                generation: runtime_state_generation(state),
+                next,
+                provider_name,
+                model,
+                done,
+            })
+            .map_err(|_| RuntimeError::Unavailable)?;
+        result.await.map_err(|_| RuntimeError::Unavailable)?
+    }
+
     pub async fn deactivate_provider(
         &self,
         reason: ProviderUnavailableReason,
@@ -1990,6 +2022,11 @@ impl CodingRuntime {
 
         let (handle, controls) = coding_runtime_control_channel();
         let (raw_event_tx, _raw_events) = mpsc::unbounded_channel();
+        // Wire the provider hot-swap slot to the runtime event stream so a queued
+        // switch announces the exact round boundary (`ModelSwitched`).
+        if let Some(swap) = parts.primary_provider_swap.as_ref() {
+            swap.set_event_sender(raw_event_tx.clone());
+        }
         let (tagged_event_tx, mut tagged_events) = mpsc::unbounded_channel();
         let adapter = spawn_runtime_owner_with_optional_agent(
             kernel_agent,
@@ -2232,6 +2269,17 @@ pub enum CodingRuntimeControl {
         generation: u64,
         next: CodingAgentConfig,
         done: oneshot::Sender<Result<RuntimeGeneration, RuntimeError>>,
+    },
+    /// Runtime model switch: queue a provider for the next kernel round WITHOUT
+    /// stopping the active turn. The conversation (and therefore the full
+    /// context) is preserved; the new provider is used by the next
+    /// `chat_stream` call.
+    SwapProviderForNextRound {
+        generation: u64,
+        next: CodingAgentConfig,
+        provider_name: String,
+        model: String,
+        done: oneshot::Sender<Result<u64, RuntimeError>>,
     },
     DeactivateProvider {
         generation: u64,
@@ -4516,6 +4564,63 @@ fn spawn_runtime_owner_with_optional_agent(
                             }
                         }
                     }
+                    Some(CodingRuntimeControl::SwapProviderForNextRound {
+                        generation: request_generation,
+                        next,
+                        provider_name,
+                        model,
+                        done,
+                    }) => {
+                        if request_generation != generation || compaction_suspended {
+                            let _ = done.send(Err(RuntimeError::Busy));
+                            continue;
+                        }
+                        let Some(runtime) = resources.as_mut() else {
+                            let _ = done.send(Err(RuntimeError::Unavailable));
+                            continue;
+                        };
+                        let session_id = runtime
+                            .parts
+                            .session
+                            .as_ref()
+                            .map(|binding| binding.id.as_str());
+                        let candidate = match runtime
+                            .provider_factory
+                            .build(&next, session_id)
+                        {
+                            Ok(provider) => provider,
+                            Err(error) => {
+                                let _ = done.send(Err(RuntimeError::ReconfigureFailed(
+                                    error.to_string(),
+                                )));
+                                continue;
+                            }
+                        };
+                        let Some(swap) = runtime.parts.primary_provider_swap.clone() else {
+                            let _ = done.send(Err(RuntimeError::ReconfigureFailed(
+                                "provider hot-swap slot is unavailable".into(),
+                            )));
+                            continue;
+                        };
+                        let requested_at = swap.swap_pending(candidate, provider_name, model);
+                        // Keep the runtime's provider projection in sync for the next
+                        // status/telemetry pass without rebuilding the agent or the
+                        // active turn's tool/persona graph.
+                        runtime.config.provider_name = next.provider_name;
+                        runtime.config.provider_type = next.provider_type;
+                        runtime.config.model = next.model;
+                        runtime.config.base_url = next.base_url;
+                        runtime.config.api_key = next.api_key;
+                        runtime.config.pricing = next.pricing;
+                        runtime.config.context_window = next.context_window;
+                        runtime.config.supports_vision = next.supports_vision;
+                        runtime.config.chat_options = next.chat_options;
+                        runtime.config.timeouts = next.timeouts;
+                        runtime.config.first_token_timeout_retries =
+                            next.first_token_timeout_retries;
+                        runtime.config.request_timeout = next.request_timeout;
+                        let _ = done.send(Ok(requested_at));
+                    }
                     Some(CodingRuntimeControl::DeactivateProvider {
                         generation: request_generation,
                         reason,
@@ -6471,6 +6576,9 @@ fn reject_runtime_control(
         }
         CodingRuntimeControl::ReassembleProvider { done, .. }
         | CodingRuntimeControl::DeactivateProvider { done, .. } => {
+            let _ = done.send(Err(RuntimeError::Unavailable));
+        }
+        CodingRuntimeControl::SwapProviderForNextRound { done, .. } => {
             let _ = done.send(Err(RuntimeError::Unavailable));
         }
         CodingRuntimeControl::Reprepare { done, .. } => {

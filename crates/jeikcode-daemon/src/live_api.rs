@@ -3701,7 +3701,71 @@ fn model_config_ok(
     deferred: bool,
 ) -> Json<serde_json::Value> {
     crate::publish_model_config(session_id, Some(provider), None, deferred);
-    Json(serde_json::json!({ "ok": true, "deferred": deferred }))
+    Json(serde_json::json!({
+        "ok": true,
+        "deferred": deferred,
+        // Back-compat alias consumed by the WebUI selector.
+        "active_turn": deferred,
+    }))
+}
+
+fn model_config_queued(session_id: Option<&str>, provider: &str) -> Json<serde_json::Value> {
+    // Not deferred to the next TURN: the switch is accepted for the next model
+    // ROUND of the running turn. The UI must keep the selection and show a
+    // "switching at the next round" hint instead of rolling back.
+    crate::publish_model_config(session_id, Some(provider), None, false);
+    Json(serde_json::json!({
+        "ok": true,
+        "deferred": false,
+        "active_turn": true,
+        "queued": true,
+    }))
+}
+
+/// Queue a provider for the next kernel round without stopping the active turn.
+/// Returns `(requested_at, provider_name, model)` for the ops log/UI.
+async fn queue_runtime_model_switch(
+    handle: &jeikcode_coding::CodingRuntimeHandle,
+    runtime_config: &jeikcode_coding::CodingRuntimeConfig,
+) -> Result<(u64, String, String), jeikcode_coding::RuntimeError> {
+    let next = crate::kernel_runtime::coding_config_from_runtime(runtime_config);
+    let provider_name = next.provider_name.clone();
+    let model = next.model.clone();
+    let requested_at = handle
+        .swap_provider_for_next_round(next, provider_name.clone(), model.clone())
+        .await?;
+    Ok((requested_at, provider_name, model))
+}
+
+fn log_model_switch_queued(
+    working_dir: &std::path::Path,
+    session_id: &str,
+    provider: &str,
+    model: &str,
+    requested_at: u64,
+) {
+    let manager = jeikcode_capabilities::session::SessionManager::for_project(working_dir);
+    let record = jeikcode_capabilities::session::ModelSwitchRecord {
+        v: jeikcode_capabilities::session::MODEL_SWITCH_VERSION,
+        provider: provider.to_string(),
+        model: model.to_string(),
+        status: "queued".to_string(),
+        requested_at,
+        applied_at: None,
+        message_id: None,
+        wait_ms: None,
+    };
+    if let Err(error) = manager.append_model_switch(session_id, &record) {
+        tracing::warn!(%error, %session_id, "failed to append queued model-switch log");
+    } else {
+        tracing::info!(
+            %session_id,
+            %provider,
+            %model,
+            requested_at,
+            "runtime model switch queued for the next round"
+        );
+    }
 }
 
 pub(crate) async fn live_provider(
@@ -3795,9 +3859,43 @@ pub(crate) async fn live_provider(
                 return model_config_ok(requested_session_id.as_deref(), &requested_provider, false)
             }
             // A turn is running: reassembling the provider would hard-kill it and drop
-            // the interrupted turn's context. The selection is already persisted to the
-            // session metadata, so accept it as deferred instead of rolling the UI back.
+            // the interrupted turn's context. With `runtime_model_switch` enabled the
+            // user asked to keep this turn alive and switch at the NEXT model round
+            // (same conversation); otherwise the selection stays deferred to the next
+            // turn exactly as before.
             Err(crate::live_hub::HubError::ActiveTurn) => {
+                if crate::api_config::runtime_model_switch_enabled() {
+                    if let Some(sid) = requested_session_id.as_deref() {
+                        let session_key = sid.to_string();
+                        if let Some(handle) = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                            .handle(&session_key)
+                        {
+                            let runtime_config = chat_runtime_config(
+                                &config,
+                                &req.provider,
+                                &join.binding.working_dir,
+                                state.telemetry.clone(),
+                            );
+                            if let Ok((requested_at, provider_name, model)) =
+                                queue_runtime_model_switch(&handle, &runtime_config).await
+                            {
+                                log_model_switch_queued(
+                                    &join.binding.working_dir,
+                                    sid,
+                                    &provider_name,
+                                    &model,
+                                    requested_at,
+                                );
+                                jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                                    .set_provider_fingerprint(
+                                        &sid.to_string(),
+                                        Some(requested_fingerprint.clone()),
+                                    );
+                                return model_config_queued(Some(sid), &requested_provider);
+                            }
+                        }
+                    }
+                }
                 return model_config_ok(requested_session_id.as_deref(), &requested_provider, true);
             }
             // View identity drifted from the execution session (e.g. `/webui`
@@ -3837,6 +3935,33 @@ pub(crate) async fn live_provider(
         jeikcode_coding::RuntimePhase::InTurn
         | jeikcode_coding::RuntimePhase::WaitingApproval
         | jeikcode_coding::RuntimePhase::Reconfiguring => {
+            if crate::api_config::runtime_model_switch_enabled() {
+                if let Some(sid) = requested_session_id.as_deref() {
+                    let runtime_config = chat_runtime_config(
+                        &config,
+                        &req.provider,
+                        &working_dir,
+                        state.telemetry.clone(),
+                    );
+                    if let Ok((requested_at, provider_name, model)) =
+                        queue_runtime_model_switch(&handle, &runtime_config).await
+                    {
+                        log_model_switch_queued(
+                            &working_dir,
+                            sid,
+                            &provider_name,
+                            &model,
+                            requested_at,
+                        );
+                        jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                            .set_provider_fingerprint(
+                                &sid.to_string(),
+                                Some(requested_fingerprint.clone()),
+                            );
+                        return model_config_queued(Some(sid), &requested_provider);
+                    }
+                }
+            }
             return model_config_ok(requested_session_id.as_deref(), &requested_provider, true);
         }
         _ => {}
@@ -3965,6 +4090,7 @@ pub(crate) async fn approval_mode_set(
 /// 正在运行的 runner，保证后台会话不被全局态残留污染。
 async fn apply_mode_request(state: &AppState, req: &LiveModeReq) -> bool {
     let was_global = live_global_mode_enabled();
+    let was_global_mode = live_current_approval_mode();
     if let Some(enabled) = req.global {
         live_set_global_mode_enabled(enabled, Some(req.mode));
     }
@@ -3976,7 +4102,20 @@ async fn apply_mode_request(state: &AppState, req: &LiveModeReq) -> bool {
     };
     let ok = apply_live_mode_scoped(scope, req.mode).await;
 
-    if req.global.is_some() && was_global != now_global {
+    // The live pill and the system-settings dialog must converge on ONE durable
+    // authority. Previously only the dialog wrote `desktop-settings.json`, so a
+    // refresh/restart re-ran the old policy and silently reverted the pill.
+    // Write on the toggle itself and whenever the global mode changes while the
+    // override is active; session-scoped switches stay in session meta only.
+    if req.global.is_some() || (now_global && req.mode != was_global_mode) {
+        let policy = if now_global { "global" } else { "memory" };
+        let persisted_mode = req.mode;
+        let saved = crate::api_config::persist_agent_mode_policy(policy, persisted_mode);
+        crate::publish_global(crate::GlobalWireEvent::DesktopSettingsChanged { settings: saved });
+    }
+
+    let global_mode_changed = now_global && req.mode != was_global_mode;
+    if (req.global.is_some() && was_global != now_global) || global_mode_changed {
         if !now_global {
             // 关闭全局：把每个会话原本记录的模式重新下发给各自的 runner。
             reapply_per_session_modes().await;
@@ -4545,6 +4684,9 @@ pub(crate) async fn live_mcp_trust(State(state): State<AppState>) -> impl IntoRe
                 Ok(_) => crate::native_live::reload_capabilities().await.is_ok(),
                 Err(_) => true,
             };
+            crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged {
+                working_dir: Some(working_dir.to_string_lossy().to_string()),
+            });
             Json(serde_json::json!({
                 "ok": reloaded,
                 "trusted": true,
@@ -5085,6 +5227,7 @@ mod tests {
                 close_action: None,
                 agent_mode_policy: Some("global".to_string()),
                 agent_global_mode: Some("plan".to_string()),
+                ..Default::default()
             }),
         )
         .await;
@@ -5125,6 +5268,7 @@ mod tests {
                 close_action: None,
                 agent_mode_policy: Some("memory".to_string()),
                 agent_global_mode: None,
+                ..Default::default()
             }),
         )
         .await;
@@ -5149,6 +5293,69 @@ mod tests {
 
         // 冷启动再次以记忆模式启动（global=false）。
         live_set_global_mode_enabled(true, Some(ApprovalMode::Auto));
+        init_agent_mode_from_desktop_settings();
+        assert!(!live_global_mode_enabled());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn approval_mode_global_toggle_persists_and_survives_cold_start() {
+        let home = crate::tests::ScopedChatHome::new();
+        let _mode_guard = ScopedApprovalModeForTest::new();
+        let state = crate::tests::chat_test_state(&home);
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+
+        // The bottom-bar pill toggles the global override through `/approval_mode`;
+        // it must write the same desktop-settings.json policy as the dialog.
+        let _ = approval_mode_set(
+            axum::extract::State(state.clone()),
+            axum::Json(LiveModeReq {
+                mode: ApprovalMode::Plan,
+                session_id: None,
+                global: Some(true),
+            }),
+        )
+        .await;
+        let path = home.path().join("desktop-settings.json");
+        let saved = crate::api_config::load_desktop_settings_payload_at(&path);
+        assert_eq!(saved.agent_mode_policy, "global");
+        assert_eq!(saved.agent_global_mode, "plan");
+        assert!(live_global_mode_enabled());
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Plan);
+
+        // A mode switch while the override stays on updates the durable default.
+        let _ = approval_mode_set(
+            axum::extract::State(state.clone()),
+            axum::Json(LiveModeReq {
+                mode: ApprovalMode::Auto,
+                session_id: Some("ignored-while-global".into()),
+                global: None,
+            }),
+        )
+        .await;
+        let saved = crate::api_config::load_desktop_settings_payload_at(&path);
+        assert_eq!(saved.agent_mode_policy, "global");
+        assert_eq!(saved.agent_global_mode, "bypass");
+
+        // Cold start must restore the override + mode from disk, not the process default.
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+        init_agent_mode_from_desktop_settings();
+        assert!(live_global_mode_enabled());
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Auto);
+
+        // Turning the override off persists the memory policy: refresh/restart keeps it off.
+        let _ = approval_mode_set(
+            axum::extract::State(state),
+            axum::Json(LiveModeReq {
+                mode: ApprovalMode::Auto,
+                session_id: None,
+                global: Some(false),
+            }),
+        )
+        .await;
+        let saved = crate::api_config::load_desktop_settings_payload_at(&path);
+        assert_eq!(saved.agent_mode_policy, "memory");
+
+        live_set_global_mode_enabled(true, Some(ApprovalMode::Plan));
         init_agent_mode_from_desktop_settings();
         assert!(!live_global_mode_enabled());
     }

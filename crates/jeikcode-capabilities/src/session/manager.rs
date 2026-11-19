@@ -3392,6 +3392,8 @@ impl SessionManager {
             self.rewind_transaction_path(id)?,
             self.meta_path(id)?,
             self.jsonl_path(id)?,
+            self.tool_metrics_path(id)?,
+            self.model_switch_path(id)?,
             self.display_path(id)?,
             self.display_meta_path(id)?,
             self.presentation_path(id)?,
@@ -3779,6 +3781,8 @@ fn session_auxiliary_artifact(name: &str) -> bool {
         ".display.idx.jsonl",
         ".display.jsonl",
         ".display.meta.json",
+        ".toolmetrics.jsonl",
+        ".model-switches.jsonl",
         ".bashkw.json",
         ".pending_permission.json",
     ];
@@ -6915,6 +6919,8 @@ mod tests {
             format!("{id}.display.jsonl"),
             format!("{id}.display.idx.jsonl"),
             format!("{id}.display.meta.json"),
+            format!("{id}.toolmetrics.jsonl"),
+            format!("{id}.model-switches.jsonl"),
             format!("{id}.bashkw.json"),
             format!("{id}.pending_permission.json"),
         ] {

@@ -228,6 +228,26 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
+  // Theme / language are browser-local mirrors of global preferences. A sibling
+  // tab changing either must apply here immediately instead of waiting for a
+  // reload (the server config broadcast covers cross-instance language, but a
+  // local-only fallback keeps offline/daemon-down tabs consistent too).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === THEME_KEY) {
+        setThemeState(readTheme());
+        return;
+      }
+      if (event.key === LANG_KEY) {
+        const next = readLang();
+        if (next) setLangState(next);
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   // 乐观切换 Git 自动同步开关：失败时回滚，保证 UI 与磁盘配置一致。
   function setAutoGitSync(next: boolean): Promise<void> {
     setAutoGitSyncState(next);

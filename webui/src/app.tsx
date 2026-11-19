@@ -242,6 +242,14 @@ export function App() {
           return;
         }
         if (event.type === 'session_mode') {
+          if (!event.session_id) {
+            // `session_id: null` = the global override changed while enabled.
+            // Every instance must move to the new global mode immediately; a
+            // refresh must also stop serving the stale bootstrap snapshot.
+            invalidateBootstrapCache();
+            setActiveSession((prev) => (prev ? { ...prev, approval_mode: event.mode } : prev));
+            return;
+          }
           if (event.session_id && sessionId === event.session_id) {
             setActiveSession((prev) => (prev ? { ...prev, approval_mode: event.mode } : prev));
           }

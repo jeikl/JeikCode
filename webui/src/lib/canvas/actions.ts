@@ -138,6 +138,8 @@ export type CanvasEventAction =
       derive?: (tool: ToolRow) => Partial<ToolRow> | undefined;
     }
   | { type: 'tool_finished'; id: string; success: boolean }
+  /** Display-only runtime model-switch marker bound to the assistant round. */
+  | { type: 'model_switch'; messageId: string; model: string }
   | {
       type: 'tool_output';
       id: string;
@@ -199,6 +201,7 @@ export function isCanvasEventAction(
     || action.type === 'tool_start'
     || action.type === 'tool_update'
     || action.type === 'tool_finished'
+    || action.type === 'model_switch'
     || action.type === 'tool_output'
     || action.type === 'tool_progress'
     || action.type === 'tool_result'
@@ -779,6 +782,43 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
     case 'tool_finished':
       next = updateToolRow(rows, action.id, {}, (tool) => settleToolRow(tool, action.success));
       break;
+    case 'model_switch': {
+      let target = -1;
+      for (let i = rows.length - 1; i >= 0; i -= 1) {
+        const row = rows[i];
+        if (row.role !== 'assistant') continue;
+        const owned = row.id === action.messageId
+          || (row.parts ?? []).some(
+            (part) =>
+              'id' in part
+              && typeof part.id === 'string'
+              && part.id.startsWith(`${action.messageId}:`),
+          );
+        if (owned) {
+          target = i;
+          break;
+        }
+      }
+      // Artifact-first rounds may create the row before the message identity is
+      // stamped; only then fall back to the newest assistant row. A different
+      // concrete id means this marker belongs to a row that has not arrived yet —
+      // never mislabel the previous round.
+      if (target < 0) {
+        for (let i = rows.length - 1; i >= 0; i -= 1) {
+          const row = rows[i];
+          if (row.role !== 'assistant') continue;
+          if (!row.id || row.id === action.messageId) target = i;
+          break;
+        }
+      }
+      if (target < 0) {
+        next = rows;
+      } else {
+        next = rows.slice();
+        next[target] = { ...next[target], switchTo: action.model } as T;
+      }
+      break;
+    }
     case 'tool_output':
       next = updateToolOutputRow(
         rows,

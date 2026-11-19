@@ -400,6 +400,23 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
 
   useEffect(() => { void reload(); }, []);
 
+  // Another instance may change the model catalog / default selection. The
+  // server already broadcasts `config_reloaded`; re-read this pane in place so
+  // the dialog never shows (or saves back) a stale snapshot.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const refresh = () => {
+      getConfig()
+        .then((cfg) => {
+          invalidateConfigCache();
+          setConfig(cfg);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener('jeikcode:config-reloaded', refresh);
+    return () => window.removeEventListener('jeikcode:config-reloaded', refresh);
+  }, []);
+
   const toggleCollapse = (accId: string) => {
     setCollapsedAccounts((prev) => ({ ...prev, [accId]: !prev[accId] }));
   };

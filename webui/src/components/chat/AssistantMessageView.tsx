@@ -18,6 +18,31 @@ import { messageHasTools, messageText } from './messageText';
 import type { CanvasRecord as Message } from '../../lib/canvas/records';
 import type { MsgPart } from '../../lib/toolRows';
 
+/** Modern display-only chip: this assistant round runs on a model that was
+ *  switched in at the round boundary. Never part of the model context. */
+function ModelSwitchBadge({ model }: { model: string }) {
+  const t = useT();
+  return (
+    <div class="model-switch-badge notranslate" translate={false} role="note">
+      <svg
+        class="model-switch-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M4 7h11l-3-3" />
+        <path d="M20 17H9l3 3" />
+      </svg>
+      <span class="model-switch-label">{t('chat.modelSwitch')}</span>
+      <code class="model-switch-model">{model}</code>
+    </div>
+  );
+}
+
 function assistantMessagePropsEqual(prev: any, next: any): boolean {
   return prev.msg === next.msg
     && prev.isLast === next.isLast
@@ -222,6 +247,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
 
   return (
     <div class={cls + liveCls} ref={searchRef}>
+      {msg.switchTo ? <ModelSwitchBadge model={msg.switchTo} /> : null}
       {/* Error turns are pure injected text — render flat. */}
       {isError ? (
         <div class="error-message-content">

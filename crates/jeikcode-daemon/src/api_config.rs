@@ -1005,7 +1005,27 @@ fn webui_listen_pref_path() -> std::path::PathBuf {
 
 fn load_webui_listen_pref() -> Option<WebuiListenPref> {
     let text = std::fs::read_to_string(webui_listen_pref_path()).ok()?;
-    serde_json::from_str(&text).ok()
+    let root = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let obj = root.as_object()?;
+    // Field-wise read so one malformed value cannot discard the saved token or
+    // host on the next write (which would lock remote clients out after reload).
+    let port = obj
+        .get("port")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|port| *port != 0)?;
+    Some(WebuiListenPref {
+        host: obj
+            .get("host")
+            .and_then(serde_json::Value::as_str)
+            .filter(|host| !host.trim().is_empty())
+            .map(str::to_string),
+        port,
+        token: obj
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 fn saved_listen_port() -> Option<u16> {
@@ -1050,7 +1070,9 @@ pub(crate) fn save_webui_listen_pref(
         pref.token = token;
     }
     let body = serde_json::to_string_pretty(&pref).map_err(|err| err.to_string())?;
-    std::fs::write(path, body).map_err(|err| err.to_string())
+    // Contains the access token: atomic replace, user-only permissions.
+    jeikcode_capabilities::fs::atomic_write(&path, body.as_bytes(), 0o600)
+        .map_err(|err| err.to_string())
 }
 
 /// The running socket stays as it is. A matching port registers the token now.
@@ -1727,6 +1749,10 @@ fn default_agent_global_mode() -> String {
     "build".to_string()
 }
 
+fn default_toggle_shortcut() -> String {
+    "Ctrl+Alt+J".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DesktopSettingsPayload {
     #[serde(default = "default_close_action")]
@@ -1737,6 +1763,16 @@ pub struct DesktopSettingsPayload {
     /// 选择 `"global"` 策略时生效的全局模式：`"build"` | `"plan"` | `"accept_edits"` | `"bypass"`。
     #[serde(default = "default_agent_global_mode")]
     pub agent_global_mode: String,
+    /// 运行时切换模型：开启后，运行中的回合在下一个模型小轮自动换 provider，
+    /// 保留当前上下文；关闭时沿用“下一轮生效/延后”的旧行为。
+    #[serde(default)]
+    pub runtime_model_switch: bool,
+    /// 开机自启（静默到托盘，不闪窗口）。
+    #[serde(default)]
+    pub autostart: bool,
+    /// 唤起/隐藏桌面窗口的全局快捷键；空串 = 禁用。
+    #[serde(default = "default_toggle_shortcut")]
+    pub toggle_shortcut: String,
 }
 
 impl Default for DesktopSettingsPayload {
@@ -1745,6 +1781,9 @@ impl Default for DesktopSettingsPayload {
             close_action: default_close_action(),
             agent_mode_policy: default_agent_mode_policy(),
             agent_global_mode: default_agent_global_mode(),
+            runtime_model_switch: false,
+            autostart: false,
+            toggle_shortcut: default_toggle_shortcut(),
         }
     }
 }
@@ -1757,6 +1796,12 @@ pub struct DesktopSettingsUpdate {
     pub agent_mode_policy: Option<String>,
     #[serde(default)]
     pub agent_global_mode: Option<String>,
+    #[serde(default)]
+    pub runtime_model_switch: Option<bool>,
+    #[serde(default)]
+    pub autostart: Option<bool>,
+    #[serde(default)]
+    pub toggle_shortcut: Option<String>,
 }
 
 pub(crate) fn normalize_desktop_settings(
@@ -1781,6 +1826,7 @@ pub(crate) fn normalize_desktop_settings(
             .unwrap_or(crate::approval_mode::ApprovalMode::Build)
             .wire()
             .to_string();
+    payload.toggle_shortcut = payload.toggle_shortcut.trim().to_string();
     payload
 }
 
@@ -1788,10 +1834,73 @@ fn desktop_settings_file_path() -> std::path::PathBuf {
     jeikcode_config::config::Config::config_dir().join("desktop-settings.json")
 }
 
+/// Process-level projection of the persisted `runtime_model_switch` checkbox.
+/// Initialized at daemon startup and refreshed on every settings save so the
+/// `/live/provider` active-turn branch does not need a disk read per switch.
+static RUNTIME_MODEL_SWITCH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn runtime_model_switch_enabled() -> bool {
+    RUNTIME_MODEL_SWITCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub(crate) fn set_runtime_model_switch(enabled: bool) {
+    RUNTIME_MODEL_SWITCH.store(enabled, std::sync::atomic::Ordering::Release);
+}
+
+pub(crate) fn init_runtime_model_switch_from_desktop_settings() {
+    set_runtime_model_switch(load_desktop_settings_payload().runtime_model_switch);
+}
+
 pub(crate) fn load_desktop_settings_payload_at(path: &std::path::Path) -> DesktopSettingsPayload {
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
-    let parsed = serde_json::from_str::<DesktopSettingsPayload>(&text).unwrap_or_default();
-    normalize_desktop_settings(parsed)
+    let root = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    normalize_desktop_settings(desktop_settings_from_object(&root))
+}
+
+/// Field-wise extraction shared by cold start and the merge writer.
+///
+/// A single null/typed-wrong value must not reset the whole document; the old
+/// typed parse returned `default()` and cold start silently reverted to
+/// memory/Build. Unknown fields are intentionally ignored here and preserved by
+/// [`merge_desktop_settings_at`]'s original JSON object.
+fn desktop_settings_from_object(
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> DesktopSettingsPayload {
+    DesktopSettingsPayload {
+        close_action: root
+            .get("close_action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ask")
+            .to_string(),
+        agent_mode_policy: root
+            .get("agent_mode_policy")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("memory")
+            .to_string(),
+        agent_global_mode: root
+            .get("agent_global_mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("build")
+            .to_string(),
+        runtime_model_switch: root
+            .get("runtime_model_switch")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        autostart: root
+            .get("autostart")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        toggle_shortcut: root
+            .get("toggle_shortcut")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .unwrap_or("Ctrl+Alt+J")
+            .to_string(),
+    }
 }
 
 pub(crate) fn load_desktop_settings_payload() -> DesktopSettingsPayload {
@@ -1802,7 +1911,25 @@ pub(crate) fn merge_desktop_settings_at(
     path: &std::path::Path,
     update: &DesktopSettingsUpdate,
 ) -> DesktopSettingsPayload {
-    let mut current = load_desktop_settings_payload_at(path);
+    // Serialize the read-modify-write inside this process: the mode pill and the
+    // system-settings dialog can now persist concurrently, and a lost update
+    // would resurrect the previous policy after a refresh.
+    static DESKTOP_SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = DESKTOP_SETTINGS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // Preserve fields this build does not know about (the desktop shell or a
+    // newer daemon may already own them). Rewriting a typed struct here used to
+    // drop them silently — same class of bug as the old native close-action
+    // writer that erased the Agent mode policy.
+    let mut root = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    // Read known fields individually so one malformed/null value cannot reset
+    // the whole document to defaults (which would clobber the mode policy).
+    let mut current = desktop_settings_from_object(&root);
     if let Some(close_action) = &update.close_action {
         current.close_action = close_action.clone();
     }
@@ -1812,13 +1939,72 @@ pub(crate) fn merge_desktop_settings_at(
     if let Some(mode) = &update.agent_global_mode {
         current.agent_global_mode = mode.clone();
     }
-    let normalized = normalize_desktop_settings(current);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(enabled) = update.runtime_model_switch {
+        current.runtime_model_switch = enabled;
     }
-    let body = serde_json::to_string_pretty(&normalized).unwrap_or_default();
-    let _ = std::fs::write(path, body);
+    if let Some(enabled) = update.autostart {
+        current.autostart = enabled;
+    }
+    if let Some(shortcut) = &update.toggle_shortcut {
+        current.toggle_shortcut = shortcut.clone();
+    }
+    let normalized = normalize_desktop_settings(current);
+    root.insert(
+        "close_action".to_string(),
+        serde_json::Value::String(normalized.close_action.clone()),
+    );
+    root.insert(
+        "agent_mode_policy".to_string(),
+        serde_json::Value::String(normalized.agent_mode_policy.clone()),
+    );
+    root.insert(
+        "agent_global_mode".to_string(),
+        serde_json::Value::String(normalized.agent_global_mode.clone()),
+    );
+    root.insert(
+        "runtime_model_switch".to_string(),
+        serde_json::Value::Bool(normalized.runtime_model_switch),
+    );
+    root.insert(
+        "autostart".to_string(),
+        serde_json::Value::Bool(normalized.autostart),
+    );
+    root.insert(
+        "toggle_shortcut".to_string(),
+        serde_json::Value::String(normalized.toggle_shortcut.clone()),
+    );
+    let body = serde_json::to_string_pretty(&serde_json::Value::Object(root)).unwrap_or_default();
+    // Atomic replace: a crash mid-write must never leave a truncated settings
+    // file that cold start would silently normalize back to defaults.
+    if let Err(error) = jeikcode_capabilities::fs::atomic_write(path, body.as_bytes(), 0o644) {
+        eprintln!(
+            "[desktop-settings] failed to persist {}: {error}",
+            path.display()
+        );
+    }
     normalized
+}
+
+/// Persist the Agent mode policy without re-applying it.
+///
+/// `/approval_mode` (mode pill + global switch) is the live control surface; it
+/// must write the same `desktop-settings.json` fields as the system-settings
+/// dialog, otherwise a page refresh / daemon restart snaps back to the stale
+/// policy on disk. The caller already applied the change in memory, so this
+/// helper is write-only and never recurses into the apply path.
+pub(crate) fn persist_agent_mode_policy(
+    policy: &str,
+    global_mode: crate::approval_mode::ApprovalMode,
+) -> DesktopSettingsPayload {
+    merge_desktop_settings_at(
+        &desktop_settings_file_path(),
+        &DesktopSettingsUpdate {
+            close_action: None,
+            agent_mode_policy: Some(policy.to_string()),
+            agent_global_mode: Some(global_mode.wire().to_string()),
+            ..Default::default()
+        },
+    )
 }
 
 pub(crate) async fn get_desktop_settings() -> impl IntoResponse {
@@ -1831,6 +2017,9 @@ pub(crate) async fn post_desktop_settings(
 ) -> impl IntoResponse {
     let mode_touched = update.agent_mode_policy.is_some() || update.agent_global_mode.is_some();
     let payload = merge_desktop_settings_at(&desktop_settings_file_path(), &update);
+    // The runtime switch branch reads this process-level projection per model
+    // change; keep it in lockstep with the just-persisted document.
+    set_runtime_model_switch(payload.runtime_model_switch);
     if mode_touched {
         crate::live_api::apply_persisted_agent_mode_policy(
             &state,
@@ -1839,6 +2028,9 @@ pub(crate) async fn post_desktop_settings(
         )
         .await;
     }
+    crate::publish_global(crate::GlobalWireEvent::DesktopSettingsChanged {
+        settings: payload.clone(),
+    });
     Json(serde_json::json!({ "success": true, "settings": payload }))
 }
 
@@ -2407,6 +2599,7 @@ mod tests {
                 close_action: Some("ask".into()),
                 agent_mode_policy: Some("global".into()),
                 agent_global_mode: Some("bypass".into()),
+                ..Default::default()
             },
         );
         assert_eq!(saved.agent_mode_policy, "global");
@@ -2419,6 +2612,7 @@ mod tests {
                 close_action: Some("tray".into()),
                 agent_mode_policy: None,
                 agent_global_mode: None,
+                ..Default::default()
             },
         );
         assert_eq!(after_close.close_action, "tray");
@@ -2430,9 +2624,100 @@ mod tests {
             close_action: "".into(),
             agent_mode_policy: "invalid".into(),
             agent_global_mode: "invalid".into(),
+            ..Default::default()
         });
         assert_eq!(normalized.close_action, "ask");
         assert_eq!(normalized.agent_mode_policy, "memory");
         assert_eq!(normalized.agent_global_mode, "build");
+    }
+
+    #[test]
+    fn desktop_settings_load_tolerates_one_bad_field_without_resetting_others() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("desktop-settings.json");
+        std::fs::write(
+            &path,
+            r#"{"close_action":"tray","agent_mode_policy":"global","agent_global_mode":null}"#,
+        )
+        .unwrap();
+        let loaded = super::load_desktop_settings_payload_at(&path);
+        assert_eq!(loaded.close_action, "tray");
+        assert_eq!(loaded.agent_mode_policy, "global");
+        assert_eq!(loaded.agent_global_mode, "build");
+    }
+
+    #[test]
+    fn desktop_settings_runtime_switch_autostart_and_shortcut_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("desktop-settings.json");
+        std::fs::write(
+            &path,
+            r#"{"runtime_model_switch":true,"autostart":true,"toggle_shortcut":"Ctrl+Shift+K"}"#,
+        )
+        .unwrap();
+        let loaded = super::load_desktop_settings_payload_at(&path);
+        assert!(loaded.runtime_model_switch);
+        assert!(loaded.autostart);
+        assert_eq!(loaded.toggle_shortcut, "Ctrl+Shift+K");
+
+        // A partial close-action write must preserve the new OS/runtime settings.
+        let saved = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                close_action: Some("tray".into()),
+                ..Default::default()
+            },
+        );
+        assert!(saved.runtime_model_switch);
+        assert!(saved.autostart);
+        assert_eq!(saved.toggle_shortcut, "Ctrl+Shift+K");
+
+        // An explicitly empty shortcut means "disabled" and must survive.
+        let cleared = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                toggle_shortcut: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cleared.toggle_shortcut, "");
+        let reloaded = super::load_desktop_settings_payload_at(&path);
+        assert_eq!(reloaded.toggle_shortcut, "");
+    }
+
+    #[test]
+    fn desktop_settings_merge_preserves_fields_written_by_other_writers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("desktop-settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "close_action": "ask",
+  "agent_mode_policy": "global",
+  "agent_global_mode": "plan",
+  "future_window_geometry": { "width": 1280 }
+}"#,
+        )
+        .unwrap();
+
+        let saved = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                close_action: Some("tray".into()),
+                agent_mode_policy: None,
+                agent_global_mode: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(saved.close_action, "tray");
+        assert_eq!(saved.agent_mode_policy, "global");
+        assert_eq!(saved.agent_global_mode, "plan");
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["future_window_geometry"]["width"], 1280,
+            "a partial settings write must not drop fields owned by the desktop shell"
+        );
     }
 }

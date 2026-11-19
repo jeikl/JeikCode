@@ -8,6 +8,7 @@
  *    同时在标签页切入后台时自动暂停 standby 监视以节省连接与唤醒开销。
  */
 import type { GlobalWireEvent, SSEEvent, SeqTaggedFrame } from '../api';
+import { observeServerTime } from './serverClock.ts';
 
 export interface MuxChatWatchOptions {
   standbyOnly?: boolean;
@@ -271,6 +272,7 @@ function ensureMuxSocket(getToken: () => string): boolean {
       if (!watcher || watcher.settled) return;
       if (parsed.event && typeof parsed.event === 'object') {
         const chatEvent = parsed.event as SSEEvent & SeqTaggedFrame;
+        observeServerTime(chatEvent.server_ts);
         if (typeof chatEvent.seq === 'number' && Number.isInteger(chatEvent.seq)) {
           watcher.afterSeq = chatEvent.seq;
         }
@@ -651,6 +653,7 @@ export async function runSseGlobalLeader(
       channel!.onmessage = (e) => {
         const msg = e.data as { kind?: string; ev?: GlobalWireEvent } | null;
         if (msg?.kind === 'event' && msg.ev && msg.ev.type !== 'sync') {
+          observeServerTime((msg.ev as { server_ts?: number }).server_ts);
           onEvent(msg.ev);
         }
       };

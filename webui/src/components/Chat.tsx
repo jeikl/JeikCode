@@ -6136,11 +6136,24 @@ export function Chat({
               // Keep raw JSON for expand/debug, but UI prefers subtasks panel.
               args: rawArgs,
               // A cold-start slice can contain a tool call whose result is not in
-              // this page yet. On an explicitly running snapshot, start pending;
-              // historical slices keep the legacy done default so old completed
-              // turns are not downgraded to Incomplete. A real tool_result below
-              // still overrides both states.
-              status: opts?.running ? 'pending' : 'done',
+              // this page yet. The persisted metrics status is authoritative when
+              // present (a crashed `running` row becomes `incomplete` on an idle
+              // session); otherwise keep the legacy running/done default. A real
+              // tool_result below still overrides both states.
+              status:
+                tc.status === 'error' || tc.status === 'incomplete' || tc.status === 'done'
+                  ? tc.status
+                  : tc.status === 'running'
+                    ? (opts?.running ? 'pending' : 'incomplete')
+                    : opts?.running
+                      ? 'pending'
+                      : 'done',
+              // Persisted timing anchors (server epoch ms) from the session
+              // tool-metrics sidecar; absent on older daemons.
+              ...(tc.started_at != null ? { started_at: tc.started_at } : {}),
+              ...(tc.finished_at != null ? { finished_at: tc.finished_at } : {}),
+              ...(tc.duration_ms != null ? { duration_ms: tc.duration_ms } : {}),
+              ...(tc.switch_ms != null ? { switch_ms: tc.switch_ms } : {}),
               ...(subtasks ? { subtasks } : {}),
             },
           });
@@ -6164,6 +6177,7 @@ export function Chat({
           turnId: msg.turn_id,
           id: msg.id,
           readOnly,
+          ...(msg.switch_to ? { switchTo: msg.switch_to } : {}),
         });
       } else if (msg.role === 'tool' && msg.tool_result) {
         const result = msg.tool_result;
@@ -6180,7 +6194,18 @@ export function Chat({
           for (const p of m.parts) {
             if (p.kind === 'tool' && p.tool.id === result.call_id) {
               p.tool.output = output;
-              p.tool.status = toolResultStatus(result.success, output, p.tool.name);
+              p.tool.status =
+                result.status === 'incomplete'
+                  ? 'incomplete'
+                  : result.status === 'error'
+                    ? 'error'
+                    : result.status === 'done'
+                      ? 'done'
+                      : toolResultStatus(result.success, output, p.tool.name);
+              if (result.duration_ms != null) p.tool.duration_ms = result.duration_ms;
+              if (result.started_at != null) p.tool.started_at = result.started_at;
+              if (result.finished_at != null) p.tool.finished_at = result.finished_at;
+              if (result.switch_ms != null) p.tool.switch_ms = result.switch_ms;
               todoResult = isTodoTool(p.tool.name);
               // Same settle rule as the live `tool_result` path (history + live must
               // share one reconciliation rule, or the two views disagree).
@@ -8391,7 +8416,12 @@ export function Chat({
     const previous = provider;
     setProvider(name);
     void postLiveProvider(name, sessionId).then((res) => {
-      if (res.ok) return;
+      if (res.ok) {
+        if (res.queued) {
+          showToast(t('cmd.model.queued'), 'info');
+        }
+        return;
+      }
       if (res.activeTurn) {
         showToast(t('cmd.model.deferred'), 'warning');
         return;
@@ -9143,6 +9173,45 @@ export function Chat({
       case 'tool_finished':
         next = reduceCanvasEvent(next, { type: 'tool_finished', id: event.id, success: event.success });
         break;
+      case 'model_switch':
+        next = reduceCanvasEvent(next, {
+          type: 'model_switch',
+          messageId: event.message_id,
+          model: event.model,
+        });
+        break;
+      case 'tool_timing': {
+        // Observability only: attach the persisted anchors to the existing row.
+        // A replayed `running` frame must never downgrade a settled row.
+        const settled = event.status !== 'running';
+        const nextStatus: ToolRow['status'] =
+          event.status === 'running' ? 'pending' : event.status;
+        next = reduceCanvasEvent(next, {
+          type: 'tool_update',
+          id: event.id,
+          update: {
+            status: nextStatus,
+            started_at: event.started_at,
+            ...(event.finished_at != null ? { finished_at: event.finished_at } : {}),
+            ...(event.duration_ms != null ? { duration_ms: event.duration_ms } : {}),
+            ...(event.switch_ms != null ? { switch_ms: event.switch_ms } : {}),
+          },
+          derive: (tool) => {
+            const terminal =
+              tool.status === 'done' || tool.status === 'error' || tool.status === 'incomplete';
+            return !settled && terminal
+              ? {
+                  status: tool.status,
+                  started_at: tool.started_at,
+                  finished_at: tool.finished_at,
+                  duration_ms: tool.duration_ms,
+                  switch_ms: tool.switch_ms,
+                }
+              : undefined;
+          },
+        });
+        break;
+      }
       case 'tool_progress':
         next = reduceCanvasEvent(next, { type: 'tool_progress', id: event.id, progress: event.progress });
         break;
@@ -9725,11 +9794,50 @@ export function Chat({
         setMessages({ type: 'tool_progress', id: event.id, progress: event.progress });
         break;
 
+      case 'tool_timing': {
+        const settled = event.status !== 'running';
+        const nextStatus: ToolRow['status'] =
+          event.status === 'running' ? 'pending' : event.status;
+        updateToolInLastAssistant(
+          event.id,
+          {
+            status: nextStatus,
+            started_at: event.started_at,
+            ...(event.finished_at != null ? { finished_at: event.finished_at } : {}),
+            ...(event.duration_ms != null ? { duration_ms: event.duration_ms } : {}),
+            ...(event.switch_ms != null ? { switch_ms: event.switch_ms } : {}),
+          },
+          (tool) => {
+            const terminal =
+              tool.status === 'done' || tool.status === 'error' || tool.status === 'incomplete';
+            return !settled && terminal
+              ? {
+                  status: tool.status,
+                  started_at: tool.started_at,
+                  finished_at: tool.finished_at,
+                  duration_ms: tool.duration_ms,
+                  switch_ms: tool.switch_ms,
+                }
+              : undefined;
+          },
+        );
+        break;
+      }
+
       case 'tool_finished': {
         // 执行已返回 → 先把该行状态落定。权威 `tool_result` 仍按整批发射顺序到达，
         // 所以长批次里的短工具原本要陪着长工具一起“运行中”；这里只动状态，
         // output / duration_ms 仍由权威帧负责。
         updateToolInLastAssistant(event.id, {}, (tool) => settleToolRow(tool, event.success));
+        break;
+      }
+
+      case 'model_switch': {
+        setMessages({
+          type: 'model_switch',
+          messageId: event.message_id,
+          model: event.model,
+        });
         break;
       }
 

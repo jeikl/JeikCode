@@ -58,6 +58,8 @@ export interface CanvasRecord {
   turnId?: number;
   /** 客户端关联键（`client_input_id`）：新契约下与 `id` 同值。 */
   clientInputId?: string;
+  /** Display-only runtime model-switch marker (`Switch to <model>`). */
+  switchTo?: string;
   /** Rebuilt from the append-only JSONL after compaction: edit/delete disabled. */
   readOnly?: boolean;
 }

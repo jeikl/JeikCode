@@ -4,6 +4,7 @@ import type { Lang } from './i18n';
 import { stripExtendedPathPrefix } from './lib/displayPath.ts';
 import type { PermissionDecisionResult } from './lib/pendingPermission.ts';
 import type { ServerChatRuntime } from './lib/serverRuntime.ts';
+import { observeServerTime } from './lib/serverClock.ts';
 import { normalizeSessionTodoSnapshot } from './lib/todoWire.ts';
 import {
   canUseStreamMux,
@@ -659,6 +660,9 @@ export async function getHealth(): Promise<HealthInfo> {
  */
 export interface SeqTaggedFrame {
   seq?: number;
+  /** Server epoch-ms cast with the frame. Drives the shared `cost` stopwatch
+   *  clock offset so skewed browser clocks show the same elapsed time. */
+  server_ts?: number;
   /** True only for frames read from the turn replay snapshot; live frames use
    *  the same seq but append instead of replacing. Absent on old daemons, where
    *  seq presence is the fallback replay marker. */
@@ -705,6 +709,28 @@ export type SSEEvent =
   /** 工具执行已返回（权威结果帧仍按发射顺序排队）。客户端用它先把行状态落定，
    *  避免同一并发批次里耗时长工具未完成时，短工具陪着一起“运行中”。 */
   | { type: 'tool_finished'; id: string; success: boolean }
+  /** Observability-only timing frame: live `cost` anchor + frozen `switch` gap.
+   *  Never part of the model context. */
+  | {
+      type: 'tool_timing';
+      id: string;
+      name: string;
+      status: 'running' | 'done' | 'error' | 'incomplete';
+      started_at: number;
+      finished_at?: number;
+      duration_ms?: number;
+      switch_ms?: number;
+    }
+  /** Display-only marker: a queued runtime model switch applied at this
+   *  assistant round boundary. Never part of the model context. */
+  | {
+      type: 'model_switch';
+      provider: string;
+      model: string;
+      message_id: string;
+      requested_at: number;
+      applied_at: number;
+    }
   | { type: 'tool_result'; id: string; name: string; output: string; success: boolean; duration_ms: number }
   | { type: 'tokens'; prompt: number; completion: number; total: number; cached?: number; cached_estimated?: boolean; reasoning?: number }
   | { type: 'permission_request'; session_id: string; approval_id: string; tool_name: string; reason: string; call_id: string; arguments: unknown }
@@ -1372,6 +1398,7 @@ export async function watchChatSession(
       let terminalSeen = false;
 
       const emit = (event: SSEEvent & SeqTaggedFrame) => {
+        observeServerTime(event.server_ts);
         if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
           terminalSeen = true;
         }
@@ -1488,6 +1515,11 @@ export async function streamChat(
   let terminalSeen = false;
 
   const emit = (event: SSEEvent) => {
+    // Guarded: some unit tests transpile this function in isolation, where the
+    // module-scope server-clock helper is intentionally absent.
+    if (typeof observeServerTime === 'function') {
+      observeServerTime((event as SSEEvent & SeqTaggedFrame).server_ts);
+    }
     if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
       terminalSeen = true;
     }
@@ -1646,6 +1678,13 @@ export interface ToolCallInfo {
   name: string;
   arguments: string;
   display: string;
+  /** Persisted execution anchors (session `toolmetrics.jsonl` join). */
+  started_at?: number;
+  finished_at?: number;
+  duration_ms?: number;
+  switch_ms?: number;
+  /** Authoritative lifecycle from the metrics sidecar (cold-start display). */
+  status?: 'running' | 'done' | 'error' | 'incomplete';
 }
 
 export interface ToolResultInfo {
@@ -1653,6 +1692,11 @@ export interface ToolResultInfo {
   success: boolean;
   summary: string;
   line_count: number;
+  started_at?: number;
+  finished_at?: number;
+  duration_ms?: number;
+  switch_ms?: number;
+  status?: 'running' | 'done' | 'error' | 'incomplete';
 }
 
 export interface SessionMessage {
@@ -1693,6 +1737,8 @@ export interface SessionMessage {
   /** Whole user-turn wall-clock duration in ms (user send → final answer).
    *  Survives refresh / session switch. Not a single LLM round. */
   elapsed_ms?: number;
+  /** Display-only `Switch to <model>` marker for this assistant round. */
+  switch_to?: string;
   /** v5 结构化显示通知元数据（事件 id / 因果锚点 / 状态与修订号）。 */
   notice?: MessageNoticeInfo;
 }
@@ -2204,6 +2250,9 @@ export interface DesktopSettings {
   close_action: 'ask' | 'tray' | 'quit';
   agent_mode_policy?: 'memory' | 'global';
   agent_global_mode?: ApprovalMode;
+  runtime_model_switch?: boolean;
+  autostart?: boolean;
+  toggle_shortcut?: string;
 }
 
 export type DesktopSettingsUpdate = Partial<DesktopSettings>;
@@ -2215,6 +2264,9 @@ export async function getDesktopSettings(): Promise<DesktopSettings> {
       close_action: 'ask',
       agent_mode_policy: 'memory',
       agent_global_mode: 'build',
+      runtime_model_switch: false,
+      autostart: false,
+      toggle_shortcut: 'Ctrl+Alt+J',
     };
   }
   return resp.json();
@@ -2227,6 +2279,9 @@ export async function postDesktopSettings(settings: DesktopSettingsUpdate): Prom
     body: JSON.stringify(settings),
   });
   if (!resp.ok) throw new Error('failed to save desktop settings');
+  // The saved mode policy is now the cold-start truth; drop the short-lived
+  // bootstrap snapshot so an immediate refresh cannot repaint the old state.
+  invalidateBootstrapCache();
 }
 
 /** Trigger a hot-reload of config from disk (POST /config/reload). */
@@ -2930,6 +2985,10 @@ export async function getSession(
     headers,
     signal: opts?.signal,
   });
+  // Cold-start clock alignment: the header is present on 200 and 304 alike and
+  // keeps the body/ETag stable while still letting persisted tool anchors paint
+  // the same live elapsed time on a skewed client clock.
+  observeServerTime(Number(resp.headers.get('x-jeikcode-server-time')) || undefined);
   // Conditional hit: reuse the exact previous body without re-parsing or
   // transferring it. The cache is tiny and keyed by the full window query.
   if (resp.status === 304 && cached) {
@@ -3052,7 +3111,11 @@ export type GlobalWireEvent =
   /** 会话审批模式变更（跨实例全局广播） */
   | { type: 'session_mode'; session_id?: string | null; mode: ApprovalMode }
   /** 全局模式开关变更：开启后所有会话统一跟随 `mode`。 */
-  | { type: 'mode_global'; enabled: boolean; mode: ApprovalMode };
+  | { type: 'mode_global'; enabled: boolean; mode: ApprovalMode }
+  /** MCP / 技能等能力开关或信任状态变更（跨实例广播）。 */
+  | { type: 'capabilities_changed'; working_dir?: string | null }
+  /** Desktop/runtime settings changed in another instance. */
+  | { type: 'desktop_settings'; settings: DesktopSettings };
 
 const GLOBAL_EVENTS_IDLE_TIMEOUT_MS = 30_000;
 
@@ -3171,7 +3234,7 @@ export async function streamGlobalEvents(
 export async function postLiveProvider(
   provider: string,
   sessionId?: string | null,
-): Promise<{ ok: boolean; activeTurn: boolean; error?: string }> {
+): Promise<{ ok: boolean; activeTurn: boolean; queued: boolean; error?: string }> {
   const resp = await apiFetch('/live/provider', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -3180,8 +3243,19 @@ export async function postLiveProvider(
   if (!resp.ok) throw new Error(`switch live provider failed: ${resp.status}`);
   // A business rejection (e.g. active_turn) is NOT thrown — the caller reverts its
   // optimistic selection and shows a notice. Only transport failures throw.
-  const body = await resp.json() as { ok?: boolean; active_turn?: boolean; error?: string };
-  return { ok: body.ok === true, activeTurn: body.active_turn === true, error: body.error };
+  const body = await resp.json() as {
+    ok?: boolean;
+    active_turn?: boolean;
+    deferred?: boolean;
+    queued?: boolean;
+    error?: string;
+  };
+  return {
+    ok: body.ok === true,
+    activeTurn: body.active_turn === true || body.deferred === true,
+    queued: body.queued === true,
+    error: body.error,
+  };
 }
 
 // --- /command endpoint ---
@@ -3275,6 +3349,10 @@ export async function postLiveMode(
   if (!resp.ok) throw new Error(`switch mode failed: ${resp.status}`);
   const body = (await resp.json()) as ApprovalModeResponse;
   if (!body.ok) throw new Error('live runtime rejected the mode switch');
+  // The backend persists the global policy before answering; drop the 2s
+  // bootstrap snapshot so an immediate refresh cannot paint the previous mode
+  // before the authoritative `/approval_mode` round-trip lands.
+  invalidateBootstrapCache();
   broadcastApprovalMode(body.mode, sessionId, body.global);
   return body.mode;
 }
