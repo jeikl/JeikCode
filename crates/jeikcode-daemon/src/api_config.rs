@@ -76,6 +76,7 @@ pub(crate) fn config_response(config: &Config) -> ConfigResponse {
         .unwrap_or_default()
         .language_key()
         .to_string();
+    let update_dead = jeikcode_config::config::runtime_state::is_dead();
     ConfigResponse {
         path: Config::default_path(),
         default_provider: default_selection,
@@ -83,7 +84,8 @@ pub(crate) fn config_response(config: &Config) -> ConfigResponse {
         providers,
         accounts,
         language,
-        github_logo: config.github_logo,
+        github_logo: config.github_logo && !update_dead,
+        update_dead,
         auto_git_sync: config.auto_git_sync,
     }
 }
@@ -1003,7 +1005,27 @@ fn webui_listen_pref_path() -> std::path::PathBuf {
 
 fn load_webui_listen_pref() -> Option<WebuiListenPref> {
     let text = std::fs::read_to_string(webui_listen_pref_path()).ok()?;
-    serde_json::from_str(&text).ok()
+    let root = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let obj = root.as_object()?;
+    // Field-wise read so one malformed value cannot discard the saved token or
+    // host on the next write (which would lock remote clients out after reload).
+    let port = obj
+        .get("port")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|port| *port != 0)?;
+    Some(WebuiListenPref {
+        host: obj
+            .get("host")
+            .and_then(serde_json::Value::as_str)
+            .filter(|host| !host.trim().is_empty())
+            .map(str::to_string),
+        port,
+        token: obj
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 fn saved_listen_port() -> Option<u16> {
@@ -1048,7 +1070,9 @@ pub(crate) fn save_webui_listen_pref(
         pref.token = token;
     }
     let body = serde_json::to_string_pretty(&pref).map_err(|err| err.to_string())?;
-    std::fs::write(path, body).map_err(|err| err.to_string())
+    // Contains the access token: atomic replace, user-only permissions.
+    jeikcode_capabilities::fs::atomic_write(&path, body.as_bytes(), 0o600)
+        .map_err(|err| err.to_string())
 }
 
 /// The running socket stays as it is. A matching port registers the token now.
@@ -1386,6 +1410,56 @@ pub struct MigrateLegacyResponse {
     pub killed_zombies_count: usize,
 }
 
+/// 判定某进程条目是否属于当前进程自身、当前线程组（TGID）或任意内核/用户态线程。
+///
+/// Linux 上 `sysinfo` 会把 `/proc/<TGID>/task/<TID>` 作为独立条目录入 `sys.processes()`，
+/// 对线程 TID 调用 `kill()` 会向整个线程组发送 SIGKILL 导致自身秒退（Issue #88）。
+fn is_protected_process_entry(
+    pid_u32: u32,
+    is_thread: bool,
+    exe_canon: Option<&std::path::Path>,
+    parent_pid: Option<u32>,
+    my_pid: Option<u32>,
+    self_task_pids: &std::collections::HashSet<u32>,
+    current_exe_canon: Option<&std::path::Path>,
+) -> bool {
+    if is_thread {
+        return true;
+    }
+    if my_pid.is_some_and(|mine| mine == pid_u32) || self_task_pids.contains(&pid_u32) {
+        return true;
+    }
+    if my_pid.is_some_and(|mine| parent_pid == Some(mine)) {
+        return true;
+    }
+    if let (Some(target_exe), Some(self_exe)) = (exe_canon, current_exe_canon) {
+        if target_exe == self_exe {
+            return true;
+        }
+    }
+    false
+}
+
+fn canonical_exe_or_raw(path: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    path.map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+}
+
+fn collect_self_task_pids(sys: &sysinfo::System) -> std::collections::HashSet<u32> {
+    let mut set = std::collections::HashSet::new();
+    let Ok(my_pid) = sysinfo::get_current_pid() else {
+        return set;
+    };
+    set.insert(my_pid.as_u32());
+    if let Some(my_proc) = sys.process(my_pid) {
+        if let Some(tasks) = my_proc.tasks() {
+            for tid in tasks {
+                set.insert(tid.as_u32());
+            }
+        }
+    }
+    set
+}
+
 pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     let mut sys = System::new();
@@ -1395,11 +1469,16 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
         ProcessRefreshKind::everything(),
     );
     let my_pid = sysinfo::get_current_pid().ok().map(|p| p.as_u32());
+    let self_task_pids = collect_self_task_pids(&sys);
+    let current_exe_canon = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
     let mut out = Vec::new();
 
-    // 收集所有当前活跃的桌面壳 PID (jeikcode-desktop)
+    // 收集所有当前活跃的桌面壳 PID (jeikcode-desktop)，仅统计主进程，不把线程计入
     let mut active_desktop_pids = std::collections::HashSet::new();
     for (pid, proc_) in sys.processes() {
+        if proc_.thread_kind().is_some() {
+            continue;
+        }
         let name = proc_.name().to_string_lossy().to_ascii_lowercase();
         if name.contains("desktop") || name.contains("tauri") {
             active_desktop_pids.insert(pid.as_u32());
@@ -1408,7 +1487,17 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
 
     for (pid, proc_) in sys.processes() {
         let pid_u32 = pid.as_u32();
-        if Some(pid_u32) == my_pid {
+        let exe_canon = canonical_exe_or_raw(proc_.exe());
+        let parent_pid = proc_.parent().map(|p| p.as_u32());
+        if is_protected_process_entry(
+            pid_u32,
+            proc_.thread_kind().is_some(),
+            exe_canon.as_deref(),
+            parent_pid,
+            my_pid,
+            &self_task_pids,
+            current_exe_canon.as_deref(),
+        ) {
             continue;
         }
         let name = proc_.name().to_string_lossy().to_ascii_lowercase();
@@ -1448,7 +1537,6 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
         });
 
         // 3. 检查父进程与绑定的桌面壳状态
-        let parent_pid = proc_.parent().map(|p| p.as_u32());
         let desktop_owner_alive = parent_pid
             .is_some_and(|ppid| active_desktop_pids.contains(&ppid))
             || declared_desktop_pid.is_some_and(|dpid| active_desktop_pids.contains(&dpid));
@@ -1481,6 +1569,9 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
 
 pub fn kill_zombie_processes_all() -> usize {
     let zombies = scan_zombie_processes();
+    if zombies.is_empty() {
+        return 0;
+    }
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let mut sys = System::new();
     sys.refresh_processes_specifics(
@@ -1488,9 +1579,26 @@ pub fn kill_zombie_processes_all() -> usize {
         true,
         ProcessRefreshKind::everything(),
     );
+    let my_pid = sysinfo::get_current_pid().ok().map(|p| p.as_u32());
+    let self_task_pids = collect_self_task_pids(&sys);
+    let current_exe_canon = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
     let mut killed = 0;
     for z in zombies {
         if let Some(proc_) = sys.process(Pid::from_u32(z.pid)) {
+            let exe_canon = canonical_exe_or_raw(proc_.exe());
+            let parent_pid = proc_.parent().map(|p| p.as_u32());
+            // 二次硬守卫：发信号前再次核对非自身/非线程/非同可执行文件
+            if is_protected_process_entry(
+                z.pid,
+                proc_.thread_kind().is_some(),
+                exe_canon.as_deref(),
+                parent_pid,
+                my_pid,
+                &self_task_pids,
+                current_exe_canon.as_deref(),
+            ) {
+                continue;
+            }
             if proc_.kill() {
                 killed += 1;
             }
@@ -1499,9 +1607,9 @@ pub fn kill_zombie_processes_all() -> usize {
     killed
 }
 
-pub(crate) async fn get_legacy_status() -> impl IntoResponse {
+fn collect_legacy_status_blocking() -> LegacyStatusResponse {
     let mut legacy_files = Vec::new();
-    let current_exe = std::env::current_exe().ok();
+    let current_exe = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
     if let Some(home) = jeikcode_config::util::real_home_dir() {
         let local_bin = home.join(".local").join("bin");
         if let Ok(entries) = std::fs::read_dir(&local_bin) {
@@ -1513,7 +1621,8 @@ pub(crate) async fn get_legacy_status() -> impl IntoResponse {
                         .and_then(|n| n.to_str())
                         .unwrap_or("")
                         .to_ascii_lowercase();
-                    let is_current = current_exe.as_ref().map_or(false, |c| c == &path);
+                    let path_canon = canonical_exe_or_raw(Some(&path));
+                    let is_current = current_exe.is_some() && current_exe == path_canon;
                     if (name.starts_with("jeikcode") || name.starts_with("atomcode")) && !is_current
                     {
                         legacy_files.push(path.display().to_string());
@@ -1548,94 +1657,381 @@ pub(crate) async fn get_legacy_status() -> impl IntoResponse {
     let has_legacy_files = !legacy_files.is_empty();
     let needs_migration = has_legacy_files || has_dirty_path || zombie_count > 0;
 
-    Json(LegacyStatusResponse {
+    LegacyStatusResponse {
         has_legacy_files,
         legacy_files,
         has_dirty_path,
         zombie_count,
         zombies,
         needs_migration,
-    })
+    }
 }
 
-pub(crate) async fn post_migrate_legacy(
-    Json(payload): Json<MigrateLegacyRequest>,
-) -> impl IntoResponse {
+fn migrate_legacy_blocking(kill_zombies: bool) -> MigrateLegacyResponse {
     let mut cleaned_files_count = 0;
-    let current_exe = std::env::current_exe().ok();
-    if let Some(ref running) = current_exe {
-        if let Some(home) = jeikcode_config::util::real_home_dir() {
-            let local_bin = home.join(".local").join("bin");
-            if let Ok(entries) = std::fs::read_dir(&local_bin) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_ascii_lowercase();
-                        if (name.starts_with("jeikcode") || name.starts_with("atomcode"))
-                            && running != &path
-                        {
-                            if std::fs::remove_file(&path).is_ok() {
-                                cleaned_files_count += 1;
-                            }
+    let current_exe = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
+    if let Some(home) = jeikcode_config::util::real_home_dir() {
+        let local_bin = home.join(".local").join("bin");
+        if let Ok(entries) = std::fs::read_dir(&local_bin) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    let path_canon = canonical_exe_or_raw(Some(&path));
+                    let is_current = current_exe.is_some() && current_exe == path_canon;
+                    if (name.starts_with("jeikcode") || name.starts_with("atomcode")) && !is_current
+                    {
+                        if std::fs::remove_file(&path).is_ok() {
+                            cleaned_files_count += 1;
                         }
                     }
                 }
             }
-            let _ = std::fs::remove_dir(&local_bin);
         }
+        let _ = std::fs::remove_dir(&local_bin);
     }
 
     jeikcode_updater::migrate_legacy_environment();
 
     let mut killed_zombies_count = 0;
-    if payload.kill_zombies {
+    if kill_zombies {
         killed_zombies_count = kill_zombie_processes_all();
     }
 
-    Json(MigrateLegacyResponse {
+    MigrateLegacyResponse {
         success: true,
         cleaned_files_count,
         killed_zombies_count,
-    })
+    }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) async fn get_legacy_status() -> impl IntoResponse {
+    let status = tokio::task::spawn_blocking(collect_legacy_status_blocking)
+        .await
+        .unwrap_or(LegacyStatusResponse {
+            has_legacy_files: false,
+            legacy_files: Vec::new(),
+            has_dirty_path: false,
+            zombie_count: 0,
+            zombies: Vec::new(),
+            needs_migration: false,
+        });
+    Json(status)
+}
+
+pub(crate) async fn post_migrate_legacy(
+    Json(payload): Json<MigrateLegacyRequest>,
+) -> impl IntoResponse {
+    let kill_zombies = payload.kill_zombies;
+    let res = tokio::task::spawn_blocking(move || migrate_legacy_blocking(kill_zombies))
+        .await
+        .unwrap_or(MigrateLegacyResponse {
+            success: false,
+            cleaned_files_count: 0,
+            killed_zombies_count: 0,
+        });
+    Json(res)
+}
+
+fn default_close_action() -> String {
+    "ask".to_string()
+}
+
+fn default_agent_mode_policy() -> String {
+    "memory".to_string()
+}
+
+fn default_agent_global_mode() -> String {
+    "build".to_string()
+}
+
+fn default_toggle_shortcut() -> String {
+    "Ctrl+Alt+J".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DesktopSettingsPayload {
-    #[serde(default)]
+    #[serde(default = "default_close_action")]
     pub close_action: String,
+    /// 启动与日常权限模式策略：`"memory"`（默认，按会话记忆）或 `"global"`（全局统一模式）。
+    #[serde(default = "default_agent_mode_policy")]
+    pub agent_mode_policy: String,
+    /// 选择 `"global"` 策略时生效的全局模式：`"build"` | `"plan"` | `"accept_edits"` | `"bypass"`。
+    #[serde(default = "default_agent_global_mode")]
+    pub agent_global_mode: String,
+    /// 运行时切换模型：开启后，运行中的回合在下一个模型小轮自动换 provider，
+    /// 保留当前上下文；关闭时沿用“下一轮生效/延后”的旧行为。
+    #[serde(default)]
+    pub runtime_model_switch: bool,
+    /// 开机自启（静默到托盘，不闪窗口）。
+    #[serde(default)]
+    pub autostart: bool,
+    /// 唤起/隐藏桌面窗口的全局快捷键；空串 = 禁用。
+    #[serde(default = "default_toggle_shortcut")]
+    pub toggle_shortcut: String,
+}
+
+impl Default for DesktopSettingsPayload {
+    fn default() -> Self {
+        Self {
+            close_action: default_close_action(),
+            agent_mode_policy: default_agent_mode_policy(),
+            agent_global_mode: default_agent_global_mode(),
+            runtime_model_switch: false,
+            autostart: false,
+            toggle_shortcut: default_toggle_shortcut(),
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DesktopSettingsUpdate {
+    #[serde(default)]
+    pub close_action: Option<String>,
+    #[serde(default)]
+    pub agent_mode_policy: Option<String>,
+    #[serde(default)]
+    pub agent_global_mode: Option<String>,
+    #[serde(default)]
+    pub runtime_model_switch: Option<bool>,
+    #[serde(default)]
+    pub autostart: Option<bool>,
+    #[serde(default)]
+    pub toggle_shortcut: Option<String>,
+}
+
+pub(crate) fn normalize_desktop_settings(
+    mut payload: DesktopSettingsPayload,
+) -> DesktopSettingsPayload {
+    payload.close_action = match payload.close_action.trim().to_ascii_lowercase().as_str() {
+        "tray" => "tray".to_string(),
+        "quit" => "quit".to_string(),
+        _ => default_close_action(),
+    };
+    payload.agent_mode_policy = if payload
+        .agent_mode_policy
+        .trim()
+        .eq_ignore_ascii_case("global")
+    {
+        "global".to_string()
+    } else {
+        default_agent_mode_policy()
+    };
+    payload.agent_global_mode =
+        crate::live_api::parse_approval_mode_wire(Some(&payload.agent_global_mode))
+            .unwrap_or(crate::approval_mode::ApprovalMode::Build)
+            .wire()
+            .to_string();
+    payload.toggle_shortcut = payload.toggle_shortcut.trim().to_string();
+    payload
 }
 
 fn desktop_settings_file_path() -> std::path::PathBuf {
     jeikcode_config::config::Config::config_dir().join("desktop-settings.json")
 }
 
-pub(crate) async fn get_desktop_settings() -> impl IntoResponse {
-    let path = desktop_settings_file_path();
+/// Process-level projection of the persisted `runtime_model_switch` checkbox.
+/// Initialized at daemon startup and refreshed on every settings save so the
+/// `/live/provider` active-turn branch does not need a disk read per switch.
+static RUNTIME_MODEL_SWITCH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn runtime_model_switch_enabled() -> bool {
+    RUNTIME_MODEL_SWITCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub(crate) fn set_runtime_model_switch(enabled: bool) {
+    RUNTIME_MODEL_SWITCH.store(enabled, std::sync::atomic::Ordering::Release);
+}
+
+pub(crate) fn init_runtime_model_switch_from_desktop_settings() {
+    set_runtime_model_switch(load_desktop_settings_payload().runtime_model_switch);
+}
+
+pub(crate) fn load_desktop_settings_payload_at(path: &std::path::Path) -> DesktopSettingsPayload {
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
-    let mut payload =
-        serde_json::from_str::<DesktopSettingsPayload>(&text).unwrap_or(DesktopSettingsPayload {
-            close_action: "ask".into(),
-        });
-    if payload.close_action.is_empty() {
-        payload.close_action = "ask".into();
+    let root = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    normalize_desktop_settings(desktop_settings_from_object(&root))
+}
+
+/// Field-wise extraction shared by cold start and the merge writer.
+///
+/// A single null/typed-wrong value must not reset the whole document; the old
+/// typed parse returned `default()` and cold start silently reverted to
+/// memory/Build. Unknown fields are intentionally ignored here and preserved by
+/// [`merge_desktop_settings_at`]'s original JSON object.
+fn desktop_settings_from_object(
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> DesktopSettingsPayload {
+    DesktopSettingsPayload {
+        close_action: root
+            .get("close_action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ask")
+            .to_string(),
+        agent_mode_policy: root
+            .get("agent_mode_policy")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("memory")
+            .to_string(),
+        agent_global_mode: root
+            .get("agent_global_mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("build")
+            .to_string(),
+        runtime_model_switch: root
+            .get("runtime_model_switch")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        autostart: root
+            .get("autostart")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        toggle_shortcut: root
+            .get("toggle_shortcut")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .unwrap_or("Ctrl+Alt+J")
+            .to_string(),
     }
-    Json(payload)
+}
+
+pub(crate) fn load_desktop_settings_payload() -> DesktopSettingsPayload {
+    load_desktop_settings_payload_at(&desktop_settings_file_path())
+}
+
+pub(crate) fn merge_desktop_settings_at(
+    path: &std::path::Path,
+    update: &DesktopSettingsUpdate,
+) -> DesktopSettingsPayload {
+    // Serialize the read-modify-write inside this process: the mode pill and the
+    // system-settings dialog can now persist concurrently, and a lost update
+    // would resurrect the previous policy after a refresh.
+    static DESKTOP_SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = DESKTOP_SETTINGS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // Preserve fields this build does not know about (the desktop shell or a
+    // newer daemon may already own them). Rewriting a typed struct here used to
+    // drop them silently — same class of bug as the old native close-action
+    // writer that erased the Agent mode policy.
+    let mut root = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    // Read known fields individually so one malformed/null value cannot reset
+    // the whole document to defaults (which would clobber the mode policy).
+    let mut current = desktop_settings_from_object(&root);
+    if let Some(close_action) = &update.close_action {
+        current.close_action = close_action.clone();
+    }
+    if let Some(policy) = &update.agent_mode_policy {
+        current.agent_mode_policy = policy.clone();
+    }
+    if let Some(mode) = &update.agent_global_mode {
+        current.agent_global_mode = mode.clone();
+    }
+    if let Some(enabled) = update.runtime_model_switch {
+        current.runtime_model_switch = enabled;
+    }
+    if let Some(enabled) = update.autostart {
+        current.autostart = enabled;
+    }
+    if let Some(shortcut) = &update.toggle_shortcut {
+        current.toggle_shortcut = shortcut.clone();
+    }
+    let normalized = normalize_desktop_settings(current);
+    root.insert(
+        "close_action".to_string(),
+        serde_json::Value::String(normalized.close_action.clone()),
+    );
+    root.insert(
+        "agent_mode_policy".to_string(),
+        serde_json::Value::String(normalized.agent_mode_policy.clone()),
+    );
+    root.insert(
+        "agent_global_mode".to_string(),
+        serde_json::Value::String(normalized.agent_global_mode.clone()),
+    );
+    root.insert(
+        "runtime_model_switch".to_string(),
+        serde_json::Value::Bool(normalized.runtime_model_switch),
+    );
+    root.insert(
+        "autostart".to_string(),
+        serde_json::Value::Bool(normalized.autostart),
+    );
+    root.insert(
+        "toggle_shortcut".to_string(),
+        serde_json::Value::String(normalized.toggle_shortcut.clone()),
+    );
+    let body = serde_json::to_string_pretty(&serde_json::Value::Object(root)).unwrap_or_default();
+    // Atomic replace: a crash mid-write must never leave a truncated settings
+    // file that cold start would silently normalize back to defaults.
+    if let Err(error) = jeikcode_capabilities::fs::atomic_write(path, body.as_bytes(), 0o644) {
+        eprintln!(
+            "[desktop-settings] failed to persist {}: {error}",
+            path.display()
+        );
+    }
+    normalized
+}
+
+/// Persist the Agent mode policy without re-applying it.
+///
+/// `/approval_mode` (mode pill + global switch) is the live control surface; it
+/// must write the same `desktop-settings.json` fields as the system-settings
+/// dialog, otherwise a page refresh / daemon restart snaps back to the stale
+/// policy on disk. The caller already applied the change in memory, so this
+/// helper is write-only and never recurses into the apply path.
+pub(crate) fn persist_agent_mode_policy(
+    policy: &str,
+    global_mode: crate::approval_mode::ApprovalMode,
+) -> DesktopSettingsPayload {
+    merge_desktop_settings_at(
+        &desktop_settings_file_path(),
+        &DesktopSettingsUpdate {
+            close_action: None,
+            agent_mode_policy: Some(policy.to_string()),
+            agent_global_mode: Some(global_mode.wire().to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+pub(crate) async fn get_desktop_settings() -> impl IntoResponse {
+    Json(load_desktop_settings_payload())
 }
 
 pub(crate) async fn post_desktop_settings(
-    Json(payload): Json<DesktopSettingsPayload>,
+    State(state): State<AppState>,
+    Json(update): Json<DesktopSettingsUpdate>,
 ) -> impl IntoResponse {
-    let path = desktop_settings_file_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let mode_touched = update.agent_mode_policy.is_some() || update.agent_global_mode.is_some();
+    let payload = merge_desktop_settings_at(&desktop_settings_file_path(), &update);
+    // The runtime switch branch reads this process-level projection per model
+    // change; keep it in lockstep with the just-persisted document.
+    set_runtime_model_switch(payload.runtime_model_switch);
+    if mode_touched {
+        crate::live_api::apply_persisted_agent_mode_policy(
+            &state,
+            &payload.agent_mode_policy,
+            &payload.agent_global_mode,
+        )
+        .await;
     }
-    let body = serde_json::to_string_pretty(&payload).unwrap_or_default();
-    let _ = std::fs::write(path, body);
-    Json(serde_json::json!({ "success": true }))
+    crate::publish_global(crate::GlobalWireEvent::DesktopSettingsChanged {
+        settings: payload.clone(),
+    });
+    Json(serde_json::json!({ "success": true, "settings": payload }))
 }
 
 /// POST /config/reload - Reloads config.toml from disk, remounts MCP/skills on
@@ -2130,5 +2526,198 @@ mod tests {
         assert!(saved.contains("\"port\": 4096"), "{saved}");
         assert!(saved.contains("later-token"), "{saved}");
         assert!(!saved.contains("no_token"), "{saved}");
+    }
+
+    #[test]
+    fn zombie_guard_protects_self_threads_children_and_same_exe() {
+        let mut self_tasks = std::collections::HashSet::new();
+        self_tasks.insert(226712);
+        self_tasks.insert(226717);
+        let self_exe = std::path::Path::new("/usr/local/bin/jeikcode");
+        let legacy_exe = std::path::Path::new("/home/u/.local/bin/jeikcode");
+
+        // 1. 主进程自身
+        assert!(is_protected_process_entry(
+            226712,
+            false,
+            Some(legacy_exe),
+            Some(1),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
+        // 2. 同线程组工作线程（即使 is_thread=false 也命中 self_tasks）
+        assert!(is_protected_process_entry(
+            226717,
+            false,
+            Some(legacy_exe),
+            Some(226712),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
+        // 3. 任意线程（Linux sysinfo thread_kind().is_some() == true）
+        assert!(is_protected_process_entry(
+            999001,
+            true,
+            Some(legacy_exe),
+            Some(999000),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
+        // 4. 同一可执行文件路径
+        assert!(is_protected_process_entry(
+            300001,
+            false,
+            Some(self_exe),
+            Some(1),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
+        // 5. 真正异路径、非线程、非本进程/子进程的遗留实例才允许判定
+        assert!(!is_protected_process_entry(
+            400001,
+            false,
+            Some(legacy_exe),
+            Some(1),
+            Some(226712),
+            &self_tasks,
+            Some(self_exe),
+        ));
+    }
+
+    #[test]
+    fn desktop_settings_preserve_agent_mode_policy_on_partial_close_action_update() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("desktop-settings.json");
+
+        let saved = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                close_action: Some("ask".into()),
+                agent_mode_policy: Some("global".into()),
+                agent_global_mode: Some("bypass".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(saved.agent_mode_policy, "global");
+        assert_eq!(saved.agent_global_mode, "bypass");
+
+        // Close-prompt dialog only updates close_action; agent mode policy must survive intact.
+        let after_close = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                close_action: Some("tray".into()),
+                agent_mode_policy: None,
+                agent_global_mode: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(after_close.close_action, "tray");
+        assert_eq!(after_close.agent_mode_policy, "global");
+        assert_eq!(after_close.agent_global_mode, "bypass");
+
+        // Unknown values normalize safely back to memory + build defaults.
+        let normalized = super::normalize_desktop_settings(super::DesktopSettingsPayload {
+            close_action: "".into(),
+            agent_mode_policy: "invalid".into(),
+            agent_global_mode: "invalid".into(),
+            ..Default::default()
+        });
+        assert_eq!(normalized.close_action, "ask");
+        assert_eq!(normalized.agent_mode_policy, "memory");
+        assert_eq!(normalized.agent_global_mode, "build");
+    }
+
+    #[test]
+    fn desktop_settings_load_tolerates_one_bad_field_without_resetting_others() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("desktop-settings.json");
+        std::fs::write(
+            &path,
+            r#"{"close_action":"tray","agent_mode_policy":"global","agent_global_mode":null}"#,
+        )
+        .unwrap();
+        let loaded = super::load_desktop_settings_payload_at(&path);
+        assert_eq!(loaded.close_action, "tray");
+        assert_eq!(loaded.agent_mode_policy, "global");
+        assert_eq!(loaded.agent_global_mode, "build");
+    }
+
+    #[test]
+    fn desktop_settings_runtime_switch_autostart_and_shortcut_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("desktop-settings.json");
+        std::fs::write(
+            &path,
+            r#"{"runtime_model_switch":true,"autostart":true,"toggle_shortcut":"Ctrl+Shift+K"}"#,
+        )
+        .unwrap();
+        let loaded = super::load_desktop_settings_payload_at(&path);
+        assert!(loaded.runtime_model_switch);
+        assert!(loaded.autostart);
+        assert_eq!(loaded.toggle_shortcut, "Ctrl+Shift+K");
+
+        // A partial close-action write must preserve the new OS/runtime settings.
+        let saved = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                close_action: Some("tray".into()),
+                ..Default::default()
+            },
+        );
+        assert!(saved.runtime_model_switch);
+        assert!(saved.autostart);
+        assert_eq!(saved.toggle_shortcut, "Ctrl+Shift+K");
+
+        // An explicitly empty shortcut means "disabled" and must survive.
+        let cleared = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                toggle_shortcut: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cleared.toggle_shortcut, "");
+        let reloaded = super::load_desktop_settings_payload_at(&path);
+        assert_eq!(reloaded.toggle_shortcut, "");
+    }
+
+    #[test]
+    fn desktop_settings_merge_preserves_fields_written_by_other_writers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("desktop-settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "close_action": "ask",
+  "agent_mode_policy": "global",
+  "agent_global_mode": "plan",
+  "future_window_geometry": { "width": 1280 }
+}"#,
+        )
+        .unwrap();
+
+        let saved = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                close_action: Some("tray".into()),
+                agent_mode_policy: None,
+                agent_global_mode: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(saved.close_action, "tray");
+        assert_eq!(saved.agent_mode_policy, "global");
+        assert_eq!(saved.agent_global_mode, "plan");
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["future_window_geometry"]["width"], 1280,
+            "a partial settings write must not drop fields owned by the desktop shell"
+        );
     }
 }

@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
+const { compareSemVer } = require('./bump-version');
 
 const TARGETS = [
   'darwin-arm64',
@@ -329,6 +330,143 @@ function buildReleaseSection({ root, tag, day, commits }) {
   return renderChangelogSection(tag, day, commits);
 }
 
+const SHELL_WATCH_PATHS = [
+  'desktop/src-tauri/src',
+  'desktop/src-tauri/windows',
+  'desktop/src-tauri/capabilities',
+  'desktop/src-tauri/icons',
+  'desktop/src-tauri/build.rs',
+  'desktop/ui',
+  'desktop/shell-compat.json',
+];
+
+const SHELL_MANIFEST_PATHS = [
+  'desktop/src-tauri/Cargo.toml',
+  'desktop/src-tauri/tauri.conf.json',
+];
+
+function stripLeadingV(ver) {
+  return String(ver || '').trim().replace(/^v/i, '');
+}
+
+function readShellCompat(root) {
+  const compatPath = path.join(root, 'desktop', 'shell-compat.json');
+  if (!fs.existsSync(compatPath)) {
+    return { minShellVersion: '0.0.0', pinnedLatestShellVersion: null };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(compatPath, 'utf8'));
+    const minShellVersion = parsed.min_shell_version ? stripLeadingV(parsed.min_shell_version) : '0.0.0';
+    const pinnedLatestShellVersion = parsed.latest_shell_version ? stripLeadingV(parsed.latest_shell_version) : null;
+    return { minShellVersion, pinnedLatestShellVersion };
+  } catch {
+    return { minShellVersion: '0.0.0', pinnedLatestShellVersion: null };
+  }
+}
+
+function isVersionBumpOnlyDiff(diffText) {
+  const lines = String(diffText || '').split(/\r?\n/);
+  for (const line of lines) {
+    if (!line || line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ ') || line.startsWith('@@')) {
+      continue;
+    }
+    if (line.startsWith('+') || line.startsWith('-')) {
+      const body = line.slice(1).trim();
+      if (!body) continue;
+      if (/^version\s*=\s*"[^"]*"\s*$/.test(body)) continue;
+      if (/^"version"\s*:\s*"[^"]*"\s*,?\s*$/.test(body)) continue;
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasRealShellDiff(root, prevTag, curTag) {
+  try {
+    const changed = execSync(
+      `git diff --name-only ${prevTag} ${curTag} -- ${SHELL_WATCH_PATHS.join(' ')}`,
+      { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+    if (changed.length > 0) return true;
+
+    for (const rel of SHELL_MANIFEST_PATHS) {
+      const diffText = execSync(
+        `git diff -U0 ${prevTag} ${curTag} -- ${rel}`,
+        { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      if (!isVersionBumpOnlyDiff(diffText)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function listOrderedChannelTags(root, currentTag) {
+  if (!fs.existsSync(path.join(root, '.git'))) {
+    return [];
+  }
+  const stableOnly = isStableTag(currentTag);
+  try {
+    const raw = execSync('git tag -l "v*"', {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const tags = raw
+      .split(/\r?\n/)
+      .map((t) => t.trim())
+      .filter((t) => /^v\d+\.\d+\.\d+/.test(t))
+      .filter((t) => (!stableOnly || isStableTag(t)))
+      .filter((t) => compareSemVer(t, currentTag) <= 0);
+    if (!tags.includes(currentTag)) tags.push(currentTag);
+    tags.sort((a, b) => compareSemVer(b, a));
+    return tags;
+  } catch {
+    return [];
+  }
+}
+
+function resolveDesktopCompat({ root, tag }) {
+  const { minShellVersion, pinnedLatestShellVersion } = readShellCompat(root);
+  const currentCore = stripLeadingV(tag);
+  if (pinnedLatestShellVersion) {
+    return {
+      min_shell_version: minShellVersion,
+      latest_shell_version: pinnedLatestShellVersion,
+      shell_changed: compareSemVer(pinnedLatestShellVersion, currentCore) === 0,
+      updater_manifest: 'desktop-updater.json',
+    };
+  }
+
+  const tags = listOrderedChannelTags(root, tag);
+  if (tags.length >= 2) {
+    let latestShellTag = null;
+    const limit = Math.min(tags.length - 1, 30);
+    for (let i = 0; i < limit; i++) {
+      if (hasRealShellDiff(root, tags[i + 1], tags[i])) {
+        latestShellTag = tags[i];
+        break;
+      }
+    }
+    if (latestShellTag) {
+      return {
+        min_shell_version: minShellVersion,
+        latest_shell_version: stripLeadingV(latestShellTag),
+        shell_changed: latestShellTag === tag,
+        updater_manifest: 'desktop-updater.json',
+      };
+    }
+  }
+
+  return {
+    min_shell_version: minShellVersion,
+    latest_shell_version: currentCore,
+    shell_changed: false,
+    updater_manifest: 'desktop-updater.json',
+  };
+}
+
 function publish({ root, distDir, tag, date, commits }) {
   const stable = isStableTag(tag);
   const binaries = collectBinaries(distDir, tag);
@@ -339,14 +477,15 @@ function publish({ root, distDir, tag, date, commits }) {
     day,
     commits: commits || collectCommits(tag),
   });
+  const desktop = resolveDesktopCompat({ root, tag });
   const notes = renderReleaseNotes(tag, section);
   fs.mkdirSync(distDir, { recursive: true });
   fs.writeFileSync(path.join(root, 'release_notes.md'), notes);
   fs.writeFileSync(
     path.join(distDir, 'latest.json'),
-    `${JSON.stringify({ version: tag, released_at: day, binaries }, null, 2)}\n`,
+    `${JSON.stringify({ version: tag, released_at: day, binaries, desktop }, null, 2)}\n`,
   );
-  return { stable, binaries, notes };
+  return { stable, binaries, desktop, notes };
 }
 
 function parseArgs(argv) {
@@ -391,6 +530,8 @@ module.exports = {
   extractChangelogSection,
   extractSectionFromMarkdown,
   buildReleaseSection,
+  isVersionBumpOnlyDiff,
+  resolveDesktopCompat,
   publish,
 };
 

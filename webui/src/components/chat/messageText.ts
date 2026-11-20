@@ -20,7 +20,7 @@ export function messageFullText(m: Message): string {
       lines.push(p.text);
     } else if (p.kind === 'tool') {
       const tool = p.tool;
-      lines.push(`🔧 ${displayToolName(tool.name)}`);
+      lines.push(`[tool] ${displayToolName(tool.name)}`);
       const detail = formatToolDetail(tool.name, tool.args);
       if (detail) lines.push(`   ${detail}`);
       if (tool.args) lines.push(`   参数: ${formatToolPayload(tool.args)}`);

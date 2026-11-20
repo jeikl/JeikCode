@@ -72,7 +72,6 @@ export function AuthExpiredDialog() {
         }}
       >
         <div class="modal-header">
-          <span style="font-size: 16px;">🔒</span>
           <h3>{t('auth.expiredTitle')}</h3>
         </div>
         <div class="modal-body">

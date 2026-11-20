@@ -1,9 +1,10 @@
 //! `todo_write` — session task list. STATELESS execute: the tool validates + echoes;
 //! current state is DERIVED by folding transcript `todo_write`/`todowrite`/`todo` calls
-//! ([`reduce_todos`]). Preferred shape is `actions[]` (or a single action object);
-//! `action` may be omitted when the other fields uniquely determine the op.
-//! `{"todos":[…]}` is resume/legacy full-list replace only. `list` is a read-only echo of
-//! the current list (legacy name kept as a first-class read; never batched). Non-destructive ⇒ `Safe`.
+//! ([`reduce_todos`]). Public shapes are `plan: [...]` (declarative baseline) and
+//! `update: [...]` (incremental patch); one call may carry BOTH, and `plan` is applied
+//! first so update ids/titles refer to the rebuilt list. Legacy `actions[]` / single
+//! action / `{"todos":[…]}` shapes stay supported for old transcripts. `list` is a
+//! read-only echo of the current list (never batched). Non-destructive ⇒ `Safe`.
 
 /// Canonical name advertised to the model. `todowrite` / `todo` remain aliases so
 /// old transcripts and models still fold.
@@ -509,7 +510,13 @@ pub fn parse_todos(args: &str) -> Result<Vec<TodoItem>, String> {
         .map_err(|e| format!("todowrite: invalid arguments: {e}. Expected {{\"todos\":[{{\"content\":\"…\",\"status\":\"pending|in_progress|completed\"}}]}}."))?;
 
     if value.get("plan").is_some() {
-        return parse_plan_rebuild(&value, &[]);
+        let mut items = parse_plan_rebuild(&value, &[])?;
+        // `plan` is the baseline; a sibling `update` patches that rebuilt list
+        // (the same order `execute` and the transcript fold use).
+        if update_has_actionable_items(&value) {
+            apply_batch_updates(&mut items, &value)?;
+        }
+        return Ok(items);
     }
     // Keep transcript-derived state aligned with RepairToolArgsMiddleware. The
     // kernel stores the model's original tool call before middleware rewriting,
@@ -581,6 +588,34 @@ pub enum ApplyOutcome {
     Unchanged,
 }
 
+/// Apply a payload that may carry BOTH a declarative baseline (`plan`) and an
+/// incremental patch (`update`/`updates`). Order is fixed: `plan` first — it
+/// defines the list order and the 1-based ids — then `update` patches that
+/// rebuilt list. A blank/empty `plan` is a read-only query and never wipes.
+fn apply_plan_then_update(
+    list: &mut Vec<TodoItem>,
+    v: &serde_json::Value,
+) -> Result<ApplyOutcome, String> {
+    // JSON object key order is irrelevant: the payload is split into its
+    // declarative baseline and its incremental patch, then applied in this
+    // fixed order regardless of where they appeared in the serialized text.
+    // Work on a copy: a failed update must not leave the rebuilt plan behind
+    // (execute commits only after both steps succeed; the fold must match).
+    let mut next = list.clone();
+    if v.get("plan").is_some() && plan_has_actionable_items(v) {
+        next = parse_plan_rebuild(v, list)?;
+    }
+    if update_has_actionable_items(v) {
+        apply_batch_updates(&mut next, v)?;
+    }
+    if next == *list {
+        Ok(ApplyOutcome::Unchanged)
+    } else {
+        *list = next;
+        Ok(ApplyOutcome::Changed)
+    }
+}
+
 /// Apply `action` / `actions[]`. `todos` full-list replace is NOT handled here
 /// (that is a fold baseline / execute plan path). Malformed JSON is `Err`.
 pub fn try_apply_todo_args(list: &mut Vec<TodoItem>, args: &str) -> Result<ApplyOutcome, String> {
@@ -588,28 +623,14 @@ pub fn try_apply_todo_args(list: &mut Vec<TodoItem>, args: &str) -> Result<Apply
         .map_err(|e| format!("todowrite: invalid JSON arguments: {e}"))?;
     canonicalize_todo_keys(&mut v);
 
-    // 1. Declarative full-plan rebuild
-    if v.get("plan").is_some() {
-        let before = list.clone();
-        let next = parse_plan_rebuild(&v, list)?;
-        if next == before {
-            return Ok(ApplyOutcome::Unchanged);
-        }
-        *list = next;
-        return Ok(ApplyOutcome::Changed);
+    // 1. Declarative baseline (`plan`) plus optional incremental patch (`update`).
+    //    A single call may carry both; `plan` always runs first so update ids refer
+    //    to the rebuilt list, then `update` patches it.
+    if v.get("plan").is_some() || v.get("update").is_some() || v.get("updates").is_some() {
+        return apply_plan_then_update(list, &v);
     }
 
-    // 2. Partial batch updates (content-first, id-fallback)
-    if v.get("update").is_some() || v.get("updates").is_some() {
-        let before = list.clone();
-        let (count, _) = apply_batch_updates(list, &v)?;
-        if count == 0 || *list == before {
-            return Ok(ApplyOutcome::Unchanged);
-        }
-        return Ok(ApplyOutcome::Changed);
-    }
-
-    // 3. Legacy actions array
+    // 2. Legacy actions array
     if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
         if arr.is_empty() {
             return Err("todowrite: `actions` must be a non-empty array.".into());
@@ -1450,10 +1471,11 @@ pub fn is_batch_plan_establishment(args: &str) -> bool {
     false
 }
 
-/// Whether a todo call's args are the FULL-LIST (re)plan shape (`{"todos":[…]}`) vs the
-/// incremental `{"action":…}` / `{"actions":[…]}` shape. `todowrite` accepts both — distinguished
-/// by shape, NOT by tool name. A payload that carries `actions` is NEVER a plan, even if a
-/// leftover `todos` field also parses (execute/apply prefer `actions`; the fold must match).
+/// Whether a todo call's args carry the declarative plan shape (`{"plan":[…]}` or
+/// legacy `{"todos":[…]}`) rather than an incremental patch. A combined `plan` +
+/// `update` call is still a plan: the plan runs first, then the update patches it.
+/// A payload that carries `actions` is NEVER a plan, even if a leftover `todos`
+/// field also parses (execute/apply prefer `actions`; the fold must match).
 pub fn is_todo_plan(args: &str) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
         return false;
@@ -1461,14 +1483,17 @@ pub fn is_todo_plan(args: &str) -> bool {
     if v.get("actions").and_then(|a| a.as_array()).is_some() {
         return false;
     }
-    if v.get("update").is_some() || v.get("updates").is_some() {
+    // A combined `plan` + `update` call IS a plan: the plan is applied first and
+    // the update patches the rebuilt list. An update-only payload stays an
+    // incremental action.
+    if v.get("plan").is_none() && (v.get("update").is_some() || v.get("updates").is_some()) {
         return false;
     }
     parse_todos(args).is_ok()
 }
 
-/// Incremental patch shape: a single `action` or a non-absent `actions` array.
-/// False for full-list `todos` plans (use [`is_todo_plan`]).
+/// Incremental patch shape: a single `action`, a non-absent `actions` array, or
+/// `update`/`updates`. False for plan shapes (use [`is_todo_plan`]).
 pub fn is_todo_action_args(args: &str) -> bool {
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(args) else {
         return false;
@@ -1484,7 +1509,8 @@ pub fn is_todo_action_args(args: &str) -> bool {
 }
 
 /// Apply one transcript todo call onto the running list.
-/// - `plan: [...]` replaces the current list (empty array is read-only).
+/// - `plan: [...]` rebuilds the list (empty array is read-only); a sibling
+///   `update` patches the rebuilt list afterwards.
 /// - legacy `todos: [...]` keeps its full-replace baseline semantics.
 /// - `clear: true` wipes the list.
 /// - `actions` / single action / `update` apply on top.
@@ -1499,17 +1525,10 @@ fn apply_todo_call(list: &mut Vec<TodoItem>, args: &str) {
         return;
     }
     if value.get("plan").is_some() {
-        // An empty plan is a read-only query, not a wipe.
-        if value
-            .get("plan")
-            .and_then(|p| p.as_array())
-            .is_some_and(|a| a.is_empty())
-        {
-            return;
-        }
-        if let Ok(next) = parse_plan_rebuild(&value, list) {
-            *list = next;
-        }
+        // `plan` is the baseline; a sibling `update` patches it afterwards. An
+        // empty plan is a read-only query, never a wipe. Sequencing lives in one
+        // helper so execute, the fold, and `try_apply_todo_args` cannot diverge.
+        let _ = apply_plan_then_update(list, &value);
         return;
     }
     if value.get("actions").and_then(|a| a.as_array()).is_none() && value.get("todos").is_some() {
@@ -2322,13 +2341,6 @@ impl Tool for TodoTool {
             ));
         }
 
-        if plan_actionable && update_actionable {
-            return err(with_current_list_for_args(
-                "todowrite: provide exactly one of `plan` or `update`.",
-                &self.board_items(),
-            ));
-        }
-
         // 1. Read-only query: an empty object (no arguments) echoes the current list.
         // `list=true` and `action=list` stay accepted for legacy transcripts.
         let is_query_list = v.as_object().is_some_and(|o| o.is_empty())
@@ -2346,20 +2358,34 @@ impl Tool for TodoTool {
             ));
         }
 
-        // 2. Full plan rebuild: the payload becomes the complete active list
+        // 2. Full plan rebuild: the payload becomes the complete active list. A
+        //    sibling `update` is applied AFTER the rebuild, so its ids/titles
+        //    refer to the new list. Nothing is committed until both succeed.
         if plan_actionable {
-            return match parse_plan_rebuild(&v, &list) {
-                Ok(new_items) => {
-                    let stored = self.commit_and_read(&new_items);
-                    ok(format!(
-                        "Plan updated ({} task{}):\n\n{}",
-                        stored.len(),
-                        if stored.len() == 1 { "" } else { "s" },
-                        render_todos_numbered(&stored, false)
-                    ))
-                }
-                Err(e) => err(with_current_list_for_args(e, &self.board_items())),
+            let mut next = match parse_plan_rebuild(&v, &list) {
+                Ok(next) => next,
+                Err(e) => return err(with_current_list_for_args(e, &self.board_items())),
             };
+            let mut update_summary = None;
+            if update_actionable {
+                match apply_batch_updates(&mut next, &v) {
+                    Ok((_count, summary)) => update_summary = Some(summary),
+                    Err(e) => return err(with_current_list(e, &self.board_items())),
+                }
+            }
+            let stored = self.commit_and_read(&next);
+            let mut out = format!(
+                "Plan updated ({} task{}):",
+                stored.len(),
+                if stored.len() == 1 { "" } else { "s" }
+            );
+            if let Some(summary) = update_summary {
+                out.push('\n');
+                out.push_str(&summary);
+            }
+            out.push_str("\n\n");
+            out.push_str(&render_todos_numbered(&stored, false));
+            return ok(out);
         }
 
         // 3. Partial batch updates (content-first, id fallback)
@@ -4746,6 +4772,139 @@ mod tests {
             r2.content.contains("[√] 3. Task A"),
             "Task A must remain completed"
         );
+    }
+
+    #[tokio::test]
+    async fn combined_plan_and_update_applies_plan_first() {
+        let t = TodoTool::new();
+        let _ = t.execute(r#"{"plan":["Old A","Old B"]}"#, &ctx()).await;
+
+        let r = t
+            .execute(
+                r#"{
+                    "plan":["A","B","C"],
+                    "update":[{"content":"B","status":"completed"},{"id":1,"status":"in_progress"}]
+                }"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        // The plan is the baseline: old tasks are gone, order is A/B/C.
+        assert!(!r.content.contains("Old A"), "{}", r.content);
+        // Update by title, then by the 1-based id of the REBUILT list.
+        assert!(r.content.contains("[~] 1. A"), "{}", r.content);
+        assert!(r.content.contains("[√] 2. B"), "{}", r.content);
+        assert!(r.content.contains("[ ] 3. C"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn combined_plan_and_update_is_key_order_independent() {
+        // `update` appears BEFORE `plan` in the serialized text. JSON object key
+        // order carries no meaning: the internal fixed order must still rebuild
+        // the plan first, then apply the update against the rebuilt ids.
+        let update_first = r#"{"update":[{"id":2,"status":"completed"}],"plan":["A","B","C"]}"#;
+        let t = TodoTool::new();
+        let _ = t.execute(r#"{"plan":["Old"]}"#, &ctx()).await;
+        let r = t.execute(update_first, &ctx()).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("[ ] 1. A"), "{}", r.content);
+        assert!(r.content.contains("[√] 2. B"), "{}", r.content);
+        assert!(r.content.contains("[ ] 3. C"), "{}", r.content);
+
+        // The transcript fold must produce the same list for either key order.
+        let plan_first = r#"{"plan":["A","B","C"],"update":[{"id":2,"status":"completed"}]}"#;
+        let folded_a = reduce_todos([("todo_write", plan_first)]);
+        let folded_b = reduce_todos([("todo_write", update_first)]);
+        assert_eq!(folded_a.len(), folded_b.len());
+        for (a, b) in folded_a.iter().zip(folded_b.iter()) {
+            assert_eq!(a.content, b.content);
+            assert_eq!(a.status, b.status);
+        }
+    }
+
+    #[tokio::test]
+    async fn combined_plan_and_update_commits_nothing_when_update_fails() {
+        let t = TodoTool::new();
+        let _ = t.execute(r#"{"plan":["Keep"]}"#, &ctx()).await;
+
+        // `plan` would replace the list, but the paired update targets a missing id.
+        let failed = t
+            .execute(
+                r#"{"plan":["New"],"update":[{"id":9,"status":"completed"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(failed.is_error, "{}", failed.content);
+
+        let after = t.execute("{}", &ctx()).await;
+        assert!(after.content.contains("1. Keep"), "{}", after.content);
+        assert!(!after.content.contains("New"), "{}", after.content);
+    }
+
+    #[tokio::test]
+    async fn empty_plan_with_actionable_update_patches_the_current_list() {
+        let t = TodoTool::new();
+        let _ = t.execute(r#"{"plan":["A","B"]}"#, &ctx()).await;
+
+        // `plan: []` is a read-only query, but the sibling update is still applied.
+        let r = t
+            .execute(
+                r#"{"plan":[],"update":[{"id":1,"status":"completed"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("[√] 1. A"), "{}", r.content);
+        assert!(r.content.contains("[ ] 2. B"), "{}", r.content);
+    }
+
+    #[test]
+    fn combined_plan_and_update_folds_and_parses_identically() {
+        let args = r#"{"plan":[{"content":"A"},{"content":"B"}],"update":[{"content":"B","status":"completed"},{"id":1,"status":"in_progress"}]}"#;
+
+        let parsed = parse_todos(args).expect("combined payload must parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].status, TodoStatus::InProgress);
+        assert_eq!(parsed[1].status, TodoStatus::Completed);
+
+        let folded = reduce_todos([("todo_write", args)]);
+        assert_eq!(folded.len(), parsed.len());
+        for (folded, parsed) in folded.iter().zip(parsed.iter()) {
+            assert_eq!(folded.content, parsed.content);
+            assert_eq!(folded.status, parsed.status);
+        }
+
+        assert!(is_todo_plan(args), "combined payload is a plan call");
+        assert!(!is_todo_action_args(args));
+    }
+
+    #[test]
+    fn try_apply_plan_and_update_uses_rebuilt_ids() {
+        let mut list = parse_todos(r#"{"plan":["old"]}"#).expect("seed plan");
+        let outcome = try_apply_todo_args(
+            &mut list,
+            r#"{"plan":["A","B"],"update":[{"id":2,"status":"completed"}]}"#,
+        )
+        .expect("combined payload applies");
+        assert_eq!(outcome, ApplyOutcome::Changed);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].content, "B");
+        assert_eq!(list[1].status, TodoStatus::Completed);
+    }
+
+    #[test]
+    fn failed_combined_update_does_not_leave_the_rebuilt_plan_in_the_fold() {
+        let mut list = parse_todos(r#"{"plan":["Keep"]}"#).expect("seed plan");
+        let before = list.clone();
+        assert!(
+            try_apply_todo_args(
+                &mut list,
+                r#"{"plan":["New"],"update":[{"id":9,"status":"completed"}]}"#,
+            )
+            .is_err(),
+            "an unknown update id must fail the whole call"
+        );
+        assert_eq!(list, before, "the fold must not keep the half-applied plan");
     }
 
     #[tokio::test]

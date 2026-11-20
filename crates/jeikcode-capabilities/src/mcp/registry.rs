@@ -628,8 +628,21 @@ impl McpRegistry {
                             let timeout_ms = config.timeout_ms();
 
                             if config.scope == super::config::McpScope::Global {
-                                match super::GlobalMcpPool::global().get_or_spawn(&config).await {
+                                let mut cancel_rx = cancelled.subscribe();
+                                let global_pool = super::GlobalMcpPool::global();
+                                let global_res = tokio::select! {
+                                    res = global_pool.get_or_spawn(&config) => Some(res),
+                                    _ = wait_for_true(&mut cancel_rx) => None,
+                                };
+                                let Some(global_res) = global_res else {
+                                    return;
+                                };
+                                match global_res {
                                     Ok(client) => {
+                                        let _transport_lifecycle = transport_lifecycle.lock().await;
+                                        if *cancelled.borrow() {
+                                            return;
+                                        }
                                         servers.write().await.insert(name.clone(), client);
                                         server_timeouts_ms
                                             .write()

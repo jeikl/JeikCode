@@ -2,7 +2,7 @@
 
 [package]
 name = "jeikcode-desktop"
-version = "7.5.1-beta.2"
+version = "7.5.2-beta.1"
 edition = "2021"
 description = "JeikCode desktop shell"
 publish = false
@@ -14,6 +14,13 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
+reqwest_0_13 = { package = "reqwest", version = "0.13", default-features = false, features = ["socks"] }
+tokio = { version = "1", features = ["sync"] }
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

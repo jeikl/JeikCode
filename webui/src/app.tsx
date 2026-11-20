@@ -22,25 +22,36 @@ import { parseFilePathAndLines } from './lib/displayPath';
 import { dropEditorTabSnapshot, mainEditorStateKey } from './lib/editorTabState';
 import { languageOptions } from './i18n';
 
-// 动态按需懒加载非首屏必需的独立弹窗，削减冷启动初始 JS 解析开销。
-// 注意：**每次启动都会渲染**的弹窗绝不能放进这里——懒加载它们没有收益，
-// 反而会在启动时和同一边界内的其它 lazy 组件竞争，Preact 可能把被抛出的
-// Suspense Promise 记成 Uncaught (in promise)。这两个组件改为静态导入。
-const ThemeDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.ThemeDialog })));
-const LanguageDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.LanguageDialog })));
-const ModelConfigDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.ModelConfigDialog })));
+// 设置类弹窗体积小且高频直达，静态导入可彻底消除首次冷启动点击左下角齿轮时的 Suspense 骨架切换闪动。
+import { ThemeDialog, LanguageDialog, ModelConfigDialog } from './components/SettingsDialogs';
+import { SystemSettingsDialog } from './components/SystemSettingsDialog';
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard').then((m) => ({ default: m.OnboardingWizard })));
 const UpdateDialog = lazy(() => import('./components/UpdateDialog').then((m) => ({ default: m.UpdateDialog })));
 const ConfigSyncModal = lazy(() => import('./components/ConfigSyncModal').then((m) => ({ default: m.ConfigSyncModal })));
-const SystemSettingsDialog = lazy(() => import('./components/SystemSettingsDialog').then((m) => ({ default: m.SystemSettingsDialog })));
+
+/** 移动端标签菜单的对话图标（线性，共用侧栏的视觉语言）。 */
+function MobileChatGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M2.5 4.5A2 2 0 0 1 4.5 2.5h7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-4.5L4 14v-2.5h-.5a2 2 0 0 1-2-2v-5z" />
+    </svg>
+  );
+}
 
 /** 每个懒加载弹窗独占一个 Suspense 边界：共享边界时，一次 import 解析后的
  *  retry 会连带重渲染仍 pending 的兄弟 lazy 组件，Preact 在分离子树上可能把
  *  抛出的 Promise 变成 unhandled rejection（控制台 “Uncaught (in promise) Promise”）。 */
-function LazyBoundary({ children }: { children: ComponentChildren }) {
-  return <Suspense fallback={null}>{children}</Suspense>;
+function LazyBoundary({
+  children,
+  fallback = null,
+}: {
+  children: ComponentChildren;
+  fallback?: ComponentChildren;
+}) {
+  return <Suspense fallback={fallback}>{children}</Suspense>;
 }
 import {
+  getBootstrap,
   getProject,
   getConfig,
   getModels,
@@ -48,9 +59,12 @@ import {
   resolveSession,
   createSession,
   getSession,
-  getActiveChatSessions,
   getChatPending,
+  getActiveChatSessions,
   getHealth,
+  getApprovalModeState,
+  invalidateApiGetCache,
+  invalidateBootstrapCache,
   checkUpdate,
   fetchUpgradeDiffs,
   postSessionSeen,
@@ -62,6 +76,7 @@ import { useT, useSettings, SettingsSection } from './settings';
 import { setStreamEpoch } from './lib/streamCursor';
 import { sessionMessagesToMarkdownLines } from './lib/historyMessages';
 import { onSoftRefresh, requestSoftRefresh } from './lib/appRefresh';
+import { hasEffectiveUpdate } from './lib/updateRouting';
 import {
   buildRestoreCandidates,
   forgetRememberedSession,
@@ -102,7 +117,7 @@ function rememberedSessionToMeta(
 
 export function App() {
   const t = useT();
-  const { theme, setTheme, lang, setLang } = useSettings();
+  const { theme, setTheme, lang, setLang, updateDead } = useSettings();
   // 刷新恢复优先级：URL 里的短 id（可分享/可直达）> 本浏览器上次选中的完整会话 id。
   // 跨设备/无痕冷启动两者都没有，才真正回到新建落地页。
   const urlSessionRef = useRef<string | null>(readSessionIdFromUrl());
@@ -161,7 +176,18 @@ export function App() {
   useEffect(
     () =>
       onGlobalEvent((event) => {
+        // Remote mutations/rewinds/deletes must invalidate metadata GET caches;
+        // TTL alone can serve a stale project/session list after a rewind.
+        if (
+          event.type === 'session_mutated' ||
+          event.type === 'session_deleted' ||
+          event.type === 'session_upsert' ||
+          event.type === 'display_appended'
+        ) {
+          invalidateApiGetCache();
+        }
         if (event.type === 'sync') {
+          const reconnect = ++globalSyncCountRef.current > 1;
           if (sessionId) {
             void getChatPending(sessionId)
               .then((p: any) => {
@@ -175,11 +201,44 @@ export function App() {
               })
               .catch(() => {});
           }
+          // A reconnect may have missed activity/health while the socket was down.
+          // Reconcile once on this edge; never fall back to periodic polling.
+          if (reconnect) {
+            void getActiveChatSessions()
+              .then((ids) => setLiveRunningIds(new Set(ids)))
+              .catch(() => {});
+            void getHealth()
+              .then((info) => setStreamEpoch(info.instance_id ?? null))
+              .catch(() => {});
+          }
           return;
         }
         if (event.type === 'session_mode') {
+          if (!event.session_id) {
+            // `session_id: null` = the global override changed while enabled.
+            // Every instance must move to the new global mode immediately; a
+            // refresh must also stop serving the stale bootstrap snapshot.
+            invalidateBootstrapCache();
+            setActiveSession((prev) => (prev ? { ...prev, approval_mode: event.mode } : prev));
+            return;
+          }
           if (event.session_id && sessionId === event.session_id) {
             setActiveSession((prev) => (prev ? { ...prev, approval_mode: event.mode } : prev));
+          }
+          return;
+        }
+        if (event.type === 'mode_global') {
+          invalidateBootstrapCache();
+          if (event.enabled) {
+            setActiveSession((prev) => (prev ? { ...prev, approval_mode: event.mode } : prev));
+          } else if (sessionId) {
+            void getApprovalModeState(sessionId)
+              .then((cur) => {
+                setActiveSession((prev) =>
+                  prev && prev.id === sessionId ? { ...prev, approval_mode: cur.mode } : prev,
+                );
+              })
+              .catch(() => {});
           }
           return;
         }
@@ -191,6 +250,13 @@ export function App() {
         }
         // 运行圈圈 / 完成对勾同源：全局 activity 广播携带内核权威终态。
         if (event.type === 'activity') {
+          setLiveRunningIds((prev) => {
+            const next = new Set(prev);
+            if (event.running) next.add(event.session_id);
+            else next.delete(event.session_id);
+            if (prev.size === next.size && [...prev].every((id) => next.has(id))) return prev;
+            return next;
+          });
           setJustCompletedIds((prev) =>
             nextCompletedBadgeIds(prev, {
               sessionId: event.session_id,
@@ -263,6 +329,8 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionListVersion, setSessionListVersion] = useState(0);
   const [liveRunningIds, setLiveRunningIds] = useState<Set<string>>(() => new Set());
+  /** First global sync is already covered by bootstrap; later syncs are reconnects. */
+  const globalSyncCountRef = useRef(0);
   /**
    * 刚完成、还没被点开看过的会话（侧栏绿色对勾）。
    *
@@ -338,23 +406,21 @@ export function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [showUpdateDialog, setShowUpdateDialog] = useState(false);
+  const updateDeadRef = useRef(false);
+  useEffect(() => {
+    updateDeadRef.current = updateDead;
+    if (updateDead) {
+      setUpdateInfo(null);
+      setShowUpdateDialog(false);
+    }
+  }, [updateDead]);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [configDiffs, setConfigDiffs] = useState<ConfigDiffItem[] | null>(null);
 
   useEffect(() => {
-    // 软刷新：不重挂任何组件，只让侧栏/运行态重新对账；
-    // 焦点、滚动位置、展开状态与终端连接全部原地保留。
+    // 软刷新：不重挂任何组件，只让侧栏重新对账；运行态由全局 activity 事件维护。
     return onSoftRefresh(() => {
       setSessionListVersion((v) => v + 1);
-      getActiveChatSessions()
-        .then((ids) => {
-          setLiveRunningIds((prev) => {
-            const next = new Set(ids);
-            if (prev.size === next.size && [...prev].every((id) => next.has(id))) return prev;
-            return next;
-          });
-        })
-        .catch(() => {});
     });
   }, []);
 
@@ -382,44 +448,37 @@ export function App() {
     typeof window !== 'undefined' ? window.innerWidth : 1200
   );
 
-  // ── 活跃会话运行态（蓝圈圈）幂等校准：每 12 秒与后端权威 active_chats 列表对齐一次，彻底消灭幽灵转圈卡死 ──
+  // ── 活跃会话运行态（蓝圈圈）：冷启动用一次 bootstrap；后续完全由全局 activity 事件驱动 ──
   useEffect(() => {
     let cancelled = false;
-    const reconcileRunning = () => {
-      getActiveChatSessions()
-        .then((serverActiveIds) => {
-          if (cancelled) return;
-          setLiveRunningIds((prev) => {
-            if (prev.size === 0 && serverActiveIds.length === 0) return prev;
-            const next = new Set<string>();
-            for (const id of serverActiveIds) {
-              next.add(id);
-            }
-            if (prev.size === next.size && [...prev].every((id) => next.has(id))) {
-              return prev;
-            }
-            return next;
-          });
-        })
-        .catch(() => {});
+    const applyActiveIds = (serverActiveIds: string[]) => {
+      if (cancelled) return;
+      setLiveRunningIds((prev) => {
+        if (prev.size === 0 && serverActiveIds.length === 0) return prev;
+        const next = new Set<string>(serverActiveIds);
+        if (prev.size === next.size && [...prev].every((id) => next.has(id))) {
+          return prev;
+        }
+        return next;
+      });
     };
 
-    reconcileRunning();
-    const timer = window.setInterval(reconcileRunning, 12000);
+    // 首次冷启动复用聚合 `/api/bootstrap`；不轮询 `/chat/active`。
+    getBootstrap()
+      .then((boot) => applyActiveIds(boot.active_chat_ids ?? []))
+      .catch(() => {});
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
   }, []);
 
   // 断点续传游标的纪元 = daemon 实例身份。重启后 `session_seq` 从 0 重算，
   // 旧游标必须作废，否则新一轮长过旧游标后，服务端只补 `seq > 旧游标` 的帧，
   // 当前回合前半段（开场提问、最初思考与工具）被静默跳过。
-  // 静默重启（崩溃 / 重启机器）不会触发升级弹层的 reload，所以这里持续轮询：
-  // 纪元一变，旧游标立即失效，下一次重连走全量幂等补发。
   useEffect(() => {
     let cancelled = false;
-    const syncEpoch = () => {
+    const syncEpoch = (skipIfHidden = true) => {
+      if (skipIfHidden && typeof document !== 'undefined' && document.hidden) return;
       getHealth()
         .then((info) => {
           if (!cancelled) setStreamEpoch(info.instance_id ?? null);
@@ -428,20 +487,21 @@ export function App() {
           /* health 不可用：保持上一个已知纪元；从未拿到过则游标一律视为无效 */
         });
     };
-    syncEpoch();
-    const timer = window.setInterval(syncEpoch, 15000);
-    // 手机回前台 / 网络恢复往往正是重连前一瞬：先校准纪元，避免带着旧游标发起补发。
+    getBootstrap()
+      .then((boot) => {
+        if (!cancelled) setStreamEpoch(boot.health?.instance_id ?? null);
+      })
+      .catch(() => syncEpoch(false));
+    // 只在回前台 / 网络恢复这类边沿校准纪元；不设置周期轮询。
     const onVisible = () => {
-      if (!document.hidden) syncEpoch();
+      if (!document.hidden) syncEpoch(false);
     };
-    window.addEventListener('focus', syncEpoch);
-    window.addEventListener('online', syncEpoch);
+    const onWake = () => syncEpoch(false);
+    window.addEventListener('online', onWake);
     document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
-      window.removeEventListener('focus', syncEpoch);
-      window.removeEventListener('online', syncEpoch);
+      window.removeEventListener('online', onWake);
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, []);
@@ -735,6 +795,11 @@ export function App() {
     let desktop = false;
     try {
       desktop = new URLSearchParams(window.location.search).get('desktop') === '1';
+      if (desktop) {
+        window.sessionStorage.setItem('jeikcode_desktop', '1');
+      } else {
+        desktop = window.sessionStorage.getItem('jeikcode_desktop') === '1';
+      }
     } catch {
       desktop = false;
     }
@@ -856,12 +921,14 @@ export function App() {
     setSidebarOpen((o) => !o);
   }
 
-  // Seed cwd from /project on mount（恢复会话时以会话目录为准，故只在仍为空时填充）
+  // Seed cwd from /api/bootstrap (回退 /project)
   useEffect(() => {
     let cancelled = false;
-    getProject()
+    getBootstrap()
+      .then((boot) => boot.project)
+      .catch(() => getProject())
       .then((p) => {
-        if (cancelled) return;
+        if (cancelled || !p) return;
         if (p.working_dir) setCwd((c) => c || p.working_dir);
         if (p.project_hash) setProjectHash((h) => h || p.project_hash!);
       })
@@ -869,13 +936,72 @@ export function App() {
         // Ignore; cwd stays empty
       });
 
-    // 自动静默检测版本更新（遵循用户选定的通道，有新版本时点亮绿色向上箭头）
+    const UPDATE_COOLDOWN_KEY = 'jeikcode_update_cooldown_v1';
+    const UPDATE_COOLDOWN_MS = 5 * 60 * 1000;
+    const UPDATE_BC_NAME = 'jeikcode_update_info_bc';
+    let updateChannel: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel === 'function') {
+        updateChannel = new BroadcastChannel(UPDATE_BC_NAME);
+        updateChannel.onmessage = (e) => {
+          if (!cancelled && e.data?.info) {
+            setUpdateInfo(e.data.info as UpdateCheckResponse);
+          }
+        };
+      }
+    } catch {}
+
+    // 若页面由桌面壳 ?desktop=1 打开，写入 sessionStorage 以便后续 URL 参数变更后仍识别桌面窗口身份
+    try {
+      if (new URLSearchParams(window.location.search).get('desktop') === '1') {
+        sessionStorage.setItem('jeikcode_desktop', '1');
+      }
+    } catch {}
+
+    // 检查是否刚完成存量老壳“第 1 跳”内核热更，需立刻强制全量检查并提示第 2 跳外壳更新
+    let hasPendingLegacyShellCheck = false;
+    try {
+      if (sessionStorage.getItem('jeikcode_pending_legacy_shell_check') === '1') {
+        hasPendingLegacyShellCheck = true;
+        sessionStorage.removeItem('jeikcode_pending_legacy_shell_check');
+        localStorage.removeItem(UPDATE_COOLDOWN_KEY);
+      }
+    } catch {}
+
+    // 自动静默检测版本更新：使用 `?summary=1` + 5 分钟跨标签页共享冷却窗口
     const fetchLatestUpdate = () => {
-      if (cancelled) return;
+      if (cancelled || updateDeadRef.current) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
       const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
-      checkUpdate(savedChannel)
+      const chKey = savedChannel || 'default';
+      try {
+        const raw = localStorage.getItem(UPDATE_COOLDOWN_KEY);
+        if (raw) {
+          const cached = JSON.parse(raw) as { at?: number; channel?: string; info?: UpdateCheckResponse };
+          if (
+            cached.channel === chKey &&
+            typeof cached.at === 'number' &&
+            Date.now() - cached.at < UPDATE_COOLDOWN_MS
+          ) {
+            if (cached.info && !cancelled) setUpdateInfo(cached.info);
+            return;
+          }
+        }
+        // 先行抢占窗口期，避免多标签页同时聚焦连发多次
+        localStorage.setItem(UPDATE_COOLDOWN_KEY, JSON.stringify({ at: Date.now(), channel: chKey }));
+      } catch {}
+
+      checkUpdate(savedChannel, { summary: true })
         .then((res) => {
-          if (!cancelled) setUpdateInfo(res);
+          if (cancelled) return;
+          setUpdateInfo(res);
+          try {
+            localStorage.setItem(
+              UPDATE_COOLDOWN_KEY,
+              JSON.stringify({ at: Date.now(), channel: chKey, info: res }),
+            );
+            updateChannel?.postMessage({ info: res });
+          } catch {}
         })
         .catch(() => {});
     };
@@ -892,7 +1018,28 @@ export function App() {
         .catch(() => {});
     };
 
-    // 1.5 秒后自动静默检测版本与配置覆盖（错峰延迟）
+    // 1.5 秒后自动静默检测版本与配置覆盖（错峰延迟）；若是第 1 跳重启后的老壳则立即全量检查
+    if (hasPendingLegacyShellCheck && !updateDeadRef.current) {
+      const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
+      checkUpdate(savedChannel, { refresh: true })
+        .then((res) => {
+          if (cancelled) return;
+          setUpdateInfo(res);
+          try {
+            const chKey = savedChannel || 'default';
+            localStorage.setItem(
+              UPDATE_COOLDOWN_KEY,
+              JSON.stringify({ at: Date.now(), channel: chKey, info: res }),
+            );
+            updateChannel?.postMessage({ info: res });
+          } catch {}
+          if (res.desktop_host?.legacy_shell && res.desktop_host?.shell_has_update) {
+            setShowUpdateDialog(true);
+          }
+        })
+        .catch(() => {});
+    }
+
     const updateTimer = setTimeout(() => {
       fetchLatestUpdate();
       fetchConfigUpgrade();
@@ -901,7 +1048,7 @@ export function App() {
     // 每 15 分钟后台自动静默检测一次，保持更新时效性
     const updateInterval = setInterval(fetchLatestUpdate, 15 * 60 * 1000);
 
-    // 窗口重新获得焦点时静默检测一次（防止开着网页期间发布了新版未及时同步）
+    // 窗口重新获得焦点时走同一 5 分钟共享冷却检查
     const onWindowFocus = () => {
       fetchLatestUpdate();
     };
@@ -912,10 +1059,14 @@ export function App() {
       clearTimeout(updateTimer);
       clearInterval(updateInterval);
       window.removeEventListener('focus', onWindowFocus);
+      try {
+        updateChannel?.close();
+      } catch {}
     };
   }, []);
 
   const openUpdateDialogWithFreshCheck = () => {
+    if (updateDeadRef.current) return;
     setShowUpdateDialog(true);
     const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
     checkUpdate(savedChannel)
@@ -924,12 +1075,13 @@ export function App() {
   };
 
   const handleManualCheckUpdate = async () => {
+    if (updateDeadRef.current) return;
     setIsCheckingUpdate(true);
     try {
       const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
       const res = await checkUpdate(savedChannel);
       setUpdateInfo(res);
-      if (res.has_update) {
+      if (hasEffectiveUpdate(res)) {
         setShowUpdateDialog(true);
       } else {
         showToast(t('update.latest', { version: res.current_version }), 'info');
@@ -1340,7 +1492,7 @@ export function App() {
                     aria-label={t('sidebar.running')}
                   />
                 ) : activeMainTabId === 'chat' ? (
-                  <span class="mobile-tab-icon">💬</span>
+                  <span class="mobile-tab-icon"><MobileChatGlyph /></span>
                 ) : (
                   <span
                     class={
@@ -1388,7 +1540,7 @@ export function App() {
                       setMobileTabsDropdownOpen(false);
                     }}
                   >
-                    <span class="mobile-tabs-row-icon">💬</span>
+                    <span class="mobile-tabs-row-icon"><MobileChatGlyph /></span>
                     <span class="mobile-tabs-row-name">{activeSession.name}</span>
                     {activeMainTabId === 'chat' && <span class="mobile-tabs-active-check">✓</span>}
                   </button>
@@ -1645,18 +1797,20 @@ export function App() {
             </div>
 
             {/* 桌面端外显：软件更新 */}
-            <button
-              type="button"
-              class={`top-nav-btn top-nav-desktop-action top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
-              onClick={openUpdateDialogWithFreshCheck}
-              title={updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}
-              aria-label={t('update.modalTitle')}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <line x1="12" y1="19" x2="12" y2="5" />
-                <polyline points="5 12 12 5 19 12" />
-              </svg>
-            </button>
+            {!updateDead && (
+              <button
+                type="button"
+                class={`top-nav-btn top-nav-desktop-action top-nav-update-btn ${hasEffectiveUpdate(updateInfo) ? 'has-update' : ''}`}
+                onClick={openUpdateDialogWithFreshCheck}
+                title={hasEffectiveUpdate(updateInfo) ? t('update.hasUpdate', { version: !updateInfo?.has_update && updateInfo?.desktop_host?.latest_shell_version ? `v${updateInfo.desktop_host.latest_shell_version}` : (updateInfo?.latest_version ?? '') }) : t('update.modalTitle')}
+                aria-label={t('update.modalTitle')}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <line x1="12" y1="19" x2="12" y2="5" />
+                  <polyline points="5 12 12 5 19 12" />
+                </svg>
+              </button>
+            )}
 
             {/* 主题切换（桌面外显，极窄或手机收纳） */}
             <button
@@ -1758,7 +1912,7 @@ export function App() {
             <div class="top-nav-more-wrap" ref={topNavMoreRef}>
               <button
                 type="button"
-                class={'top-nav-btn top-nav-more-btn' + (updateInfo?.has_update ? ' has-update-dot' : '')}
+                class={'top-nav-btn top-nav-more-btn' + (!updateDead && hasEffectiveUpdate(updateInfo) ? ' has-update-dot' : '')}
                 onClick={() => setTopNavMoreOpen((o) => !o)}
                 title={t('sidebar.itemMenu')}
                 aria-label={t('sidebar.itemMenu')}
@@ -1793,21 +1947,23 @@ export function App() {
                     <RemoteAccessControl />
                   </div>
 
-                  <button
-                    type="button"
-                    class="top-nav-more-item"
-                    onClick={() => {
-                      setTopNavMoreOpen(false);
-                      openUpdateDialogWithFreshCheck();
-                    }}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <line x1="12" y1="19" x2="12" y2="5" />
-                      <polyline points="5 12 12 5 19 12" />
-                    </svg>
-                    <span>{updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}</span>
-                    {updateInfo?.has_update && <span class="update-more-badge">NEW</span>}
-                  </button>
+                  {!updateDead && (
+                    <button
+                      type="button"
+                      class="top-nav-more-item"
+                      onClick={() => {
+                        setTopNavMoreOpen(false);
+                        openUpdateDialogWithFreshCheck();
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="19" x2="12" y2="5" />
+                        <polyline points="5 12 12 5 19 12" />
+                      </svg>
+                      <span>{hasEffectiveUpdate(updateInfo) ? t('update.hasUpdate', { version: !updateInfo?.has_update && updateInfo?.desktop_host?.latest_shell_version ? `v${updateInfo.desktop_host.latest_shell_version}` : (updateInfo?.latest_version ?? '') }) : t('update.modalTitle')}</span>
+                      {hasEffectiveUpdate(updateInfo) && <span class="update-more-badge">NEW</span>}
+                    </button>
+                  )}
 
                   <button
                     type="button"
@@ -1898,18 +2054,6 @@ export function App() {
             restoring={restoring}
             onTurnDone={() => {
               setSessionListVersion((v) => v + 1);
-              // 回合完成时，立即主动校准本地 liveRunningIds，确保清除残留的旋转菊花
-              getActiveChatSessions()
-                .then((ids) => {
-                  setLiveRunningIds((prev) => {
-                    const next = new Set<string>();
-                    for (const id of prev) {
-                      if (ids.includes(id)) next.add(id);
-                    }
-                    return next;
-                  });
-                })
-                .catch(() => {});
             }}
             onTurnRunningChange={(id, running) => {
               if (!id) return;
@@ -1945,6 +2089,7 @@ export function App() {
             setActiveMainTabId={setActiveMainTabId}
             topModelSlot={topModelSlot}
             onOpenModelConfig={() => setSettingsSection('model')}
+            onOpenModeSettings={() => setSettingsSection('agent_mode')}
             onLiveReview={onLiveReview}
             onBindReviewDismiss={onBindReviewDismiss}
           />
@@ -1960,24 +2105,23 @@ export function App() {
         />
       )}
       {settingsSection === 'theme' && (
-        <LazyBoundary>
-          <ThemeDialog onClose={() => setSettingsSection(null)} />
-        </LazyBoundary>
+        <ThemeDialog onClose={() => setSettingsSection(null)} />
       )}
       {settingsSection === 'language' && (
-        <LazyBoundary>
-          <LanguageDialog onClose={() => setSettingsSection(null)} />
-        </LazyBoundary>
+        <LanguageDialog onClose={() => setSettingsSection(null)} />
       )}
       {settingsSection === 'model' && (
-        <LazyBoundary>
-          <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
-        </LazyBoundary>
+        <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
       )}
       {settingsSection === 'system' && (
-        <LazyBoundary>
-          <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
-        </LazyBoundary>
+        <SystemSettingsDialog initialTab="models" onClose={() => setSettingsSection(null)} />
+      )}
+      {settingsSection === 'agent_mode' && (
+        <SystemSettingsDialog
+          initialTab="desktop"
+          focusSection="agent_mode"
+          onClose={() => setSettingsSection(null)}
+        />
       )}
       {headerDialog === 'rename' && activeSession && (
         <RenameDialog
@@ -1999,7 +2143,7 @@ export function App() {
           }}
         />
       )}
-      {showUpdateDialog && (
+      {!updateDead && showUpdateDialog && (
         <LazyBoundary>
           <UpdateDialog
             info={updateInfo}

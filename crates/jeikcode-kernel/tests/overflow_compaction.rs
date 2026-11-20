@@ -35,6 +35,7 @@ impl LlmProvider for OverflowWhenLarge {
         if messages.len() > self.max {
             return Err(ProviderError {
                 retryable: false,
+                resumable: false,
                 message: "This model's maximum context length is 8192 tokens".into(),
                 http_status: Some(400),
                 code: Some("context_length_exceeded".into()),

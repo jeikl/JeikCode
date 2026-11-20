@@ -75,3 +75,117 @@ test('serverRuntimeRunning 只认显式 true，缺失即空闲', () => {
   // 非布尔真值不算（避免老 daemon / 异常负载误点火）。
   assert.equal(serverRuntimeRunning({ running: 1 as unknown as boolean }), false);
 });
+
+test('resolveDoneConfirmation handles idle, stop guard, controllers, new turns, and bounded shutdown retries', async () => {
+  const { resolveDoneConfirmation } = await import('./serverRuntime.ts');
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: false, source: 'idle' },
+      completedOperationId: 'op-1',
+      expectedOperationId: 'op-1',
+      attemptsLeft: 4,
+      inManualStopGuard: false,
+    }),
+    'finish',
+  );
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: true, source: 'chat', turn_id: 'op-2' },
+      completedOperationId: 'op-1',
+      expectedOperationId: 'op-1',
+      attemptsLeft: 4,
+      inManualStopGuard: true,
+    }),
+    'finish',
+  );
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: true, source: 'loop' },
+      completedOperationId: 'op-1',
+      expectedOperationId: 'op-1',
+      attemptsLeft: 4,
+      inManualStopGuard: false,
+    }),
+    'wait_controller',
+  );
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: true, source: 'goal' },
+      completedOperationId: 'op-1',
+      expectedOperationId: 'op-1',
+      attemptsLeft: 4,
+      inManualStopGuard: false,
+    }),
+    'wait_controller',
+  );
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: true, source: 'live' },
+      completedOperationId: 'op-1',
+      expectedOperationId: 'op-1',
+      attemptsLeft: 4,
+      inManualStopGuard: false,
+    }),
+    'reattach_new_turn',
+  );
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: true, source: 'chat', turn_id: 'op-2' },
+      completedOperationId: 'op-1',
+      expectedOperationId: 'op-1',
+      attemptsLeft: 4,
+      inManualStopGuard: false,
+    }),
+    'reattach_new_turn',
+  );
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: true, source: 'chat', turn_id: 'op-1' },
+      completedOperationId: 'op-1',
+      expectedOperationId: 'op-1',
+      attemptsLeft: 3,
+      inManualStopGuard: false,
+    }),
+    'retry_shutdown',
+  );
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: true, source: 'chat', turn_id: 'op-1' },
+      completedOperationId: 'op-1',
+      expectedOperationId: 'op-1',
+      attemptsLeft: 0,
+      inManualStopGuard: false,
+    }),
+    'finish',
+  );
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: true, source: 'chat', turn_id: 'op-other' },
+      completedOperationId: null,
+      expectedOperationId: null,
+      attemptsLeft: 2,
+      inManualStopGuard: false,
+    }),
+    'retry_shutdown',
+  );
+
+  assert.equal(
+    resolveDoneConfirmation({
+      runtime: { running: true, source: 'compaction' },
+      completedOperationId: 'op-1',
+      expectedOperationId: 'op-1',
+      attemptsLeft: 0,
+      inManualStopGuard: false,
+    }),
+    'finish',
+  );
+});

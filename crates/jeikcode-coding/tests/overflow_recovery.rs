@@ -35,6 +35,7 @@ impl LlmProvider for OverflowOnce {
             *failed = true;
             return Err(ProviderError {
                 retryable: false,
+                resumable: false,
                 message: "maximum context length exceeded".into(),
                 http_status: Some(400),
                 code: Some("context_length_exceeded".into()),

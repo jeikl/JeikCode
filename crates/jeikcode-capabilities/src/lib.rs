@@ -85,6 +85,11 @@ pub mod schema_sanitizer;
 ))]
 pub(crate) mod paths;
 
+/// Shared ignore policy for graph indexing, grep/glob and the sensitive-path
+/// gate. One source of truth for scope ordering and noise/sensitive separation.
+#[cfg(any(feature = "tools", feature = "codeintel"))]
+pub(crate) mod ignore_policy;
+
 /// Shared L1 process utilities (console-window suppression, `shell_command`,
 /// UTF-8 locale, `is_running_as_admin`) — used here and by the CLI/TUI drivers, so
 /// `capabilities` owns them without depending on `core`. `shell_command` +
@@ -103,6 +108,11 @@ pub mod pathnorm;
 /// whenever a reqwest-using capability is enabled.
 #[cfg(any(feature = "provider", feature = "web", feature = "mcp"))]
 pub(crate) mod proxy;
+
+/// Process-wide shared asynchronous `reqwest::Client` connection pool with ALPN
+/// HTTP/2 negotiation, trusted roots caching (#514), and cooldown-gated rebuilds.
+#[cfg(any(feature = "provider", feature = "web", feature = "mcp"))]
+pub mod http_pool;
 
 /// Ungated path helpers (leading-`~` expansion, home dir, Windows POSIX `/tmp`
 /// and `/c/Users` mapping) shared by the `tools` and `codeintel` families so
@@ -138,6 +148,9 @@ pub mod fs;
 pub mod plugin;
 
 // Shared argument repair module; preserves tools::repair alias without implicitly enabling tools.
+#[cfg(any(feature = "tools", feature = "provider", feature = "session"))]
+pub(crate) mod call_signals;
+
 #[cfg(any(feature = "tools", feature = "provider", feature = "session"))]
 pub mod argument_repair;
 

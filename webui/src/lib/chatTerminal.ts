@@ -1235,3 +1235,134 @@ export function isStackedTurnBillingUsage(
   if (prompt <= contextLimit) return false;
   return cached >= prompt * 0.9;
 }
+
+export interface TerminalNoticePartLike {
+  kind: string;
+  text?: string;
+  eventId?: string;
+  severity?: string;
+  status?: string;
+  anchorMessageId?: string;
+}
+
+export interface TerminalNoticeMessageLike {
+  id?: string;
+  role: string;
+  parts: TerminalNoticePartLike[];
+}
+
+function matchesTerminalEventPrefix(stopReason: string | undefined, eventId: string): boolean {
+  switch (stopReason) {
+    case 'max_rounds':
+      return eventId.startsWith('warn-max-rounds:') || eventId.startsWith('err-max-rounds:');
+    case 'tool_loop_detected':
+      return eventId.startsWith('err-tool-loop:');
+    case 'repeat_loop':
+      return eventId.startsWith('err-repeat:') || eventId.startsWith('err-echo:');
+    case 'rate_limited':
+      return eventId.startsWith('rl:');
+    case 'timeout':
+      return eventId.startsWith('err-ttft:') || eventId.startsWith('err-stall:');
+    case 'max_continuations':
+      return eventId.startsWith('err-max-cont:');
+    case 'policy_denied':
+      return eventId.startsWith('err-policy:');
+    default:
+      return false;
+  }
+}
+
+/**
+ * Determine across all 11 locales whether the terminal reason in a `done` event
+ * has already been surfaced by a settled, causally-anchored notice card.
+ */
+export function isTerminalNoticeAlreadyExplained(
+  messages: TerminalNoticeMessageLike[],
+  opts: { stopReason?: string; detail?: string; noticeAnchor?: string },
+): boolean {
+  const { stopReason, detail, noticeAnchor } = opts;
+  return messages.some((message) =>
+    message.parts.some((part) => {
+      if (part.kind === 'rate_limited') {
+        return stopReason === 'rate_limited';
+      }
+      if (part.kind !== 'notice') return false;
+      const anchorMatches =
+        !noticeAnchor || !part.anchorMessageId || part.anchorMessageId === noticeAnchor;
+      if (detail && part.text && part.text.includes(detail)) {
+        return true;
+      }
+      if (part.severity === 'error' && part.status === 'settled' && anchorMatches) {
+        return true;
+      }
+      if (
+        part.status === 'settled' &&
+        anchorMatches &&
+        typeof part.eventId === 'string' &&
+        matchesTerminalEventPrefix(stopReason, part.eventId)
+      ) {
+        return true;
+      }
+      return false;
+    }),
+  );
+}
+
+function normalizeNoticeText(text: string): string {
+  return text.trim().replace(/\s+/g, ' ');
+}
+
+function messageNoticeEventIds(message: TerminalNoticeMessageLike): string[] {
+  const ids: string[] = [];
+  if (message.id) ids.push(message.id);
+  for (const p of message.parts) {
+    if ((p.kind === 'notice' || p.kind === 'rate_limited') && p.eventId) {
+      ids.push(p.eventId);
+    }
+  }
+  return ids;
+}
+
+function messageNoticeTexts(message: TerminalNoticeMessageLike): string[] {
+  const texts: string[] = [];
+  for (const p of message.parts) {
+    if ((p.kind === 'notice' || p.kind === 'rate_limited' || (message.role === 'system' && p.kind === 'text')) && p.text) {
+      const normalized = normalizeNoticeText(p.text);
+      if (normalized) texts.push(normalized);
+    }
+  }
+  return texts;
+}
+
+/**
+ * Fallback deduplication for `adoptAuthoritativeDiskTail`: checks id, structured
+ * `eventId`, and normalized notice text so legacy/mismatched system notices never double-card.
+ */
+export function noticeAlreadyPresentInMessages(
+  existing: TerminalNoticeMessageLike[],
+  candidate: TerminalNoticeMessageLike,
+): boolean {
+  const candidateIds = new Set(messageNoticeEventIds(candidate));
+  const candidateTexts = new Set(messageNoticeTexts(candidate));
+  return existing.some((row) => {
+    if (candidate.id && row.id === candidate.id) return true;
+    for (const eid of messageNoticeEventIds(row)) {
+      if (candidateIds.has(eid)) return true;
+    }
+    if (candidateTexts.size > 0) {
+      for (const txt of messageNoticeTexts(row)) {
+        if (candidateTexts.has(txt)) return true;
+      }
+    }
+    return false;
+  });
+}
+
+export function filterUnpersistedLocalNotices<T extends TerminalNoticeMessageLike>(
+  canvas: T[],
+  diskTail: TerminalNoticeMessageLike[],
+): T[] {
+  return canvas.filter(
+    (m) => m.role === 'system' && Boolean(m.id) && !noticeAlreadyPresentInMessages(diskTail, m),
+  );
+}

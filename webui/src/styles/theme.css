@@ -133,6 +133,13 @@
 }
 ::-webkit-scrollbar-corner { background: transparent; }
 
+/* Layout-pass aliases: new semantic names use the original palette values
+   (and existing rules keep their original fallbacks). */
+:root {
+  --app-text-muted: #888;
+  --app-timing-text: var(--app-input-placeholder-foreground);
+}
+
 /* Wide-screen & adaptive content expansion */
 @media (min-width: 1440px) {
   :root {

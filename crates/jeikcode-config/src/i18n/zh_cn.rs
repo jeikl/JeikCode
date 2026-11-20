@@ -1209,7 +1209,7 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         }
         Msg::CliAboutTelemetry => "遥测控制".into(),
         Msg::CliAboutPlugin => "管理技能/命令插件".into(),
-        Msg::CliAboutUninstall => "卸载 JeikCode。无参数时交互询问是否保留用户配置；simple 只删程序；all 全部删除。详细教程：https://jeikcode.top/zh/guide/updates.html".into(),
+        Msg::CliAboutUninstall => "卸载 JeikCode。无参数时交互询问是否保留用户配置；simple 只删程序；all 全部删除。".into(),
         Msg::CliAboutSetup => "重新初始化 JeikCode 环境与内置配置到 ~/.jeikcode/".into(),
         Msg::CliAboutHooks => "管理钩子（列表、测试、启用/禁用）".into(),
         Msg::CliAboutHooksList => "列出所有已加载钩子及其状态".into(),
@@ -1375,9 +1375,53 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::StreamReadRetryExhausted { attempts } =>
             format!("网络连接中断:远端关闭或重置了连接,自动重连 {attempts} 次后仍失败,可重试。").into(),
         Msg::StreamReadPartialResponse =>
-            "响应中断:为避免重复输出或工具执行,未自动重放;已保留可安全保存的部分回复,可继续。".into(),
+            "响应中断:已保留可安全保存的部分回复,可继续。".into(),
+        Msg::StreamReadInterrupted =>
+            "网络连接中断:远端关闭或重置了连接,可重试。".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("连接中断,正在自动重连(最多 {max} 次),已保留当前输出…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("连接中断,已保留当前输出,重试 {attempt}/{max} 次").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("流空闲超时，已保留当前输出，重试 {attempt}/{max} 次")
+        } else {
+            format!("流空闲超时，正在重试 {attempt}/{max} 次")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("网络连接中断，已保留当前输出，重试 {attempt}/{max} 次")
+        } else {
+            format!("网络连接中断，正在重试 {attempt}/{max} 次")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("连接已恢复（重试 {attempts} 次后继续）").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "自动重连后流响应仍超时，已终止本轮".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("触发速率限制，{secs} 秒后自动重试…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "达到速率限制额度，已暂停，请等待重置或切换模型后继续".into()
+        } else {
+            format!("达到速率限制已暂停：{detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "流在已产生部分回复后超时；已保留部分回复，可继续。".into(),
         Msg::StreamReadResetHint =>
             "此错误常见于公司网络或代理环境,请检查代理/VPN/防火墙设置后重试。".into(),
         Msg::StreamReadDetailsPrefix => "详情: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "疑似复读死循环：检测到连续重复相同的输出与工具调用，已提示模型最后一次调整方向，否则将终止本轮。".into()
+        } else {
+            "疑似复读死循环：检测到连续重复相同的输出与工具调用，已提示模型调整方向。".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("已停止：模型连续 {rounds} 轮复读相同的推理、文本与工具调用模式").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("疑似工具调用循环：相同调用或只读批处理连续 {threshold} 次返回相同结果，已提示模型调整策略").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("检测到工具调用死循环：相同调用或只读批处理连续 {threshold} 次返回相同结果，已在下次请求前停止").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("已停止：模型连续 {rounds} 轮重复相同的工具调用模式").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("已达到最大轮次上限（{cap} 轮）；已停止调用工具并生成进度总结与后续建议。").into(),
     }
 }

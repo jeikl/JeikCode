@@ -50,7 +50,7 @@ export function pullSession(req: SessionPullRequest): Promise<SessionDetail> {
       opts.turnsOnly = true;
       break;
     case 'older':
-      if (req.beforeSeq != null) {
+      if (req.beforeSeq != null && Number.isInteger(req.beforeSeq) && req.beforeSeq > 0) {
         opts.beforeSeq = req.beforeSeq;
         opts.limit = req.limit ?? DEFAULT_PAGE;
       } else {

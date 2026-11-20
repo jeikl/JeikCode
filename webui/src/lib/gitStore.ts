@@ -113,6 +113,10 @@ class ProjectGitManager {
   private pendingVersions = new Map<string, number>();
   private lastFetchTimes = new Map<string, number>();
   private fetchInflight = new Map<string, Promise<boolean>>();
+  /** Coalesce duplicate initial/subscription refreshes for the same repo. */
+  private lastScheduledRefresh = new Map<string, number>();
+  /** Coalesce duplicate repos probes from multiple initial GitPanel mounts. */
+  private reposRefreshing = new Set<string>();
 
   private normalizeKey(cwd?: string): string {
     return cwd ? cwd.trim() : '';
@@ -289,6 +293,14 @@ class ProjectGitManager {
     } = {},
   ): Promise<void> {
     const key = this.normalizeKey(cwd);
+    const now = Date.now();
+    // Multiple GitPanel mounts/subscriptions can schedule the same initial
+    // refresh back-to-back. Coalesce them unless this is an explicit force-all
+    // mutation/remote invalidation.
+    if (!options.forceAll && now - (this.lastScheduledRefresh.get(key) ?? 0) < 2000) {
+      return Promise.resolve();
+    }
+    this.lastScheduledRefresh.set(key, now);
     let inflight = this.inflights.get(key);
     if (!inflight) {
       inflight = { running: false, needsFollowup: false, debounceTimer: null };
@@ -305,7 +317,9 @@ class ProjectGitManager {
       if (!ctrl) return;
 
       if (ctrl.running) {
-        ctrl.needsFollowup = true;
+        // Duplicate mount/effect requests share the in-flight result. Only a
+        // force-all invalidation (mutation/remote event) needs a follow-up run.
+        if (options.forceAll) ctrl.needsFollowup = true;
         return;
       }
 
@@ -434,6 +448,8 @@ class ProjectGitManager {
    */
   public async refreshRepos(cwd?: string, sessionId?: string | null): Promise<void> {
     const key = this.normalizeKey(cwd);
+    if (this.reposRefreshing.has(key)) return;
+    this.reposRefreshing.add(key);
     try {
       const res = await fetchGitRepos(key);
       const cur = this.getState(key);
@@ -468,6 +484,8 @@ class ProjectGitManager {
       }
     } catch {
       // 忽略多仓库探测失败
+    } finally {
+      this.reposRefreshing.delete(key);
     }
   }
 

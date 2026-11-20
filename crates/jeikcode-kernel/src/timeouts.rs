@@ -42,8 +42,8 @@ impl TimeoutPolicy {
     pub const DEFAULT_CONNECT_SECS: u64 = 10;
     pub const DEFAULT_OPEN_SECS: u64 = 180;
     pub const DEFAULT_TTFT_SECS: u64 = 180;
-    pub const DEFAULT_TRANSITION_SECS: u64 = 180;
-    pub const DEFAULT_STREAMING_SECS: u64 = 120;
+    pub const DEFAULT_TRANSITION_SECS: u64 = 360;
+    pub const DEFAULT_STREAMING_SECS: u64 = 360;
 
     /// Neutral kernel default: content clocks off, transport still bounded.
     pub const fn unbounded() -> Self {
@@ -140,17 +140,17 @@ mod tests {
         );
         assert_eq!(
             p.phase_limit(StreamPhase::Transition),
-            Some(Duration::from_secs(180))
+            Some(Duration::from_secs(360))
         );
         assert_eq!(
             p.phase_limit(StreamPhase::Thinking),
-            Some(Duration::from_secs(120))
+            Some(Duration::from_secs(360))
         );
         assert_eq!(
             p.phase_limit(StreamPhase::Streaming),
-            Some(Duration::from_secs(120))
+            Some(Duration::from_secs(360))
         );
-        assert_eq!(p.idle_watchdog(), Duration::from_secs(180));
+        assert_eq!(p.idle_watchdog(), Duration::from_secs(360));
         assert_eq!(p.connect, Duration::from_secs(10));
         assert_eq!(p.open, Duration::from_secs(180));
     }

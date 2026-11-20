@@ -201,6 +201,53 @@ fn live_session_approval_mode_in_dir(working_dir: &Path, session_id: &str) -> Ap
     live_current_approval_mode()
 }
 
+/// Asynchronous version of [`live_session_approval_mode`] for async request handlers:
+/// checks memory cache first and offloads disk backfill (`resolve_session_by_id` +
+/// `read_meta`) onto `spawn_blocking`.
+pub(crate) async fn live_session_approval_mode_async(session_id: Option<&str>) -> ApprovalMode {
+    if live_global_mode_enabled() {
+        return live_current_approval_mode();
+    }
+    let Some(sid) = session_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        return live_current_approval_mode();
+    };
+    if let Some(mode) = cached_session_approval_mode(&sid) {
+        return mode;
+    }
+    if session_approval_mode_known_absent(&sid) {
+        return live_current_approval_mode();
+    }
+    crate::spawn_blocking_isolated(move || live_session_approval_mode(Some(&sid)))
+        .await
+        .unwrap_or_else(|_| live_current_approval_mode())
+}
+
+/// Asynchronous version of [`live_session_approval_mode_in_dir`] for async handlers:
+/// avoids reading session metadata synchronously on Tokio worker threads.
+async fn live_session_approval_mode_in_dir_async(
+    working_dir: std::path::PathBuf,
+    session_id: String,
+) -> ApprovalMode {
+    if live_global_mode_enabled() {
+        return live_current_approval_mode();
+    }
+    if let Some(mode) = cached_session_approval_mode(&session_id) {
+        return mode;
+    }
+    if session_approval_mode_known_absent(&session_id) {
+        return live_current_approval_mode();
+    }
+    crate::spawn_blocking_isolated(move || {
+        live_session_approval_mode_in_dir(&working_dir, &session_id)
+    })
+    .await
+    .unwrap_or_else(|_| live_current_approval_mode())
+}
+
 fn cached_session_approval_mode(sid: &str) -> Option<ApprovalMode> {
     let guard = SESSION_APPROVAL_MODES
         .lock()
@@ -640,6 +687,18 @@ pub fn live_set_mode_for_session(session_id: Option<&str>, mode: ApprovalMode) {
     });
 }
 
+/// 记录已解析出的新会话默认/请求审批模式（若全局开关关闭），避免首发写入磁盘前被
+/// 负缓存挡回 `Build`。
+pub(crate) fn live_remember_session_mode(session_id: &str, mode: ApprovalMode) {
+    if live_global_mode_enabled() {
+        return;
+    }
+    let sid = session_id.trim();
+    if !sid.is_empty() {
+        remember_session_approval_mode(sid, mode);
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct ScopedApprovalModeForTest {
     _guard: std::sync::MutexGuard<'static, ()>,
@@ -658,6 +717,9 @@ impl ScopedApprovalModeForTest {
         if let Ok(mut map) = SESSION_APPROVAL_MODES.lock() {
             *map = None;
         }
+        if let Ok(mut misses) = SESSION_APPROVAL_MODE_MISSES.lock() {
+            misses.clear();
+        }
         Self { _guard: guard }
     }
 }
@@ -669,6 +731,9 @@ impl Drop for ScopedApprovalModeForTest {
         live_set_mode(ApprovalMode::Build);
         if let Ok(mut map) = SESSION_APPROVAL_MODES.lock() {
             *map = None;
+        }
+        if let Ok(mut misses) = SESSION_APPROVAL_MODE_MISSES.lock() {
+            misses.clear();
         }
     }
 }
@@ -1280,6 +1345,7 @@ pub(crate) async fn run_chat_turn_v2(
     approval_mode: ApprovalMode,
     mut steer_rx: mpsc::UnboundedReceiver<ChatSteerSignal>,
     client_input_id: Option<String>,
+    runtime_handle_tx: Option<tokio::sync::oneshot::Sender<jeikcode_coding::CodingRuntimeHandle>>,
 ) {
     use jeikcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
     use jeikcode_coding::TurnCompletion;
@@ -1310,12 +1376,13 @@ pub(crate) async fn run_chat_turn_v2(
     // model conversation below (`user_images = Vec::new()`), so a reloading client refills
     // the thumbnail from the sidecar. The /chat path previously skipped this, so the image
     // was lost after refresh for anyone loading the session fresh from disk. Mirrors /live.
-    stash_vl_display_images(
+    stash_vl_display_images_async(
         &runtime_cfg.working_dir,
         &session_id,
         &user_text,
         &user_images,
-    );
+    )
+    .await;
     let naming_session_id = session_id.clone();
     let naming_project_bucket =
         jeikcode_capabilities::session::SessionManager::project_hash(&runtime_cfg.working_dir);
@@ -1336,6 +1403,9 @@ pub(crate) async fn run_chat_turn_v2(
         coding_cfg,
         owned_task,
     } = prepared;
+    if let Some(tx) = runtime_handle_tx {
+        let _ = tx.send(handle.clone());
+    }
     // The non-sync `/chat` path creates a short-lived runtime for every turn
     // when this view is the first owner. Do not block send on MCP: a stalled
     // catalog used to drop the user message. Soft-wait a warm cache, then
@@ -1795,6 +1865,9 @@ pub(crate) async fn run_chat_turn_v2(
                 // Disk title was already seeded at publish; forward so live views see the provisional title.
                 let _ = runtime_event_tx.send(CodingRuntimeEvent::SessionTitleSeeded { name });
             }
+            event @ CodingRuntimeEvent::ModelSwitched { .. } => {
+                let _ = runtime_event_tx.send(event);
+            }
             CodingRuntimeEvent::RuntimeStopped(_) => {
                 send_chat_runtime_error(
                     &runtime_event_tx,
@@ -2042,6 +2115,34 @@ pub(crate) enum LiveWireEvent {
         message_id: String,
         turn_ordinal: u32,
     },
+    /// 已落盘的显示通知（重试进度等）：同 `id` 原地更新，`display_seq` 是账本坐标。
+    #[serde(rename = "display_notice")]
+    DisplayNotice {
+        session_id: String,
+        id: String,
+        display_seq: u64,
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        created_at: Option<u64>,
+    },
+    /// 统一结构化系统通知：同 `event_id` 按 `revision` 原地刷新，按 `anchor_message_id` 因果落位。
+    #[serde(rename = "system_notice")]
+    SystemNotice {
+        session_id: String,
+        event_id: String,
+        part_id: String,
+        kind: jeikcode_kernel::event::NoticeKind,
+        severity: jeikcode_kernel::event::NoticeSeverity,
+        status: jeikcode_kernel::event::NoticeStatus,
+        revision: u32,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<u64>,
+    },
     /// One or more live inputs were folded into the active turn. The exact
     /// payload lets browser clients acknowledge their FIFO pending-steer UI
     /// without guessing from text deltas or turn terminals.
@@ -2068,6 +2169,9 @@ pub(crate) enum LiveWireEvent {
     /// path display + session-list filter to follow. Carries the absolute path.
     #[serde(rename = "working_dir")]
     WorkingDir { working_dir: String },
+    /// 压缩后通知前端立即刷新上下文计数。
+    #[serde(rename = "context_compacted")]
+    ContextCompacted { session_id: String, tokens: u32 },
     /// Rate-limit hit: provider has throttled requests. Carries display-ready reset
     /// time and label so the webui can render a countdown notice instead of a generic error.
     #[serde(rename = "rate_limited")]
@@ -2085,6 +2189,8 @@ pub(crate) enum LiveWireEvent {
         /// 与 `Warning` 相同的回合锚点：限流提示属于发生限流的那一轮。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<String>,
     },
 }
 
@@ -2097,6 +2203,9 @@ struct NativeLiveWireProjector {
     current_message_id: Option<String>,
     part_seq: u32,
     last_part_kind: Option<String>,
+    /// 最近一次已通过 `SystemNotice` 收口终态错误的文本，避免伴随错误事件重复成卡。
+    last_settled_error_notice_text: Option<String>,
+    pending_rate_limit_notice: Option<(String, Option<String>)>,
 }
 
 impl NativeLiveWireProjector {
@@ -2286,7 +2395,6 @@ impl NativeLiveWireProjector {
                     cached: meta.tokens.cached as usize,
                 },
                 Kernel::Compacted {
-                    removed,
                     bytes_before,
                     bytes_after,
                     committed: true,
@@ -2297,20 +2405,13 @@ impl NativeLiveWireProjector {
                         crate::COMPACTION_OWNER_LIVE,
                         true,
                     );
-                    let before_tokens = (bytes_before as f32 / 3.5).ceil() as usize;
                     let after_tokens = (bytes_after as f32 / 3.5).ceil() as usize;
-                    let mark = jeikcode_config::i18n::format_compaction_mark(
-                        removed,
-                        before_tokens,
-                        after_tokens,
-                    );
-                    // live 路径也必须落盘：否则刷新/异地端只剩瞬态 Warning，
-                    // 紫色压缩边界会随页面重建而消失。
-                    let _ = crate::persist_session_display_notice(&self.session_id, &mark, None);
-                    LiveWireEvent::Warning {
-                        message: mark,
-                        tokens_after: Some(after_tokens as u32),
-                        message_id: self.notice_anchor(),
+                    let _ = bytes_before;
+                    // /live 投影器只转发上下文计数刷新，不再双写 display 账本；
+                    // 压缩边界通知卡片由 kernel紧随发出的 AgentEvent::SystemNotice 承担。
+                    LiveWireEvent::ContextCompacted {
+                        session_id: self.session_id.clone(),
+                        tokens: after_tokens as u32,
                     }
                 }
                 Kernel::CompactionFailed { error, .. } => {
@@ -2342,11 +2443,64 @@ impl NativeLiveWireProjector {
                     );
                     return None;
                 }
-                Kernel::Error { message, .. } => LiveWireEvent::Error { message },
+                Kernel::SystemNotice(notice) => {
+                    if notice.kind == jeikcode_kernel::event::NoticeKind::RateLimit {
+                        // 限流由紧随其后的 Kernel::RateLimited 结合浏览器多语言格式统一渲染；
+                        // 在此暂存 event_id 与因果锚点，避免出现两张卡片。
+                        self.pending_rate_limit_notice =
+                            Some((notice.event_id, notice.anchor_message_id));
+                        return None;
+                    }
+                    if notice.status == jeikcode_kernel::event::NoticeStatus::Settled
+                        && notice.severity == jeikcode_kernel::event::NoticeSeverity::Error
+                    {
+                        self.last_settled_error_notice_text = Some(notice.text.trim().to_string());
+                    }
+                    LiveWireEvent::SystemNotice {
+                        session_id: self.session_id.clone(),
+                        event_id: notice.event_id,
+                        part_id: notice.part_id,
+                        kind: notice.kind,
+                        severity: notice.severity,
+                        status: notice.status,
+                        revision: notice.revision,
+                        text: notice.text,
+                        anchor_message_id: notice
+                            .anchor_message_id
+                            .or_else(|| self.notice_anchor()),
+                        anchor_part_id: notice.anchor_part_id,
+                        created_at: None,
+                    }
+                }
+                Kernel::Error { message, .. } => {
+                    if self.last_settled_error_notice_text.as_deref() == Some(message.trim()) {
+                        return None;
+                    }
+                    LiveWireEvent::Error { message }
+                }
                 Kernel::Warning(message) => LiveWireEvent::Warning {
                     message: crate::localize_agent_warning(&message),
                     tokens_after: None,
                     message_id: self.notice_anchor(),
+                },
+                Kernel::RetryNotice {
+                    notice_id,
+                    part_id,
+                    message,
+                    attempt,
+                    ..
+                } => LiveWireEvent::SystemNotice {
+                    session_id: self.session_id.clone(),
+                    event_id: notice_id,
+                    part_id,
+                    kind: jeikcode_kernel::event::NoticeKind::Retry,
+                    severity: jeikcode_kernel::event::NoticeSeverity::Warning,
+                    status: jeikcode_kernel::event::NoticeStatus::Active,
+                    revision: attempt.max(1),
+                    text: message,
+                    anchor_message_id: self.notice_anchor(),
+                    anchor_part_id: None,
+                    created_at: None,
                 },
                 Kernel::RateLimited {
                     reset_at_display,
@@ -2354,14 +2508,22 @@ impl NativeLiveWireProjector {
                     secs_until_reset,
                     auto_resuming,
                     server_message,
-                } => LiveWireEvent::RateLimited {
-                    reset_at_display,
-                    reset_label,
-                    secs_until_reset,
-                    auto_resuming,
-                    server_message,
-                    message_id: self.notice_anchor(),
-                },
+                } => {
+                    let (event_id, anchor) = self
+                        .pending_rate_limit_notice
+                        .take()
+                        .map(|(id, a)| (Some(id), a))
+                        .unwrap_or((None, None));
+                    LiveWireEvent::RateLimited {
+                        reset_at_display,
+                        reset_label,
+                        secs_until_reset,
+                        auto_resuming,
+                        server_message,
+                        message_id: anchor.or_else(|| self.notice_anchor()),
+                        event_id,
+                    }
+                }
                 Kernel::ToolCallStreaming { .. }
                 | Kernel::ToolBatchStarted { .. }
                 | Kernel::ToolBatchCompleted { .. }
@@ -2521,16 +2683,11 @@ impl NativeLiveWireProjector {
                     crate::COMPACTION_OWNER_LIVE,
                     true,
                 );
-                let mark = jeikcode_config::i18n::format_compaction_mark(
-                    outcome.removed_messages,
-                    outcome.estimated_tokens_before,
-                    outcome.estimated_tokens_after,
-                );
-                let _ = crate::persist_session_display_notice(&self.session_id, &mark, None);
-                LiveWireEvent::Warning {
-                    message: mark,
-                    tokens_after: Some(outcome.estimated_tokens_after as u32),
-                    message_id: self.notice_anchor(),
+                // 压缩边界通知由 kernel 的 AgentEvent::SystemNotice 统一推送，
+                // 不在此二次写盘或发送第二张提示卡片；只同步最新 context tokens。
+                LiveWireEvent::ContextCompacted {
+                    session_id: self.session_id.clone(),
+                    tokens: outcome.estimated_tokens_after as u32,
                 }
             }
             crate::live_hub::LiveViewEvent::Runtime(Runtime::CompactionFinished {
@@ -2645,15 +2802,18 @@ pub(crate) async fn live_stream(
 
     if let Some(session_id) = sid.clone() {
         if crate::native_live::should_use_registry_for_session(&session_id) {
-            return live_stream_from_registry(wd, session_id).into_response();
+            return live_stream_from_registry(wd, session_id)
+                .await
+                .into_response();
         }
     }
 
+    let mode = live_session_approval_mode_async(sid.as_deref()).await;
     let join = match crate::native_live::ensure_headless_runtime(
         wd.clone(),
         state.telemetry.clone(),
         live_current_provider(),
-        native_runtime_mode(live_session_approval_mode(sid.as_deref())),
+        native_runtime_mode(mode),
         sid,
     )
     .await
@@ -2662,7 +2822,9 @@ pub(crate) async fn live_stream(
         Err(error) => {
             // Embedded TUI bound to another session — fall back to registry view.
             if let Some(session_id) = parse_session_id_from_embedded_mismatch(&error) {
-                return live_stream_from_registry(wd, session_id).into_response();
+                return live_stream_from_registry(wd, session_id)
+                    .await
+                    .into_response();
             }
             return (
                 StatusCode::NOT_FOUND,
@@ -2671,7 +2833,7 @@ pub(crate) async fn live_stream(
                 .into_response();
         }
     };
-    live_stream_from_hub_join(join).into_response()
+    live_stream_from_hub_join(join).await.into_response()
 }
 
 fn parse_session_id_from_embedded_mismatch(error: &str) -> Option<String> {
@@ -2733,54 +2895,68 @@ fn project_registry_event(
     })
 }
 
-fn live_stream_from_registry(
+async fn live_stream_from_registry(
     working_dir: std::path::PathBuf,
     session_id: String,
 ) -> axum::response::Response {
-    let mut snapshot =
-        match crate::native_live::registry_session_snapshot(&working_dir, &session_id) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": error })),
-                )
-                    .into_response();
-            }
-        };
-    // `/live` is another resume entrypoint: a `/chat` crash checkpoint must be
-    // overlaid here too, before the snapshot becomes the runtime prefix.
-    if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&session_id) {
-        let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
-    }
-    let session_name = {
-        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&working_dir);
-        match crate::legacy_convert::load_catalog_session_view_in_project(&bucket, &session_id) {
+    let sid_clone = session_id.clone();
+    let wd_clone = working_dir.clone();
+    let prep = crate::spawn_blocking_isolated(move || {
+        let mut snapshot =
+            match crate::native_live::registry_session_snapshot(&wd_clone, &sid_clone) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Err((StatusCode::NOT_FOUND, error)),
+            };
+        // `/live` is another resume entrypoint: a `/chat` crash checkpoint must be
+        // overlaid here too, before the snapshot becomes the runtime prefix.
+        if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&sid_clone) {
+            let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
+        }
+        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&wd_clone);
+        let session_name = match crate::legacy_convert::load_catalog_session_view_in_project(
+            &bucket, &sid_clone,
+        ) {
             Ok(Some(session)) => session.meta.name,
             Ok(None) => String::new(),
-            Err(error) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": error.to_string() })),
-                )
-                    .into_response();
-            }
+            Err(error) => return Err((StatusCode::NOT_FOUND, error.to_string())),
+        };
+        let snapshot_count = snapshot.messages.len();
+        let (snapshot_offset, snapshot_tail) = snapshot_tail(&snapshot.messages);
+        let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot_tail
+            .iter()
+            .map(crate::MessageInfo::from_kernel)
+            .collect();
+        crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
+        crate::attach_display_images(&mut snapshot_messages, &wd_clone, &sid_clone);
+        Ok((
+            snapshot_messages,
+            snapshot_count,
+            snapshot_offset,
+            session_name,
+        ))
+    })
+    .await;
+
+    let (snapshot_messages, snapshot_count, snapshot_offset, session_name) = match prep {
+        Ok(Ok(data)) => data,
+        Ok(Err((status, error))) => {
+            return (status, Json(serde_json::json!({ "error": error }))).into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("snapshot task panicked: {error}") })),
+            )
+                .into_response();
         }
     };
+
     let project_hash = crate::hash_path(&working_dir);
     let provider = live_current_provider();
-    let (tx, out_rx) = mpsc::unbounded_channel::<LiveWireEvent>();
+    let (tx, out_rx) = mpsc::channel::<LiveWireEvent>(1024);
     // Snapshot + replay head is emitted ahead of the live bus and tagged
     // `replay: true`; only those frames may be de-duplicated client-side.
     let mut head: Vec<LiveWireEvent> = Vec::new();
-    let snapshot_count = snapshot.messages.len();
-    let (snapshot_offset, snapshot_tail) = snapshot_tail(&snapshot.messages);
-    let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot_tail
-        .iter()
-        .map(crate::MessageInfo::from_kernel)
-        .collect();
-    crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
-    crate::attach_display_images(&mut snapshot_messages, &working_dir, &session_id);
     head.push(LiveWireEvent::Snapshot {
         messages: snapshot_messages,
         message_count: snapshot_count,
@@ -2815,18 +2991,27 @@ fn live_stream_from_registry(
         }
     }
 
+    let sid_log = session_id.clone();
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(sequenced) => {
                     if let Some(w) = project_registry_event(&mut projector, sequenced) {
-                        if tx.send(w).is_err() {
-                            break;
+                        match tx.try_send(w) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    session_id = %sid_log,
+                                    "closing lagging registry /live stream subscriber"
+                                );
+                                break;
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    let _ = tx.send(LiveWireEvent::Error {
+                    let _ = tx.try_send(LiveWireEvent::Error {
                         message: format!(
                             "registry live stream lagged by {skipped} events; reconnect"
                         ),
@@ -2843,7 +3028,7 @@ fn live_stream_from_registry(
         log_live_frame_size(&wire, frame.len());
         Ok::<_, std::convert::Infallible>(Event::default().data(frame))
     });
-    let live_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|wire| {
+    let live_stream = tokio_stream::wrappers::ReceiverStream::new(out_rx).map(|wire| {
         Ok::<_, std::convert::Infallible>(Event::default().data(live_wire_frame_json(&wire, false)))
     });
     let stream = head_stream.chain(live_stream);
@@ -2865,53 +3050,65 @@ fn live_stream_from_registry(
     resp
 }
 
-fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::response::Response {
+async fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response::Response {
     let snapshot_wd = join.binding.working_dir.clone();
-    let mut snapshot = (*join.snapshot).clone();
-    // `/live` is another resume entrypoint: overlay any per-token checkpoint from
-    // a crashed `/chat` turn before handing the snapshot to the runtime.
-    if let Some(partial) =
-        jeikcode_capabilities::session::partial::load_global(&join.binding.session_id)
-    {
-        let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
-    }
-    let session_name = {
-        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&snapshot_wd);
-        match crate::legacy_convert::load_catalog_session_view_in_project(
-            &bucket,
-            &join.binding.session_id,
+    let sid_clone = join.binding.session_id.clone();
+    let wd_clone = snapshot_wd.clone();
+    let snapshot_arc = std::sync::Arc::clone(&join.snapshot);
+    let prep = crate::spawn_blocking_isolated(move || {
+        let mut snapshot = (*snapshot_arc).clone();
+        // `/live` is another resume entrypoint: overlay any per-token checkpoint from
+        // a crashed `/chat` turn before handing the snapshot to the runtime.
+        if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&sid_clone) {
+            let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
+        }
+        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&wd_clone);
+        let session_name = match crate::legacy_convert::load_catalog_session_view_in_project(
+            &bucket, &sid_clone,
         ) {
             Ok(Some(session)) => session.meta.name,
             Ok(None) => String::new(),
-            Err(error) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": error.to_string() })),
-                )
-                    .into_response();
-            }
+            Err(error) => return Err((StatusCode::NOT_FOUND, error.to_string())),
+        };
+        let snapshot_count = snapshot.messages.len();
+        let (snapshot_offset, snapshot_tail) = snapshot_tail(&snapshot.messages);
+        let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot_tail
+            .iter()
+            .map(crate::MessageInfo::from_kernel)
+            .collect();
+        crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
+        // Re-attach display-only images (VL-preprocessed originals) so a refresh — which
+        // rebuilds from the kernel snapshot (image stripped) — shows the thumbnail, not the
+        // "missing image" placeholder. Same sidecar the HTTP session-load path reads.
+        crate::attach_display_images(&mut snapshot_messages, &wd_clone, &sid_clone);
+        Ok((
+            snapshot_messages,
+            snapshot_count,
+            snapshot_offset,
+            session_name,
+        ))
+    })
+    .await;
+
+    let (snapshot_messages, snapshot_count, snapshot_offset, session_name) = match prep {
+        Ok(Ok(data)) => data,
+        Ok(Err((status, error))) => {
+            return (status, Json(serde_json::json!({ "error": error }))).into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("snapshot task panicked: {error}") })),
+            )
+                .into_response();
         }
     };
+
     let project_hash = crate::hash_path(&snapshot_wd);
-    let (tx, out_rx) = mpsc::unbounded_channel::<LiveWireEvent>();
+    let (tx, out_rx) = mpsc::channel::<LiveWireEvent>(1024);
     // Snapshot + replay head is emitted ahead of the live bus and tagged
     // `replay: true`; only those frames may be de-duplicated client-side.
     let mut head: Vec<LiveWireEvent> = Vec::new();
-    let snapshot_count = snapshot.messages.len();
-    let (snapshot_offset, snapshot_tail) = snapshot_tail(&snapshot.messages);
-    let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot_tail
-        .iter()
-        .map(crate::MessageInfo::from_kernel)
-        .collect();
-    crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
-    // Re-attach display-only images (VL-preprocessed originals) so a refresh — which
-    // rebuilds from the kernel snapshot (image stripped) — shows the thumbnail, not the
-    // "missing image" placeholder. Same sidecar the HTTP session-load path reads.
-    crate::attach_display_images(
-        &mut snapshot_messages,
-        &snapshot_wd,
-        &join.binding.session_id,
-    );
     head.push(LiveWireEvent::Snapshot {
         messages: snapshot_messages,
         message_count: snapshot_count,
@@ -2922,6 +3119,13 @@ fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::respo
         provider: join.binding.provider.clone(),
         mode: live_current_mode_wire(),
         working_dir: snapshot_wd.to_string_lossy().to_string(),
+    });
+    // 连上来的第一帧携带权威运行状态：客户端不靠 replay 是否恰好包含终态，
+    // 也不靠轮询。重试中/已结束都能在重连时立即收敛。
+    head.push(LiveWireEvent::State {
+        running: join.turn_active,
+        stop_reason: None,
+        message: None,
     });
     let mut projector = NativeLiveWireProjector {
         session_id: join.binding.session_id.clone(),
@@ -2938,6 +3142,7 @@ fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::respo
         }
     }
     let binding_id = join.binding.id;
+    let sid_log = join.binding.session_id.clone();
     let mut rx = join.receiver;
     tokio::spawn(async move {
         loop {
@@ -2948,14 +3153,22 @@ fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::respo
                         observation.generation,
                         observation.event,
                     ) {
-                        if tx.send(w).is_err() {
-                            break;
+                        match tx.try_send(w) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    session_id = %sid_log,
+                                    "closing lagging hub /live stream subscriber"
+                                );
+                                break;
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                 }
                 Ok(_) => break,
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    let _ = tx.send(LiveWireEvent::Error {
+                    let _ = tx.try_send(LiveWireEvent::Error {
                         message: format!("live stream lagged by {skipped} events; reconnect"),
                     });
                     break;
@@ -2970,7 +3183,7 @@ fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::respo
         log_live_frame_size(&wire, frame.len());
         Ok::<_, std::convert::Infallible>(Event::default().data(frame))
     });
-    let live_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|wire| {
+    let live_stream = tokio_stream::wrappers::ReceiverStream::new(out_rx).map(|wire| {
         Ok::<_, std::convert::Infallible>(Event::default().data(live_wire_frame_json(&wire, false)))
     });
     let stream = head_stream.chain(live_stream);
@@ -3128,6 +3341,7 @@ fn text_carries_vl_caption(text: &str) -> bool {
 /// conversation, leaving the persisted snapshot image-less — AND at least one image exists.
 /// Both the `/live` and `/chat` VL-strip paths call this; the `/chat` path previously
 /// skipped it, so reloading clients (other users) saw only the "missing image" placeholder.
+#[cfg(test)]
 fn stash_vl_display_images(
     working_dir: &std::path::Path,
     session_id: &str,
@@ -3153,6 +3367,36 @@ fn stash_vl_display_images(
         })
         .collect();
     crate::append_display_images(working_dir, session_id, display);
+}
+
+/// Async wrapper around [`stash_vl_display_images`] that offloads sidecar directory
+/// creation and JSONL writes to `tokio::task::spawn_blocking`.
+async fn stash_vl_display_images_async(
+    working_dir: &std::path::Path,
+    session_id: &str,
+    runtime_text: &str,
+    original_images: &[ImageContent],
+) {
+    if !text_carries_vl_caption(runtime_text) || original_images.is_empty() {
+        return;
+    }
+    let wd = working_dir.to_path_buf();
+    let sid = session_id.to_string();
+    let display: Vec<crate::ImageData> = original_images
+        .iter()
+        .map(|image| crate::ImageData {
+            media_type: image.media_type.clone(),
+            data: image.data.clone(),
+            missing: false,
+        })
+        .collect();
+    let _ = crate::spawn_blocking_isolated(move || {
+        let _ = std::fs::create_dir_all(
+            jeikcode_capabilities::session::SessionManager::for_project(&wd).root(),
+        );
+        crate::append_display_images(&wd, &sid, display);
+    })
+    .await;
 }
 
 /// 对 live 输入做视觉预处理：主模型不支持视觉时，用 VL 模型把图片转文字拼进 caption
@@ -3215,19 +3459,27 @@ pub(crate) async fn live_message(
                 crate::native_live::session_draft_working_dir(&session_id)
             {
                 draft_dir
-            } else if let Ok(Some(resolved)) = crate::resolve_session_by_id(&session_id) {
-                PathBuf::from(resolved.meta.working_dir)
             } else {
-                live_current_working_dir(&working_dir)
+                let sid_lookup = session_id.clone();
+                if let Ok(Ok(Some(resolved))) = crate::spawn_blocking_isolated(move || {
+                    crate::resolve_session_by_id(&sid_lookup)
+                })
+                .await
+                {
+                    PathBuf::from(resolved.meta.working_dir)
+                } else {
+                    live_current_working_dir(&working_dir)
+                }
             };
             let registry =
                 jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
             if registry.handle(&session_id).is_none() {
+                let mode = live_session_approval_mode_async(Some(&session_id)).await;
                 if let Err(error) = crate::native_live::ensure_registry_runner(
                     wd.clone(),
                     state.telemetry.clone(),
                     bootstrap_provider.clone(),
-                    native_runtime_mode(live_session_approval_mode(Some(&session_id))),
+                    native_runtime_mode(mode),
                     session_id.clone(),
                 )
                 .await
@@ -3331,7 +3583,8 @@ pub(crate) async fn live_message(
                     state.telemetry.clone(),
                 )
                 .await;
-                stash_vl_display_images(&wd, &session_id, &runtime_text, &original_images);
+                stash_vl_display_images_async(&wd, &session_id, &runtime_text, &original_images)
+                    .await;
                 let (runtime_input, echo_input) =
                     split_live_inputs(req.message, original_images, runtime_text);
                 return match crate::native_live::submit_via_registry(
@@ -3369,11 +3622,12 @@ pub(crate) async fn live_message(
         }
     }
 
+    let mode = live_session_approval_mode_async(sid.as_deref()).await;
     let join = match crate::native_live::ensure_headless_runtime(
         live_current_working_dir(&working_dir),
         state.telemetry.clone(),
         bootstrap_provider,
-        native_runtime_mode(live_session_approval_mode(sid.as_deref())),
+        native_runtime_mode(mode),
         sid,
     )
     .await
@@ -3457,12 +3711,13 @@ pub(crate) async fn live_message(
     // VL preprocessing produced a caption ⇒ the runtime strips the image from the
     // conversation (it must never re-enter model context — see estimate_tokens). Stash the
     // originals in the display-only sidecar so a page refresh re-attaches the thumbnail.
-    stash_vl_display_images(
+    stash_vl_display_images_async(
         &join.binding.working_dir,
         &join.binding.session_id,
         &runtime_text,
         &original_images,
-    );
+    )
+    .await;
     let (runtime_input, echo_input) = split_live_inputs(req.message, original_images, runtime_text);
     match crate::native_live::submit_confirmed_with_echo(
         runtime_input,
@@ -3549,6 +3804,7 @@ pub(crate) async fn live_stop(
         crate::native_live::cancel_confirmed().await.is_ok()
     };
     if let Some(ref sid) = session_id {
+        jeikcode_capabilities::tools::task::cancel_subagents_for_session(sid);
         jeikcode_capabilities::tools::bash_runtime::cancel_foreground_live_bash_for_session(sid);
     }
     Json(serde_json::json!({ "accepted": accepted }))
@@ -3601,7 +3857,126 @@ fn model_config_ok(
     deferred: bool,
 ) -> Json<serde_json::Value> {
     crate::publish_model_config(session_id, Some(provider), None, deferred);
-    Json(serde_json::json!({ "ok": true, "deferred": deferred }))
+    Json(serde_json::json!({
+        "ok": true,
+        "deferred": deferred,
+        // Back-compat alias consumed by the WebUI selector.
+        "active_turn": deferred,
+    }))
+}
+
+fn model_config_queued(session_id: Option<&str>, provider: &str) -> Json<serde_json::Value> {
+    // Not deferred to the next TURN: the switch is accepted for the next model
+    // ROUND of the running turn. The UI must keep the selection and show a
+    // "switching at the next round" hint instead of rolling back.
+    crate::publish_model_config(session_id, Some(provider), None, false);
+    Json(serde_json::json!({
+        "ok": true,
+        "deferred": false,
+        "active_turn": true,
+        "queued": true,
+    }))
+}
+
+/// Queue a provider for the next kernel round without stopping the active turn.
+/// Returns `(requested_at, provider_name, model)` for the ops log/UI.
+async fn queue_runtime_model_switch(
+    handle: &jeikcode_coding::CodingRuntimeHandle,
+    runtime_config: &jeikcode_coding::CodingRuntimeConfig,
+) -> Result<(u64, String, String), jeikcode_coding::RuntimeError> {
+    let next = crate::kernel_runtime::coding_config_from_runtime(runtime_config);
+    let provider_name = next.provider_name.clone();
+    let model = next.model.clone();
+    let requested_at = handle
+        .swap_provider_for_next_round(next, provider_name.clone(), model.clone())
+        .await?;
+    Ok((requested_at, provider_name, model))
+}
+
+/// 若已开启运行中切换模型，则在活跃运行态上排队登记下一小轮的模型切换。
+async fn try_queue_active_runtime_switch(
+    handle: &jeikcode_coding::CodingRuntimeHandle,
+    config: &Config,
+    provider_selection: &str,
+    requested_provider: &str,
+    requested_fingerprint: Option<&str>,
+    working_dir: &std::path::Path,
+    session_id: Option<&str>,
+    telemetry: Arc<crate::Telemetry>,
+    record_registry_fp: bool,
+) -> Json<serde_json::Value> {
+    if crate::api_config::runtime_model_switch_enabled() {
+        if let Some(sid) = session_id {
+            let mut runtime_config =
+                chat_runtime_config(config, provider_selection, working_dir, telemetry);
+            apply_session_effort_override(&mut runtime_config, working_dir, Some(sid));
+            if let Ok((requested_at, provider_name, model)) =
+                queue_runtime_model_switch(handle, &runtime_config).await
+            {
+                log_model_switch_queued_async(
+                    working_dir.to_path_buf(),
+                    sid.to_string(),
+                    provider_name,
+                    model,
+                    requested_at,
+                )
+                .await;
+                if record_registry_fp {
+                    jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                        .set_provider_fingerprint(
+                            &sid.to_string(),
+                            requested_fingerprint.map(str::to_string),
+                        );
+                }
+                return model_config_queued(Some(sid), requested_provider);
+            }
+        }
+    }
+    model_config_ok(session_id, requested_provider, true)
+}
+
+async fn log_model_switch_queued_async(
+    working_dir: std::path::PathBuf,
+    session_id: String,
+    provider: String,
+    model: String,
+    requested_at: u64,
+) {
+    let _ = crate::spawn_blocking_isolated(move || {
+        log_model_switch_queued(&working_dir, &session_id, &provider, &model, requested_at);
+    })
+    .await;
+}
+
+fn log_model_switch_queued(
+    working_dir: &std::path::Path,
+    session_id: &str,
+    provider: &str,
+    model: &str,
+    requested_at: u64,
+) {
+    let manager = jeikcode_capabilities::session::SessionManager::for_project(working_dir);
+    let record = jeikcode_capabilities::session::ModelSwitchRecord {
+        v: jeikcode_capabilities::session::MODEL_SWITCH_VERSION,
+        provider: provider.to_string(),
+        model: model.to_string(),
+        status: "queued".to_string(),
+        requested_at,
+        applied_at: None,
+        message_id: None,
+        wait_ms: None,
+    };
+    if let Err(error) = manager.append_model_switch(session_id, &record) {
+        tracing::warn!(%error, %session_id, "failed to append queued model-switch log");
+    } else {
+        tracing::info!(
+            %session_id,
+            %provider,
+            %model,
+            requested_at,
+            "runtime model switch queued for the next round"
+        );
+    }
 }
 
 pub(crate) async fn live_provider(
@@ -3695,9 +4070,30 @@ pub(crate) async fn live_provider(
                 return model_config_ok(requested_session_id.as_deref(), &requested_provider, false)
             }
             // A turn is running: reassembling the provider would hard-kill it and drop
-            // the interrupted turn's context. The selection is already persisted to the
-            // session metadata, so accept it as deferred instead of rolling the UI back.
+            // the interrupted turn's context. With `runtime_model_switch` enabled the
+            // user asked to keep this turn alive and switch at the NEXT model round
+            // (same conversation); otherwise the selection stays deferred to the next
+            // turn exactly as before.
             Err(crate::live_hub::HubError::ActiveTurn) => {
+                if let Some(sid) = requested_session_id.as_deref() {
+                    if let Some(handle) =
+                        jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                            .handle(&sid.to_string())
+                    {
+                        return try_queue_active_runtime_switch(
+                            &handle,
+                            &config,
+                            &req.provider,
+                            &requested_provider,
+                            Some(&requested_fingerprint),
+                            &join.binding.working_dir,
+                            Some(sid),
+                            state.telemetry.clone(),
+                            true,
+                        )
+                        .await;
+                    }
+                }
                 return model_config_ok(requested_session_id.as_deref(), &requested_provider, true);
             }
             // View identity drifted from the execution session (e.g. `/webui`
@@ -3717,35 +4113,71 @@ pub(crate) async fn live_provider(
     }
 
     // Hub VIEW is on another session (or unbound), but this process still owns
-    // the unique runtime — typical TUI `/webui` then WebUI sidebar back onto
-    // that TUI session. Reload that handle instead of returning ok and letting
-    // the next `/chat` spawn a second runtime (SessionInUse).
-    let unique = requested_session_id
+    // a session runtime — either via `SessionRuntimeRegistry` (TUI / shared view)
+    // or directly inside `ActiveChatRegistry` (pure WebUI `/chat` turn).
+    let (handle, registry_managed) = match requested_session_id
         .as_deref()
-        .and_then(crate::native_live::existing_runner_handle);
-    let Some(handle) = unique else {
-        return model_config_ok(requested_session_id.as_deref(), &requested_provider, false);
+        .and_then(crate::native_live::existing_runner_handle)
+    {
+        Some(handle) => (handle, true),
+        None => match requested_session_id.as_deref() {
+            Some(sid) => match state.active_chats.runtime_handle(sid).await {
+                Some(handle) => (handle, false),
+                None => {
+                    return model_config_ok(
+                        requested_session_id.as_deref(),
+                        &requested_provider,
+                        false,
+                    );
+                }
+            },
+            None => {
+                return model_config_ok(
+                    requested_session_id.as_deref(),
+                    &requested_provider,
+                    false,
+                );
+            }
+        },
     };
-    let cached_fp = requested_session_id.as_deref().and_then(|id| {
-        jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-            .provider_fingerprint(&id.to_string())
-    });
-    if cached_fp.as_deref() == Some(requested_fingerprint.as_str()) {
-        return model_config_ok(requested_session_id.as_deref(), &requested_provider, false);
+    if registry_managed {
+        let cached_fp = requested_session_id.as_deref().and_then(|id| {
+            jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                .provider_fingerprint(&id.to_string())
+        });
+        if cached_fp.as_deref() == Some(requested_fingerprint.as_str()) {
+            return model_config_ok(requested_session_id.as_deref(), &requested_provider, false);
+        }
     }
     match handle.status().phase {
         jeikcode_coding::RuntimePhase::InTurn
         | jeikcode_coding::RuntimePhase::WaitingApproval
         | jeikcode_coding::RuntimePhase::Reconfiguring => {
-            return model_config_ok(requested_session_id.as_deref(), &requested_provider, true);
+            return try_queue_active_runtime_switch(
+                &handle,
+                &config,
+                &req.provider,
+                &requested_provider,
+                Some(&requested_fingerprint),
+                &working_dir,
+                requested_session_id.as_deref(),
+                state.telemetry.clone(),
+                registry_managed,
+            )
+            .await;
         }
         _ => {}
     }
-    let runtime_config = chat_runtime_config(
+    let mut runtime_config = chat_runtime_config(
         &config,
         &req.provider,
         &working_dir,
         state.telemetry.clone(),
+    );
+    apply_session_effort_override(
+        &mut runtime_config,
+        &working_dir,
+        requested_session_id.as_deref(),
     );
     match handle
         .reassemble_provider(crate::kernel_runtime::coding_config_from_runtime(
@@ -3754,14 +4186,30 @@ pub(crate) async fn live_provider(
         .await
     {
         Ok(_) => {
-            if let Some(session_id) = requested_session_id.as_deref() {
-                jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                    .set_provider_fingerprint(&session_id.to_string(), Some(requested_fingerprint));
+            if registry_managed {
+                if let Some(session_id) = requested_session_id.as_deref() {
+                    jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                        .set_provider_fingerprint(
+                            &session_id.to_string(),
+                            Some(requested_fingerprint),
+                        );
+                }
             }
             model_config_ok(requested_session_id.as_deref(), &requested_provider, false)
         }
         Err(jeikcode_coding::RuntimeError::Busy) => {
-            model_config_ok(requested_session_id.as_deref(), &requested_provider, true)
+            try_queue_active_runtime_switch(
+                &handle,
+                &config,
+                &req.provider,
+                &requested_provider,
+                Some(&requested_fingerprint),
+                &working_dir,
+                requested_session_id.as_deref(),
+                state.telemetry.clone(),
+                registry_managed,
+            )
+            .await
         }
         Err(error) => Json(serde_json::json!({
             "ok": false,
@@ -3790,7 +4238,7 @@ pub(crate) struct ApprovalModeQuery {
     pub session_id: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub(crate) struct ApprovalModeResp {
     pub ok: bool,
     pub mode: ApprovalMode,
@@ -3801,9 +4249,10 @@ pub(crate) struct ApprovalModeResp {
 pub(crate) async fn approval_mode_get(
     axum::extract::Query(query): axum::extract::Query<ApprovalModeQuery>,
 ) -> impl IntoResponse {
+    let mode = live_session_approval_mode_async(query.session_id.as_deref()).await;
     Json(ApprovalModeResp {
         ok: true,
-        mode: live_session_approval_mode(query.session_id.as_deref()),
+        mode,
         global: live_global_mode_enabled(),
     })
 }
@@ -3849,11 +4298,12 @@ pub(crate) async fn approval_mode_set(
     State(state): State<AppState>,
     Json(req): Json<LiveModeReq>,
 ) -> impl IntoResponse {
-    let session_id = req.session_id.as_deref();
+    let session_id = req.session_id.clone();
     let ok = apply_mode_request(&state, &req).await;
+    let mode = live_session_approval_mode_async(session_id.as_deref()).await;
     Json(ApprovalModeResp {
         ok,
-        mode: live_session_approval_mode(session_id),
+        mode,
         global: live_global_mode_enabled(),
     })
 }
@@ -3865,6 +4315,7 @@ pub(crate) async fn approval_mode_set(
 /// 正在运行的 runner，保证后台会话不被全局态残留污染。
 async fn apply_mode_request(state: &AppState, req: &LiveModeReq) -> bool {
     let was_global = live_global_mode_enabled();
+    let was_global_mode = live_current_approval_mode();
     if let Some(enabled) = req.global {
         live_set_global_mode_enabled(enabled, Some(req.mode));
     }
@@ -3876,7 +4327,27 @@ async fn apply_mode_request(state: &AppState, req: &LiveModeReq) -> bool {
     };
     let ok = apply_live_mode_scoped(scope, req.mode).await;
 
-    if req.global.is_some() && was_global != now_global {
+    // The live pill and the system-settings dialog must converge on ONE durable
+    // authority. Previously only the dialog wrote `desktop-settings.json`, so a
+    // refresh/restart re-ran the old policy and silently reverted the pill.
+    // Write on the toggle itself and whenever the global mode changes while the
+    // override is active; session-scoped switches stay in session meta only.
+    if req.global.is_some() || (now_global && req.mode != was_global_mode) {
+        let policy = if now_global { "global" } else { "memory" };
+        let persisted_mode = req.mode;
+        if let Ok(saved) = crate::spawn_blocking_isolated(move || {
+            crate::api_config::persist_agent_mode_policy(policy, persisted_mode)
+        })
+        .await
+        {
+            crate::publish_global(crate::GlobalWireEvent::DesktopSettingsChanged {
+                settings: saved,
+            });
+        }
+    }
+
+    let global_mode_changed = now_global && req.mode != was_global_mode;
+    if (req.global.is_some() && was_global != now_global) || global_mode_changed {
         if !now_global {
             // 关闭全局：把每个会话原本记录的模式重新下发给各自的 runner。
             reapply_per_session_modes().await;
@@ -3888,28 +4359,83 @@ async fn apply_mode_request(state: &AppState, req: &LiveModeReq) -> bool {
     }
 
     if req.mode == ApprovalMode::Auto {
-        match scope {
-            Some(sid) => {
-                state
-                    .pending_permissions
-                    .deliver_all_for_session(sid.trim(), PermissionDecision::AllowOnce);
+        clear_pending_permissions_on_auto(state, scope).await;
+    }
+    ok
+}
+
+async fn clear_pending_permissions_on_auto(state: &AppState, scope: Option<&str>) {
+    match scope {
+        Some(sid) => {
+            let sid_trimmed = sid.trim().to_string();
+            state
+                .pending_permissions
+                .deliver_all_for_session(&sid_trimmed, PermissionDecision::AllowOnce);
+            let _ = crate::spawn_blocking_isolated(move || {
                 jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
-                    sid.trim(),
+                    &sid_trimmed,
                 );
-            }
-            None => {
-                state
-                    .pending_permissions
-                    .deliver_all(PermissionDecision::AllowOnce);
-                if let Ok(binding) = crate::native_live::binding() {
+            })
+            .await;
+        }
+        None => {
+            state
+                .pending_permissions
+                .deliver_all(PermissionDecision::AllowOnce);
+            if let Ok(binding) = crate::native_live::binding() {
+                let sid = binding.session_id.clone();
+                let _ = crate::spawn_blocking_isolated(move || {
                     jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
-                        &binding.session_id,
+                        &sid,
                     );
-                }
+                })
+                .await;
             }
         }
     }
-    ok
+}
+
+/// 进程冷启动初始化：读取 `~/.jeikcode/desktop-settings.json` 中的 Agent 模式策略。
+/// `agent_mode_policy == "global"` 时开启全局统一模式；否则以记忆模式启动（关闭全局覆盖，
+/// 各会话按自身 `meta.approval_mode` 恢复，新会话回落为 Build）。
+pub(crate) fn init_agent_mode_from_desktop_settings() {
+    let settings = crate::api_config::load_desktop_settings_payload();
+    if settings.agent_mode_policy == "global" {
+        let mode = parse_approval_mode_wire(Some(&settings.agent_global_mode))
+            .unwrap_or(ApprovalMode::Build);
+        live_set_global_mode_enabled(true, Some(mode));
+    } else {
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+    }
+}
+
+/// 保存系统设置中的 Agent 模式策略后立即生效，并向全部实例广播 `ModeGlobal` 状态。
+pub(crate) async fn apply_persisted_agent_mode_policy(
+    state: &AppState,
+    policy: &str,
+    global_mode_wire: &str,
+) {
+    let is_global = policy.trim().eq_ignore_ascii_case("global");
+    let target_mode =
+        parse_approval_mode_wire(Some(global_mode_wire)).unwrap_or(ApprovalMode::Build);
+    if is_global {
+        live_set_global_mode_enabled(true, Some(target_mode));
+        let _ = apply_live_mode_scoped(None, target_mode).await;
+        if target_mode == ApprovalMode::Auto {
+            clear_pending_permissions_on_auto(state, None).await;
+        }
+    } else {
+        live_set_global_mode_enabled(false, None);
+        reapply_per_session_modes().await;
+    }
+    crate::publish_global(crate::GlobalWireEvent::ModeGlobal {
+        enabled: is_global,
+        mode: if is_global {
+            target_mode.wire().to_string()
+        } else {
+            live_current_approval_mode().wire().to_string()
+        },
+    });
 }
 
 /// 关闭全局开关后，把各会话恢复为自己的模式（仅影响正在运行的 runner）。
@@ -3919,12 +4445,20 @@ async fn reapply_per_session_modes() {
     let registry = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
     for entry in registry.list_all() {
         if let Some(handle) = registry.handle(&entry.session_id) {
-            let mode = live_session_approval_mode_in_dir(&entry.working_dir, &entry.session_id);
+            let mode = live_session_approval_mode_in_dir_async(
+                entry.working_dir.clone(),
+                entry.session_id.clone(),
+            )
+            .await;
             let _ = handle.set_mode(native_runtime_mode(mode)).await;
         }
     }
     if let Ok(binding) = crate::native_live::binding() {
-        let mode = live_session_approval_mode_in_dir(&binding.working_dir, &binding.session_id);
+        let mode = live_session_approval_mode_in_dir_async(
+            binding.working_dir.clone(),
+            binding.session_id.clone(),
+        )
+        .await;
         let _ = crate::native_live::set_mode(native_runtime_mode(mode)).await;
     }
 }
@@ -3941,11 +4475,12 @@ pub(crate) async fn live_mode(
     State(state): State<AppState>,
     Json(req): Json<LiveModeReq>,
 ) -> impl IntoResponse {
-    let session_id = req.session_id.as_deref();
+    let session_id = req.session_id.clone();
     let ok = apply_mode_request(&state, &req).await;
+    let mode = live_session_approval_mode_async(session_id.as_deref()).await;
     Json(ApprovalModeResp {
         ok,
-        mode: live_session_approval_mode(session_id),
+        mode,
         global: live_global_mode_enabled(),
     })
 }
@@ -4398,6 +4933,9 @@ pub(crate) async fn live_mcp_trust(State(state): State<AppState>) -> impl IntoRe
                 Ok(_) => crate::native_live::reload_capabilities().await.is_ok(),
                 Err(_) => true,
             };
+            crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged {
+                working_dir: Some(working_dir.to_string_lossy().to_string()),
+            });
             Json(serde_json::json!({
                 "ok": reloaded,
                 "trusted": true,
@@ -4922,6 +5460,153 @@ mod tests {
             }
             other => panic!("expected SessionMode event, got: {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persisted_agent_mode_policy_applies_broadcasts_and_cold_starts() {
+        let home = crate::tests::ScopedChatHome::new();
+        let _mode_guard = ScopedApprovalModeForTest::new();
+        let state = crate::tests::chat_test_state(&home);
+        let mut global_rx = crate::global_events().subscribe();
+
+        // 保存“全局模式 = plan”，当场生效并广播 ModeGlobal(enabled=true, mode="plan")。
+        crate::api_config::post_desktop_settings(
+            axum::extract::State(state.clone()),
+            axum::Json(crate::api_config::DesktopSettingsUpdate {
+                close_action: None,
+                agent_mode_policy: Some("global".to_string()),
+                agent_global_mode: Some("plan".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert!(live_global_mode_enabled());
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Plan);
+
+        let mut saw_global_plan = false;
+        while let Ok(Ok(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), global_rx.recv()).await
+        {
+            if matches!(
+                ev,
+                crate::GlobalWireEvent::ModeGlobal {
+                    enabled: true,
+                    ref mode
+                } if mode == "plan"
+            ) {
+                saw_global_plan = true;
+                break;
+            }
+        }
+        assert!(
+            saw_global_plan,
+            "saving global agent mode policy must broadcast ModeGlobal(enabled=true, mode=plan)"
+        );
+
+        // 模拟进程大退冷启动：重置内存状态后再调用 init_agent_mode_from_desktop_settings()。
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+        init_agent_mode_from_desktop_settings();
+        assert!(live_global_mode_enabled());
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Plan);
+
+        // 切回“记忆模式”：保存后当场关闭全局覆盖并广播 ModeGlobal(enabled=false)。
+        crate::api_config::post_desktop_settings(
+            axum::extract::State(state),
+            axum::Json(crate::api_config::DesktopSettingsUpdate {
+                close_action: None,
+                agent_mode_policy: Some("memory".to_string()),
+                agent_global_mode: None,
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert!(!live_global_mode_enabled());
+        let mut saw_memory_switch = false;
+        while let Ok(Ok(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), global_rx.recv()).await
+        {
+            if matches!(
+                ev,
+                crate::GlobalWireEvent::ModeGlobal { enabled: false, .. }
+            ) {
+                saw_memory_switch = true;
+                break;
+            }
+        }
+        assert!(
+            saw_memory_switch,
+            "saving memory agent mode policy must broadcast ModeGlobal(enabled=false)"
+        );
+
+        // 冷启动再次以记忆模式启动（global=false）。
+        live_set_global_mode_enabled(true, Some(ApprovalMode::Auto));
+        init_agent_mode_from_desktop_settings();
+        assert!(!live_global_mode_enabled());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn approval_mode_global_toggle_persists_and_survives_cold_start() {
+        let home = crate::tests::ScopedChatHome::new();
+        let _mode_guard = ScopedApprovalModeForTest::new();
+        let state = crate::tests::chat_test_state(&home);
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+
+        // The bottom-bar pill toggles the global override through `/approval_mode`;
+        // it must write the same desktop-settings.json policy as the dialog.
+        let _ = approval_mode_set(
+            axum::extract::State(state.clone()),
+            axum::Json(LiveModeReq {
+                mode: ApprovalMode::Plan,
+                session_id: None,
+                global: Some(true),
+            }),
+        )
+        .await;
+        let path = home.path().join("desktop-settings.json");
+        let saved = crate::api_config::load_desktop_settings_payload_at(&path);
+        assert_eq!(saved.agent_mode_policy, "global");
+        assert_eq!(saved.agent_global_mode, "plan");
+        assert!(live_global_mode_enabled());
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Plan);
+
+        // A mode switch while the override stays on updates the durable default.
+        let _ = approval_mode_set(
+            axum::extract::State(state.clone()),
+            axum::Json(LiveModeReq {
+                mode: ApprovalMode::Auto,
+                session_id: Some("ignored-while-global".into()),
+                global: None,
+            }),
+        )
+        .await;
+        let saved = crate::api_config::load_desktop_settings_payload_at(&path);
+        assert_eq!(saved.agent_mode_policy, "global");
+        assert_eq!(saved.agent_global_mode, "bypass");
+
+        // Cold start must restore the override + mode from disk, not the process default.
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+        init_agent_mode_from_desktop_settings();
+        assert!(live_global_mode_enabled());
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Auto);
+
+        // Turning the override off persists the memory policy: refresh/restart keeps it off.
+        let _ = approval_mode_set(
+            axum::extract::State(state),
+            axum::Json(LiveModeReq {
+                mode: ApprovalMode::Auto,
+                session_id: None,
+                global: Some(false),
+            }),
+        )
+        .await;
+        let saved = crate::api_config::load_desktop_settings_payload_at(&path);
+        assert_eq!(saved.agent_mode_policy, "memory");
+
+        live_set_global_mode_enabled(true, Some(ApprovalMode::Plan));
+        init_agent_mode_from_desktop_settings();
+        assert!(!live_global_mode_enabled());
     }
 
     #[tokio::test]

@@ -26,7 +26,13 @@ export function DesktopClosePromptDialog() {
     setOpen(false);
     if (action === 'tray') {
       if (remember) {
-        void postDesktopSettings({ close_action: action }).catch(() => {});
+        // Persist BEFORE the native action so the daemon (single writer for the
+        // merged settings document) has already committed `close_action`.
+        try {
+          await postDesktopSettings({ close_action: action });
+        } catch {
+          /* ignore */
+        }
         try {
           window.open('http://tauri.localhost/__desktop_action/set_close_action?action=tray', '_blank');
         } catch {
@@ -121,7 +127,6 @@ export function DesktopClosePromptDialog() {
               fontSize: '24px',
             }}
           >
-            🖥️
           </div>
           <h3 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600 }}>
             {t('desktop.closePromptTitle') || '关闭 JeikCode'}

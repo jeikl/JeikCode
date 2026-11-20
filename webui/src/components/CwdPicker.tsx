@@ -14,9 +14,15 @@ interface CwdPickerProps {
   onClose: () => void;
   /** Overrides the default "switch directory" title (add-project flow). */
   title?: string;
+  /** 若设为 true，确认时只回调 onPick 而不调用 changeDir 切换当前全局工作目录 */
+  skipChangeDir?: boolean;
+  /** 可选自定义副标题说明 */
+  subtitle?: string;
+  /** 可选外层遮罩附加样式类（如嵌套弹窗层级置顶） */
+  overlayClass?: string;
 }
 
-export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
+export function CwdPicker({ current, onPick, onClose, title, skipChangeDir, subtitle, overlayClass }: CwdPickerProps) {
   const t = useT();
   // 遮罩空白处点击关闭：避免弹窗内拖拽划词（左滑选中）时被误判为外部点击而秒关。
   const backdropDismiss = useBackdropDismiss(onClose);
@@ -134,11 +140,13 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
     if (!finalPath) return;
     setConfirming(true);
     try {
-      await changeDir(finalPath);
+      if (!skipChangeDir) {
+        await changeDir(finalPath);
+      }
       onPick(finalPath);
       onClose();
     } catch {
-      // Best-effort; still switch cwd locally
+      // Best-effort; still pass picked path locally
       onPick(finalPath);
       onClose();
     } finally {
@@ -159,15 +167,15 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
   function getShortcutIcon(id: string) {
     switch (id) {
       case 'home':
-        return '🏠';
+        return '~';
       case 'desktop':
-        return '🖥️';
+        return 'dt';
       case 'downloads':
-        return '📥';
+        return '↓';
       case 'documents':
-        return '📄';
+        return 'doc';
       default:
-        return '📁';
+        return '/';
     }
   }
 
@@ -180,14 +188,13 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
 
   return (
     <div
-      class="modal-overlay"
+      class={'modal-overlay' + (overlayClass ? ` ${overlayClass}` : '')}
       {...backdropDismiss}
     >
       <div class="modal-card cwd-picker-modal">
         <div class="modal-header">
-          <span>📁</span>
           <h3>{title || t('cwd.title')}</h3>
-          <span class="modal-sub" style="margin-left:auto">{t('cwd.affectsSession')}</span>
+          <span class="modal-sub" style="margin-left:auto">{subtitle ?? t('cwd.affectsSession')}</span>
         </div>
 
         <div class="modal-body">
@@ -229,7 +236,6 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
                   title={`${t('cwd.drives')}: ${d}`}
                   onClick={() => handleDriveClick(d)}
                 >
-                  <span>💽</span>
                   <span>{d}</span>
                 </button>
               ))}
@@ -270,7 +276,7 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
             {/* Instant Filter Bar */}
             {dirs.length > 5 && (
               <div class="dir-filter-bar">
-                <span style="opacity:0.6;font-size:11px;">🔍</span>
+                <span style="opacity:0.6;font-size:11px;">/</span>
                 <input
                   type="text"
                   class="dir-filter-input"
@@ -310,7 +316,7 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
               {!dirLoading &&
                 filteredDirs.map((d) => (
                   <button key={d} class="dir-item" onClick={() => handleSubdirClick(d)}>
-                    <span>📁</span>
+                    <span>/</span>
                     <span>{d}</span>
                   </button>
                 ))}

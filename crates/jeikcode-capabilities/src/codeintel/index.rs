@@ -17,6 +17,7 @@ use super::symbols::{
     extract_call_sites_from_tree, extract_symbols_from_tree, parse_source, CallSite, Symbol,
 };
 use super::{path_for_display, path_matches_scope};
+use crate::ignore_policy::IgnorePolicy;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -1134,69 +1135,13 @@ fn max_index_file_bytes(path: &Path) -> u64 {
     }
 }
 
-fn load_codegraph_ignore(root: &Path) -> ignore::gitignore::Gitignore {
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
-    let cfg = crate::paths::config_dir();
-    for p in [
-        // `.codegraphignore` = noise rules shared with glob/grep search;
-        // `.codegraphignore.graph` = sensitive rules (`.env*`, keys, SSH), applied to
-        // code graph indexing and as the default glob/grep exclusion. `include_ignored`
-        // never exposes them; `include_sensitive` is approval-gated.
-        root.join(".codegraphignore"),
-        root.join(".codegraignore"),
-        root.join(".codegraphignore.graph"),
-        root.join(".codegraignore.graph"),
-        root.join(".jeikcode").join(".codegraphignore"),
-        root.join(".jeikcode").join(".codegraphignore.graph"),
-        cfg.join(".codegraphignore"),
-        cfg.join(".codegraignore"),
-        cfg.join(".codegraphignore.graph"),
-        cfg.join(".codegraignore.graph"),
-    ] {
-        if p.is_file() {
-            let _ = builder.add(&p);
-        }
-    }
-    builder.build().unwrap_or_else(|_| {
-        ignore::gitignore::GitignoreBuilder::new(root)
-            .build()
-            .expect("empty gitignore")
-    })
-}
-
-/// The sensitive list must keep credentials out of indexing and default search while the
-/// shared noise list stays search-visible (see `assets/.codegraphignore.graph`).
-#[cfg(test)]
-mod graph_ignore_scope_tests {
-    use super::load_codegraph_ignore;
-
-    #[test]
-    fn graph_only_list_hides_credentials_from_indexing() {
-        let d = tempfile::tempdir().unwrap();
-        std::fs::write(
-            d.path().join(".codegraphignore.graph"),
-            include_str!("../../assets/.codegraphignore.graph"),
-        )
-        .unwrap();
-        std::fs::create_dir_all(d.path().join("src")).unwrap();
-        let gi = load_codegraph_ignore(d.path());
-        for hidden in [".env", ".env.local", "id_rsa", ".ssh"] {
-            assert!(
-                gi.matched(d.path().join(hidden), hidden == ".ssh")
-                    .is_ignore(),
-                "graph must not index {hidden}"
-            );
-        }
-        assert!(
-            !gi.matched(d.path().join("src/main.rs"), false).is_ignore(),
-            "source files must stay indexed"
-        );
-    }
-}
-
-fn codegraph_ignored(gi: &ignore::gitignore::Gitignore, root: &Path, path: &Path) -> bool {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    gi.matched_path_or_any_parents(rel, false).is_ignore()
+fn skip_index_file(_root: &Path, path: &Path, len: u64, policy: &IgnorePolicy) -> bool {
+    is_generated_source(path)
+        || path_under_skip_dir(path)
+        || policy.is_ignored_for_graph(path)
+        || len == 0
+        || len > max_index_file_bytes(path)
+        || is_minified_web_bundle(path, len)
 }
 
 /// One-line UMD/`lib/index.js` kits are not named `*.min.js` but still explode
@@ -1221,15 +1166,6 @@ fn is_minified_web_bundle(path: &Path, len: u64) -> bool {
         return false;
     };
     n > 0 && buf[..n].iter().filter(|&&b| b == b'\n').count() < 4
-}
-
-fn skip_index_file(root: &Path, path: &Path, len: u64, gi: &ignore::gitignore::Gitignore) -> bool {
-    is_generated_source(path)
-        || path_under_skip_dir(path)
-        || codegraph_ignored(gi, root, path)
-        || len == 0
-        || len > max_index_file_bytes(path)
-        || is_minified_web_bundle(path, len)
 }
 
 /// Generated / designer C# sources — huge and low value for call-graph tools.
@@ -1361,15 +1297,22 @@ fn discover_all_git_roots(workspace: &Path) -> Vec<PathBuf> {
 
 /// Walk `root` (assumed already canonical) for indexable source files + staleness inputs.
 fn collect_files(root: &Path) -> Vec<Walked> {
+    let policy = IgnorePolicy::load_deep(root);
+    collect_files_with_policy(root, &policy)
+}
+
+/// Same walk, but reuse the workspace policy. Used by the warm `discover_new_files`
+/// path: treating a freshly-created subdirectory as a new ignore-policy root would
+/// silently drop workspace-level `.codegraphignore` / `.jeikcode` rules.
+fn collect_files_with_policy(root: &Path, policy: &IgnorePolicy) -> Vec<Walked> {
     let git_roots = discover_all_git_roots(root);
     if !git_roots.is_empty() {
         use std::collections::HashSet;
-        let gi = load_codegraph_ignore(root);
         let mut all_files = Vec::new();
         let mut seen = HashSet::new();
 
         for gr in &git_roots {
-            if let Some(files) = collect_files_via_git_root(root, gr, &gi) {
+            if let Some(files) = collect_files_via_git_root(root, gr, policy) {
                 for w in files {
                     if seen.insert(w.path.clone()) {
                         all_files.push(w);
@@ -1381,7 +1324,7 @@ fn collect_files(root: &Path) -> Vec<Walked> {
         // If root itself has no .git, or if some subtrees are outside git roots,
         // use fallback walk to pick up loose un-git'd files in the workspace.
         if !root.join(".git").exists() {
-            let fallback_files = collect_files_fallback(root);
+            let fallback_files = collect_files_fallback(root, policy);
             for w in fallback_files {
                 if seen.insert(w.path.clone()) {
                     all_files.push(w);
@@ -1395,13 +1338,13 @@ fn collect_files(root: &Path) -> Vec<Walked> {
         }
     }
 
-    collect_files_fallback(root)
+    collect_files_fallback(root, policy)
 }
 
 fn collect_files_via_git_root(
     workspace_root: &Path,
     git_root: &Path,
-    gi: &ignore::gitignore::Gitignore,
+    policy: &IgnorePolicy,
 ) -> Option<Vec<Walked>> {
     let mut cmd = std::process::Command::new("git");
     cmd.args(&[
@@ -1445,7 +1388,7 @@ fn collect_files_via_git_root(
                 return None;
             }
             let len = md.len();
-            if skip_index_file(workspace_root, &full_p, len, gi) {
+            if skip_index_file(workspace_root, &full_p, len, policy) {
                 return None;
             }
             let mtime_ns = md
@@ -1466,8 +1409,9 @@ fn collect_files_via_git_root(
     Some(out)
 }
 
-fn collect_files_fallback(root: &Path) -> Vec<Walked> {
+fn collect_files_fallback(root: &Path, policy: &IgnorePolicy) -> Vec<Walked> {
     let mut out = Vec::new();
+    let policy_filter = policy.clone();
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(true)
@@ -1475,7 +1419,9 @@ fn collect_files_fallback(root: &Path) -> Vec<Walked> {
         .git_global(true)
         .git_exclude(true)
         .add_custom_ignore_filename(".codegraphignore")
-        .add_custom_ignore_filename(".codegraignore");
+        .add_custom_ignore_filename(".codegraignore")
+        .add_custom_ignore_filename(".codegraphignore.graph")
+        .add_custom_ignore_filename(".codegraignore.graph");
 
     // Add global ignore files if present (~/.jeikcode/.codegraphignore, ~/.jeikcode/.codegraignore)
     let global_config = crate::paths::config_dir();
@@ -1488,17 +1434,29 @@ fn collect_files_fallback(root: &Path) -> Vec<Walked> {
         builder.add_ignore(global_ignore2);
     }
 
-    // Also check .jeikcode/.codegraphignore inside project root
+    // Also check the project `.jeikcode` and sensitive scopes. The per-file
+    // policy check below is authoritative; these walker rules keep directory
+    // pruning cheap and cover nested `.codegraphignore` files.
     let project_jeikcode_ignore = root.join(".jeikcode").join(".codegraphignore");
     if project_jeikcode_ignore.is_file() {
         builder.add_ignore(project_jeikcode_ignore);
     }
+    let project_jeikcode_sensitive = root.join(".jeikcode").join(".codegraphignore.graph");
+    if project_jeikcode_sensitive.is_file() {
+        builder.add_ignore(project_jeikcode_sensitive);
+    }
+    for name in [".codegraphignore.graph", ".codegraignore.graph"] {
+        let path = global_config.join(name);
+        if path.is_file() {
+            builder.add_ignore(path);
+        }
+    }
 
     for entry in builder
-        .filter_entry(|e| {
+        .filter_entry(move |e| {
             // Prune known build/vendor directories early (gitignore may be missing).
             if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                !should_prune_index_dir(e.path())
+                !should_prune_index_dir(e.path()) && !policy_filter.is_ignored_for_graph(e.path())
             } else {
                 true
             }
@@ -1523,7 +1481,7 @@ fn collect_files_fallback(root: &Path) -> Vec<Walked> {
         }
         let md = entry.metadata().ok();
         let len = md.as_ref().map(|m| m.len()).unwrap_or(0);
-        if len == 0 || len > max_index_file_bytes(p) || is_minified_web_bundle(p, len) {
+        if skip_index_file(root, p, len, policy) {
             continue;
         }
         let mtime_ns = md
@@ -1709,6 +1667,11 @@ pub struct FileUnit {
     pub len: u64,
     pub nodes: Vec<SymbolNode>,
     pub calls: Vec<RawCall>,
+    /// True when the file was read/parsed unsuccessfully and produced an empty
+    /// tombstone. Not persisted: the next reconcile must retry the file instead
+    /// of treating the empty unit as "known and clean" forever.
+    #[serde(skip)]
+    pub parse_failed: bool,
 }
 
 /// In-memory workspace index loaded from SQLite (`index.v1.db`).
@@ -1727,6 +1690,27 @@ fn units_from_disk(units: HashMap<String, FileUnit>) -> HashMap<PathBuf, FileUni
         .into_iter()
         .map(|(p, u)| (normalize_index_path(&PathBuf::from(p)), u))
         .collect()
+}
+
+/// Migrate legacy empty tombstones created before `parse_failed` existed.
+/// A disk-loaded unit with no nodes/calls for a non-empty, supported code file
+/// may have been produced by a transient read/parse failure; retry it once.
+fn heal_empty_code_units(units: &mut HashMap<PathBuf, FileUnit>) {
+    for (path, unit) in units.iter_mut() {
+        if unit.parse_failed || unit.len == 0 || !unit.nodes.is_empty() || !unit.calls.is_empty() {
+            continue;
+        }
+        if Lang::detect(path).is_some_and(|lang| lang.is_indexed()) {
+            unit.parse_failed = true;
+        }
+    }
+}
+
+/// A persisted graph is only reusable when it covers every persisted unit.
+/// A crash/partial write can save a new unit without refreshing the graph blob;
+/// reusing that graph would make the new file invisible until touch/init.
+fn graph_covers_units(units: &HashMap<PathBuf, FileUnit>, graph: &CodeGraph) -> bool {
+    !units.is_empty() && units.keys().all(|p| graph.file_mtimes.contains_key(p))
 }
 
 /// Re-key an in-memory unit map so lookups never miss due to slash / drive
@@ -2028,19 +2012,32 @@ fn parse_unit(w: &Walked) -> Option<FileUnit> {
     // (empty, header-only, generic json/xml, …). Returning None used to drop
     // the path from `units`, so the next query rediscovered the same 64 files
     // forever (MAX_DISCOVER_NEW_ON_QUERY). An empty unit is a tombstone:
-    // mtime/len stay, discover treats it as known.
-    let (nodes, calls) = match std::fs::read_to_string(&w.path) {
+    // mtime/len stay, discover treats it as known. A read/parse failure is
+    // different: mark `parse_failed` so the next reconcile retries instead of
+    // pinning an empty unit forever.
+    let (nodes, calls, parse_failed) = match std::fs::read_to_string(&w.path) {
         Ok(source) => {
             let source = super::strip_utf8_bom(&source);
-            parse_file(&w.path, source).unwrap_or((Vec::new(), Vec::new()))
+            if source.is_empty() && w.len > 0 {
+                (Vec::new(), Vec::new(), true)
+            } else {
+                match parse_file(&w.path, source) {
+                    Some((nodes, calls)) => (nodes, calls, false),
+                    None => {
+                        let supported = Lang::detect(&w.path).is_some_and(|l| l.is_indexed());
+                        (Vec::new(), Vec::new(), supported)
+                    }
+                }
+            }
         }
-        Err(_) => (Vec::new(), Vec::new()),
+        Err(_) => (Vec::new(), Vec::new(), true),
     };
     Some(FileUnit {
         mtime_ns: w.mtime_ns,
         len: w.len,
         nodes,
         calls,
+        parse_failed,
     })
 }
 
@@ -2157,8 +2154,23 @@ fn path_in_focus(path: &Path, focus: Option<&Path>) -> bool {
     path_matches_scope(&normalize_index_path(path), &normalize_index_path(focus))
 }
 
-fn restat_one(path: &Path, unit: &FileUnit, focus: Option<&Path>) -> Result<Walked, PathBuf> {
+fn restat_one(
+    path: &Path,
+    unit: &FileUnit,
+    focus: Option<&Path>,
+    policy: Option<&IgnorePolicy>,
+) -> Result<Walked, PathBuf> {
     let norm = normalize_index_path(path);
+    if let Some(policy) = policy {
+        if policy.is_ignored_for_graph(&norm) {
+            return Err(norm);
+        }
+    }
+    if unit.parse_failed {
+        // Retry next reconcile; never let a failed parse become a permanent
+        // empty tombstone.
+        return Err(norm);
+    }
     if !path_in_focus(&norm, focus) {
         return Ok(Walked {
             path: norm,
@@ -2202,10 +2214,11 @@ fn restat_one(path: &Path, unit: &FileUnit, focus: Option<&Path>) -> Result<Walk
 fn restat_known_units(
     units: &HashMap<PathBuf, FileUnit>,
     focus: Option<&Path>,
+    policy: Option<&IgnorePolicy>,
 ) -> (Vec<Walked>, Vec<PathBuf>) {
     let mut results: Vec<Result<Walked, PathBuf>> = units
         .par_iter()
-        .map(|(path, unit)| restat_one(path, unit, focus))
+        .map(|(path, unit)| restat_one(path, unit, focus, policy))
         .collect();
     let mut walked = Vec::with_capacity(results.len());
     let mut missing = Vec::new();
@@ -2219,9 +2232,12 @@ fn restat_known_units(
     (walked, missing)
 }
 
-fn walked_from_disk(path: &Path) -> Option<Walked> {
+fn walked_from_disk(path: &Path, policy: &IgnorePolicy) -> Option<Walked> {
     let norm = normalize_index_path(path);
-    if is_generated_source(&norm) || path_under_skip_dir(&norm) {
+    if is_generated_source(&norm)
+        || path_under_skip_dir(&norm)
+        || policy.is_ignored_for_graph(&norm)
+    {
         return None;
     }
     let ext_ok = norm
@@ -2340,6 +2356,7 @@ fn discover_new_files(
     root: &Path,
     units: &HashMap<PathBuf, FileUnit>,
     focus: Option<&Path>,
+    policy: &IgnorePolicy,
 ) -> Vec<Walked> {
     let known: HashSet<PathBuf> = units.keys().map(|p| normalize_index_path(p)).collect();
     let mut new_files = Vec::new();
@@ -2356,7 +2373,7 @@ fn discover_new_files(
         if !path_in_focus(&n, focus) {
             return;
         }
-        if let Some(w) = walked_from_disk(&n) {
+        if let Some(w) = walked_from_disk(&n, policy) {
             new_files.push(w);
         }
     };
@@ -2402,7 +2419,7 @@ fn discover_new_files(
             // New folder next to indexed sources. Ingest only if it is a
             // small package (e.g. `pkg/new.rs`). A large unindexed sibling
             // project (20k files) is skipped — that was the 224s cold start.
-            let found = collect_files(&pn);
+            let found = collect_files_with_policy(&pn, policy);
             if found.len() > 16 {
                 continue;
             }
@@ -2420,7 +2437,7 @@ fn discover_new_files(
         let f = normalize_index_path(focus);
         let already_indexed = known.iter().any(|k| path_in_focus(k, Some(&f)));
         if !already_indexed && f.is_dir() {
-            for w in collect_files(&f) {
+            for w in collect_files_with_policy(&f, policy) {
                 push_new(w.path);
             }
         }
@@ -3034,6 +3051,11 @@ pub struct CodeIndex {
 struct IndexState {
     /// Last workspace root this index was built for (canonical).
     root: Option<PathBuf>,
+    /// Monotonic revision for query-cache invalidation. Incremented on every
+    /// in-memory graph mutation (fast patch, file removal, reconcile compose).
+    /// `walk_fp` alone is not enough: a fast-patched edit changes the graph
+    /// without a new walk.
+    graph_revision: u64,
     /// Walk fingerprint of the last successful sync (path+mtime+len of all files).
     walk_fp: u64,
     /// Per-file parse units — the incremental cache.
@@ -3051,6 +3073,14 @@ struct IndexState {
     /// built and cached so every query / session sharing this `CodeIndex`
     /// reuses them instead of re-projecting every symbol on every query.
     concept_vectors: Option<Arc<std::collections::HashMap<SymbolId, Vec<f32>>>>,
+    /// CJK/ASCII postings for candidate pruning. Built lazily for large graphs.
+    /// A full recompose clears it; fast-patched symbols are carried separately
+    /// in `candidate_pending` so we do not rebuild the whole index per edit.
+    candidate_index: Option<Arc<super::retrieval::CandidateIndex>>,
+    /// Symbols patched since the postings index was built. They are force-added
+    /// to every candidate set so a new/renamed symbol is never missed without
+    /// rebuilding the whole index on each agent edit.
+    candidate_pending: HashSet<SymbolId>,
     building: bool,
     /// Stats from the most recent refresh (for `jeikcode init` reporting).
     last_stats: Option<RefreshStats>,
@@ -3066,12 +3096,15 @@ impl Default for IndexState {
     fn default() -> Self {
         Self {
             root: None,
+            graph_revision: 1,
             walk_fp: 0,
             units: HashMap::new(),
             graph: None,
             dirindex: None,
             idf_stats: None,
             concept_vectors: None,
+            candidate_index: None,
+            candidate_pending: HashSet::new(),
             building: false,
             last_stats: None,
             last_update_instant: None,
@@ -3122,6 +3155,11 @@ impl CodeIndex {
         let Some(root) = guard.root.clone() else {
             return false;
         };
+        if IgnorePolicy::is_ignored_at(&root, &norm_path) {
+            // Ignore rules must also win over agent fast-path edits. Otherwise an
+            // edit to a build/vendor/credential path silently re-enters the graph.
+            return false;
+        }
 
         let ext_ok = norm_path
             .extension()
@@ -3166,6 +3204,7 @@ impl CodeIndex {
                         removed_files: vec![norm_path.clone()],
                         ..Default::default()
                     });
+                    guard.graph_revision = guard.graph_revision.wrapping_add(1);
                     guard.last_update_instant = Some(Instant::now());
                     guard.fast_patch_pending = true;
                     drop(guard);
@@ -3198,6 +3237,7 @@ impl CodeIndex {
                 g_mut.remove_file(&norm_path);
             }
             guard.fast_patch_pending = true;
+            guard.graph_revision = guard.graph_revision.wrapping_add(1);
             drop(guard);
             persist_units_incremental(&root, &[], &[norm_path]);
             return true;
@@ -3208,6 +3248,7 @@ impl CodeIndex {
             len,
             nodes,
             calls,
+            parse_failed: false,
         };
 
         if let Some(graph) = guard.graph.as_mut() {
@@ -3228,6 +3269,9 @@ impl CodeIndex {
         }
 
         guard.units.insert(norm_path.clone(), unit.clone());
+        guard
+            .candidate_pending
+            .extend(unit.nodes.iter().map(|node| node.id));
         guard.last_stats = Some(RefreshStats {
             reparsed: 1,
             removed: 0,
@@ -3238,6 +3282,7 @@ impl CodeIndex {
         });
         guard.last_update_instant = Some(Instant::now());
         guard.fast_patch_pending = true;
+        guard.graph_revision = guard.graph_revision.wrapping_add(1);
         drop(guard);
 
         persist_units_incremental(&root, &[(norm_path, unit)], &[]);
@@ -3279,6 +3324,75 @@ impl CodeIndex {
         } else {
             None
         }
+    }
+
+    /// Monotonic graph revision for query-cache keys. Unlike [`fingerprint`],
+    /// this advances on fast in-memory patches that do not trigger a walk.
+    pub fn graph_revision(&self, root: &Path) -> Option<u64> {
+        let root = super::canonical(root);
+        let guard = self.inner.lock().unwrap();
+        if guard.root.as_ref() == Some(&root) {
+            Some(guard.graph_revision)
+        } else {
+            None
+        }
+    }
+
+    /// Symbols patched since the candidate postings were built. Force-include
+    /// them in the next candidate set so a fast-patched symbol is never missed.
+    pub fn candidate_pending_ids(&self, root: &Path) -> HashSet<SymbolId> {
+        let root = super::canonical(root);
+        let guard = self.inner.lock().unwrap();
+        if guard.root.as_ref() == Some(&root) {
+            guard.candidate_pending.clone()
+        } else {
+            HashSet::new()
+        }
+    }
+
+    /// Postings index for candidate pruning. Built lazily once per graph
+    /// revision; small graphs return `None` so the caller keeps the simpler
+    /// full scan (the postings overhead is not worth it below ~4k symbols).
+    pub fn get_candidate_index(
+        &self,
+        root: &Path,
+    ) -> Option<Arc<super::retrieval::CandidateIndex>> {
+        const MIN_CANDIDATE_GRAPH_SYMBOLS: usize = 4_000;
+        let root = super::canonical(root);
+        let (graph, revision) = {
+            let guard = self.inner.lock().unwrap();
+            if guard.root.as_ref() != Some(&root) {
+                return None;
+            }
+            if let Some(index) = guard.candidate_index.clone() {
+                return Some(index);
+            }
+            let graph = guard.graph.clone()?;
+            if graph.node_count() < MIN_CANDIDATE_GRAPH_SYMBOLS {
+                return None;
+            }
+            (graph, guard.graph_revision)
+        };
+
+        // Build outside the lock; a stale build is discarded below.
+        let started = Instant::now();
+        let built = Arc::new(super::retrieval::CandidateIndex::build(&graph));
+        super::index_log::log_derived_rebuild(
+            &root,
+            "candidate_index",
+            started.elapsed(),
+            serde_json::json!({ "symbols": built.total_symbols() }),
+        );
+
+        let mut guard = self.inner.lock().unwrap();
+        if guard.root.as_ref() != Some(&root) || guard.graph_revision != revision {
+            return None;
+        }
+        if let Some(existing) = guard.candidate_index.clone() {
+            return Some(existing);
+        }
+        guard.candidate_index = Some(built.clone());
+        Some(built)
     }
 
     /// Last refresh statistics for `root` (cache hit / reparsed count), if available.
@@ -3407,6 +3521,7 @@ impl CodeIndex {
         let root = super::canonical(root);
         let focus_canon = focus.map(super::canonical);
         let focus = focus_canon.as_deref();
+        let ignore_policy = IgnorePolicy::load_deep(&root);
         let started = Instant::now();
 
         let mut guard = match self.inner.lock() {
@@ -3453,6 +3568,7 @@ impl CodeIndex {
                     .par_iter()
                     .filter(|(path, _, _)| path_in_focus(path, focus))
                     .map(|(path, mtime_ns, len)| match std::fs::metadata(path) {
+                        _ if ignore_policy.is_ignored_for_graph(path) => (0, 1),
                         Ok(md) => {
                             let disk_mtime = md
                                 .modified()
@@ -3483,11 +3599,12 @@ impl CodeIndex {
                                     len: *l,
                                     nodes: Vec::new(),
                                     calls: Vec::new(),
+                                    parse_failed: false,
                                 },
                             )
                         })
                         .collect();
-                    let newcomers = discover_new_files(&root, &known_only, focus);
+                    let newcomers = discover_new_files(&root, &known_only, focus, &ignore_policy);
                     if newcomers.is_empty() {
                         let mut guard = match self.inner.lock() {
                             Ok(g) => g,
@@ -3553,12 +3670,15 @@ impl CodeIndex {
             if units.is_empty() {
                 if let Some(disk) = load_disk_cache(&root) {
                     let disk_fp = disk.walk_fp;
-                    let disk_graph_ok = disk.graph.node_count() > 0;
-                    let disk_graph = disk.graph;
                     let mut loaded = units_from_disk(disk.units);
+                    heal_empty_code_units(&mut loaded);
+                    let disk_graph_ok =
+                        disk.graph.node_count() > 0 && graph_covers_units(&loaded, &disk.graph);
+                    let disk_graph = disk.graph;
                     if !loaded.is_empty() {
                         let n_files = loaded.len();
-                        let (mut walked_known, missing) = restat_known_units(&loaded, focus);
+                        let (mut walked_known, missing) =
+                            restat_known_units(&loaded, focus, Some(&ignore_policy));
                         let focused_dirty = walked_known
                             .iter()
                             .filter(|w| {
@@ -3569,7 +3689,7 @@ impl CodeIndex {
                             })
                             .count()
                             + missing.iter().filter(|p| path_in_focus(p, focus)).count();
-                        let newcomers = discover_new_files(&root, &loaded, focus);
+                        let newcomers = discover_new_files(&root, &loaded, focus, &ignore_policy);
                         let g = if disk_graph_ok {
                             on_progress(&format!(
                                 "Code graph: loaded SQLite snapshot ({n_files} files, {} symbols) — skipped tree walk.",
@@ -3671,8 +3791,8 @@ impl CodeIndex {
             }
 
             on_progress("Code graph: no SQLite index, walking workspace...");
-            let files = collect_files(&root);
-            let fp = fingerprint(&files);
+            let files = collect_files_with_policy(&root, &ignore_policy);
+            let fp = fingerprint(&files) ^ ignore_policy.fingerprint();
 
             let sync = sync_units(&mut units, &files, on_progress, budget, focus, &root);
             let g = self.finish_reconcile(
@@ -3722,11 +3842,12 @@ impl CodeIndex {
         drop(guard);
 
         rekey_units(&mut units);
-        let (mut walked, missing) = restat_known_units(&units, focus);
+        let ignore_policy = IgnorePolicy::load_deep(root);
+        let (mut walked, missing) = restat_known_units(&units, focus, Some(&ignore_policy));
         for p in &missing {
             units.remove(p);
         }
-        let newcomers = discover_new_files(root, &units, focus);
+        let newcomers = discover_new_files(root, &units, focus, &ignore_policy);
         if !newcomers.is_empty() {
             on_progress(&format!(
                 "Code graph: discovered {} new sibling file(s).",
@@ -3740,7 +3861,7 @@ impl CodeIndex {
         if sync.reparsed == 0 && sync.removed == 0 {
             sync.changed_paths.clear();
         }
-        let fp = fingerprint(&walked);
+        let fp = fingerprint(&walked) ^ ignore_policy.fingerprint();
         self.finish_reconcile(
             root,
             fp,
@@ -3925,6 +4046,11 @@ impl CodeIndex {
         guard.walk_fp = fp;
         guard.units = units;
         guard.graph = Some(g.clone());
+        if reparsed > 0 || removed > 0 || need_compose {
+            guard.graph_revision = guard.graph_revision.wrapping_add(1);
+            guard.candidate_index = None;
+            guard.candidate_pending.clear();
+        }
         guard.fast_patch_pending = false;
         if need_compose && !can_patch {
             let t_di = Instant::now();
@@ -4240,6 +4366,85 @@ export function CouponPanel() {
     }
 
     #[test]
+    fn graph_blob_must_cover_all_units() {
+        let file = PathBuf::from("src/new.rs");
+        let units = HashMap::from([(
+            file.clone(),
+            FileUnit {
+                mtime_ns: 1,
+                len: 1,
+                nodes: Vec::new(),
+                calls: Vec::new(),
+                parse_failed: false,
+            },
+        )]);
+        let mut graph = CodeGraph::new();
+        assert!(!graph_covers_units(&units, &graph));
+        graph.file_mtimes.insert(file, 0);
+        assert!(graph_covers_units(&units, &graph));
+    }
+
+    #[test]
+    fn legacy_empty_code_unit_is_healed_on_load() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("legacy.rs");
+        std::fs::write(&file, "pub fn legacy_recovered() {}\n").unwrap();
+        let md = std::fs::metadata(&file).unwrap();
+        let unit = FileUnit {
+            mtime_ns: md
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            len: md.len(),
+            nodes: Vec::new(),
+            calls: Vec::new(),
+            parse_failed: false,
+        };
+        let mut units = HashMap::from([(file.clone(), unit)]);
+        heal_empty_code_units(&mut units);
+        assert!(units.get(&file).unwrap().parse_failed);
+        assert!(
+            restat_one(&file, units.get(&file).unwrap(), None, None).is_err(),
+            "healed legacy tombstone must be retried"
+        );
+    }
+
+    #[test]
+    fn failed_parse_is_retried_instead_of_becoming_a_tombstone() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("main.rs"), "pub fn main() {}\n").unwrap();
+        // Invalid UTF-8 makes parse_unit fail; it must not pin an empty unit.
+        std::fs::write(d.path().join("recover.rs"), [0xff, 0xfe, 0x00]).unwrap();
+        let idx = CodeIndex::new();
+        let _ = idx.build(d.path());
+
+        std::fs::write(d.path().join("recover.rs"), "pub fn recovered() {}\n").unwrap();
+        let g = idx.get(d.path());
+        assert!(
+            g.find_by_name("recovered").into_iter().next().is_some(),
+            "a failed parse must be retried after the file becomes valid"
+        );
+    }
+
+    #[test]
+    fn new_file_in_existing_focused_dir_is_discovered() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        let idx = CodeIndex::new();
+        let _ = idx.build(d.path());
+
+        std::fs::write(d.path().join("src/b.rs"), "pub fn b_new() {}\n").unwrap();
+        let g = idx.get_scoped(d.path(), Some(&d.path().join("src")));
+        assert!(
+            !g.find_by_name("b_new").is_empty(),
+            "a new file in an already-indexed focused dir must be discovered"
+        );
+    }
+
+    #[test]
     fn new_file_create_is_ingested_without_git() {
         // Create (not just modify/delete) must be incremental even with no VCS.
         let d = tempfile::tempdir().unwrap();
@@ -4342,6 +4547,7 @@ export function CouponPanel() {
             len: meta.len(),
             nodes: g.nodes.values().cloned().collect(),
             calls: vec![],
+            parse_failed: false,
         };
         let units = HashMap::from([(file.clone(), unit.clone())]);
         let graph_dir = d.path().join(".jeikcode").join("codegraph");
@@ -4836,6 +5042,121 @@ public class OrderController
     }
 
     #[test]
+    fn nested_codegraphignore_whitelist_reopens_graph_rule() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("sub")).unwrap();
+        std::fs::write(d.path().join(".codegraphignore"), "sub/keep.rs\n").unwrap();
+        std::fs::write(d.path().join("sub").join(".codegraphignore"), "!keep.rs\n").unwrap();
+        std::fs::write(d.path().join("sub/keep.rs"), "pub fn keep_nested() {}").unwrap();
+
+        let g = build_graph(d.path());
+        assert!(
+            g.find_by_name("keep_nested").into_iter().next().is_some(),
+            "nested whitelist must be honored by the graph walk"
+        );
+    }
+
+    #[test]
+    fn nested_ignore_blocks_fast_patch() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("main.rs"), "pub fn main() {}").unwrap();
+        std::fs::create_dir_all(d.path().join("sub")).unwrap();
+        std::fs::write(
+            d.path().join("sub").join(".codegraphignore"),
+            "ignored.rs\n",
+        )
+        .unwrap();
+        let idx = CodeIndex::new();
+        let _ = idx.build(d.path());
+        std::fs::write(d.path().join("sub/ignored.rs"), "pub fn nested() {}").unwrap();
+        assert!(
+            !idx.update_single_file(
+                &d.path().join("sub/ignored.rs"),
+                Some("pub fn nested_edit() {}"),
+            ),
+            "fast patch must honor nested .codegraphignore"
+        );
+    }
+
+    #[test]
+    fn sensitive_graphignore_skips_indexing_in_fallback_walk() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("main.rs"), "pub fn main() {}").unwrap();
+        std::fs::write(
+            d.path().join("secret.cs"),
+            "public class SecretPayload { }\n",
+        )
+        .unwrap();
+        std::fs::write(d.path().join(".codegraphignore.graph"), "secret.cs\n").unwrap();
+
+        let g = build_graph(d.path());
+        assert!(!g.find_by_name("main").is_empty());
+        assert!(
+            g.find_by_name("SecretPayload").is_empty(),
+            "sensitive .graph must be honored by the fallback graph walk"
+        );
+    }
+
+    #[test]
+    fn workspace_ignore_applies_to_new_subdirectory_discovery() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("main.rs"), "pub fn main() {}").unwrap();
+        std::fs::write(d.path().join(".codegraphignore"), "newdir/ignored.rs\n").unwrap();
+
+        let idx = CodeIndex::new();
+        let _ = idx.build(d.path());
+
+        std::fs::create_dir_all(d.path().join("newdir")).unwrap();
+        std::fs::write(
+            d.path().join("newdir").join("keep.rs"),
+            "pub fn keep_new() {}",
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("newdir").join("ignored.rs"),
+            "pub fn ignored_new() {}",
+        )
+        .unwrap();
+
+        let g = idx.get(d.path());
+        assert!(
+            g.find_by_name("keep_new").into_iter().next().is_some(),
+            "new subdirectory keep.rs must be discovered"
+        );
+        assert!(
+            g.find_by_name("ignored_new").is_empty(),
+            "workspace policy must still apply when a new subdirectory is discovered"
+        );
+    }
+
+    #[test]
+    fn codegraphignore_applies_to_warm_new_files_and_edits() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("main.rs"), "pub fn main() {}").unwrap();
+        std::fs::write(d.path().join(".codegraphignore"), "ignored.rs\n").unwrap();
+
+        let idx = CodeIndex::new();
+        let _ = idx.build(d.path());
+
+        // A new file in an already-indexed directory must not bypass policy.
+        std::fs::write(d.path().join("ignored.rs"), "pub fn ignored_new() {}").unwrap();
+        let g = idx.get(d.path());
+        assert!(
+            g.find_by_name("ignored_new").is_empty(),
+            "warm discover path must honor .codegraphignore"
+        );
+
+        // An agent fast-patch to an ignored file must also be rejected.
+        let accepted = idx.update_single_file(
+            &d.path().join("ignored.rs"),
+            Some("pub fn ignored_edit() {}"),
+        );
+        assert!(!accepted, "fast patch must reject ignored files");
+        let g = idx.get(d.path());
+        assert!(g.find_by_name("ignored_edit").is_empty());
+    }
+
+    #[test]
     fn skips_vendored_element_ui_and_minified_js() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("app.js"), "export function app() {}\n").unwrap();
@@ -4862,15 +5183,15 @@ public class OrderController
             path_under_skip_dir(&ui.join("index.js")),
             "element-ui/ must be a skip dir"
         );
-        let gi = load_codegraph_ignore(d.path());
+        let policy = IgnorePolicy::load(d.path());
         let min_len = std::fs::metadata(&minified).unwrap().len();
         assert!(
-            skip_index_file(d.path(), &minified, min_len, &gi),
+            skip_index_file(d.path(), &minified, min_len, &policy),
             "one-line 40KB JS must be treated as a minified bundle"
         );
         let pretty_len = std::fs::metadata(&pretty).unwrap().len();
         assert!(
-            !skip_index_file(d.path(), &pretty, pretty_len, &gi),
+            !skip_index_file(d.path(), &pretty, pretty_len, &policy),
             "normal multi-line JS must stay"
         );
         assert!(

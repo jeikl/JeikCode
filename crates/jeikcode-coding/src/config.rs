@@ -666,15 +666,8 @@ impl TierProvider {
     }
 }
 
-/// Share of the CodingPlan 5h rolling `call_limit` a single `/goal` may consume
-/// (percent). A goal that eats more than this starves the user's interactive work
-/// and other controllers within the same rolling window.
-const GOAL_ROUND_SHARE_PERCENT: i64 = 30;
-/// Floor so a micro plan still yields a usable goal budget.
-const GOAL_ROUND_FLOOR: u32 = 50;
-/// Fallback when there is no CodingPlan `call_limit` to derive from
-/// (non-CodingPlan provider, offline, pre-login) and no explicit env override.
-const GOAL_ROUND_FALLBACK: u32 = 300;
+/// Fallback when there is no explicit env override: `0` = unbounded (no hard round cap).
+const GOAL_ROUND_FALLBACK: u32 = 0;
 
 /// Explicit `JEIKCODE_GOAL_MAX_ROUNDS` override, if set and parseable.
 pub fn goal_max_rounds_env() -> Option<u32> {
@@ -683,34 +676,21 @@ pub fn goal_max_rounds_env() -> Option<u32> {
         .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
-/// Resolve the `/goal` round cap. Precedence: explicit env override → a share of
-/// the CodingPlan binding-window `call_limit` (Pro 1000 → 300, Lite 800 → 240) →
-/// a flat fallback. Pure so the host can call it once `call_limit` is known
-/// without threading config plumbing.
-pub fn derive_goal_max_rounds(env_override: Option<u32>, call_limit: Option<i64>) -> u32 {
-    if let Some(explicit) = env_override {
-        return explicit;
-    }
-    match call_limit {
-        Some(limit) if limit > 0 => {
-            u32::try_from(limit.saturating_mul(GOAL_ROUND_SHARE_PERCENT) / 100)
-                .unwrap_or(GOAL_ROUND_FALLBACK)
-                .max(GOAL_ROUND_FLOOR)
-        }
-        _ => GOAL_ROUND_FALLBACK,
-    }
+/// Resolve the `/goal` round cap. Precedence: explicit env override → `0` (unbounded).
+/// CodingPlan quota no longer imposes a hard 240/300-round cutoff; idle-stall (3 rounds
+/// without progress) and 429 pacing still protect unattended runs.
+pub fn derive_goal_max_rounds(env_override: Option<u32>, _call_limit: Option<i64>) -> u32 {
+    env_override.unwrap_or(GOAL_ROUND_FALLBACK)
 }
 
 fn default_goal_max_rounds() -> u32 {
-    // Construction happens before CodingPlan `call_limit` is known; the host
-    // re-derives with the real limit after login via `derive_goal_max_rounds`.
     derive_goal_max_rounds(goal_max_rounds_env(), None)
 }
 fn default_turn_max_rounds() -> u32 {
     std::env::var("JEIKCODE_TURN_MAX_ROUNDS")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(230)
+        .unwrap_or(0)
 }
 
 fn default_tool_loop_policy() -> Option<ToolLoopPolicy> {
@@ -758,10 +738,7 @@ fn default_goal_max_duration_secs() -> u64 {
         .unwrap_or(0)
 }
 fn default_loop_max_rounds() -> u32 {
-    resolve_loop_max_rounds(
-        100,
-        std::env::var("JEIKCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
-    )
+    resolve_loop_max_rounds(0, std::env::var("JEIKCODE_LOOP_MAX_ROUNDS").ok().as_deref())
 }
 
 /// Resolve the product-level `/loop` round high-water mark.
@@ -910,11 +887,12 @@ mod tests {
     #[test]
     fn round_caps_have_generous_defaults() {
         let c = CodingAgentConfig::new("k", "https://x/v1", "m", "/tmp");
-        assert_eq!(c.max_rounds, 230);
-        // No CodingPlan info at construction → the non-CodingPlan fallback.
-        assert_eq!(c.goal_max_rounds, 300);
+        assert_eq!(c.max_rounds, 0);
+        // No explicit env override → 0 (unbounded) by default.
+        assert_eq!(c.goal_max_rounds, 0);
+        assert_eq!(c.loop_max_rounds, 0);
         // The wall-clock cap is OFF by default (0 = disabled); the goal is bounded
-        // by the round cap + evaluator instead. Re-enable via env if ever needed.
+        // by unproductive-round guard + evaluator instead. Re-enable via env if ever needed.
         assert_eq!(c.goal_max_duration_secs, 0);
     }
 
@@ -941,45 +919,38 @@ mod tests {
     }
 
     #[test]
-    fn derive_goal_rounds_scales_with_plan_call_limit() {
-        // 30% of the binding 5h window's call_limit. Pro=1000 → 300, Lite=800 → 240.
-        assert_eq!(derive_goal_max_rounds(None, Some(1000)), 300);
-        assert_eq!(derive_goal_max_rounds(None, Some(800)), 240);
+    fn derive_goal_rounds_defaults_unbounded_even_with_plan_call_limit() {
+        // Without explicit JEIKCODE_GOAL_MAX_ROUNDS, Pro=1000 / Lite=800 both remain 0 (unbounded).
+        assert_eq!(derive_goal_max_rounds(None, Some(1000)), 0);
+        assert_eq!(derive_goal_max_rounds(None, Some(800)), 0);
     }
 
     #[test]
     fn derive_goal_rounds_env_override_wins_over_plan() {
         // An explicit JEIKCODE_GOAL_MAX_ROUNDS is the user's word — it beats the
-        // plan-derived value regardless of call_limit.
+        // unbounded default regardless of call_limit.
         assert_eq!(derive_goal_max_rounds(Some(150), Some(1000)), 150);
         assert_eq!(derive_goal_max_rounds(Some(1), None), 1);
     }
 
     #[test]
-    fn derive_goal_rounds_falls_back_without_plan() {
-        // Non-CodingPlan / offline / unknown call_limit → flat fallback, never a
-        // hardcoded 200 tied to one plan tier.
-        assert_eq!(derive_goal_max_rounds(None, None), 300);
-        assert_eq!(derive_goal_max_rounds(None, Some(0)), 300);
-        assert_eq!(derive_goal_max_rounds(None, Some(-5)), 300);
+    fn derive_goal_rounds_falls_back_to_unbounded_without_plan() {
+        assert_eq!(derive_goal_max_rounds(None, None), 0);
+        assert_eq!(derive_goal_max_rounds(None, Some(0)), 0);
+        assert_eq!(derive_goal_max_rounds(None, Some(-5)), 0);
     }
 
     #[test]
-    fn derive_goal_rounds_floors_tiny_plans() {
-        // A micro window (30% = 30) must still leave a usable goal budget.
-        assert_eq!(derive_goal_max_rounds(None, Some(100)), 50);
+    fn derive_goal_rounds_tiny_plans_stay_unbounded_without_override() {
+        assert_eq!(derive_goal_max_rounds(None, Some(100)), 0);
     }
 
-    // Fix #4: saturating_mul prevents a debug-panic on adversarial i64::MAX
-    // call_limit (plain * would overflow in debug builds). After saturation the
-    // i64→u32 try_from fails and falls back to GOAL_ROUND_FALLBACK (300).
     #[test]
-    fn derive_goal_rounds_saturating_mul_no_panic_on_i64_max() {
-        // Must not panic in debug builds, and must return GOAL_ROUND_FALLBACK.
+    fn derive_goal_rounds_no_panic_on_i64_max() {
         let result = derive_goal_max_rounds(None, Some(i64::MAX));
         assert_eq!(
-            result, 300,
-            "i64::MAX call_limit must fall back to GOAL_ROUND_FALLBACK (300)"
+            result, 0,
+            "i64::MAX call_limit without env override must remain GOAL_ROUND_FALLBACK (0)"
         );
     }
 

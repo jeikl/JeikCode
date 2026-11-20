@@ -686,3 +686,110 @@ export function formatToolDetail(name: string, argsJson: string): string {
   return formatToolCompactJson(argsJson);
 }
 
+function basenameOfPath(value: string): string {
+  // Normalize both separators, then keep the rightmost non-empty segment.
+  // Works for directories, file paths and slash/backslash-shaped artifact ids.
+  const clean = value.trim().replace(/[\\/]+$/, '');
+  if (!clean) return '';
+  const parts = clean.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || clean;
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Mobile / compact tool-row summary: only the parameter a developer needs at a glance.
+ * - Read: `app.css 123-567` (file name + requested line range)
+ * - Edit / Write / list_directory: `app.css` (last path segment)
+ * - Shell: the first command line
+ * - Other tools: path/query/url if present, else a short compact JSON preview.
+ * The expanded body still renders the complete argument payload.
+ */
+export function compactToolDetail(name: string, argsJson: string): string {
+  const trimmed = argsJson.trim();
+  if (!trimmed) return '';
+  let args: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return trimmed.replace(/\s+/g, ' ').slice(0, 80);
+    }
+    args = parsed as Record<string, unknown>;
+  } catch {
+    return trimmed.replace(/\s+/g, ' ').slice(0, 80);
+  }
+
+  const norm = name.trim().toLowerCase().replace(/[-_]/g, '');
+  const pathKeys = [
+    'path', 'file_path', 'filepath', 'filePath', 'file', 'target_file', 'targetFile',
+    'filename', 'fileName', 'dir', 'directory', 'cwd', 'artifact_id', 'artifactid', 'artifact',
+  ];
+  let path = '';
+  for (const key of pathKeys) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) { path = value; break; }
+  }
+  // Some edit tools only put the path inside the edits array.
+  if (!path && Array.isArray(args.edits)) {
+    for (const edit of args.edits) {
+      if (edit && typeof edit === 'object') {
+        const row = edit as Record<string, unknown>;
+        const value = row.path ?? row.file_path ?? row.filePath ?? row.file;
+        if (typeof value === 'string' && value.trim()) { path = value; break; }
+      }
+    }
+  }
+  const base = path ? basenameOfPath(path) : '';
+
+  if (norm === 'read' || norm === 'readfile') {
+    const offset =
+      finiteNumber(args.offset) ?? finiteNumber(args.start_line) ?? finiteNumber(args.start) ?? finiteNumber(args.line_start);
+    const limit = finiteNumber(args.limit);
+    const end =
+      finiteNumber(args.end_line) ?? finiteNumber(args.end) ?? finiteNumber(args.line_end) ??
+      (offset != null && limit != null ? offset + limit - 1 : null);
+    if (base) {
+      if (offset != null && end != null) return `${base} ${offset}-${end}`;
+      if (offset != null) return `${base} ${offset}+`;
+      if (limit != null) return `${base} 1-${limit}`;
+      return base;
+    }
+  }
+
+  if (base && [
+    'edit', 'editfile', 'write', 'writefile', 'createfile',
+    'searchreplace', 'paralleleditfiles', 'listdirectory', 'changedir',
+  ].includes(norm)) {
+    return base;
+  }
+
+  // Search tools: the pair that matters is the scanned directory and the matcher.
+  if (['grep', 'glob', 'codeexplore', 'codesearch', 'search'].includes(norm)) {
+    const matcher = args.pattern ?? args.query ?? args.glob ?? args.expression;
+    const matcherText = typeof matcher === 'string' ? matcher.trim().split(/\r?\n/)[0].slice(0, 80) : '';
+    if (base && matcherText) return `${base} · ${matcherText}`;
+    if (matcherText) return matcherText;
+    if (base) return base;
+  }
+
+  const command = args.command ?? args.cmd ?? args.script;
+  if (typeof command === 'string' && command.trim()) {
+    return command.trim().split(/\r?\n/)[0].slice(0, 80);
+  }
+
+  const query = args.query ?? args.pattern ?? args.url ?? args.expression;
+  if (typeof query === 'string' && query.trim()) {
+    return `${base ? base + ' · ' : ''}${query.trim().split(/\r?\n/)[0].slice(0, 80)}`;
+  }
+
+  if (base) return base;
+  return formatToolDetail(name, argsJson).slice(0, 100);
+}
+

@@ -77,7 +77,10 @@ async fn approval_middleware_gates_risky_tool_via_id_roundtrip() {
             }),
             StreamEvent::Done { truncated: false },
         ],
-        vec![StreamEvent::Done { truncated: false }],
+        vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::Done { truncated: false },
+        ],
     ]));
 
     let handle = Agent::builder()
@@ -492,7 +495,12 @@ async fn round_budget_projected_to_llm_and_hard_capped() {
     while let Some(ev) = handle.events.recv().await {
         match ev {
             AgentEvent::Usage(m) => rounds_seen.push(m.round),
-            AgentEvent::Error { message, .. } if message.contains("max rounds") => capped = true,
+            AgentEvent::SystemNotice(notice)
+                if notice.event_id.starts_with("warn-max-rounds:")
+                    && notice.kind == jeikcode_kernel::event::NoticeKind::Warning =>
+            {
+                capped = true
+            }
             AgentEvent::TurnComplete { .. } => break,
             _ => {}
         }
@@ -501,14 +509,14 @@ async fn round_budget_projected_to_llm_and_hard_capped() {
     let _ = handle.task.await;
 
     let calls = received.lock().unwrap();
-    // hard cap: only 3 LLM calls; the scripted 4th was never requested
+    // 3 working rounds + 1 soft-landing round (where the 4th scripted response is rejected if it calls a tool)
     assert_eq!(
         calls.len(),
-        3,
-        "round 4 must be hard-capped; got {} calls",
+        4,
+        "rounds 1..=3 + 1 soft landing call; got {} calls",
         calls.len()
     );
-    assert!(capped, "max-rounds cap must emit an Error event");
+    assert!(capped, "max-rounds cap must emit a Warning SystemNotice");
     // projection escalates each round, ending with the final-round warning
     assert_eq!(
         calls[0].last().unwrap(),
@@ -525,10 +533,10 @@ async fn round_budget_projected_to_llm_and_hard_capped() {
             "[round 3/3 - final round, wrap up now]".to_string()
         )
     );
-    // recording: each assistant message carried its round (1,2,3)
+    // recording: working rounds 1..=3 plus soft-landing round 4 all record round numbers
     assert_eq!(
         rounds_seen,
-        vec![1, 2, 3],
+        vec![1, 2, 3, 4],
         "Message.meta.round must be recorded per round"
     );
     // cache-safety: the original user message is byte-identical across rounds
@@ -672,7 +680,10 @@ async fn tool_middleware_rewrites_blocks_and_transforms() {
                 }),
                 StreamEvent::Done { truncated: false },
             ],
-            vec![StreamEvent::Done { truncated: false }],
+            vec![
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::Done { truncated: false },
+            ],
         ]));
         let mut handle = Agent::builder()
             .provider(provider)
@@ -715,7 +726,10 @@ async fn tool_middleware_rewrites_blocks_and_transforms() {
                 }),
                 StreamEvent::Done { truncated: false },
             ],
-            vec![StreamEvent::Done { truncated: false }],
+            vec![
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::Done { truncated: false },
+            ],
         ]));
         let mut handle = Agent::builder()
             .provider(provider)
@@ -765,7 +779,10 @@ async fn tool_middleware_rewrites_blocks_and_transforms() {
                 }),
                 StreamEvent::Done { truncated: false },
             ],
-            vec![StreamEvent::Done { truncated: false }],
+            vec![
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::Done { truncated: false },
+            ],
         ]));
         let mut handle = Agent::builder()
             .provider(provider)
@@ -815,7 +832,10 @@ async fn dangerous_command_requires_approval_safe_does_not_and_grant_is_cached()
                 }),
                 StreamEvent::Done { truncated: false },
             ],
-            vec![StreamEvent::Done { truncated: false }],
+            vec![
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::Done { truncated: false },
+            ],
         ]));
         let mut handle = Agent::builder()
             .provider(provider)
@@ -861,7 +881,10 @@ async fn dangerous_command_requires_approval_safe_does_not_and_grant_is_cached()
                 }),
                 StreamEvent::Done { truncated: false },
             ],
-            vec![StreamEvent::Done { truncated: false }],
+            vec![
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::Done { truncated: false },
+            ],
             vec![
                 StreamEvent::ToolCall(ToolCall {
                     id: "2".into(),
@@ -870,7 +893,10 @@ async fn dangerous_command_requires_approval_safe_does_not_and_grant_is_cached()
                 }),
                 StreamEvent::Done { truncated: false },
             ],
-            vec![StreamEvent::Done { truncated: false }],
+            vec![
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::Done { truncated: false },
+            ],
         ]));
         let mut handle = Agent::builder()
             .provider(provider)

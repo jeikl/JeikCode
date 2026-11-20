@@ -241,7 +241,9 @@ pub async fn request_approval_decision(
         args: call.arguments.clone(),
     })
     .unwrap_or(serde_json::Value::Null);
+    let wait_started = std::time::Instant::now();
     let response = rt.request(kind, payload).await;
+    crate::call_signals::add_approval_wait(&call.id, wait_started.elapsed().as_millis() as u64);
     if response.is_null() {
         return Err(approval_channel_failure_deny(tool_name));
     }

@@ -71,7 +71,7 @@ pub struct ToolResult {
 }
 
 /// What the LLM sees for a mounted tool.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,
@@ -106,17 +106,33 @@ pub struct ToolDef {
 #[derive(Clone)]
 pub struct ProgressSink {
     inner: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    call_id: Option<String>,
 }
 
 impl ProgressSink {
     /// A sink that discards (no driver listening). The default.
     pub fn noop() -> Self {
-        Self { inner: None }
+        Self {
+            inner: None,
+            call_id: None,
+        }
     }
     /// A sink backed by `f`. The kernel installs one that forwards to the driver event
     /// stream, tagging each message with the executing call's id.
     pub fn new(f: Arc<dyn Fn(String) + Send + Sync>) -> Self {
-        Self { inner: Some(f) }
+        Self {
+            inner: Some(f),
+            call_id: None,
+        }
+    }
+    /// Attach the executing tool call's id for internal context correlation.
+    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
+        self.call_id = Some(call_id.into());
+        self
+    }
+    /// Returns the executing tool call's id when bound by the kernel dispatcher.
+    pub fn call_id(&self) -> Option<&str> {
+        self.call_id.as_deref()
     }
     /// Report incremental progress to the driver. No-op if no driver is listening.
     pub fn emit(&self, message: impl Into<String>) {
@@ -332,12 +348,16 @@ pub struct MountedToolsSnapshot {
     revision: ToolCatalogRevision,
     selected: BTreeMap<String, Arc<dyn Tool>>,
     defs: Arc<[ToolDef]>,
+    /// Conservative wire-token estimate for `defs`, computed once when this
+    /// snapshot is published. Pressure math reads this O(1) instead of
+    /// re-serializing every schema on each agent round.
+    defs_tokens: u64,
 }
 
 impl MountedToolsSnapshot {
     fn new(revision: ToolCatalogRevision, selected: BTreeMap<String, Arc<dyn Tool>>) -> Self {
         let mut seen = std::collections::BTreeSet::new();
-        let defs = selected
+        let defs: Arc<[ToolDef]> = selected
             .values()
             .filter(|t| seen.insert(t.name().to_string()))
             .map(|t| ToolDef {
@@ -347,10 +367,12 @@ impl MountedToolsSnapshot {
             })
             .collect::<Vec<_>>()
             .into();
+        let defs_tokens = estimate_defs_tokens(&defs);
         Self {
             revision,
             selected,
             defs,
+            defs_tokens,
         }
     }
 
@@ -362,6 +384,13 @@ impl MountedToolsSnapshot {
         self.defs.to_vec()
     }
 
+    /// Conservative wire-token estimate for the mounted schemas (~4 bytes/token
+    /// plus the per-tool envelope). Cached at publish time so mid-turn and
+    /// pre-send pressure guards never re-serialize the tool catalog per round.
+    pub fn defs_token_estimate(&self) -> u64 {
+        self.defs_tokens
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         if let Some(tool) = self.selected.get(name) {
             return Some(tool.clone());
@@ -371,6 +400,23 @@ impl MountedToolsSnapshot {
             .find(|tool| tool.name() == name || tool.aliases().iter().any(|alias| *alias == name))
             .cloned()
     }
+}
+
+/// Conservative wire estimate for mounted tool schemas so mid-turn auto-compaction
+/// and pre-send overflow guards match actual provider prompt tokens (where ~50 tool
+/// schemas add tens of thousands of tokens). Computed once per catalog publish; see
+/// [`MountedToolsSnapshot::defs_token_estimate`].
+fn estimate_defs_tokens(defs: &[ToolDef]) -> u64 {
+    if defs.is_empty() {
+        return 0;
+    }
+    let byte_count: usize = defs
+        .iter()
+        .map(|tool| {
+            tool.name.len() + tool.description.len() + tool.parameters.to_string().len() + 24
+        })
+        .sum();
+    ((byte_count / 4) as u64).max(1)
 }
 
 /// Runtime-owned write side of an updatable tool mount.
@@ -574,6 +620,35 @@ mod tests {
         assert_eq!(defs[0].name, "risky_write");
         assert!(mounted.get("echo").is_none());
         assert!(mounted.get("risky_write").is_some());
+    }
+
+    #[test]
+    fn tool_defs_token_estimate_is_cached_at_publish() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(Dummy("echo", RiskLevel::Safe)));
+        let (mounted, _publisher) = registry.mount_updatable(&["echo"]);
+        let snapshot = mounted.snapshot();
+
+        // Dummy declares an empty schema; the envelope still has a non-zero cost.
+        assert!(snapshot.defs_token_estimate() > 0);
+        assert_eq!(
+            snapshot.defs_token_estimate(),
+            super::estimate_defs_tokens(&snapshot.defs())
+        );
+
+        let rich = super::ToolDef {
+            name: "read".into(),
+            description: "x".repeat(400),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "y".repeat(400) } }
+            }),
+        };
+        assert!(
+            super::estimate_defs_tokens(&[rich]) >= 200,
+            "non-trivial tool schemas must contribute meaningful overhead"
+        );
+        assert_eq!(super::estimate_defs_tokens(&[]), 0);
     }
 
     #[tokio::test]

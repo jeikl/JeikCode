@@ -9,7 +9,7 @@
 //! - Preloaded rich domain thesaurus for E-Commerce, Admin Systems, AI/Agent, Medical, Robotics, Full-Stack
 //! - Hybrid retrieval: Lexical + Thesaurus + Dense Vector Cosine Matching
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const VECTOR_DIM: usize = 128;
@@ -25,6 +25,10 @@ pub struct ThesaurusRule {
 #[derive(Debug, Clone, Default)]
 pub struct DynamicThesaurus {
     rules: Vec<ThesaurusRule>,
+    /// Monotonic content revision. Bumped whenever the rule set changes; used
+    /// by the code_explore query cache so a hot-reloaded dictionary cannot
+    /// return a result computed with the previous dictionary.
+    revision: u64,
 }
 
 impl DynamicThesaurus {
@@ -32,6 +36,25 @@ impl DynamicThesaurus {
         let mut dt = Self::default();
         dt.load_embedded_defaults();
         dt
+    }
+
+    /// Current rule-set revision (cache key component).
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Rebuild from scratch: embedded defaults + the given directories.
+    ///
+    /// This is the production hot-reload path. Unlike repeatedly calling
+    /// [`load_from_dir`], it never accumulates duplicate rules, so a long
+    /// session with many `code_explore` calls does not grow the dictionary.
+    pub fn reload_from_dirs(&mut self, dirs: &[std::path::PathBuf]) {
+        self.rules.clear();
+        self.load_embedded_defaults();
+        for dir in dirs {
+            self.load_from_dir(dir);
+        }
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Load from `.jeikcode/thesaurus` directory in workspace or user home.
@@ -58,6 +81,7 @@ impl DynamicThesaurus {
     /// Parse simple `=` formatted text.
     /// Format: `中文词1, 中文词2 = en_word1, en_word2`
     pub fn parse_and_append(&mut self, content: &str) {
+        let before = self.rules.len();
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
@@ -95,6 +119,9 @@ impl DynamicThesaurus {
                     });
                 }
             }
+        }
+        if self.rules.len() != before {
+            self.revision = self.revision.wrapping_add(1);
         }
     }
 
@@ -175,8 +202,20 @@ impl DynamicThesaurus {
 pub struct SearchTokens {
     pub raw_query: String,
     pub words: Vec<String>,
+    /// CJK n-grams used for lexical recall (full run + bigrams + trigrams).
     pub cjk_phrases: Vec<String>,
+    /// Original contiguous CJK runs from the user query. Thesaurus matching and
+    /// intent coverage use these, never the n-grams above — otherwise a shared
+    /// 2-char suffix like "喜报" activates every dictionary entry containing it.
+    pub cjk_segments: Vec<String>,
+    /// Union of hard/soft expansions. Kept for candidate generation and legacy
+    /// callers; ranking must distinguish the two sets below.
     pub expanded_terms: HashSet<String>,
+    /// Explicit, specific dictionary matches (full term or >= 3 CJK chars).
+    /// These may act as anchors.
+    pub hard_expanded_terms: HashSet<String>,
+    /// Generic/suffix matches. Candidate-recall only; never a strong anchor.
+    pub soft_expanded_terms: HashSet<String>,
     pub code_identifiers: Vec<String>,
     pub path_fragments: Vec<String>,
     /// Dense semantic embedding vector (128-dim)
@@ -199,6 +238,7 @@ pub fn parse_bilingual_query_with_thesaurus(
     let flush_cjk = |cjk: &mut String, tokens: &mut SearchTokens| {
         if !cjk.is_empty() {
             let chars: Vec<char> = cjk.chars().collect();
+            tokens.cjk_segments.push(cjk.clone());
             tokens.cjk_phrases.push(cjk.clone());
             if chars.len() >= 2 {
                 for i in 0..chars.len() - 1 {
@@ -261,14 +301,20 @@ pub fn parse_bilingual_query_with_thesaurus(
     flush_cjk(&mut current_cjk, &mut tokens);
     flush_ascii(&mut current_ascii, &mut tokens);
 
-    // Expand through thesaurus rules
-    for rule in &thesaurus.rules {
-        let cn_hit = tokens.cjk_phrases.iter().any(|phrase| {
-            rule.cn_terms
-                .iter()
-                .any(|cn| phrase.contains(cn) || cn.contains(phrase))
-        });
+    // Expand through thesaurus rules.
+    //
+    // Two rules keep a growing dictionary from collapsing every sibling intent:
+    //  1. CN matching is segment-based and longest-match-only. A query segment
+    //     "部门前置喜报" may match both "部门前置喜报" and "喜报"; only the
+    //     longest match expands, so the generic suffix cannot fan out to every
+    //     "*喜报" entry.
+    //  2. Extensions are split into hard (specific/full-term) and soft (generic
+    //     suffix). Only hard extensions may act as ranking anchors.
+    let mut active: HashSet<usize> = HashSet::new();
+    let mut en_hits: HashSet<usize> = HashSet::new();
+    let mut cn_ratio_by_rule: HashMap<usize, f64> = HashMap::new();
 
+    for (idx, rule) in thesaurus.rules.iter().enumerate() {
         let en_hit = tokens.words.iter().any(|w| {
             rule.en_terms
                 .iter()
@@ -284,11 +330,64 @@ pub fn parse_bilingual_query_with_thesaurus(
                             || (ec.len() >= 6 && ec.contains(&compact)))
                 })
         });
+        if en_hit {
+            en_hits.insert(idx);
+            active.insert(idx);
+        }
+    }
 
-        if cn_hit || en_hit {
-            for en in &rule.en_terms {
-                tokens.expanded_terms.insert(en.to_ascii_lowercase());
+    for segment in &tokens.cjk_segments {
+        let segment_len = segment.chars().count().max(1);
+        let mut matches: Vec<(usize, usize)> = Vec::new();
+        for (idx, rule) in thesaurus.rules.iter().enumerate() {
+            if let Some(len) = rule
+                .cn_terms
+                .iter()
+                .filter(|cn| !cn.is_empty() && segment.contains(cn.as_str()))
+                .map(|cn| cn.chars().count())
+                .max()
+            {
+                matches.push((idx, len));
             }
+        }
+        let best = matches.iter().map(|(_, len)| *len).max().unwrap_or(0);
+        for (idx, len) in matches {
+            if len == best {
+                active.insert(idx);
+                let ratio = len as f64 / segment_len as f64;
+                cn_ratio_by_rule
+                    .entry(idx)
+                    .and_modify(|v| *v = (*v).max(ratio))
+                    .or_insert(ratio);
+            }
+        }
+    }
+
+    for idx in active {
+        let rule = &thesaurus.rules[idx];
+        let cn_ratio = cn_ratio_by_rule.get(&idx).copied().unwrap_or(0.0);
+        let en_hit = en_hits.contains(&idx);
+        let full_cn_match = tokens.cjk_segments.iter().any(|segment| {
+            rule.cn_terms
+                .iter()
+                .any(|cn| !cn.is_empty() && segment == cn)
+        });
+        // Explicit EN mapping, a full CN term, or a match covering at least half
+        // of the query segment is specific enough to anchor. This keeps short
+        // generic verbs (保存 -> persist) as hard mappings while demoting a
+        // 2-char suffix shared by a long business phrase (喜报 in 部门前置喜报).
+        let hard = en_hit || full_cn_match || cn_ratio >= 0.5;
+
+        for en in &rule.en_terms {
+            let term = en.to_ascii_lowercase();
+            tokens.expanded_terms.insert(term.clone());
+            if hard {
+                tokens.hard_expanded_terms.insert(term);
+            } else {
+                tokens.soft_expanded_terms.insert(term);
+            }
+        }
+        if hard {
             for cn in &rule.cn_terms {
                 tokens.cjk_phrases.push(cn.clone());
             }
@@ -297,8 +396,13 @@ pub fn parse_bilingual_query_with_thesaurus(
 
     tokens.words.sort();
     tokens.words.dedup();
+    tokens.cjk_segments.sort();
+    tokens.cjk_segments.dedup();
     tokens.cjk_phrases.sort();
     tokens.cjk_phrases.dedup();
+    tokens
+        .soft_expanded_terms
+        .retain(|term| !tokens.hard_expanded_terms.contains(term));
 
     // Compute dense vector embedding for query
     tokens.dense_vector = compute_dense_embedding(&tokens.raw_query, &tokens.expanded_terms);
@@ -542,6 +646,87 @@ pub fn compute_dense_embedding(text: &str, expanded: &HashSet<String>) -> Vec<f3
     vec
 }
 
+/// Split a user query into independent intent units and parse each one.
+///
+/// Intent units are the original whitespace/punctuation-delimited segments,
+/// not CJK n-grams. This is what lets `Double11 双11 喜报 语音播报` retrieve
+/// three separate modules instead of demanding that one file match all four
+/// terms (the old global coverage multiplier did exactly the latter).
+pub fn parse_query_intents(query: &str, thesaurus: &DynamicThesaurus) -> Vec<SearchTokens> {
+    let mut units: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let flush = |current: &mut String, units: &mut Vec<String>| {
+        let trimmed = current.trim();
+        if !trimmed.is_empty() {
+            units.push(trimmed.to_string());
+        }
+        current.clear();
+    };
+
+    for ch in query.chars() {
+        let separator = ch.is_whitespace()
+            || matches!(
+                ch,
+                ',' | '，'
+                    | '。'
+                    | ';'
+                    | '；'
+                    | ':'
+                    | '：'
+                    | '!'
+                    | '！'
+                    | '?'
+                    | '？'
+                    | '、'
+                    | '|'
+                    | '('
+                    | ')'
+                    | '（'
+                    | '）'
+                    | '['
+                    | ']'
+                    | '【'
+                    | '】'
+                    | '"'
+                    | '\''
+                    | '“'
+                    | '”'
+                    | '‘'
+                    | '’'
+            );
+        if separator {
+            flush(&mut current, &mut units);
+        } else {
+            current.push(ch);
+        }
+    }
+    flush(&mut current, &mut units);
+
+    let mut seen = HashSet::new();
+    let mut intents = Vec::new();
+    for unit in units {
+        if !seen.insert(unit.to_ascii_lowercase()) {
+            continue;
+        }
+        let tokens = parse_bilingual_query_with_thesaurus(&unit, thesaurus);
+        if tokens.words.is_empty()
+            && tokens.cjk_segments.is_empty()
+            && tokens.code_identifiers.is_empty()
+        {
+            continue;
+        }
+        intents.push(tokens);
+        if intents.len() >= 8 {
+            break;
+        }
+    }
+
+    if intents.is_empty() {
+        intents.push(parse_bilingual_query_with_thesaurus(query, thesaurus));
+    }
+    intents
+}
+
 /// Calculate cosine similarity between two 128-dim dense vectors (-1.0 .. 1.0 -> scaled 0.0 .. 1.0).
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
@@ -611,7 +796,7 @@ fn is_stop_word(word: &str) -> bool {
 
 /// Generic crumbs split out of `BKOrderType` / `OrderItemService` / `MaylifeAmount`.
 /// Standalone user input (`order` typed as its own word) still goes to `words`.
-fn is_generic_ident_fragment(word: &str) -> bool {
+pub(crate) fn is_generic_ident_fragment(word: &str) -> bool {
     matches!(
         word,
         "order"
@@ -722,7 +907,7 @@ fn is_mixed_ident_token(s: &str) -> bool {
 }
 
 /// `pay_order` / `payOrder` / `PayOrder` → `payorder` for cross-style ident hits.
-fn compact_ident(s: &str) -> String {
+pub(crate) fn compact_ident(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(|c| c.to_lowercase())
@@ -747,9 +932,18 @@ fn lexical_match_parts(tokens: &SearchTokens, target_text: &str) -> (f64, usize)
             matched_distinct_concepts += 1;
         }
     }
-    for expanded in &tokens.expanded_terms {
+    for expanded in &tokens.hard_expanded_terms {
         if target_lower.contains(expanded) {
             lexical_score += 24.0;
+            matched_distinct_concepts += 1;
+        }
+    }
+    // Generic suffix/short-term expansions are recall evidence only. They must
+    // not carry the same weight as an explicit dictionary term, otherwise a
+    // growing dictionary makes every sibling module look equally relevant.
+    for expanded in &tokens.soft_expanded_terms {
+        if target_lower.contains(expanded) {
+            lexical_score += 10.0;
             matched_distinct_concepts += 1;
         }
     }
@@ -769,18 +963,18 @@ fn lexical_match_parts(tokens: &SearchTokens, target_text: &str) -> (f64, usize)
 }
 
 fn coverage_mult(tokens: &SearchTokens, matched_distinct_concepts: usize) -> f64 {
-    let total_query_concepts = tokens.cjk_phrases.len() + tokens.words.len();
-    if total_query_concepts >= 2 {
-        if matched_distinct_concepts >= 2 {
-            2.2
-        } else if matched_distinct_concepts == 1 {
-            0.55
-        } else {
-            1.0
-        }
-    } else {
-        1.0
+    // Coverage is measured against the ORIGINAL CJK segments and ASCII words,
+    // never the n-gram expansion. The old formula counted every bigram/trigram
+    // as an independent "concept", which made a single phrase look like a
+    // multi-concept hit (2.2x) and punished single-intent modules (0.55x).
+    // The new range is [1.0, 1.45]: a gentle density bonus, never a penalty.
+    let segment_chars: usize = tokens.cjk_segments.iter().map(|s| s.chars().count()).sum();
+    let total = segment_chars + tokens.words.len() + tokens.code_identifiers.len();
+    if total == 0 {
+        return 1.0;
     }
+    let ratio = (matched_distinct_concepts as f64 / total as f64).min(1.0);
+    1.0 + 0.45 * ratio
 }
 
 /// Lexical + thesaurus similarity only (no 128-dim embedding).
@@ -811,6 +1005,120 @@ pub fn calculate_text_similarity(tokens: &SearchTokens, target_text: &str) -> f6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thesaurus_longest_match_suppresses_sibling_suffix_rules() {
+        let mut dt = DynamicThesaurus::default();
+        dt.parse_and_append(
+            "美莱转推, 美莱转推喜报 = personmlztxibao, mlzt\n\
+             部门前置喜报, 前置喜报 = depqzxibao, depqz\n\
+             百万喜报, 百万战报 = baiwanxibao, baiwan\n\
+             大促喜报 = dacuxibao\n",
+        );
+
+        let q = parse_bilingual_query_with_thesaurus("部门前置喜报", &dt);
+        assert!(q.hard_expanded_terms.contains("depqzxibao"));
+        assert!(
+            !q.expanded_terms.contains("personmlztxibao")
+                && !q.expanded_terms.contains("baiwanxibao")
+                && !q.expanded_terms.contains("dacuxibao"),
+            "a shared 喜报 suffix must not fan out to sibling rules: {:?}",
+            q.expanded_terms
+        );
+
+        let q2 = parse_bilingual_query_with_thesaurus("百万喜报", &dt);
+        assert!(q2.hard_expanded_terms.contains("baiwanxibao"));
+        assert!(!q2.expanded_terms.contains("depqzxibao"));
+        assert!(!q2.expanded_terms.contains("dacuxibao"));
+    }
+
+    #[test]
+    fn builtin_generic_suffix_is_suppressed_by_longer_project_term() {
+        let mut dt = DynamicThesaurus::new();
+        dt.parse_and_append("部门前置喜报 = depqzxibao");
+        let q = parse_bilingual_query_with_thesaurus("部门前置喜报", &dt);
+        assert!(q.hard_expanded_terms.contains("depqzxibao"));
+        assert!(
+            !q.expanded_terms.contains("department"),
+            "built-in 部门 must not expand when a longer project term matches: {:?}",
+            q.expanded_terms
+        );
+    }
+
+    #[test]
+    fn generic_suffix_expansion_is_soft_not_anchor() {
+        let mut dt = DynamicThesaurus::default();
+        dt.parse_and_append("喜报 = xibao");
+        let q = parse_bilingual_query_with_thesaurus("部门前置喜报", &dt);
+        assert!(!q.hard_expanded_terms.contains("xibao"));
+        assert!(q.soft_expanded_terms.contains("xibao"));
+    }
+
+    #[test]
+    fn short_verb_mapping_is_hard_when_it_covers_half_the_segment() {
+        let mut dt = DynamicThesaurus::default();
+        dt.parse_and_append("保存, 持久化 = save, persist");
+        let q = parse_bilingual_query_with_thesaurus("保存数据", &dt);
+        assert!(
+            q.hard_expanded_terms.contains("persist"),
+            "2-char verb covering half of the segment must stay hard: {:?}",
+            q.expanded_terms
+        );
+    }
+
+    #[test]
+    fn single_suffix_hit_is_not_halved_by_coverage() {
+        let mut dt = DynamicThesaurus::default();
+        dt.parse_and_append("部门前置喜报 = depqzxibao");
+        let q = parse_bilingual_query_with_thesaurus("部门前置喜报", &dt);
+        let score = calculate_lexical_similarity(&q, "喜报");
+        assert!(
+            score > 20.0,
+            "a single shared suffix must keep its lexical score, not 0.55x: {score}"
+        );
+    }
+
+    #[test]
+    fn reload_from_dirs_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "jeikcode-thesaurus-idempotent-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("biz.txt"), "部门前置喜报 = depqzxibao\n").unwrap();
+
+        let mut dt = DynamicThesaurus::new();
+        dt.reload_from_dirs(std::slice::from_ref(&dir));
+        let first = dt.rules.len();
+        let first_rev = dt.revision();
+        dt.reload_from_dirs(std::slice::from_ref(&dir));
+        assert_eq!(dt.rules.len(), first, "reload must not append duplicates");
+        assert!(
+            dt.revision() > first_rev,
+            "reload must bump the cache revision"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parse_query_intents_splits_independent_modules() {
+        let dt = DynamicThesaurus::default();
+        let intents = parse_query_intents("Double11 双11 喜报 语音播报", &dt);
+        assert_eq!(intents.len(), 4, "expected four intent units");
+        assert_eq!(intents[0].raw_query, "Double11");
+        assert_eq!(intents[1].raw_query, "双11");
+        assert_eq!(intents[2].raw_query, "喜报");
+        assert_eq!(intents[3].raw_query, "语音播报");
+    }
+
+    #[test]
+    fn parse_query_intents_keeps_cjk_compound_whole() {
+        let dt = DynamicThesaurus::default();
+        let intents = parse_query_intents("部门前置喜报", &dt);
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].cjk_segments, vec!["部门前置喜报".to_string()]);
+    }
 
     #[test]
     fn test_dense_vector_semantic_matching() {

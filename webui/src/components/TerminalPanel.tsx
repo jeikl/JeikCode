@@ -13,6 +13,38 @@ import {
 import { showToast } from './Toast';
 import { useT, useSettings } from '../settings';
 import { getPageZoom } from '../lib/pageZoom';
+import {
+  SHELL_CONFIGS,
+  resolveHostPlatform,
+  getPlatformShells,
+  getDefaultShellForPlatform,
+  getMainstreamShell,
+  inferShellFromTab,
+  getSavedSessions,
+  saveSessions,
+  getSavedActiveTab,
+  saveActiveTab,
+  areAllTerminalsClosed,
+  markAllTerminalsClosed,
+  getSavedTerminalCount,
+  registerTerminalRunHandler,
+  type TerminalTab,
+  type ShellOption,
+  type HostPlatform,
+} from '../lib/terminalStorage';
+
+export {
+  SHELL_CONFIGS,
+  resolveHostPlatform,
+  getPlatformShells,
+  getDefaultShellForPlatform,
+  getMainstreamShell,
+  inferShellFromTab,
+  getSavedTerminalCount,
+  type TerminalTab,
+  type ShellOption,
+  type HostPlatform,
+};
 
 function measureTerminalGrid(term: Terminal, container: HTMLElement): { cols: number; rows: number } | null {
   const core = (term as unknown as {
@@ -53,86 +85,6 @@ export interface TerminalPanelProps {
   cwd?: string;
   active?: boolean;
   onTabsCountChange?: (count: number) => void;
-}
-
-export function getSavedTerminalCount(projectCwd?: string): number {
-  const saved = getSavedSessions(projectCwd);
-  return saved && saved.length > 0 ? saved.length : 1;
-}
-
-export interface ShellOption {
-  id: string;
-  name: string;
-  icon: string;
-}
-
-export type HostPlatform = 'windows' | 'macos' | 'linux';
-
-export const SHELL_CONFIGS: Record<HostPlatform, ShellOption[]> = {
-  windows: [
-    { id: 'powershell', name: 'PowerShell', icon: '⚡' },
-    { id: 'cmd', name: 'CMD', icon: '⬛' },
-    { id: 'gitbash', name: 'Git Bash', icon: '🌲' },
-    { id: 'wsl', name: 'WSL (Ubuntu)', icon: '🐧' },
-  ],
-  macos: [
-    { id: 'zsh', name: 'Zsh', icon: '🐚' },
-    { id: 'bash', name: 'Bash', icon: '🐚' },
-  ],
-  linux: [
-    { id: 'bash', name: 'Bash', icon: '🐚' },
-    { id: 'zsh', name: 'Zsh', icon: '🐚' },
-    { id: 'sh', name: 'Sh', icon: '🐚' },
-  ],
-};
-
-export function resolveHostPlatform(cwd?: string): HostPlatform {
-  const trimmed = (cwd || '').trim().replace(/\\/g, '/');
-  // 1. 如果路径含有 Windows 盘符特征（例如 E:/code/jeikcode 或 C:\... 或 /c/...），100% 确定宿主机为 Windows！
-  if (/^[a-zA-Z]:[/\\]/.test(trimmed) || /^[/\\][a-zA-Z]:/.test(trimmed) || /^\/[a-zA-Z]\//.test(trimmed)) {
-    return 'windows';
-  }
-  // 2. 本地持久化缓存的真实宿主机平台 (由后端 API 返回并记住)
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const cached = window.localStorage.getItem('jeikcode:host_platform');
-      if (cached === 'windows' || cached === 'macos' || cached === 'linux') {
-        return cached as HostPlatform;
-      }
-    }
-  } catch {}
-  // 3. 常见路径推断 (Unix 绝对路径)
-  if (trimmed.startsWith('/Users/')) return 'macos';
-  // 关键修复：任何以 / 开头的绝对路径（如 /root, /root/..., /home/..., /var/..., /etc/..., /tmp/..., /usr/... 等），
-  // 只要不属于 Windows 虚拟挂载盘符，必然为 Linux / Unix 宿主机！
-  if (trimmed.startsWith('/')) return 'linux';
-
-  // 4. 客户端自身判定（仅在桌面浏览器且无盘符时作为弱参考）
-  if (typeof navigator !== 'undefined') {
-    const ua = navigator.userAgent || '';
-    const isMobile = /android|iphone|ipad|ipod|mobile/i.test(ua);
-    if (!isMobile) {
-      if (/mac/i.test(ua) || /macintosh|macintel/i.test(navigator.platform)) return 'macos';
-      if (/linux/i.test(ua) || /linux/i.test(navigator.platform)) return 'linux';
-      if (/win/i.test(ua) || /windows/i.test(navigator.platform)) return 'windows';
-    }
-  }
-  return 'linux';
-}
-
-export function getPlatformShells(platform: HostPlatform = 'windows'): ShellOption[] {
-  return SHELL_CONFIGS[platform] || SHELL_CONFIGS.windows;
-}
-
-export function getDefaultShellForPlatform(platform: HostPlatform = 'windows'): string {
-  return platform === 'windows' ? 'powershell' : platform === 'macos' ? 'zsh' : 'bash';
-}
-
-export const PLATFORM_SHELLS: ShellOption[] = SHELL_CONFIGS.windows;
-export const DEFAULT_SHELL = 'powershell';
-
-export function getMainstreamShell(platform: HostPlatform = 'windows'): string {
-  return getDefaultShellForPlatform(platform);
 }
 
 const DARK_TERMINAL_THEME = {
@@ -183,106 +135,6 @@ const LIGHT_TERMINAL_THEME = {
   brightWhite: '#8c959f',
 };
 
-interface TerminalTab {
-  id: string;
-  name: string;
-  cwd: string;
-  shell?: string;
-  timestamp: number;
-}
-
-export function inferShellFromTab(tab: { name?: string; shell?: string }, platform?: HostPlatform): string {
-  const p = platform || resolveHostPlatform();
-  const direct = (tab.shell || '').toLowerCase().trim();
-  if (direct) {
-    if (direct.includes('git') || (direct.includes('bash') && p === 'windows')) return 'gitbash';
-    if (direct.includes('wsl') || direct.includes('ubuntu')) return 'wsl';
-    if (direct.includes('cmd')) return p === 'windows' ? 'cmd' : 'bash';
-    if (direct.includes('zsh')) return 'zsh';
-    if (direct.includes('power') || direct.includes('pwsh')) {
-      return p === 'windows' ? 'powershell' : (p === 'macos' ? 'zsh' : 'bash');
-    }
-    if (direct.includes('bash')) return p === 'windows' ? 'gitbash' : 'bash';
-    if (direct.includes('sh')) return 'sh';
-    return direct;
-  }
-  const name = (tab.name || '').toLowerCase().trim();
-  if (name.includes('git') || (name.includes('bash') && p === 'windows')) return 'gitbash';
-  if (name.includes('wsl') || name.includes('ubuntu')) return 'wsl';
-  if (name.includes('cmd')) return p === 'windows' ? 'cmd' : 'bash';
-  if (name.includes('zsh')) return 'zsh';
-  if (name.includes('power') || name.includes('pwsh')) {
-    return p === 'windows' ? 'powershell' : (p === 'macos' ? 'zsh' : 'bash');
-  }
-  return getDefaultShellForPlatform(p);
-}
-
-const getProjectTerminalStorageKey = (projectCwd?: string) => {
-  const norm = (projectCwd || 'default').replace(/\\/g, '/').trim().toLowerCase();
-  return `jeikcode:terminal:sessions:${norm}`;
-};
-
-function getSavedSessions(projectCwd?: string): TerminalTab[] | null {
-  try {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      const key = getProjectTerminalStorageKey(projectCwd);
-      const raw = window.sessionStorage.getItem(key);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          const plat = resolveHostPlatform(projectCwd);
-          return parsed.map((t) => {
-            const shell = inferShellFromTab(t, plat);
-            let name = t.name;
-            if (plat !== 'windows' && name && name.toLowerCase().includes('powershell')) {
-              name = name.replace(/powershell/gi, shell);
-            }
-            return {
-              ...t,
-              name,
-              shell,
-            };
-          });
-        }
-      }
-    }
-  } catch {}
-  return null;
-}
-
-function saveSessions(tabs: TerminalTab[], projectCwd?: string) {
-  try {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      const key = getProjectTerminalStorageKey(projectCwd);
-      const plat = resolveHostPlatform(projectCwd);
-      const normalized = tabs.map((t) => ({
-        ...t,
-        shell: inferShellFromTab(t, plat),
-      }));
-      window.sessionStorage.setItem(key, JSON.stringify(normalized));
-    }
-  } catch {}
-}
-
-function getSavedActiveTab(projectCwd?: string): string | null {
-  try {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      const norm = (projectCwd || 'default').replace(/\\/g, '/').trim().toLowerCase();
-      return window.sessionStorage.getItem(`jeikcode:terminal:active_tab:${norm}`);
-    }
-  } catch {}
-  return null;
-}
-
-function saveActiveTab(tabId: string, projectCwd?: string) {
-  try {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      const norm = (projectCwd || 'default').replace(/\\/g, '/').trim().toLowerCase();
-      window.sessionStorage.setItem(`jeikcode:terminal:active_tab:${norm}`, tabId);
-    }
-  } catch {}
-}
-
 export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelProps) {
   const t = useT();
   const { theme, effectiveTheme } = useSettings();
@@ -290,29 +142,10 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
 
   const sessionScopeKey = cwd || 'default';
 
-  const stableDefaultId = useMemo(() => {
-    const norm = (cwd || 'default').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-    return `term_main_${norm}`;
-  }, [cwd]);
-
   const [tabs, setTabs] = useState<TerminalTab[]>(() => {
+    if (areAllTerminalsClosed(cwd)) return [];
     const saved = getSavedSessions(cwd);
-    if (saved && saved.length > 0) return saved;
-    const norm = (cwd || 'default').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-    const id = `term_main_${norm}`;
-    // 首个标签必须跟随宿主机真实平台（Windows→PowerShell，macOS→Zsh，Linux→Bash）。
-    // 此前硬编码 DEFAULT_SHELL('powershell')：非 Windows 宿主上标签名写着 powershell，
-    // 后端却按 bash 启动实际进程，导致“标签名与真实终端不一致”。
-    const shell = getDefaultShellForPlatform(resolveHostPlatform(cwd));
-    return [
-      {
-        id,
-        name: `${shell} 1`,
-        cwd: cwd || '.',
-        shell,
-        timestamp: 0,
-      },
-    ];
+    return saved ?? [];
   });
 
   const [activeTabId, setActiveTabIdState] = useState<string>(() => {
@@ -320,6 +153,17 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
     if (saved && tabs.some((t) => t.id === saved)) return saved;
     return tabs[0]?.id || '';
   });
+
+  // 仅真正激活看过的标签页才实例化 xterm 与建立 WebSocket，其余后台标签页延后到首次点击时再建连
+  const [activatedTabIds, setActivatedTabIds] = useState<Record<string, boolean>>(() => {
+    const initialId = getSavedActiveTab(cwd) || tabs[0]?.id || '';
+    return initialId ? { [initialId]: true } : {};
+  });
+
+  useEffect(() => {
+    if (!activeTabId) return;
+    setActivatedTabIds((prev) => (prev[activeTabId] ? prev : { ...prev, [activeTabId]: true }));
+  }, [activeTabId]);
 
   const setActiveTabId = useCallback(
     (idOrFn: string | ((prev: string) => string)) => {
@@ -991,6 +835,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
         });
 
         if (enriched.length > 0) {
+          markAllTerminalsClosed(cwd, false);
           // 清理本地已经不在后端运行的无效记录
           const validIds = new Set(enriched.map((t: TerminalTab) => t.id));
           for (const [id, rec] of termMap.current.entries()) {
@@ -1012,24 +857,17 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
             return has ? cur : enriched[0]!.id;
           });
         } else {
-          // 如果后端已被清空（如在其他浏览器删除了所有终端），本地清理并仅保留一个新创建的干净初始会话！
+          // 后端当前没有终端时保持空列表，不再自动新建并触发 30 条 PTY 复活
           for (const [id, record] of termMap.current.entries()) {
             try { record.ro?.disconnect(); } catch {}
             try { record.ws?.close(); } catch {}
             try { record.term.dispose(); } catch {}
           }
           termMap.current.clear();
-          const newId = stableDefaultId;
-          const newTab: TerminalTab = {
-            id: newId,
-            name: `${preferredShell} 1`,
-            cwd: cwd || '.',
-            shell: preferredShell,
-            timestamp: Date.now(),
-          };
-          setTabs([newTab]);
-          saveSessions([newTab], cwd);
-          setActiveTabId(newId);
+          setTabs([]);
+          saveSessions([], cwd);
+          setActiveTabIdState('');
+          saveActiveTab('', cwd);
         }
       }
     } catch {}
@@ -1088,6 +926,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
   // 创建新终端标签
   const createNewTab = useCallback(
     async (shellName = preferredShell, initialCommand?: string) => {
+      markAllTerminalsClosed(cwd, false);
       // 用户主动新建终端：允许下一次布局把焦点交给新终端。
       focusOnNextLayoutRef.current = true;
       try {
@@ -1123,8 +962,12 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
     [cwd, tabs.length, preferredShell]
   );
 
-  // 监听全局终端执行命令事件（如 /init 构建代码图谱自动拉起主流终端并执行）
+  // 监听全局终端执行命令事件（含懒挂载前暂存队列消费，如 /init 自动拉起并执行）
   useEffect(() => {
+    const unregisterHandler = registerTerminalRunHandler((command, shell) => {
+      const targetShell = shell || getMainstreamShell(hostPlatform);
+      void createNewTab(targetShell, command);
+    });
     const handleRunCommand = (e: Event) => {
       const customEvent = e as CustomEvent<{ command: string; shell?: string }>;
       const { command, shell } = customEvent.detail || {};
@@ -1134,6 +977,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
     };
     window.addEventListener('jeikcode:terminal:run_command', handleRunCommand);
     return () => {
+      unregisterHandler();
       window.removeEventListener('jeikcode:terminal:run_command', handleRunCommand);
     };
   }, [createNewTab, hostPlatform]);
@@ -1176,13 +1020,9 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
     void createNewTab(shellId);
   };
 
-  // 关闭单个终端 Tab
+  // 关闭单个终端 Tab（允许全部关闭至 0 个，不再强制保留）
   const closeTab = (tabId: string, e: MouseEvent) => {
     e.stopPropagation();
-    if (tabs.length <= 1) {
-      showToast(t('terminal.minOneSession'), 'info');
-      return;
-    }
     const record = termMap.current.get(tabId);
     if (record) {
       try {
@@ -1198,6 +1038,15 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
     }
     const remaining = tabs.filter((t) => t.id !== tabId);
     setTabs(remaining);
+    saveSessions(remaining, cwd);
+    if (remaining.length === 0) {
+      markAllTerminalsClosed(cwd, true);
+      setActiveTabIdState('');
+      saveActiveTab('', cwd);
+    } else if (activeTabId === tabId) {
+      focusOnNextLayoutRef.current = true;
+      setActiveTabId(remaining[remaining.length - 1]!.id);
+    }
     void closeTerminalSession(tabId);
     try {
       if (typeof BroadcastChannel !== 'undefined') {
@@ -1206,13 +1055,9 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
         bc.close();
       }
     } catch {}
-    if (activeTabId === tabId) {
-      focusOnNextLayoutRef.current = true;
-      setActiveTabId(remaining[remaining.length - 1]!.id);
-    }
   };
 
-  // 关闭所有终端标签（终止所有任务，恢复纯净初始终端）
+  // 关闭所有终端标签（真正清理并保持空列表，绝不复活幽灵终端）
   const closeAllTabs = () => {
     tabs.forEach((tab) => {
       const record = termMap.current.get(tab.id);
@@ -1224,18 +1069,19 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
       }
       void closeTerminalSession(tab.id);
     });
-    const newId = stableDefaultId;
-    const newTab: TerminalTab = {
-      id: newId,
-      name: `${preferredShell} 1`,
-      cwd: cwd || '.',
-      shell: preferredShell,
-      timestamp: Date.now(),
-    };
-    setTabs([newTab]);
-    focusOnNextLayoutRef.current = true;
-    setActiveTabId(newId);
-    saveSessions([newTab], cwd);
+    markAllTerminalsClosed(cwd, true);
+    setTabs([]);
+    setActivatedTabIds({});
+    setActiveTabIdState('');
+    saveActiveTab('', cwd);
+    saveSessions([], cwd);
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('jeikcode:terminal:sync');
+        bc.postMessage({ type: 'sync', cwd });
+        bc.close();
+      }
+    } catch {}
     showToast(t('terminal.allClosed') || '已关闭所有终端标签并终止任务', 'info');
   };
 
@@ -1293,18 +1139,16 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
                 }}
                 title={tab.name + ' (双击关闭标签)'}
               >
-                <span class="terminal-tab-icon">💻</span>
+                <span class="terminal-tab-icon" aria-hidden="true">›</span>
                 <span class="terminal-tab-name">{tab.name}</span>
-                {tabs.length > 1 && (
-                  <button
-                    type="button"
-                    class="terminal-tab-close"
-                    onClick={(e) => closeTab(tab.id, e as unknown as MouseEvent)}
-                    title="Close terminal"
-                  >
-                    ×
-                  </button>
-                )}
+                <button
+                  type="button"
+                  class="terminal-tab-close"
+                  onClick={(e) => closeTab(tab.id, e as unknown as MouseEvent)}
+                  title="Close terminal"
+                >
+                  ×
+                </button>
               </div>
             );
           })}
@@ -1371,7 +1215,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
             onClick={toggleScratchpad}
             title={t('terminal.scratchpad')}
           >
-            📝
+            ✎
           </button>
         </div>
       </div>
@@ -1389,7 +1233,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
                 setScratchpadText('');
               }}
             >
-              {`🚀 ${t('terminal.send')}`}
+              {t('terminal.send')}
             </button>
           </div>
           <textarea
@@ -1409,15 +1253,31 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
         </div>
       )}
 
-      {/* 现代 xterm 真实终端视口区：绝对定位重叠，visibility 切换，保留完整物理宽高 */}
+      {/* 现代 xterm 真实终端视口区：仅激活过的标签页实例化 xterm 与建立 WebSocket */}
       <div class="terminal-xterm-stage">
-        {tabs.map((tab) => (
-          <div
-            key={tab.id}
-            ref={(el) => bindTerminalContainer(tab, el)}
-            class={'terminal-xterm-viewport' + (tab.id === activeTabId ? ' active' : '')}
-          />
-        ))}
+        {tabs.length === 0 ? (
+          <div class="git-empty-state" style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
+            <button
+              type="button"
+              class="btn btn-primary"
+              onClick={() => void createNewTab(preferredShell)}
+            >
+              + {t('terminal.newPowerShell')}
+            </button>
+          </div>
+        ) : (
+          tabs.map((tab) => {
+            const isMounted = tab.id === activeTabId || Boolean(activatedTabIds[tab.id]);
+            if (!isMounted) return null;
+            return (
+              <div
+                key={tab.id}
+                ref={(el) => bindTerminalContainer(tab, el)}
+                class={'terminal-xterm-viewport' + (tab.id === activeTabId ? ' active' : '')}
+              />
+            );
+          })
+        )}
       </div>
     </div>
   );

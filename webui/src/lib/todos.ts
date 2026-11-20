@@ -1,9 +1,11 @@
 /**
  * Session todo list — TUI `active_todos` panel parity for WebUI.
  *
- * The `todowrite` / `todo` tools are stateless: the model either sends a full
- * plan (`{"todos":[…]}`), an incremental batch (`{"actions":[…]}`), or a single
- * incremental action (`{"action":"add|update|...",…}`).
+ * The `todowrite` / `todo` tools are stateless: the model sends a full plan
+ * (`{"plan":[…]}`), an incremental patch (`{"update":[…]}`), an incremental
+ * batch (`{"actions":[…]}`), or a single incremental action. A call may carry
+ * both `plan` and `update`: the plan establishes the baseline first, then the
+ * update patches the rebuilt list.
  * Current list is folded over the transcript the same way as
  * `jeikcode_capabilities::tools::todo::reduce_todos`.
  */
@@ -198,7 +200,9 @@ export function parseTodosFromOutput(output?: string | null): TodoItem[] | null 
   return lines.some((line) => line.trim() === '(no tasks)') ? [] : null;
 }
 
-/** Full-list plan shape. Returns null when args are not a valid plan. */
+/** Full-list plan shape. When `update` is present, it is applied after the
+ * plan rebuild (ids/titles refer to the rebuilt list). Returns null when args
+ * are not a valid plan. */
 export function parseTodoPlan(args: string): TodoItem[] | null {
   let value: unknown;
   try {
@@ -211,7 +215,8 @@ export function parseTodoPlan(args: string): TodoItem[] | null {
   // `actions` takes precedence over leftover `todos` field (same as Rust backend).
   if (Array.isArray(value.actions)) return null;
 
-  let todos = value.plan !== undefined ? value.plan : value.todos;
+  const hasPlanField = value.plan !== undefined;
+  let todos = hasPlanField ? value.plan : value.todos;
   // Tolerate a single-layer stringified array (same as Rust parse_todos).
   if (typeof todos === 'string') {
     try {
@@ -237,7 +242,11 @@ export function parseTodoPlan(args: string): TodoItem[] | null {
     if (!content) continue;
     out.push({ content, status: status ?? 'pending' });
   }
-  return out.length > 0 ? out : null;
+  const withUpdate =
+    hasPlanField && (value.update !== undefined || value.updates !== undefined)
+      ? applyUpdateItems(out, value.update ?? value.updates)
+      : out;
+  return withUpdate.length > 0 ? withUpdate : null;
 }
 
 function applyOne(list: TodoItem[], v: Record<string, unknown>): TodoItem[] {
@@ -295,6 +304,121 @@ function applyUpdateAt(
     if (status === 'in_progress') next = ensureSingleInProgress(next, idx);
   }
   return next;
+}
+
+/** `update` entries accept content/title/task as the match key (Rust parity). */
+function updateContent(value: Record<string, unknown>): string {
+  const raw = value.content ?? value.task ?? value.title;
+  return typeof raw === 'string' ? normalizeTodoContent(raw) : '';
+}
+
+function positiveIntField(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 1) return raw;
+  if (typeof raw === 'string') {
+    const parsed = Number.parseInt(raw.trim(), 10);
+    return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
+  }
+  return null;
+}
+
+function isDeleteUpdate(value: Record<string, unknown>): boolean {
+  if (value.delete === true) return true;
+  const raw = typeof value.status === 'string'
+    ? value.status.trim().toLowerCase().replace(/[-_\s]/g, '')
+    : '';
+  return raw === 'delete' || raw === 'remove' || raw === 'deleted' || raw === 'removed';
+}
+
+/** `after`/`after_id` (and legacy `before*`) name the task immediately before the new one. */
+function updateAnchorIndex(list: TodoItem[], value: Record<string, unknown>): number | null {
+  const id = positiveIntField(value.after_id)
+    ?? positiveIntField(value.before_id)
+    ?? positiveIntField(value.after)
+    ?? positiveIntField(value.before);
+  if (id !== null) return id <= list.length ? id - 1 : null;
+  const anchor = value.after ?? value.before ?? value.before_content;
+  if (typeof anchor !== 'string') return null;
+  const key = normalizeTodoContent(anchor);
+  const idx = list.findIndex((item) => normalizeTodoContent(item.content) === key);
+  return idx >= 0 ? idx : null;
+}
+
+function applyUpdateEntry(
+  list: TodoItem[],
+  entry: Record<string, unknown>,
+): { list: TodoItem[]; inProgressIdx: number | null } {
+  const content = updateContent(entry);
+  const contentKey = content ? normalizeTodoContent(content) : '';
+  const id = jsonId(entry);
+  let idx = contentKey
+    ? list.findIndex((item) => normalizeTodoContent(item.content) === contentKey)
+    : -1;
+  if (idx < 0 && id !== null && id <= list.length) idx = id - 1;
+
+  if (isDeleteUpdate(entry)) {
+    if (idx < 0) return { list, inProgressIdx: null };
+    const next = list.slice();
+    next.splice(idx, 1);
+    return { list: next, inProgressIdx: null };
+  }
+
+  const status = typeof entry.status === 'string' ? parseStatus(entry.status) : null;
+  const renamed = entry.new_content ?? entry.new_title;
+  const newContent = typeof renamed === 'string' ? normalizeTodoContent(renamed) : '';
+
+  // Anchor path: insert or move the item right after the named preceding task.
+  const anchorIdx = updateAnchorIndex(list, entry);
+  if (anchorIdx !== null) {
+    if (!content) return { list, inProgressIdx: null };
+    const next = list.slice();
+    const existing = next.findIndex((item) => normalizeTodoContent(item.content) === contentKey);
+    const item = existing >= 0 ? next.splice(existing, 1)[0]! : undefined;
+    const insertAt = anchorIdx + 1;
+    const adjusted = item !== undefined && existing < insertAt ? insertAt - 1 : insertAt;
+    const landing = Math.min(adjusted, next.length);
+    const landingItem: TodoItem = item ? { ...item } : { content, status: 'pending' };
+    if (status) landingItem.status = status;
+    next.splice(landing, 0, landingItem);
+    return {
+      list: status === 'in_progress' ? ensureSingleInProgress(next, landing) : next,
+      inProgressIdx: status === 'in_progress' ? landing : null,
+    };
+  }
+
+  if (idx >= 0) {
+    const next = list.map((item) => ({ ...item }));
+    if (newContent) next[idx] = { ...next[idx]!, content: newContent };
+    if (status) next[idx] = { ...next[idx]!, status };
+    return {
+      list: status === 'in_progress' ? ensureSingleInProgress(next, idx) : next,
+      inProgressIdx: status === 'in_progress' ? idx : null,
+    };
+  }
+
+  // No match: a content-bearing update appends, matching the backend.
+  if (!content) return { list, inProgressIdx: null };
+  const next = list.concat([{ content, status: status ?? 'pending' }]);
+  const landing = next.length - 1;
+  return {
+    list: status === 'in_progress' ? ensureSingleInProgress(next, landing) : next,
+    inProgressIdx: status === 'in_progress' ? landing : null,
+  };
+}
+
+/** Apply a top-level `update`/`updates` patch (content-first, id fallback). */
+function applyUpdateItems(list: TodoItem[], raw: unknown): TodoItem[] {
+  const entries = raw === undefined || raw === null
+    ? []
+    : Array.isArray(raw) ? raw : [raw];
+  let next = list;
+  let lastInProgress: number | null = null;
+  for (const entry of entries) {
+    if (!isRecord(entry)) continue;
+    const applied = applyUpdateEntry(next, entry);
+    next = applied.list;
+    if (applied.inProgressIdx !== null) lastInProgress = applied.inProgressIdx;
+  }
+  return lastInProgress === null ? next : ensureSingleInProgress(next, lastInProgress);
 }
 
 function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoItem[] {
@@ -362,6 +486,13 @@ export function applyTodoAction(list: TodoItem[], args: string): TodoItem[] {
     v = parsed;
   } catch {
     return list;
+  }
+
+  // `update`/`updates` is the modern incremental patch shape. `plan` (handled by
+  // parseTodoPlan) establishes a baseline first; an update-only call patches the
+  // current list. `actions` loses to `update` when both are present, matching Rust.
+  if (v.update !== undefined || v.updates !== undefined) {
+    return applyUpdateItems(list, v.update ?? v.updates);
   }
 
   if (Array.isArray(v.actions)) {
@@ -725,6 +856,7 @@ function isTodoActionValid(args: string): boolean {
   try {
     const v = JSON.parse(args);
     if (!isRecord(v)) return false;
+    if (v.update !== undefined || v.updates !== undefined) return true;
     if (Array.isArray(v.actions)) {
       return v.actions.length > 0 && v.actions.every((a) => isRecord(a) && actionKind(a) !== null);
     }

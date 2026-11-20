@@ -172,8 +172,8 @@ const BUILTIN_COMMANDS: &[Command] = &[
     // selection happens in the modal, not on the command line.
     Command { name: "rewind",  desc: "Restore the conversation to an earlier checkpoint", needs_args: false, hidden: false },
     Command { name: "worktree", desc: "Git worktree isolation (create/list/done/cleanup)", needs_args: true, hidden: false },
-    Command { name: "update",  desc: "Upgrade jeikcode to latest (subcommands: set <url>, rollback)", needs_args: false, hidden: false },
-    Command { name: "upgrade", desc: "Upgrade jeikcode to latest (subcommands: set <url>, rollback)", needs_args: false, hidden: false },
+    Command { name: "update",  desc: "Upgrade jeikcode to latest (subcommands: set <url>, rollback)", needs_args: false, hidden: true },
+    Command { name: "upgrade", desc: "Upgrade jeikcode to latest (subcommands: set <url>, rollback)", needs_args: false, hidden: true },
     Command { name: "plan",    desc: "Switch to Plan mode (read-only exploration)", needs_args: false, hidden: false },
     Command { name: "build",   desc: "Switch to Build mode (full execution)", needs_args: false, hidden: false },
     Command { name: "auto",    desc: "Switch to Auto mode (auto-approve all tools)", needs_args: false, hidden: false },

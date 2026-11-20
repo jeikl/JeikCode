@@ -754,15 +754,18 @@ impl SnapshotHook {
     }
 
     fn record_persistence_error(&self, error: &SessionStoreError) {
-        if error.is_uncertain_commit() {
-            self.persistence_status
-                .report_uncertain_commit(error.to_string());
-        }
+        report_snapshot_store_error(&self.persistence_status, error);
     }
 
     fn compaction_error(&self, error: SessionStoreError) -> CompactionCheckpointError {
         self.record_persistence_error(&error);
         CompactionCheckpointError::new(error.to_string())
+    }
+}
+
+fn report_snapshot_store_error(status: &SnapshotPersistenceStatus, error: &SessionStoreError) {
+    if error.is_uncertain_commit() {
+        status.report_uncertain_commit(error.to_string());
     }
 }
 
@@ -773,6 +776,12 @@ fn reindex_compacted_sidecars(
     presentation: &mut PresentationFile,
 ) {
     if before.messages.len() != after.messages.len() {
+        let after_pos_by_id: std::collections::HashMap<&str, usize> = after
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| message.id.as_deref().map(|id| (id, index)))
+            .collect();
         let prefix = before
             .messages
             .iter()
@@ -787,14 +796,33 @@ fn reindex_compacted_sidecars(
             .count();
         let old_end = before.messages.len().saturating_sub(suffix);
         let new_end = after.messages.len().saturating_sub(suffix);
+        // 优先按末尾消息 id 判断 turn 是否在压缩后存活及新边界位置：
+        // 轮中自动压缩时 `before`（上轮落盘快照）与 `after`（当轮新尾巴）末尾不同导致 `suffix=0`，
+        // 若盲用位置差会把上一个已完结 Turn 的 `after_message` 错移进当前轮。
+        let resolve_by_id = |stat: &TurnStat| -> Option<Option<usize>> {
+            let end_idx = stat.after_message.checked_sub(1)?;
+            let end_id = before.messages.get(end_idx)?.id.as_deref()?;
+            if after_pos_by_id.is_empty() {
+                return None;
+            }
+            Some(after_pos_by_id.get(end_id).map(|pos| pos + 1))
+        };
         let _ = meta.archive_turn_stats_where(|stat| {
-            stat.position_valid && stat.after_message > prefix && stat.after_message < old_end
+            if !stat.position_valid {
+                return false;
+            }
+            if let Some(resolved) = resolve_by_id(stat) {
+                return resolved.is_none();
+            }
+            stat.after_message > prefix && stat.after_message < old_end
         });
         for stat in &mut meta.turn_stats {
             if !stat.position_valid {
                 continue;
             }
-            if stat.after_message >= old_end {
+            if let Some(Some(new_after)) = resolve_by_id(stat) {
+                stat.after_message = new_after;
+            } else if stat.after_message >= old_end {
                 stat.after_message = new_end + stat.after_message.saturating_sub(old_end);
             }
         }
@@ -864,6 +892,23 @@ fn root_user_start_ms_for_steered_chain(convo: &Conversation) -> Option<u64> {
         };
     }
     saw_steer.then_some(fallback_ts).flatten()
+}
+
+pub(crate) fn stop_reason_slug(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::Stopped => "stopped",
+        StopReason::MaxRounds => "max_rounds",
+        StopReason::MaxContinuations => "max_continuations",
+        StopReason::RepeatLoop => "repeat_loop",
+        StopReason::ToolLoopDetected => "tool_loop_detected",
+        StopReason::ProviderError => "provider_error",
+        StopReason::Timeout => "timeout",
+        StopReason::Cancelled => "cancelled",
+        StopReason::PromptRejected => "prompt_rejected",
+        StopReason::PolicyDenied => "policy_denied",
+        StopReason::RateLimited => "rate_limited",
+        _ => "unknown",
+    }
 }
 
 #[async_trait]
@@ -1073,103 +1118,141 @@ impl LifecycleHooks for SnapshotHook {
             .unwrap_or_default();
 
         let msg_count = convo.messages.len();
-        let update_meta = |meta: &mut SessionMeta| {
-            meta.auto_name_from_messages(&convo.messages);
-            meta.updated_at = now;
-            meta.turn_count = meta.turn_count.saturating_add(1);
-            meta.message_count = msg_count as u32;
-            // 真实 usage 入场：压缩估算的占用到此作废，后续以本次 turn stat 为准。
-            meta.compacted_context_tokens = None;
-            if let Some(attr) = attribution.as_ref() {
-                if !attr.provider_id.is_empty() {
-                    meta.preferred_model = Some(attr.provider_id.clone());
+        let reason_slug = stop_reason_slug(*reason).to_string();
+        let reason_errored = *reason != StopReason::Stopped;
+        let turn_id = ctx.turn_id;
+
+        let (checkpoint, candidate_points, has_rewind) = if let Some(point) = completed_rewind {
+            let rewind = self
+                .rewind
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut next_points = rewind.points.clone();
+            next_points.push(point);
+            const MAX_REWIND_POINTS: usize = 100;
+            if next_points.len() > MAX_REWIND_POINTS {
+                let excess = next_points.len() - MAX_REWIND_POINTS;
+                next_points.drain(..excess);
+            }
+            (rewind.checkpoint.clone(), Some(next_points), true)
+        } else {
+            (None, None, false)
+        };
+
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let working_dir = self.working_dir.clone();
+        let lease = self.lease.clone();
+        let persistence_status = self.persistence_status.clone();
+        let checkpoint_for_task = checkpoint.clone();
+
+        let commit_outcome = tokio::task::spawn_blocking(move || {
+            let update_meta = |meta: &mut SessionMeta| {
+                meta.auto_name_from_messages(&snap.messages);
+                meta.updated_at = now;
+                meta.turn_count = meta.turn_count.saturating_add(1);
+                meta.message_count = msg_count as u32;
+                // 真实 usage 入场：压缩估算的占用到此作废，后续以本次 turn stat 为准。
+                meta.compacted_context_tokens = None;
+                if let Some(attr) = attribution.as_ref() {
+                    if !attr.provider_id.is_empty() {
+                        meta.preferred_model = Some(attr.provider_id.clone());
+                    }
+                }
+                let _ = meta.archive_turn_stats_where(|stat| {
+                    stat.turn_id == 0 && stat.position_valid && stat.after_message > msg_count
+                });
+
+                meta.turn_stats.push(TurnStat {
+                    after_message: msg_count,
+                    position_valid: true,
+                    turn_id,
+                    round_count,
+                    tool_call_count,
+                    duration_ms,
+                    total_tokens,
+                    errored: reason_errored,
+                    used_tokens,
+                    ctx_window,
+                    model_usage,
+                    stop_reason: Some(reason_slug),
+                });
+            };
+            let result = if let Some(lease) = &lease {
+                mgr.commit_native_runtime_mutation(
+                    lease,
+                    &snap,
+                    |_current_snapshot, meta, _presentation| {
+                        update_meta(meta);
+                        Ok(())
+                    },
+                )
+            } else {
+                if let Err(error) = mgr.save_snapshot(&session_id, &snap) {
+                    eprintln!("[SnapshotHook] save_snapshot failed: {error}");
+                    return Err(());
+                }
+                let fresh = SessionMeta::new(&session_id, &working_dir, now);
+                mgr.update_meta_or_insert(&session_id, fresh, update_meta)
+            };
+            if let Err(error) = result {
+                report_snapshot_store_error(&persistence_status, &error);
+                eprintln!("[SnapshotHook] update_meta failed: {error}");
+                return Err(());
+            }
+
+            let mut rewind_committed = false;
+            if has_rewind {
+                if let Some(ref points) = candidate_points {
+                    let ledger = RewindLedger {
+                        version: LEDGER_VERSION,
+                        points: points.clone(),
+                    };
+                    let mut refs_ok = true;
+                    if let Some(cp) = checkpoint_for_task.as_ref() {
+                        if let Err(error) = cp.retain_points(&ledger.points) {
+                            eprintln!("[SnapshotHook] rewind refs update failed: {error}");
+                            refs_ok = false;
+                        }
+                    }
+                    if refs_ok {
+                        let saved = match &lease {
+                            Some(lease) => mgr.save_rewind_ledger_with_lease(lease, &ledger),
+                            None => mgr.save_rewind_ledger(&session_id, &ledger),
+                        };
+                        if let Err(error) = saved {
+                            eprintln!("[SnapshotHook] rewind ledger save failed: {error}");
+                        } else {
+                            rewind_committed = true;
+                        }
+                    }
                 }
             }
-            // Only legacy position-only stats can be judged by message count.
-            // Native stats have stable turn ids and are reindexed exclusively by
-            // the explicit compaction/undo seams.
-            let _ = meta.archive_turn_stats_where(|stat| {
-                stat.turn_id == 0 && stat.position_valid && stat.after_message > msg_count
-            });
-            meta.turn_stats.push(TurnStat {
-                after_message: msg_count,
-                position_valid: true,
-                turn_id: ctx.turn_id,
-                round_count,
-                tool_call_count,
-                duration_ms,
-                total_tokens,
-                errored: *reason != StopReason::Stopped,
-                used_tokens,
-                ctx_window,
-                model_usage,
-            });
-        };
-        let result = if let Some(lease) = &self.lease {
-            self.mgr.commit_native_runtime_mutation(
-                lease,
-                &snap,
-                |_current_snapshot, meta, _presentation| {
-                    update_meta(meta);
-                    Ok(())
-                },
-            )
-        } else {
-            if let Err(error) = self.mgr.save_snapshot(&self.session_id, &snap) {
-                eprintln!("[SnapshotHook] save_snapshot failed: {error}");
-                return;
-            }
-            let fresh = SessionMeta::new(&self.session_id, &self.working_dir, now);
-            self.mgr
-                .update_meta_or_insert(&self.session_id, fresh, update_meta)
-        };
-        if let Err(error) = result {
-            self.record_persistence_error(&error);
-            eprintln!("[SnapshotHook] update_meta failed: {error}");
-            // Preserve the accepted-prompt checkpoint until a later successful
-            // aggregate commit supersedes it.
-            return;
-        }
-        if let Some(point) = completed_rewind {
+
+            mgr.clear_inflight_snapshot(&session_id);
+            crate::session::partial::clear_global(&session_id);
+            Ok(rewind_committed.then_some(candidate_points).flatten())
+        })
+        .await;
+
+        if let Ok(Ok(Some(committed_points))) = commit_outcome {
             let mut rewind = self
                 .rewind
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let previous_points = rewind.points.clone();
-            rewind.points.push(point);
-            const MAX_REWIND_POINTS: usize = 100;
-            if rewind.points.len() > MAX_REWIND_POINTS {
-                let excess = rewind.points.len() - MAX_REWIND_POINTS;
-                rewind.points.drain(..excess);
-            }
-            let ledger = RewindLedger {
-                version: LEDGER_VERSION,
-                points: rewind.points.clone(),
-            };
-            if let Some(checkpoint) = rewind.checkpoint.as_ref() {
-                if let Err(error) = checkpoint.retain_points(&ledger.points) {
-                    eprintln!("[SnapshotHook] rewind refs update failed: {error}");
-                    rewind.points = previous_points;
-                    return;
-                }
-            }
-            let saved = match &self.lease {
-                Some(lease) => self.mgr.save_rewind_ledger_with_lease(lease, &ledger),
-                None => self.mgr.save_rewind_ledger(&self.session_id, &ledger),
-            };
-            if let Err(error) = saved {
-                eprintln!("[SnapshotHook] rewind ledger save failed: {error}");
-                if let Some(checkpoint) = rewind.checkpoint.as_ref() {
-                    let _ = checkpoint.retain_points(&previous_points);
-                }
-                rewind.points = previous_points;
+            rewind.points = committed_points;
+        } else if has_rewind && matches!(commit_outcome, Ok(Ok(None))) {
+            let previous_points = self
+                .rewind
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .points
+                .clone();
+            if let Some(cp) = checkpoint {
+                let _ =
+                    tokio::task::spawn_blocking(move || cp.retain_points(&previous_points)).await;
             }
         }
-        self.mgr.clear_inflight_snapshot(&self.session_id);
-        // The canonical snapshot now contains this turn (partial included). The
-        // per-token crash recovery sidecar is superseded; a failed commit above
-        // returns early and deliberately keeps it.
-        crate::session::partial::clear_global(&self.session_id);
     }
 }
 
@@ -1414,6 +1497,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         };
         let mut meta = SessionMeta::new(id, "/p", 1);
         meta.owner = StorageOwner::Native;
@@ -1500,6 +1584,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         };
         let mut meta = SessionMeta::new(id, "/p", 1);
         meta.owner = StorageOwner::Native;
@@ -1554,6 +1639,72 @@ mod tests {
         assert_eq!(stats.len(), 2);
         assert_eq!((stats[0].turn_id, stats[0].after_message), (2, 1));
         assert_eq!((stats[1].turn_id, stats[1].after_message), (3, 3));
+    }
+
+    #[test]
+    fn mid_turn_compaction_with_newer_turn_tail_reindexes_prior_turn_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(SessionManager::with_root(dir.path()));
+        let id = "mid-turn-compact-id-reindex";
+        let with_id = |mut msg: Message, msg_id: &str| -> Message {
+            msg.id = Some(msg_id.to_string());
+            msg
+        };
+        let before = SessionSnapshot::new(vec![
+            with_id(Message::user("u1"), "m-u1"),
+            with_id(Message::assistant("a1", Vec::new()), "m-a1"),
+            with_id(Message::user("u2"), "m-u2"),
+            with_id(Message::assistant("a2", Vec::new()), "m-a2"),
+        ]);
+        let stat = |after_message, turn_id| TurnStat {
+            after_message,
+            position_valid: true,
+            turn_id,
+            round_count: 1,
+            tool_call_count: 0,
+            duration_ms: 100,
+            total_tokens: 1,
+            errored: false,
+            used_tokens: 1,
+            ctx_window: 10,
+            model_usage: Vec::new(),
+            stop_reason: None,
+        };
+        let mut meta = SessionMeta::new(id, "/p", 1);
+        meta.owner = StorageOwner::Native;
+        meta.turn_stats = vec![stat(2, 1), stat(4, 2)];
+        meta.turn_count = 2;
+        meta.message_count = 4;
+
+        let lease = manager.acquire_lease(id).unwrap();
+        manager
+            .commit_native_import(
+                &lease,
+                Some(&before),
+                Some(&PresentationFile::default()),
+                &meta,
+            )
+            .unwrap();
+        let hook = SnapshotHook::new(manager.clone(), id, "/p").with_lease(lease);
+        // 第 3 轮运行中触发自动压缩：保留 u1、插入摘要锚点，同时后面已带有第 3 轮的 2 条新消息。
+        let after = SessionSnapshot::new(vec![
+            with_id(Message::user("u1"), "m-u1"),
+            Message::synthetic_user("<!-- jeikcode:anchor v1 -->\nsummary"),
+            with_id(Message::user("u2"), "m-u2"),
+            with_id(Message::assistant("a2", Vec::new()), "m-a2"),
+            with_id(Message::user("u3"), "m-u3"),
+            with_id(Message::assistant("a3-mid", Vec::new()), "m-a3"),
+        ]);
+
+        CompactionCheckpoint::save(&hook, &after).unwrap();
+
+        let stats = manager.read_meta(id).unwrap().turn_stats;
+        assert_eq!(stats.len(), 1, "第 1 轮末尾 m-a1 已被摘要，必须归档");
+        assert_eq!(stats[0].turn_id, 2);
+        assert_eq!(
+            stats[0].after_message, 4,
+            "第 2 轮必须精确定位在 m-a2 之后(4)，绝不可错移到第 3 轮末尾(6)"
+        );
     }
 
     #[test]

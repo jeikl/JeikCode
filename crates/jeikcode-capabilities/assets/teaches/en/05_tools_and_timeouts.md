@@ -43,6 +43,9 @@ Short commands undergo health checks at every `silent_kill_secs`: pager/REPL/ful
 - `include_logs=true` independently opens grep log contents (default false, independent from `include_ignored`); glob includes log paths by default.
 - `include_sensitive=true` opens sensitive credential paths; Build/AcceptEdits/Plan prompt, Auto continues.
 - `read` does not apply the ignore filter to an explicit path; sensitive paths go through `SensitivePathGate`.
+- Ignore sources and precedence: global `~/.jeikcode` < project root < project `.jeikcode`; project rules override global. `.codegraphignore.graph` is a separate hard sensitive gate: `include_ignored=true` can never open it, and a project noise `!` cannot re-open a sensitive path.
+- The graph index and grep/glob share one ignore policy but use different profiles: graph indexing also follows `.gitignore`; grep/glob intentionally do **not** apply `.gitignore` to preserve comprehensive search. The graph warm/edit paths also enforce ignore rules, and editing an ignore file invalidates the graph/query cache via its fingerprint.
+- Nested `.codegraphignore` / `.graph` files are loaded by the deep policy: child rules override parent rules; search and full graph indexing use the deep policy. The hard sensitive baseline (`.env*`, keys, `.ssh`, `.jeikcode/auth.toml`, etc.) is independent of `.graph`, so it still holds when that file is missing.
 
 ---
 
@@ -101,18 +104,36 @@ eager = "auto"                  # Proactivity: "auto" (intent-based) | "preferre
 
 ```toml
 [coding]
-max_rounds = 230                # Maximum model interaction rounds per session (0 = unlimited)
+max_rounds = 0                  # Maximum model interaction rounds per session (0 = unlimited by default; >0 triggers soft-landing summary)
 connect_timeout_secs = 10       # TCP/TLS connection timeout
 open_timeout_secs = 180         # HTTP response header (TTFB) timeout; does not truncate streaming body
 ttft_secs = 180                 # Time to first thinking/content/tool token (alias first_token_timeout_secs)
-transition_secs = 180           # Transition timeout from thinking completion to first content/tool token
-streaming_sliding_secs = 120    # Sliding window between consecutive content tokens
-first_token_timeout_retries = 3 # Automatic retry attempts upon first token timeout
+transition_secs = 360           # Transition timeout from thinking completion to first content/tool token
+streaming_sliding_secs = 360    # Sliding window between consecutive content tokens
+first_token_timeout_retries = 6 # Automatic retry attempts upon first token timeout
 compact_threshold = 0.9         # Auto-compaction watermark fraction (0.1–1.0; >= 1.0 disables)
 # compact_max_tokens = 350000   # Optional hard token cap for auto-compaction (stricter limit wins)
 ```
 
 Environment variable overrides: `JEIKCODE_CONNECT_TIMEOUT_SECS`, `JEIKCODE_OPEN_TIMEOUT_SECS`, `JEIKCODE_TTFT_SECS` (or `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS`), `JEIKCODE_TRANSITION_SECS`, `JEIKCODE_STREAMING_SECS` (or `JEIKCODE_STREAM_TIMEOUT_SECS`). Setting to `0` disables that specific timeout stage. SSE ping, `ResponseId`, and `Usage` do not reset the content sliding window.
+
+### Automatic retries (unified ladder)
+
+Every transient failure shares one backoff ladder: `0, 2, 5, 10, 15, 30, 45, 60, 90` seconds (up to 9 attempts, 257 seconds cumulative). The failure kind only decides the cap and the action:
+
+| Failure | Cap | Action |
+| :--- | :---: | :--- |
+| Connect / response-header failure (5xx, 408, 425, transport) | 9 | Resend the whole request |
+| Mid-stream drop (text/reasoning already emitted) | 9 | Keep the output and continue in a new bubble |
+| Mid-stream drop while a tool call is being assembled | 9 | Drop the unfinished call, keep the complete prefix, continue |
+| Stream idle timeout | 9 | Continue when output exists, otherwise resend |
+| First-token timeout | `first_token_timeout_retries` (default 6) | Resend the whole request |
+| Empty response / reasoning-only / malformed | 6 | Resend the whole request |
+| Rate limit 429 | 5 | Wait for the server reset window |
+| Context overflow | 3 | Compact, then resend |
+| Output truncated by length cap | 2 | Continue generating (not a failure) |
+
+One card per incident: every attempt overwrites the progress in place (`retry x/9`), and the card is rewritten with the terminal state once the budget is exhausted or the stream recovers; different incidents get their own cards. 401/403, 400, balance/moderation/model-not-found, decode failures, user cancellation, and policy denials are never retried.
 
 ---
 
@@ -121,7 +142,7 @@ Environment variable overrides: `JEIKCODE_CONNECT_TIMEOUT_SECS`, `JEIKCODE_OPEN_
 ```toml
 [subagent]
 max_concurrent = 0              # Maximum concurrent subagents (0 = unlimited, the default; >0 caps it)
-max_rounds = 230                # Maximum interaction rounds per subagent (0 = unlimited)
+max_rounds = 300                # Maximum interaction rounds per subagent (default 300; 0 = unlimited)
 ```
 
 ---

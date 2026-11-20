@@ -1232,7 +1232,7 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         }
         Msg::CliAboutTelemetry => "Telemetry controls".into(),
         Msg::CliAboutPlugin => "Manage skill/command plugins".into(),
-        Msg::CliAboutUninstall => "Uninstall JeikCode. With no arguments, ask whether to keep user configuration. `simple` removes only the program. `all` removes everything. Tutorial: https://jeikcode.top/guide/updates.html".into(),
+        Msg::CliAboutUninstall => "Uninstall JeikCode. With no arguments, ask whether to keep user configuration. `simple` removes only the program. `all` removes everything.".into(),
         Msg::CliAboutSetup => "Re-initialize JeikCode environment and bundled configurations to ~/.jeikcode/".into(),
         Msg::CliAboutHooks => "Manage hooks (list, test, enable/disable)".into(),
         Msg::CliAboutHooksList => "List all loaded hooks with their status".into(),
@@ -1402,9 +1402,53 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::StreamReadRetryExhausted { attempts } =>
             format!("Network connection interrupted: remote host closed or reset connection, reconnect failed after {attempts} attempts. You can retry.").into(),
         Msg::StreamReadPartialResponse =>
-            "Response interrupted: not auto-replayed to prevent duplicated output or tool execution; safe partial response preserved, you can continue.".into(),
+            "Response interrupted: the safe partial response was preserved, you can continue.".into(),
+        Msg::StreamReadInterrupted =>
+            "Network connection interrupted: remote host closed or reset connection. You can retry.".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("Connection dropped; reconnecting automatically (up to {max} attempts), current output preserved…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("Connection interrupted; current output preserved; retry {attempt}/{max}").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("Stream stalled (idle timeout); output preserved, retrying {attempt}/{max}")
+        } else {
+            format!("Stream stalled (idle timeout), retrying {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("Connection dropped; output preserved, retrying {attempt}/{max}")
+        } else {
+            format!("Connection dropped, retrying {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("Connection recovered after {attempts} retries, continuing").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "Stream timeout after automatic reconnects".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("Rate limited, retrying in {secs}s...").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "Rate limit reached; paused until window resets".into()
+        } else {
+            format!("Rate limit paused: {detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "Stream timeout after partial response; the partial response was preserved and can be continued.".into(),
         Msg::StreamReadResetHint =>
             "This error is common in corporate network or proxy environments; please check proxy/VPN/firewall settings.".into(),
         Msg::StreamReadDetailsPrefix => "Details: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "Possible echo loop: repeated output and tool pattern detected; asking the model to change course before stopping this turn.".into()
+        } else {
+            "Possible echo loop: repeated output and tool pattern detected; asking the model to change course.".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("stopped: the model replayed the same reasoning/text and tool-call pattern for {rounds} consecutive rounds").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("possible tool loop: the same call or read-only batch returned the same result(s) {threshold} times; asking the model to change course").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("tool loop detected: the same call or read-only batch returned the same result(s) {threshold} times; stopping before another model request").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("stopped: the model repeated the same tool-call pattern for {rounds} consecutive rounds").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Round limit ({cap}) reached; paused tool execution to summarize progress and next steps.").into(),
     }
 }

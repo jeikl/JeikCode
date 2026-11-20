@@ -53,10 +53,40 @@ fn state_path() -> PathBuf {
 
 fn load() -> SidebarFile {
     let path = state_path();
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(text) = std::fs::read_to_string(&path) else {
         return SidebarFile::default();
     };
-    serde_json::from_slice(&bytes).unwrap_or_default()
+    // Field/item-wise read: one invalid pin or a schema-drifted entry must not
+    // discard the user's other hidden/pinned projects (the next save would then
+    // overwrite the file with an empty state).
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return SidebarFile::default();
+    };
+    let Some(obj) = root.as_object() else {
+        return SidebarFile::default();
+    };
+    let hidden = obj
+        .get("hidden")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let pinned = obj
+        .get("pinned")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| serde_json::from_value::<PinnedProject>(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    SidebarFile { hidden, pinned }
 }
 
 fn save(state: &SidebarFile) {

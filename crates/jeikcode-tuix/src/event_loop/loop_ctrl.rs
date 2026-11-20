@@ -38,7 +38,7 @@ impl LoopController {
             interval: Duration::from_secs(secs),
             payload,
             round: 0,
-            max_rounds: 100,
+            max_rounds: 0,
             due: false,
             consecutive_failures: 0,
             awaiting_turn_terminal: false,
@@ -98,6 +98,7 @@ mod tests {
     fn round_limit_stops() {
         let mut c = LoopController::new_interval(300, LoopPayload::Prompt("x".into()));
         c.due = true;
+        c.max_rounds = 100;
         c.round = c.max_rounds;
         assert_eq!(c.decide(true), LoopAction::Stop);
     }

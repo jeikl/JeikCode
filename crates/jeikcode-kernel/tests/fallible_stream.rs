@@ -58,15 +58,16 @@ async fn provider_open_error_surfaces_and_fails_turn() {
     );
 }
 
-// A stream that emits some TextDelta then a mid-stream Error must surface the
-// error, fire on_error, and end the turn WITHOUT a fake empty-success.
+// A stream that emits some TextDelta then a TERMINAL mid-stream Error must
+// surface the error, fire on_error, and end the turn WITHOUT a fake empty-success.
+// (Transport-class drops are retried on the unified ladder — see the resume test below.)
 #[tokio::test]
 async fn mid_stream_error_surfaces_and_fails_turn() {
     let reg = ToolRegistry::new();
     let provider = Arc::new(ScriptedProvider::events(vec![
         StreamEvent::TextDelta("partial".into()),
         StreamEvent::Error(ProviderError {
-            retryable: true,
+            retryable: false,
             message: "upstream 503".into(),
             ..Default::default()
         }),
@@ -114,6 +115,74 @@ async fn mid_stream_error_surfaces_and_fails_turn() {
             .unwrap()
             .contains(&"on_model_response".to_string()),
         "a failed turn must NOT run the success path (no bogus assistant message)"
+    );
+}
+
+// A mid-stream TRANSPORT drop after text is RESUMED on the unified ladder: the
+// partial text stays, exactly ONE notice is emitted, and the turn completes
+// successfully on the next stream (no Error, no diagnostic row).
+#[tokio::test(start_paused = true)]
+async fn mid_stream_transport_drop_resumes_and_completes() {
+    let reg = ToolRegistry::new();
+    let provider = Arc::new(MockProvider::new(vec![
+        vec![
+            StreamEvent::TextDelta("hel".into()),
+            StreamEvent::Error(ProviderError {
+                retryable: false,
+                resumable: true,
+                message: "connection reset (os error 10054)".into(),
+                ..Default::default()
+            }),
+        ],
+        vec![
+            StreamEvent::TextDelta("lo".into()),
+            StreamEvent::Done { truncated: false },
+        ],
+    ]));
+    let recorder = Arc::new(RecorderHook::new());
+    let log = recorder.log.clone();
+
+    let handle = spawn_agent(provider, reg, recorder);
+    handle.commands.send(send("go")).unwrap();
+
+    let mut events = handle.events;
+    let mut notices = 0;
+    let mut error_msg: Option<String> = None;
+    let mut text = String::new();
+    let mut completed = false;
+    while let Some(ev) = events.recv().await {
+        match ev {
+            jeikcode_kernel::event::AgentEvent::SystemNotice(ref notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                notices += 1
+            }
+            AgentEvent::RetryNotice { .. } => notices += 1,
+            AgentEvent::TextDelta(t) => text.push_str(&t),
+            AgentEvent::Error { message, .. } => error_msg = Some(message),
+            AgentEvent::TurnComplete { .. } => {
+                completed = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(completed, "the resumed turn must complete");
+    assert_eq!(notices, 1, "一次故障只弹一条提示（后续重试静默）");
+    assert!(
+        error_msg.is_none(),
+        "a resumed turn must not surface a terminal error; got {error_msg:?}"
+    );
+    assert!(
+        text.contains("hel") && text.contains("lo"),
+        "both halves must stream: {text}"
+    );
+    assert!(
+        log.lock()
+            .unwrap()
+            .contains(&"on_model_response".to_string()),
+        "the success path must run on the resumed stream"
     );
 }
 
@@ -187,6 +256,11 @@ async fn recovered_truncation_continues_without_warning() {
     while let Some(ev) = handle.events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warning = Some(w),
+            AgentEvent::SystemNotice(n)
+                if n.kind == jeikcode_kernel::event::NoticeKind::Truncation =>
+            {
+                warning = Some(n.text)
+            }
             AgentEvent::TurnComplete { .. } => {
                 completed = true;
                 break;
@@ -264,6 +338,11 @@ async fn repeated_truncation_is_bounded() {
     while let Some(ev) = handle.events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warning = Some(w),
+            AgentEvent::SystemNotice(n)
+                if n.kind == jeikcode_kernel::event::NoticeKind::Truncation =>
+            {
+                warning = Some(n.text);
+            }
             AgentEvent::TurnComplete { .. } => {
                 completed = true;
                 break;
@@ -392,11 +471,18 @@ async fn retryable_open_failure_retries_visibly_then_succeeds() {
 
     let mut events = handle.events;
     let mut warnings: Vec<String> = Vec::new();
+    let mut notices = 0usize;
     let mut errored = false;
     let mut stop: Option<String> = None;
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            AgentEvent::SystemNotice(ref notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                notices += 1
+            }
+            AgentEvent::RetryNotice { .. } => notices += 1,
             AgentEvent::Error { .. } => errored = true,
             AgentEvent::TurnComplete { reason } => {
                 stop = Some(format!("{reason:?}"));
@@ -406,15 +492,9 @@ async fn retryable_open_failure_retries_visibly_then_succeeds() {
         }
     }
 
-    let retry_notes: Vec<&String> = warnings.iter().filter(|w| w.contains("秒后重试")).collect();
     assert_eq!(
-        retry_notes.len(),
-        2,
-        "two retryable failures must emit two visible retry notices; got {warnings:?}"
-    );
-    assert!(
-        retry_notes[0].contains("(1/3)") && retry_notes[1].contains("(2/3)"),
-        "retry notices must be numbered 1/3 then 2/3; got {retry_notes:?}"
+        notices, 2,
+        "每次重试都发一条进度（同一 id 原地更新）；got {warnings:?}"
     );
     assert!(
         !errored,
@@ -516,6 +596,11 @@ async fn empty_response_is_retried_then_succeeds() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            jeikcode_kernel::event::AgentEvent::SystemNotice(notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                warnings.push(notice.text)
+            }
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::Error { .. } => errored = true,
             AgentEvent::TurnComplete { reason } => {
@@ -536,9 +621,11 @@ async fn empty_response_is_retried_then_succeeds() {
         "the recovered response text must reach the driver"
     );
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("空响应") && w.contains("重试")),
+        warnings.iter().any(|w| {
+            let lower = w.to_lowercase();
+            (w.contains("空响应") || lower.contains("empty response"))
+                && (w.contains("重试") || lower.contains("retrying"))
+        }),
         "an empty response must emit a VISIBLE retry notice; got {warnings:?}"
     );
     assert!(
@@ -578,6 +665,11 @@ async fn thinking_only_stream_is_retried_then_succeeds() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            jeikcode_kernel::event::AgentEvent::SystemNotice(notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                warnings.push(notice.text)
+            }
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::TurnComplete { reason } => {
                 stop = Some(format!("{reason:?}"));
@@ -594,9 +686,10 @@ async fn thinking_only_stream_is_retried_then_succeeds() {
     );
     assert_eq!(text, "done");
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("只返回了思考") && w.contains("重试")),
+        warnings.iter().any(
+            |w| (w.contains("只返回了思考") || w.contains("only reasoning"))
+                && (w.contains("重试") || w.contains("retrying"))
+        ),
         "thinking-only must emit a distinct retry notice; got {warnings:?}"
     );
     assert_eq!(stop.as_deref(), Some("Stopped"));
@@ -635,6 +728,11 @@ async fn whitespace_only_stream_is_retried_then_succeeds() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            jeikcode_kernel::event::AgentEvent::SystemNotice(notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                warnings.push(notice.text)
+            }
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::Error { .. } => errored = true,
             AgentEvent::TurnComplete { reason } => {
@@ -661,7 +759,8 @@ async fn whitespace_only_stream_is_retried_then_succeeds() {
     assert!(
         warnings
             .iter()
-            .any(|w| w.contains("空响应") && w.contains("重试")),
+            .any(|w| (w.contains("空响应") || w.contains("empty response"))
+                && (w.contains("重试") || w.contains("retrying"))),
         "a whitespace-only stream must emit the VISIBLE empty-response retry notice; got {warnings:?}"
     );
     assert!(
@@ -694,7 +793,16 @@ async fn empty_response_exhaustion_fails_visibly() {
     let mut stop: Option<String> = None;
     while let Some(ev) = events.recv().await {
         match ev {
-            AgentEvent::Warning(w) if w.contains("空响应") => retry_notices += 1,
+            AgentEvent::Warning(w) if w.contains("空响应") || w.contains("empty response") => {
+                retry_notices += 1
+            }
+            jeikcode_kernel::event::AgentEvent::SystemNotice(ref notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active
+                    && (notice.text.contains("空响应")
+                        || notice.text.contains("empty response")) =>
+            {
+                retry_notices += 1
+            }
             AgentEvent::Error { message, .. } => error_msg = Some(message),
             AgentEvent::TurnComplete { reason } => {
                 stop = Some(format!("{reason:?}"));
@@ -705,16 +813,18 @@ async fn empty_response_exhaustion_fails_visibly() {
     }
 
     assert_eq!(
-        retry_notices, 5,
-        "the dedicated budget is 5 visible retries"
+        retry_notices, 6,
+        "the dedicated budget is 6 visible retries"
     );
     let calls = received.lock().unwrap().len();
     assert_eq!(
-        calls, 6,
-        "1 initial empty open + 5 retries = 6 chat_stream calls; got {calls}"
+        calls, 7,
+        "1 initial empty open + 6 retries = 7 chat_stream calls; got {calls}"
     );
     assert!(
-        error_msg.as_deref().is_some_and(|m| m.contains("空响应")),
+        error_msg
+            .as_deref()
+            .is_some_and(|m| m.contains("空响应") || m.contains("empty response")),
         "exhaustion must surface a clear empty-response Error; got {error_msg:?}"
     );
     assert_eq!(
@@ -758,6 +868,11 @@ async fn malformed_response_retried_with_distinct_notice() {
     while let Some(ev) = events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            jeikcode_kernel::event::AgentEvent::SystemNotice(notice)
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+            {
+                warnings.push(notice.text)
+            }
             AgentEvent::TextDelta(t) => text.push_str(&t),
             AgentEvent::TurnComplete { reason } => {
                 stop = Some(format!("{reason:?}"));
@@ -774,13 +889,17 @@ async fn malformed_response_retried_with_distinct_notice() {
     );
     assert_eq!(text, "ok", "the recovered response must reach the driver");
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("格式异常") && w.contains("重试")),
+        warnings.iter().any(|w| {
+            let lower = w.to_lowercase();
+            (w.contains("格式异常") || lower.contains("malformed"))
+                && (w.contains("重试") || lower.contains("retrying"))
+        }),
         "a malformed response must emit a格式异常 retry notice; got {warnings:?}"
     );
     assert!(
-        !warnings.iter().any(|w| w.contains("空响应")),
+        !warnings
+            .iter()
+            .any(|w| w.contains("空响应") || w.to_lowercase().contains("empty response")),
         "a malformed response must NOT use the empty-response (空响应) wording; got {warnings:?}"
     );
     assert_eq!(

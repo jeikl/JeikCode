@@ -208,9 +208,12 @@ impl OpenAiCompatProvider {
         let user_agent = cfg.user_agent.clone();
         let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
         let initial_tls12 = jeikcode_config::tls::should_cap_url(&url);
-        let client = std::sync::Arc::new(SwappableClient::new(initial_tls12, move |tls12| {
-            build_http_client(connect_timeout, skip_tls_verify, user_agent.clone(), tls12)
-        })?);
+        let client = std::sync::Arc::new(SwappableClient::new_shared(
+            connect_timeout,
+            skip_tls_verify,
+            user_agent,
+            initial_tls12,
+        )?);
         Ok(Self {
             cfg,
             policy,
@@ -222,163 +225,50 @@ impl OpenAiCompatProvider {
     }
 }
 
-/// Build a fresh streaming HTTP client from the process's current proxy env.
-/// Extracted so [`SwappableClient`] can rebuild an identical client with an EMPTY
-/// connection pool when a pooled connection goes stale.
+/// Build a fresh uncached streaming HTTP client via the shared `#514` builder.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_http_client(
     connect_timeout: std::time::Duration,
     skip_tls_verify: bool,
     user_agent: Option<String>,
     force_tls12: bool,
 ) -> Result<reqwest::Client, ProviderError> {
-    // First attempt: webpki base + OS native store + SSL_CERT_FILE (add_trusted_roots).
-    match build_http_client_inner(
+    let spec = crate::http_pool::HttpClientSpec::provider(
         connect_timeout,
         skip_tls_verify,
-        user_agent.clone(),
+        user_agent,
         force_tls12,
-        true,
-    ) {
-        Ok(client) => Ok(client),
-        Err(first) => {
-            // BACKSTOP (issue #514): even with the per-cert probe in `add_trusted_roots`,
-            // a poisoned SSL_CERT_FILE (or any other trust-root surprise) rejected by
-            // rustls at `.build()` aborts the ENTIRE client — leaving every provider dead
-            // on startup with an opaque "builder error". Rather than a total outage, retry
-            // ONCE with the INFALLIBLE webpki base only. Public-CA endpoints (the gateway,
-            // model APIs) still work; only a corporate MITM root would be lost, and a
-            // request-time TLS error is far better than a client that never builds.
-            tracing::warn!(
-                "http client build failed with the OS/SSL_CERT_FILE trust roots ({}); \
-                 retrying with the webpki base only — a custom/corporate root may be ignored (issue #514)",
-                first.message
-            );
-            build_http_client_inner(
-                connect_timeout,
-                skip_tls_verify,
-                user_agent,
-                force_tls12,
-                false,
-            )
-        }
-    }
-}
-
-/// Build a client with a single trust-root policy. `trust_os_roots=false` uses only
-/// the infallible webpki base (the backstop path); `true` layers the OS native store
-/// and `SSL_CERT_FILE` on top via [`add_trusted_roots`].
-fn build_http_client_inner(
-    connect_timeout: std::time::Duration,
-    skip_tls_verify: bool,
-    user_agent: Option<String>,
-    force_tls12: bool,
-    trust_os_roots: bool,
-) -> Result<reqwest::Client, ProviderError> {
-    let mut builder = crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
-        .connect_timeout(connect_timeout)
-        // Drop idle keep-alive connections before the gateway LB does, so
-        // we don't reuse a server-closed socket (the "error sending
-        // request" / ConnectionReset class). See POOL_IDLE_TIMEOUT.
-        .pool_idle_timeout(retry::POOL_IDLE_TIMEOUT)
-        // Product UA so the gateway can attribute/slice traffic by version
-        // (parity with core's `build_http_client`). Driver injects the real
-        // `jeikcode/<version>`; bare fallback when unset.
-        .user_agent(user_agent.as_deref().unwrap_or(super::DEFAULT_USER_AGENT));
-    if force_tls12 {
-        builder = builder.max_tls_version(reqwest::tls::Version::TLS_1_2);
-    }
-    // TLS trust (issue #514): webpki base roots are always present so `.build()`
-    // never hard-fails on certs; layer the OS native store (corporate MITM CAs)
-    // and SSL_CERT_FILE on top, additively and best-effort. This is the DEFAULT
-    // v2 provider path. Mirrors `core::provider::add_trusted_roots` — kept
-    // crate-local because capabilities does not depend on core.
-    // Skip the rustls root-layering on Windows: the native-tls (SChannel) default backend
-    // trusts the Windows system store natively, and re-feeding certs through native-tls's
-    // parser risks rejecting one rustls accepted. Runtime `cfg!` keeps the fn referenced
-    // (no dead_code) while compiling the call out on Windows.
-    if trust_os_roots && !cfg!(target_os = "windows") {
-        builder = add_trusted_roots(builder);
-    }
-    if skip_tls_verify {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    builder.build().map_err(|e| ProviderError {
+    );
+    crate::http_pool::build_http_client_uncached(&spec).map_err(|message| ProviderError {
         retryable: false,
-        // reqwest's builder-error `Display` is a bare "builder error" — the real
-        // reason (bad cert, invalid header, …) lives in its `source()` chain, so
-        // walk it (shared `retry::err_chain`) or the message is useless (issue #514).
-        message: format!("http client build failed: {}", retry::err_chain(&e)),
+        message,
         ..Default::default()
     })
 }
 
-/// Add the OS native root store and `SSL_CERT_FILE` (if set) to the builder's
-/// trusted roots, ON TOP of the built-in webpki roots. Best-effort: unparseable
-/// certs, an unreadable/malformed `SSL_CERT_FILE`, or native-store load errors
-/// are warned and skipped — NEVER fatal (the webpki base guarantees a working
-/// client). Mirrors `core::provider::add_trusted_roots`; codex-style graceful
-/// `load_native_certs`. See issue #514.
-fn add_trusted_roots(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    // 1) OS native roots (corporate MITM CAs live here).
-    let native = rustls_native_certs::load_native_certs();
-    if !native.errors.is_empty() {
-        tracing::warn!(
-            "loaded OS native roots with {} error(s); using the {} that parsed (issue #514)",
-            native.errors.len(),
-            native.certs.len()
-        );
-    }
-    // `reqwest::Certificate::from_der` does NOT validate under rustls — it just stores
-    // the bytes and defers validation to `rustls::RootCertStore::add` INSIDE `.build()`,
-    // which aborts the WHOLE client on the first cert rustls rejects (a legacy OS root
-    // without X509v3 extensions is enough). Pre-filter each cert through the same rustls
-    // parser so one bad OS root can't take every provider down. reqwest's own native
-    // loader is likewise tolerant; ours must be too. See issue #514.
-    let mut rejected = 0usize;
-    for der in native.certs {
-        if rustls::RootCertStore::empty().add(der.clone()).is_err() {
-            rejected += 1;
-            continue;
-        }
-        if let Ok(cert) = reqwest::Certificate::from_der(der.as_ref()) {
-            builder = builder.add_root_certificate(cert);
-        }
-    }
-    if rejected > 0 {
-        tracing::warn!(
-            "skipped {rejected} OS root cert(s) rustls rejected; they would have aborted the whole client build (issue #514)"
-        );
-    }
-
-    // 2) SSL_CERT_FILE override/extra (empty string = unset). Loaded explicitly
-    //    for cross-platform certainty. reqwest's `Certificate` is validated only
-    //    at `.build()`; unlike the native loop above we do NOT pre-probe these
-    //    (no DER in hand from `from_pem_bundle`), so a MALFORMED SSL_CERT_FILE
-    //    still poisons `.build()` — but the `build_http_client` BACKSTOP catches
-    //    that and rebuilds on the webpki base (never a panic; the file is then
-    //    ignored with a warning rather than killing the client). See #514.
-    let Some(path) = std::env::var_os("SSL_CERT_FILE").filter(|p| !p.is_empty()) else {
-        return builder;
+pub(crate) fn shared_provider_http_client(
+    connect_timeout: std::time::Duration,
+    skip_tls_verify: bool,
+    user_agent: Option<String>,
+    force_tls12: bool,
+    force_rebuild: bool,
+) -> Result<reqwest::Client, ProviderError> {
+    let spec = crate::http_pool::HttpClientSpec::provider(
+        connect_timeout,
+        skip_tls_verify,
+        user_agent,
+        force_tls12,
+    );
+    let res = if force_rebuild {
+        crate::http_pool::rebuild_shared_http_client(&spec)
+    } else {
+        crate::http_pool::shared_http_client(&spec)
     };
-    let Ok(pem) = std::fs::read(&path) else {
-        tracing::warn!("SSL_CERT_FILE={path:?} could not be read; ignoring (issue #514)");
-        return builder;
-    };
-    match reqwest::Certificate::from_pem_bundle(&pem) {
-        Ok(certs) => {
-            let count = certs.len();
-            for c in certs {
-                builder = builder.add_root_certificate(c);
-            }
-            tracing::info!("Loaded {count} TLS root(s) from SSL_CERT_FILE={path:?} (issue #514)");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "SSL_CERT_FILE={path:?} is not a valid PEM bundle: {e}; ignoring (issue #514)"
-            );
-        }
-    }
-    builder
+    res.map_err(|message| ProviderError {
+        retryable: false,
+        message,
+        ..Default::default()
+    })
 }
 
 /// An HTTP client held behind a rebuild seam. `get()` hands out the current client
@@ -390,18 +280,47 @@ fn add_trusted_roots(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuil
 pub(crate) struct SwappableClient {
     current: std::sync::RwLock<reqwest::Client>,
     #[allow(clippy::type_complexity)]
-    build: Box<dyn Fn(bool) -> Result<reqwest::Client, ProviderError> + Send + Sync>,
+    build: Box<dyn Fn(bool, bool) -> Result<reqwest::Client, ProviderError> + Send + Sync>,
 }
 
 impl SwappableClient {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(
         force_tls12: bool,
         build: impl Fn(bool) -> Result<reqwest::Client, ProviderError> + Send + Sync + 'static,
     ) -> Result<Self, ProviderError> {
-        let initial = build(force_tls12)?;
+        let wrapped = move |tls12: bool, _force_rebuild: bool| build(tls12);
+        let initial = wrapped(force_tls12, false)?;
         Ok(Self {
             current: std::sync::RwLock::new(initial),
-            build: Box::new(build),
+            build: Box::new(wrapped),
+        })
+    }
+
+    pub(crate) fn new_shared(
+        connect_timeout: std::time::Duration,
+        skip_tls_verify: bool,
+        user_agent: Option<String>,
+        initial_tls12: bool,
+    ) -> Result<Self, ProviderError> {
+        let initial = shared_provider_http_client(
+            connect_timeout,
+            skip_tls_verify,
+            user_agent.clone(),
+            initial_tls12,
+            false,
+        )?;
+        Ok(Self {
+            current: std::sync::RwLock::new(initial),
+            build: Box::new(move |tls12: bool, force_rebuild: bool| {
+                shared_provider_http_client(
+                    connect_timeout,
+                    skip_tls_verify,
+                    user_agent.clone(),
+                    tls12,
+                    force_rebuild,
+                )
+            }),
         })
     }
 
@@ -416,10 +335,10 @@ impl SwappableClient {
             .clone()
     }
 
-    /// Rebuild with a fresh (empty) pool and swap it in. On failure the old
-    /// client remains valid, but the caller receives the build error explicitly.
+    /// Rebuild with a fresh (empty) pool and swap it in (shared pool uses cooldown singleflight).
+    /// On failure the old client remains valid, and the caller receives the build error explicitly.
     pub(crate) fn rebuild(&self, force_tls12: bool) -> Result<reqwest::Client, ProviderError> {
-        let fresh = (self.build)(force_tls12)?;
+        let fresh = (self.build)(force_tls12, true)?;
         *self.current.write().unwrap_or_else(|p| p.into_inner()) = fresh.clone();
         Ok(fresh)
     }
@@ -533,14 +452,10 @@ impl LlmProvider for OpenAiCompatProvider {
             // connection under load (surfaces as "error decoding response body" /
             // "unexpected EOF during chunk size line"). Once replay-sensitive output
             // has been emitted, retry would duplicate it, so the error is surfaced.
-            // 1 initial open + up to 2 transparent reopens. A gateway resetting
-            // connections under load can drop more than one attempt before a
-            // healthy backend answers, so a single reopen is not enough.
-            const MAX_STREAM_ATTEMPTS: u32 = 6;
-            let mut stream_attempt = 1u32;
-            let mut reconnect_attempts = 0u32;
-            let mut resp = resp;
-            'reopen: loop {
+            // 重试调度已统一到内核（`jeikcode_kernel::retry`）：本层只发一次流，
+            // 失败时重建连接池并把失败分类上报，不再自己 sleep / 重放。
+            let resp = resp;
+            {
                 let mut dec = SseDecoder::new();
                 let mut emitted_replay_sensitive = false;
                 let mut pending_metadata = Vec::new();
@@ -553,6 +468,7 @@ impl LlmProvider for OpenAiCompatProvider {
                             // have reached the consumer), so not retryable.
                             yield StreamEvent::Error(ProviderError {
                                 retryable: false,
+                                resumable: true,
                                 message: "stream idle timeout".to_string(),
                                 ..Default::default()
                             });
@@ -575,54 +491,30 @@ impl LlmProvider for OpenAiCompatProvider {
                             return;
                         }
                         Ok(Some(Err(e))) => {
-                            // No replay-sensitive output reached the consumer yet → re-open
-                            // the whole request transparently (bounded by MAX_STREAM_ATTEMPTS).
-                            if !emitted_replay_sensitive && stream_attempt < MAX_STREAM_ATTEMPTS {
-                                reconnect_attempts += 1;
-                                // Brief backoff so an immediate reopen does not slam a
-                                // gateway that is resetting under load. Bounded and
-                                // esc-interruptible: the kernel races the whole
-                                // stream.next() against cancellation, so a sleep here is
-                                // cancelled with the turn.
-                                tokio::time::sleep(retry::compute_backoff(stream_attempt, &policy)).await;
-                                // A body that died mid-read on a half-closed pooled socket
-                                // is the canonical poisoned-pool trigger. Rebuild BEFORE the
-                                // reopen so its FIRST attempt gets a fresh (empty) pool instead
-                                // of re-grabbing the dead socket. Both the transient-transport
-                                // class and a TLS record-corruption alert (BadRecordMac/DecryptError)
-                                // poison the pool this way; a logical/decode failure isn't cured by a
-                                // new pool. (The reopened `open_stream` additionally escalates to
-                                // managed TLS-1.2 on its first OPEN-path corruption.)
-                                if retry::is_stale_connection_error(&e)
-                                    || retry::chain_has_tls_corruption(&e)
-                                {
-                                    if let Err(rebuild_error) = client.rebuild(
-                                        jeikcode_config::tls::should_cap_url(&url),
-                                    ) {
-                                        yield StreamEvent::Error(rebuild_error);
-                                        return;
-                                    }
+                            // A body that died mid-read on a half-closed pooled socket is
+                            // the canonical poisoned-pool trigger: rebuild so the kernel's
+                            // next attempt gets a fresh (empty) pool instead of re-grabbing
+                            // the dead socket. TLS record corruption poisons it the same way;
+                            // a logical/decode failure isn't cured by a new pool.
+                            if retry::is_stale_connection_error(&e)
+                                || retry::chain_has_tls_corruption(&e)
+                            {
+                                if let Err(rebuild_error) = client.rebuild(
+                                    jeikcode_config::tls::should_cap_url(&url),
+                                ) {
+                                    yield StreamEvent::Error(rebuild_error);
+                                    return;
                                 }
-                                if let Ok(fresh) =
-                                    open_stream(&client, &url, &body_bytes, &signer, &api_key, &session_id, &policy, rate_limit_retry_owner, open_timeout).await
-                                {
-                                    stream_attempt += 1;
-                                    resp = fresh;
-                                    continue 'reopen;
-                                }
-                                // Re-open failed: fall through and surface the
-                                // original mid-stream error below.
                             }
                             yield StreamEvent::Error(ProviderError {
                                 retryable: false,
+                                resumable: true,
                                 message: retry::stream_read_error_message(
                                     &e,
                                     if emitted_replay_sensitive {
                                         retry::StreamReadRecovery::PartialResponse
                                     } else {
-                                        retry::StreamReadRecovery::RetryExhausted {
-                                            attempts: reconnect_attempts,
-                                        }
+                                        retry::StreamReadRecovery::Interrupted
                                     },
                                 ),
                                 ..Default::default()
@@ -807,6 +699,7 @@ async fn open_stream(
                     let provider_code = envelope.as_ref().and_then(provider_error_code);
                     return Err(ProviderError {
                         retryable: retry::is_retryable_status(code),
+                        resumable: false,
                         message: super::friendly_http_error(code, &detail),
                         http_status: Some(code),
                         code: provider_code,
@@ -1586,6 +1479,7 @@ impl SseDecoder {
         if let Some(err) = &chunk.error {
             out.push(StreamEvent::Error(ProviderError {
                 retryable: false,
+                resumable: false,
                 message: format!("provider error: {}", parse_error_obj(err)),
                 http_status: None,
                 code: error_code(err),
@@ -1913,7 +1807,11 @@ mod tests {
         }
     }
 
+    // These tests build/rebuild the shared HTTP client, which reads
+    // `SSL_CERT_FILE`. Serialize with the cert-env tests below so a concurrent
+    // env swap cannot make the rebuild fail with a status-less transport error.
     #[tokio::test]
+    #[serial_test::serial(ssl_cert_file_env)]
     async fn refreshable_signer_recovers_one_401_and_resigns_retry() {
         let server = MockServer::start().await;
         let responses = std::sync::Arc::new(AtomicUsize::new(0));
@@ -1939,6 +1837,13 @@ mod tests {
         });
         let mut cfg =
             OpenAiCompatConfig::new("unused", format!("{}/v1", server.uri()), "test-model");
+        // Localhost wiremock may close a keep-alive connection between the first
+        // 401 and the recovery retry. The provider layer intentionally makes a
+        // single OPEN attempt (the kernel owns retry scheduling), so give this
+        // harness a transport retry budget; a 401 itself is never retried unless
+        // the signer recovers it.
+        cfg.retry.max_attempts = 3;
+        cfg.retry.base_delay = Duration::from_millis(10);
         cfg.request_signer = Some(signer.clone());
         let provider = OpenAiCompatProvider::new(cfg).unwrap();
 
@@ -1966,6 +1871,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(ssl_cert_file_env)]
     async fn refreshable_signer_stops_after_second_401() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1981,6 +1887,11 @@ mod tests {
         });
         let mut cfg =
             OpenAiCompatConfig::new("unused", format!("{}/v1", server.uri()), "test-model");
+        // See the recovery test above: tolerate a stale localhost keep-alive
+        // connection so the assertion exercises the second-401 branch, not a
+        // transport error. A 401 is never retried by the transport layer.
+        cfg.retry.max_attempts = 3;
+        cfg.retry.base_delay = Duration::from_millis(10);
         cfg.request_signer = Some(signer.clone());
         let provider = OpenAiCompatProvider::new(cfg).unwrap();
 
@@ -1989,7 +1900,11 @@ mod tests {
             .await
             .err()
             .expect("a second 401 must terminate recovery");
-        assert_eq!(error.http_status, Some(401));
+        assert_eq!(
+            error.http_status,
+            Some(401),
+            "second 401 must surface the auth-expired status, got: {error:?}"
+        );
         assert_eq!(error.code.as_deref(), Some("authentication_expired"));
         assert!(error.message.contains("/provider"));
         assert_eq!(signer.recoveries.load(Ordering::SeqCst), 1);
@@ -3752,21 +3667,17 @@ mod tests {
         }
     }
 
+    /// 中流断连后由**内核**统一重试：适配器只发一次流，并把失败标记为
+    /// `resumable`（可续写），不再自己偷偷重开。
     #[tokio::test]
-    async fn midstream_eof_before_any_event_reopens_and_succeeds() {
+    async fn midstream_eof_before_any_event_surfaces_a_resumable_error() {
         use std::io::Write;
         use std::net::TcpListener;
 
-        // Mock gateway: connection #1 opens a chunked 200 then drops the socket
-        // before sending any chunk — reproducing the reported
-        // "unexpected EOF during chunk size line". Because NOTHING reached the
-        // consumer, the provider must transparently re-open (v1 parity); the
-        // caller then sees only the successful connection #2 response.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let handle = std::thread::spawn(move || {
-            // #1: chunked 200, then abrupt close with no chunk → mid-stream EOF.
             let (mut s1, _) = listener.accept().unwrap();
             read_http_request(&mut s1);
             s1.write_all(
@@ -3775,18 +3686,6 @@ mod tests {
             .unwrap();
             s1.flush().unwrap();
             drop(s1);
-
-            // #2: a complete, close-delimited SSE body.
-            let (mut s2, _) = listener.accept().unwrap();
-            read_http_request(&mut s2);
-            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
-            s2.write_all(
-                format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}")
-                    .as_bytes(),
-            )
-            .unwrap();
-            s2.flush().unwrap();
-            drop(s2);
         });
 
         let cfg = OpenAiCompatConfig::new("k", format!("http://127.0.0.1:{port}"), "glm-test");
@@ -3798,159 +3697,22 @@ mod tests {
             .expect("open should succeed");
         let events: Vec<StreamEvent> = stream.collect().await;
 
-        let has_error = events.iter().any(|e| matches!(e, StreamEvent::Error(_)));
+        let err = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Error(err) => Some(err),
+                _ => None,
+            })
+            .expect("a mid-stream drop must surface as an error");
         assert!(
-            !has_error,
-            "must not surface a mid-stream error after a clean re-open: {events:?}"
+            err.resumable && !err.retryable,
+            "the kernel owns the retry; the adapter must mark it resumable: {err:?}"
         );
-        let text: String = events
-            .iter()
-            .filter_map(|e| match e {
-                StreamEvent::TextDelta(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            text, "ok",
-            "should deliver the re-opened response: {events:?}"
-        );
-
-        let _ = handle.join();
-    }
-
-    #[tokio::test]
-    async fn abandoned_attempt_metadata_is_not_emitted_after_reopen() {
-        use std::io::Write;
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let handle = std::thread::spawn(move || {
-            let (mut stale, _) = listener.accept().unwrap();
-            read_http_request(&mut stale);
-            let payload =
-                "data: {\"id\":\"resp_stale\",\"model\":\"model-stale\",\"choices\":[]}\n\n";
-            stale
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
-                )
-                .unwrap();
-            stale
-                .write_all(format!("{:x}\r\n{payload}\r\n", payload.len()).as_bytes())
-                .unwrap();
-            stale.flush().unwrap();
-            drop(stale);
-
-            let (mut fresh, _) = listener.accept().unwrap();
-            read_http_request(&mut fresh);
-            let body = "data: {\"id\":\"resp_fresh\",\"model\":\"model-fresh\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
-            fresh
-                .write_all(
-                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}")
-                        .as_bytes(),
-                )
-                .unwrap();
-            fresh.flush().unwrap();
-        });
-
-        let mut cfg = OpenAiCompatConfig::new("k", format!("http://127.0.0.1:{port}"), "glm-test");
-        cfg.retry.base_delay = std::time::Duration::from_millis(1);
-        cfg.retry.max_delay = std::time::Duration::from_millis(2);
-        let provider = OpenAiCompatProvider::new(cfg).unwrap();
-        let events: Vec<StreamEvent> = provider
-            .chat_stream(&[Message::user("hi")], &[], &ChatOptions::default())
-            .await
-            .unwrap()
-            .collect()
-            .await;
-
-        let ids: Vec<&str> = events
-            .iter()
-            .filter_map(|event| match event {
-                StreamEvent::ResponseId(id) => Some(id.as_str()),
-                _ => None,
-            })
-            .collect();
-        let models: Vec<&str> = events
-            .iter()
-            .filter_map(|event| match event {
-                StreamEvent::ResponseModel(model) => Some(model.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(ids, vec!["resp_fresh"]);
-        assert_eq!(models, vec!["model-fresh"]);
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::Error(_))));
-
-        let _ = handle.join();
-    }
-
-    #[tokio::test]
-    async fn midstream_reset_twice_before_any_event_reopens_until_success() {
-        use std::io::Write;
-        use std::net::TcpListener;
-
-        // A gateway resetting connections under load can drop MORE than one
-        // attempt before a healthy backend answers. Connections #1 and #2 both
-        // open a chunked 200 then close before any chunk (nothing reached the
-        // consumer); #3 serves a complete body. With a single reopen this would
-        // surface an error after #2 — the provider must reopen twice and deliver
-        // only #3's response.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let handle = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut s, _) = listener.accept().unwrap();
-                read_http_request(&mut s);
-                s.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
-                )
-                .unwrap();
-                s.flush().unwrap();
-                drop(s);
-            }
-            let (mut s3, _) = listener.accept().unwrap();
-            read_http_request(&mut s3);
-            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
-            s3.write_all(
-                format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}")
-                    .as_bytes(),
-            )
-            .unwrap();
-            s3.flush().unwrap();
-            drop(s3);
-        });
-
-        let mut cfg = OpenAiCompatConfig::new("k", format!("http://127.0.0.1:{port}"), "glm-test");
-        // Keep the inter-reopen backoff negligible so the test is fast.
-        cfg.retry.base_delay = std::time::Duration::from_millis(1);
-        cfg.retry.max_delay = std::time::Duration::from_millis(2);
-        let provider = OpenAiCompatProvider::new(cfg).unwrap();
-
-        let stream = provider
-            .chat_stream(&[Message::user("hi")], &[], &ChatOptions::default())
-            .await
-            .expect("open should succeed");
-        let events: Vec<StreamEvent> = stream.collect().await;
-
         assert!(
-            !events.iter().any(|e| matches!(e, StreamEvent::Error(_))),
-            "two pre-event resets must be ridden through transparently: {events:?}"
-        );
-        let text: String = events
-            .iter()
-            .filter_map(|e| match e {
-                StreamEvent::TextDelta(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            text, "ok",
-            "should deliver the third (successful) response: {events:?}"
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(_))),
+            "nothing was delivered before the drop: {events:?}"
         );
 
         let _ = handle.join();
@@ -4147,6 +3909,7 @@ mod tests {
     fn is_reasoning_effort_rejection_matches_only_the_field_400() {
         let mk = |code: u16, msg: &str| ProviderError {
             retryable: false,
+            resumable: false,
             message: msg.into(),
             http_status: Some(code),
             code: None,

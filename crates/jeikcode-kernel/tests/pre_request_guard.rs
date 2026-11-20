@@ -48,6 +48,7 @@ async fn warnings_for(hook: Arc<dyn LifecycleHooks>) -> Vec<String> {
     while let Some(ev) = handle.events.recv().await {
         match ev {
             AgentEvent::Warning(w) => warnings.push(w),
+            AgentEvent::SystemNotice(n) => warnings.push(n.text),
             AgentEvent::TurnComplete { .. } => break,
             _ => {}
         }

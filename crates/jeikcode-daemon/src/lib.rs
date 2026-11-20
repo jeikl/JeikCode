@@ -29,6 +29,7 @@ mod api_config;
 mod api_git;
 pub mod api_git_webhook;
 mod api_provider;
+pub mod api_schedule;
 mod api_update;
 pub mod approval_mode;
 mod commands;
@@ -39,11 +40,13 @@ mod git_intent;
 pub(crate) mod kernel_runtime;
 pub mod legacy_convert;
 pub mod live_hub;
+pub mod logging;
 pub mod native_live;
 mod runtime_host;
 mod shell_open;
 mod sidebar_projects;
 mod steer_prompt;
+mod watchdog;
 /// File-sink diagnostic trace (`ctrace!` macro), enabled via `JEIKCODE_TUIX_LOG`.
 /// Moved here from the retired `jeikcode-core` (daemon is its only consumer;
 /// `jeikcode_tuix::trace` keeps its own copy targeting the same append file).
@@ -153,6 +156,7 @@ pub(crate) struct ConfigResponse {
     pub language: String,
     /// Whether to display the GitHub repository logo in the UI.
     pub github_logo: bool,
+    pub update_dead: bool,
     /// Agent 执行完会改动分支/引用/远端的 git 命令后，是否自动向该项目全部会话广播 Git 刷新。
     pub auto_git_sync: bool,
 }
@@ -503,6 +507,12 @@ fn read_display_tail_view(
         index.iter().filter_map(|row| row.id.clone()).collect();
     if index.is_empty()
         || meta.v != jeikcode_capabilities::session::DISPLAY_VERSION
+        || display_needs_compacted_steer_heal(
+            &meta,
+            &display_ids,
+            &session.snapshot.messages,
+            &session.meta.id,
+        )
         || !v4_display_covers_completed_user_turns(
             &meta,
             &display_ids,
@@ -518,8 +528,15 @@ fn read_display_tail_view(
     let is_visible_user = |row: &jeikcode_capabilities::session::DisplayIndexRow| {
         row.role.eq_ignore_ascii_case("user") && !row.synthetic
     };
-    if start > 0 && !is_visible_user(&index[start]) {
-        if let Some(position) = index[..start].iter().rposition(is_visible_user) {
+    let is_visible_turn_root = |row: &jeikcode_capabilities::session::DisplayIndexRow| {
+        is_visible_user_turn_start_content(&row.role, row.synthetic, &row.content)
+    };
+    if start > 0 && !is_visible_turn_root(&index[start]) {
+        if let Some(position) = index[..start]
+            .iter()
+            .rposition(is_visible_turn_root)
+            .or_else(|| index[..start].iter().rposition(is_visible_user))
+        {
             start = position;
         }
     }
@@ -585,7 +602,14 @@ fn read_display_tail_view(
     // end at the snapshot's last message, it may be missing that in-flight tail
     // (the snapshot/inflight file already has it). Fall back to the full read,
     // which appends the snapshot tail idempotently.
-    let display_last_id = records.last().and_then(|record| record.id.as_deref());
+    let display_last_id = records
+        .iter()
+        .rev()
+        .find(|record| {
+            record.event_id.is_none()
+                && record.internal_origin.as_deref() != Some("turn_diagnostic")
+        })
+        .and_then(|record| record.id.as_deref());
     if let Some(snapshot_last_id) = session
         .snapshot
         .messages
@@ -641,6 +665,8 @@ fn read_display_tail_view(
         &session.meta.id,
     );
     repair_display_clock(&mut messages);
+    annotate_tool_metrics(&mut messages, manager, &session.meta.id);
+    annotate_model_switches(&mut messages, manager, &session.meta.id);
     Some(DisplayTailView {
         turns,
         message_count: prefix_len + total,
@@ -1030,15 +1056,7 @@ mod session_window_tests {
                 role: "user".into(),
                 id: Some(id.into()),
                 content: text.into(),
-                reasoning: None,
-                synthetic: false,
-                internal_origin: None,
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                is_error: false,
-                images: Vec::new(),
-                created_at: None,
-                elapsed_ms: None,
+                ..Default::default()
             }
         }
         fn turn_stat(
@@ -1057,6 +1075,7 @@ mod session_window_tests {
                 used_tokens: 0,
                 ctx_window: 0,
                 model_usage: Vec::new(),
+                stop_reason: None,
             }
         }
 
@@ -1269,6 +1288,7 @@ mod session_window_tests {
             approval_mode: None,
             reasoning_effort: Some("high".into()),
             thinking_budget: Some(4096),
+            origin: jeikcode_capabilities::session::SessionOrigin::Manual,
             presence: jeikcode_capabilities::session::CatalogPresence::NativeOnly,
         };
         let summary = catalog_entry_to_session_summary(&entry);
@@ -1310,15 +1330,7 @@ mod session_window_tests {
             role: "user".into(),
             id: None,
             content: long.clone(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
-            created_at: None,
-            elapsed_ms: None,
+            ..Default::default()
         };
         let turns = session_records_user_outline(&[record], 0);
         assert_eq!(turns[0].label.chars().count(), 120);
@@ -1340,15 +1352,7 @@ mod session_window_tests {
             role: "user".into(),
             id: Some("m-empty".into()),
             content: "   \n\t".into(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
-            created_at: None,
-            elapsed_ms: None,
+            ..Default::default()
         };
         assert!(session_records_user_outline(&[record], 0).is_empty());
     }
@@ -1504,6 +1508,149 @@ mod chat_replay_tests {
             other => panic!("unexpected replay buffer: {other:?}"),
         }
     }
+
+    #[test]
+    fn replay_coalesces_non_adjacent_system_notices_and_preserves_settled() {
+        use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus};
+
+        let notice = |rev: u32, status: NoticeStatus, severity: NoticeSeverity, text: &str| {
+            ChatEvent::SystemNotice {
+                session_id: "s-replay".into(),
+                event_id: "retry-inc-1".into(),
+                part_id: "retry-inc-1:1:notice".into(),
+                kind: NoticeKind::Retry,
+                severity,
+                status,
+                revision: rev,
+                text: text.into(),
+                anchor_message_id: Some("a-anchor".into()),
+                anchor_part_id: None,
+                created_at: Some(1_000),
+            }
+        };
+
+        let mut log = ReplayLog::new(0);
+        assert_eq!(
+            push_chat_replay(
+                &mut log,
+                notice(
+                    1,
+                    NoticeStatus::Active,
+                    NoticeSeverity::Warning,
+                    "attempt 1/9"
+                )
+            ),
+            1
+        );
+        assert_eq!(
+            push_chat_replay(
+                &mut log,
+                ChatEvent::TextDelta {
+                    content: "partial".into(),
+                    message_id: Some("a-anchor".into()),
+                    part_id: Some("a-anchor:1:text".into()),
+                    part_seq: Some(1),
+                    part_rev: Some(1),
+                }
+            ),
+            2
+        );
+        // 非相邻同 event_id 通知必须原位合并，不能额外 append。
+        assert_eq!(
+            push_chat_replay(
+                &mut log,
+                notice(
+                    2,
+                    NoticeStatus::Settled,
+                    NoticeSeverity::Error,
+                    "retries exhausted"
+                )
+            ),
+            3
+        );
+        // 已被 Settled 的事件不允许被旧/滞后 Active 反向降级。
+        assert_eq!(
+            push_chat_replay(
+                &mut log,
+                notice(
+                    3,
+                    NoticeStatus::Active,
+                    NoticeSeverity::Warning,
+                    "stale active"
+                )
+            ),
+            4
+        );
+
+        assert_eq!(log.events.len(), 2, "same event_id must coalesce in place");
+        assert_eq!(log.events[0].0, 4, "coalesced slot advances replay cursor");
+        match &log.events[0].1 {
+            ChatEvent::SystemNotice {
+                revision,
+                status,
+                severity,
+                text,
+                anchor_message_id,
+                ..
+            } => {
+                assert_eq!(*revision, 2);
+                assert_eq!(*status, NoticeStatus::Settled);
+                assert_eq!(*severity, NoticeSeverity::Error);
+                assert_eq!(text, "retries exhausted");
+                assert_eq!(anchor_message_id.as_deref(), Some("a-anchor"));
+            }
+            other => panic!("expected SystemNotice at slot 0, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn display_record_notice_metadata_roundtrips_to_message_info() {
+        use jeikcode_capabilities::session::{DisplayRecord, DISPLAY_VERSION};
+        use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus};
+
+        let record = DisplayRecord {
+            v: DISPLAY_VERSION,
+            session_id: "s-meta".into(),
+            turn_id: 4,
+            index: 2,
+            seq: 9,
+            role: "assistant".into(),
+            id: Some("retry-inc-42".into()),
+            content: "stream stall (2/9)".into(),
+            internal_origin: Some("turn_diagnostic".into()),
+            created_at: Some(12_345),
+            event_id: Some("retry-inc-42".into()),
+            part_id: Some("retry-inc-42:1:notice".into()),
+            anchor_message_id: Some("a-42".into()),
+            anchor_part_id: Some("a-42:1:text".into()),
+            notice_kind: Some(NoticeKind::Timeout),
+            revision: Some(2),
+            severity: Some(NoticeSeverity::Warning),
+            status: Some(NoticeStatus::Active),
+            ..Default::default()
+        };
+
+        let info = display_record_to_message_info(&record);
+        let notice = info.notice.as_ref().expect("MessageInfo.notice preserved");
+        assert_eq!(notice.event_id.as_deref(), Some("retry-inc-42"));
+        assert_eq!(notice.part_id.as_deref(), Some("retry-inc-42:1:notice"));
+        assert_eq!(notice.anchor_message_id.as_deref(), Some("a-42"));
+        assert_eq!(notice.anchor_part_id.as_deref(), Some("a-42:1:text"));
+        assert_eq!(notice.notice_kind, Some(NoticeKind::Timeout));
+        assert_eq!(notice.revision, Some(2));
+        assert_eq!(notice.severity, Some(NoticeSeverity::Warning));
+        assert_eq!(notice.status, Some(NoticeStatus::Active));
+
+        let roundtrip = display_record_from_message_info("s-meta", 2, &info);
+        assert_eq!(roundtrip.event_id, record.event_id);
+        assert_eq!(roundtrip.part_id, record.part_id);
+        assert_eq!(roundtrip.anchor_message_id, record.anchor_message_id);
+        assert_eq!(roundtrip.anchor_part_id, record.anchor_part_id);
+        assert_eq!(roundtrip.notice_kind, record.notice_kind);
+        assert_eq!(roundtrip.revision, record.revision);
+        assert_eq!(roundtrip.severity, record.severity);
+        assert_eq!(roundtrip.status, record.status);
+    }
 }
 
 #[cfg(test)]
@@ -1597,6 +1744,7 @@ mod transcript_display_tests {
             args: "{\"path\":\"a\"}".into(),
             result: "R1".into(),
             is_error: false,
+            ..Default::default()
         });
         let second = turn(2, 200, "Q2", "A2");
 
@@ -1638,15 +1786,8 @@ mod transcript_display_tests {
             role: role.into(),
             id: Some("m-1".into()),
             content: content.into(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
             created_at: Some(1),
-            elapsed_ms: None,
+            ..Default::default()
         }
     }
 
@@ -2011,6 +2152,7 @@ mod global_events_tests {
                 updated_at: 2,
                 message_count: 3,
                 origin: "manual".into(),
+                is_scheduled: false,
                 approval_mode: None,
                 preferred_model: None,
                 reasoning_effort: None,
@@ -2261,6 +2403,63 @@ fn display_record_ids(
 ///
 /// A `backfilled` log is no longer exempt: its rows carry the canonical message
 /// ids, so the same check applies and a later dropped append is still caught.
+/// 判断快照中是否存在压缩锚点；若存在则说明锚点及其之前的消息均属于模型上下文摘要前历史，
+/// 不可再作为快照后各已完成回合的对齐起点。
+fn compaction_anchor_index(snapshot: &[jeikcode_kernel::message::Message]) -> Option<usize> {
+    use jeikcode_kernel::message::Role;
+
+    snapshot.iter().position(|message| {
+        message.role == Role::User
+            && message.synthetic
+            && jeikcode_capabilities::compaction::is_compaction_anchor_text(&message.text)
+    })
+}
+
+/// 若历史会话曾被旧回填逻辑写坏（`backfilled == true` 且快照存在压缩锚点，却漏掉了早期的
+/// `promoted` steer），允许用修复后的归并逻辑一次性自愈重建 `display.jsonl`；
+/// 自愈完成后所有历史 steer 已进入 `display_ids`，后续读取永不再重复触发。
+fn display_needs_compacted_steer_heal(
+    meta: &jeikcode_capabilities::session::DisplayMeta,
+    display_ids: &std::collections::HashSet<String>,
+    snapshot: &[jeikcode_kernel::message::Message],
+    session_id: &str,
+) -> bool {
+    use jeikcode_kernel::message::Role;
+
+    if !meta.backfilled {
+        return false;
+    }
+    let Some(anchor_idx) = compaction_anchor_index(snapshot) else {
+        return false;
+    };
+    let Some(boundary_ts) = snapshot[anchor_idx + 1..]
+        .iter()
+        .find(|message| message.role == Role::User && !message.synthetic)
+        .and_then(|message| (message.created_at_ms > 0).then_some(message.created_at_ms))
+    else {
+        return false;
+    };
+    jeikcode_capabilities::session::inputs::list_global(session_id)
+        .into_iter()
+        .any(|input| {
+            if input.delivery != "steer" || input.status != "promoted" {
+                return false;
+            }
+            if input.created_at == 0 || input.created_at >= boundary_ts {
+                return false;
+            }
+            if input.text.trim().is_empty() && input.images.is_empty() {
+                return false;
+            }
+            let primary_id = input
+                .message_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(input.id.as_str());
+            !display_ids.contains(primary_id) && !display_ids.contains(&input.id)
+        })
+}
+
 fn v4_display_covers_completed_user_turns(
     meta: &jeikcode_capabilities::session::DisplayMeta,
     display_ids: &std::collections::HashSet<String>,
@@ -2273,6 +2472,9 @@ fn v4_display_covers_completed_user_turns(
     if meta.last_turn_id < snapshot_last_turn {
         return false;
     }
+    // 压缩锚点及之前的模型上下文（含 sacred_floor 保留的初代提示）已从当前活动上下文裁剪，
+    // 绝不能与压缩后的 turn_stats 切片混检，否则会陷入“每次读取都被迫重写 display.jsonl”的死循环。
+    let post_anchor_start = compaction_anchor_index(snapshot).map_or(0, |idx| idx + 1);
     let completed: std::collections::HashSet<u64> = meta.completed_turns.iter().copied().collect();
     let mut previous = 0usize;
     for stat in turn_stats
@@ -2280,7 +2482,11 @@ fn v4_display_covers_completed_user_turns(
         .filter(|stat| stat.position_valid && stat.turn_id != 0)
     {
         let end = stat.after_message.min(snapshot.len());
-        let start = previous.min(end);
+        if end <= post_anchor_start {
+            previous = previous.max(end);
+            continue;
+        }
+        let start = previous.max(post_anchor_start).min(end);
         let turn = &snapshot[start..end];
         if let Some(prompt) = turn
             .iter()
@@ -2685,18 +2891,11 @@ fn append_pending_inputs(
             });
         }
     }
-    // A promoted steer is already a real persisted user message, but display.jsonl
-    // is only flushed at turn end. Project it into `messages` now so a refresh in
-    // the fold→settle window cannot lose BOTH the queue card (already retired) and
-    // the canvas bubble (not yet flushed).
+    // 只对仍属于当前活动回合（或最新未结算尾巴）的已折叠 steer 做补偿投影；
+    // 会话已空闲且存在更新的主提问/回合时，绝不能把压缩前的历史 promoted steer 拉到会话末尾。
     for input in &all_inputs {
-        if input.delivery != "steer" || input.status != "promoted" {
+        if !promoted_steer_belongs_to_unsettled_tail(input, operation_id, &all_inputs, messages) {
             continue;
-        }
-        if let (Some(current), Some(input_op)) = (operation_id, input.operation_id.as_deref()) {
-            if current != input_op {
-                continue;
-            }
         }
         let message_id = input
             .message_id
@@ -2726,10 +2925,9 @@ fn append_pending_inputs(
         if content.trim().is_empty() && images.is_empty() {
             continue;
         }
-        next_seq = next_seq.saturating_add(1);
-        messages.push(message_info! {
-            turn_id: None,
-            seq: Some(next_seq),
+        let user_info = message_info! {
+            turn_id: input.turn_id,
+            seq: None,
             role: "user".into(),
             id: Some(message_id.clone()),
             content,
@@ -2742,7 +2940,13 @@ fn append_pending_inputs(
             images: (!images.is_empty()).then_some(images),
             created_at: Some(input.created_at),
             elapsed_ms: None,
-        });
+        };
+        insert_steered_message_at_anchor(
+            messages,
+            user_info,
+            input.anchor_message_id.as_deref(),
+            &mut next_seq,
+        );
         existing.insert(message_id);
         existing.insert(input.id.clone());
     }
@@ -2754,6 +2958,92 @@ fn append_pending_inputs(
         working_dir,
         absolute_index_base,
     );
+}
+
+fn promoted_steer_belongs_to_unsettled_tail(
+    input: &jeikcode_capabilities::session::SessionInput,
+    operation_id: Option<&str>,
+    all_inputs: &[jeikcode_capabilities::session::SessionInput],
+    messages: &[MessageInfo],
+) -> bool {
+    if input.delivery != "steer" || input.status != "promoted" {
+        return false;
+    }
+    if let Some(current) = operation_id {
+        return input
+            .operation_id
+            .as_deref()
+            .is_none_or(|input_op| input_op == current);
+    }
+    // 会话已空闲时：若存在更新的 prompt 轮次或画布最新主提问时间晚于该 steer，
+    // 说明该 steer 属于历史已翻篇回合，严禁再补投影到会话尾部。
+    let has_newer_prompt = all_inputs.iter().any(|other| {
+        other.delivery == "prompt"
+            && other.created_at > input.created_at
+            && other.operation_id.as_deref() != input.operation_id.as_deref()
+    });
+    if has_newer_prompt {
+        return false;
+    }
+    let latest_visible_user_ts = messages
+        .iter()
+        .rev()
+        .find(|message| is_visible_user_turn_start(message))
+        .and_then(|message| message.created_at);
+    if let Some(latest_ts) = latest_visible_user_ts {
+        if input.created_at > 0 && latest_ts > input.created_at {
+            return false;
+        }
+    }
+    true
+}
+
+fn insert_steered_message_at_anchor(
+    messages: &mut Vec<MessageInfo>,
+    mut user_info: MessageInfo,
+    anchor_message_id: Option<&str>,
+    next_seq: &mut u64,
+) {
+    *next_seq = next_seq.saturating_add(1);
+    user_info.seq = Some(*next_seq);
+    if let Some(anchor_id) = anchor_message_id.map(str::trim).filter(|id| !id.is_empty()) {
+        if let Some(anchor_pos) = messages
+            .iter()
+            .rposition(|message| message.id.as_deref() == Some(anchor_id))
+        {
+            let mut insert_at = anchor_pos + 1;
+            while insert_at < messages.len() {
+                let row = &messages[insert_at];
+                if row.role.eq_ignore_ascii_case("tool") {
+                    insert_at += 1;
+                    continue;
+                }
+                if row.internal_origin.as_deref() == Some("turn_diagnostic")
+                    && row
+                        .notice
+                        .as_ref()
+                        .and_then(|notice| notice.anchor_message_id.as_deref())
+                        == Some(anchor_id)
+                {
+                    insert_at += 1;
+                    continue;
+                }
+                if row.internal_origin.as_deref() == Some("promoted_steer")
+                    && row.created_at.unwrap_or(0) <= user_info.created_at.unwrap_or(0)
+                {
+                    insert_at += 1;
+                    continue;
+                }
+                break;
+            }
+            if insert_at < messages.len() {
+                user_info.seq = None;
+            }
+            messages.insert(insert_at, user_info);
+            return;
+        }
+    }
+    messages.push(user_info);
 }
 
 /// Keep queued/folded steers in the right-rail outline before display flush.
@@ -2782,10 +3072,13 @@ fn append_folded_steer_outline(
         {
             continue;
         }
-        // `/chat` steers carry the owning operation's client id. A live-runtime
-        // steer has no ActiveChatRegistry operation; it is still included as
-        // long as it is promoted and not already in the persisted outline.
-        if let (Some(current), Some(input_op)) = (operation_id, input.operation_id.as_deref()) {
+        if input.status == "promoted" {
+            if !promoted_steer_belongs_to_unsettled_tail(input, operation_id, inputs, messages) {
+                continue;
+            }
+        } else if let (Some(current), Some(input_op)) =
+            (operation_id, input.operation_id.as_deref())
+        {
             if current != input_op {
                 continue;
             }
@@ -2821,19 +3114,28 @@ fn append_folded_steer_outline(
             message.id.as_deref() == Some(message_id)
                 || message.id.as_deref() == Some(input.id.as_str())
         });
-        turns.push(SessionTurnOutline {
+        let target_index = projected_index
+            .map(|position| absolute_index_base + position)
+            .unwrap_or(absolute_index_base + messages.len() + added);
+        let item = SessionTurnOutline {
             ordinal: turns.len(),
             id: Some(input.id.clone()),
             // Promoted rows now have a canvas index; pending rows remain jumped
             // by id until display.jsonl flushes.
-            index: projected_index
-                .map(|position| absolute_index_base + position)
-                .unwrap_or(absolute_index_base + messages.len() + added),
+            index: target_index,
             label,
             pending: projected_index.is_none(),
             seq: Some(input.seq),
-        });
+        };
+        if let Some(pos) = turns.iter().position(|turn| turn.index > target_index) {
+            turns.insert(pos, item);
+        } else {
+            turns.push(item);
+        }
         added = added.saturating_add(1);
+    }
+    for (ordinal, turn) in turns.iter_mut().enumerate() {
+        turn.ordinal = ordinal;
     }
 }
 
@@ -3311,6 +3613,20 @@ pub(crate) fn jeikcode_home_test_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+/// Offload blocking work onto Tokio's blocking pool while propagating any
+/// thread-local [`jeikcode_config::test_util::IsolatedHome`] override across threads.
+pub(crate) fn spawn_blocking_isolated<F, R>(f: F) -> tokio::task::JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let test_home = jeikcode_config::test_util::overridden_home();
+    tokio::task::spawn_blocking(move || {
+        let _test_home = test_home.map(jeikcode_config::test_util::IsolatedHome::at);
+        f()
+    })
+}
+
 type ProjectStateStore = Arc<RwLock<ProjectState>>;
 
 pub(crate) static DAEMON_PROJECT: std::sync::Mutex<Option<ProjectStateStore>> =
@@ -3328,6 +3644,64 @@ struct AdmittedUser {
     /// 按身份认领自己的乐观气泡，而不是退化到文本比对。
     client_input_id: Option<String>,
     images: Vec<ImageData>,
+}
+
+/// One admitted `/chat` operation. Aliases include both the persisted session id
+/// and the browser-generated request id so either client protocol can stop it.
+const ACTIVE_CHAT_SHARDS: usize = 64;
+
+fn active_chat_shard_idx(key: &str) -> usize {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash as usize) % ACTIVE_CHAT_SHARDS
+}
+
+#[derive(Default)]
+struct SharedChatWireCache {
+    /// Bounded cache of pre-serialized live watch/WS frames keyed by `(seq, op_id)`
+    /// so concurrent tabs watching the same turn share `Arc<str>` payloads zero-copy.
+    entries: std::collections::VecDeque<(u64, Option<String>, Arc<str>, Arc<str>)>,
+}
+
+fn get_or_build_chat_watch_frame(
+    cache: &std::sync::Mutex<SharedChatWireCache>,
+    event: &ChatEvent,
+    session_id: &str,
+    session_id_json: &str,
+    seq: u64,
+    operation_id: Option<&str>,
+) -> (Arc<str>, Arc<str>) {
+    {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, watch_json, ws_frame)) = guard
+            .entries
+            .iter()
+            .rev()
+            .find(|(s, op, _, _)| *s == seq && op.as_deref() == operation_id)
+        {
+            return (Arc::clone(watch_json), Arc::clone(ws_frame));
+        }
+    }
+    let ev_json = chat_watch_frame_json(event, session_id, Some(seq), false, operation_id);
+    let ws_frame = wrap_chat_ws_frame(session_id_json, &ev_json);
+    let watch_arc: Arc<str> = Arc::from(ev_json);
+    let ws_arc: Arc<str> = Arc::from(ws_frame);
+    {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.entries.len() >= 64 {
+            guard.entries.pop_front();
+        }
+        guard.entries.push_back((
+            seq,
+            operation_id.map(str::to_string),
+            Arc::clone(&watch_arc),
+            Arc::clone(&ws_arc),
+        ));
+    }
+    (watch_arc, ws_arc)
 }
 
 /// One admitted `/chat` operation. Aliases include both the persisted session id
@@ -3356,6 +3730,8 @@ struct ActiveChatOperation {
     /// reattach to a turn started by OpenAI/API clients without owning the
     /// primary SSE response.
     event_bus: tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
+    /// Shared per-turn JSON/WS frame cache for zero-copy multi-watcher fan-out.
+    wire_cache: Arc<std::sync::Mutex<SharedChatWireCache>>,
     /// The user message admitted for this turn, recorded right when it is
     /// pushed to the conversation. `tokio::broadcast` does not replay history,
     /// so a `/chat/watch` observer that attaches *after* the turn started would
@@ -3374,6 +3750,8 @@ struct ActiveChatOperation {
     /// A submit on this channel is folded at the next round boundary; it does not
     /// cancel the in-flight model call or tool batch.
     steer_tx: Option<mpsc::UnboundedSender<live_api::ChatSteerSignal>>,
+    /// 正在执行的 `/chat` 回合所持有的原生运行时句柄，供运行期热切模型（`/live/provider`）排队。
+    runtime_handle: Option<jeikcode_coding::CodingRuntimeHandle>,
     /// FIFO of client correlation ids for `/chat/steer` submits awaiting fold.
     /// Drained by the projection when a `Steered` event lands, so the wire can
     /// echo the id and let the WebUI reconcile an in-flight steer after refresh.
@@ -3383,41 +3761,48 @@ struct ActiveChatOperation {
 }
 
 #[derive(Default)]
-struct ActiveChatIndex {
-    operations: HashMap<String, ActiveChatOperation>,
-    aliases: HashMap<String, String>,
+struct SessionChatShard {
     /// `/chat/watch` observers that arrived while the session had NO active
     /// turn. Keyed by session id -> client id -> sender.
     standby_watchers: HashMap<String, HashMap<String, mpsc::UnboundedSender<(u64, ChatEvent)>>>,
-    /// Session-scoped event state. Survives the operation: the turn's frames live
-    /// in the operation, but "how far did this session get" and "what was its
-    /// terminal frame" must outlive the turn.
-    ///
-    /// The resume cursor (`after_seq`) is session-scoped while the frames were
-    /// turn-scoped — that mismatch is exactly why a subscriber attaching after the
-    /// turn ended could never learn the turn was over, and the WebUI stayed stuck
-    /// in "running" (red stop button, clock still ticking, checklist frozen).
+    /// Session-scoped event cursor surviving operation teardown.
     session_seq: HashMap<String, u64>,
-    /// 会话级终态帧记录。
-    ///
-    /// 断点续传游标是会话级的，帧却只活在回合里 —— 回合一结束，断链重连 / 刷新 /
-    /// 切回的订阅者就再也拿不到终态帧，前端会一直停在「运行中」（红色停止按钮 + 计时器
-    /// 一直叠加 + 清单定格），只能靠切一次会话顺带修好。终态帧是整个回合最重要的一帧，
-    /// 它必须活得比 operation 久，所以记在会话上而不是记在 operation 里。
-    ///
-    /// 键是会话的 alias；值是（序号, 帧本身）。
+    /// Session-scoped last terminal frame `(seq, ChatEvent)` retained for late watchers.
     session_terminal: HashMap<String, (u64, ChatEvent)>,
 }
 
-/// Atomic admission and identity-aware cleanup for background `/chat` turns.
+struct ActiveChatShards {
+    aliases: Vec<RwLock<HashMap<String, String>>>,
+    operations: Vec<RwLock<HashMap<String, ActiveChatOperation>>>,
+    sessions: Vec<RwLock<SessionChatShard>>,
+    active_count: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for ActiveChatShards {
+    fn default() -> Self {
+        Self {
+            aliases: (0..ACTIVE_CHAT_SHARDS)
+                .map(|_| RwLock::new(HashMap::new()))
+                .collect(),
+            operations: (0..ACTIVE_CHAT_SHARDS)
+                .map(|_| RwLock::new(HashMap::new()))
+                .collect(),
+            sessions: (0..ACTIVE_CHAT_SHARDS)
+                .map(|_| RwLock::new(SessionChatShard::default()))
+                .collect(),
+            active_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+/// 64-way hash-sharded atomic admission and identity-aware registry for background `/chat` turns.
 ///
-/// The old `HashMap<alias, CancellationToken>` overwrote an existing entry when
-/// two requests targeted the same session, then let the older task remove the
-/// replacement entry during cleanup. Keeping operations and aliases in one lock
-/// makes single-flight admission and compare-by-operation cleanup indivisible.
+/// Strict lock hierarchy across shards prevents deadlocks when an operation binds multiple
+/// aliases (`session_id`, `request_id`, `occupancy`):
+/// `aliases (ascending shard index) -> operations (ascending) -> sessions (ascending)`.
 #[derive(Clone, Default)]
 struct ActiveChatRegistry {
-    inner: Arc<RwLock<ActiveChatIndex>>,
+    shards: Arc<ActiveChatShards>,
 }
 
 struct ActiveChatAdmission {
@@ -3439,6 +3824,13 @@ enum ActiveChatAdmissionError {
 }
 
 impl ActiveChatRegistry {
+    /// Lock-free O(1) count of currently admitted active chat turns (consumed by reactor watchdog).
+    pub(crate) fn active_operation_count(&self) -> usize {
+        self.shards
+            .active_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn admit(
         &self,
         session_id: Option<&str>,
@@ -3460,35 +3852,6 @@ impl ActiveChatRegistry {
         request_id: Option<String>,
         occupancy: Option<String>,
     ) -> Result<ActiveChatAdmission, ActiveChatAdmissionError> {
-        let mut index = self.inner.write().await;
-        if session_id
-            .as_deref()
-            .is_some_and(|alias| index.aliases.contains_key(alias))
-            || occupancy
-                .as_deref()
-                .is_some_and(|alias| index.aliases.contains_key(alias))
-        {
-            return Err(ActiveChatAdmissionError::SessionBusy);
-        }
-        if request_id
-            .as_deref()
-            .is_some_and(|alias| index.aliases.contains_key(alias))
-        {
-            return Err(ActiveChatAdmissionError::RequestBusy);
-        }
-
-        let operation_id = uuid::Uuid::new_v4().to_string();
-        let cancellation = CancellationToken::new();
-        let stop_gate = Arc::new(Mutex::new(false));
-        // 会话级游标起点：接着上一回合的序号继续走（严格单调递增）。
-        let seq_base = session_id
-            .as_deref()
-            .and_then(|sid| index.session_seq.get(sid).copied())
-            .unwrap_or(0);
-        // Capacity: expanded to 4096 to prevent Lagged event drops during heavy tool outputs / streaming.
-        let (event_bus, _) = tokio::sync::broadcast::channel(4096);
-        // Clone for waking standby watchers (the original moves into the operation).
-        let bus_for_drain = event_bus.clone();
         let mut aliases = Vec::with_capacity(3);
         for alias in [
             session_id.as_deref(),
@@ -3502,40 +3865,112 @@ impl ActiveChatRegistry {
                 aliases.push(alias.to_string());
             }
         }
-        for alias in &aliases {
-            index.aliases.insert(alias.clone(), operation_id.clone());
+        let mut alias_shard_ids: Vec<usize> =
+            aliases.iter().map(|a| active_chat_shard_idx(a)).collect();
+        alias_shard_ids.sort_unstable();
+        alias_shard_ids.dedup();
+
+        // Acquire write locks on only the involved alias shards in ascending shard order.
+        let mut alias_guards: Vec<(
+            usize,
+            tokio::sync::RwLockWriteGuard<'_, HashMap<String, String>>,
+        )> = Vec::with_capacity(alias_shard_ids.len());
+        for shard_id in alias_shard_ids {
+            alias_guards.push((shard_id, self.shards.aliases[shard_id].write().await));
         }
+        let shard_contains_alias = |guards: &[(
+            usize,
+            tokio::sync::RwLockWriteGuard<'_, HashMap<String, String>>,
+        )],
+                                    alias: &str|
+         -> bool {
+            let target = active_chat_shard_idx(alias);
+            guards
+                .iter()
+                .find(|(id, _)| *id == target)
+                .is_some_and(|(_, map)| map.contains_key(alias))
+        };
+
+        if session_id
+            .as_deref()
+            .is_some_and(|alias| shard_contains_alias(&alias_guards, alias))
+            || occupancy
+                .as_deref()
+                .is_some_and(|alias| shard_contains_alias(&alias_guards, alias))
+        {
+            return Err(ActiveChatAdmissionError::SessionBusy);
+        }
+        if request_id
+            .as_deref()
+            .is_some_and(|alias| shard_contains_alias(&alias_guards, alias))
+        {
+            return Err(ActiveChatAdmissionError::RequestBusy);
+        }
+
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let cancellation = CancellationToken::new();
+        let stop_gate = Arc::new(Mutex::new(false));
+        let seq_base = if let Some(sid) = session_id.as_deref() {
+            let sess_shard = active_chat_shard_idx(sid);
+            self.shards.sessions[sess_shard]
+                .read()
+                .await
+                .session_seq
+                .get(sid)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let (event_bus, _) = tokio::sync::broadcast::channel(4096);
+        let bus_for_drain = event_bus.clone();
         let started_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        index.operations.insert(
-            operation_id.clone(),
-            ActiveChatOperation {
-                started_at,
-                status: None,
-                session_id: session_id.clone(),
-                request_id,
-                aliases,
-                cancellation: cancellation.clone(),
-                stop_gate,
-                finished: Arc::new(Notify::new()),
-                stopped: false,
-                terminal_reached: false,
-                event_bus,
-                admitted_user: None,
-                replay: Arc::new(std::sync::Mutex::new(ReplayLog::new(seq_base))),
-                seq_base,
-                steer_tx: None,
-                steer_client_ids: std::collections::VecDeque::new(),
-                steer_timestamps: std::collections::VecDeque::new(),
-            },
-        );
+        let op_shard = active_chat_shard_idx(&operation_id);
+        {
+            let mut ops = self.shards.operations[op_shard].write().await;
+            ops.insert(
+                operation_id.clone(),
+                ActiveChatOperation {
+                    started_at,
+                    status: None,
+                    session_id: session_id.clone(),
+                    request_id,
+                    aliases: aliases.clone(),
+                    cancellation: cancellation.clone(),
+                    stop_gate,
+                    finished: Arc::new(Notify::new()),
+                    stopped: false,
+                    terminal_reached: false,
+                    event_bus,
+                    wire_cache: Arc::new(std::sync::Mutex::new(SharedChatWireCache::default())),
+                    admitted_user: None,
+                    replay: Arc::new(std::sync::Mutex::new(ReplayLog::new(seq_base))),
+                    seq_base,
+                    steer_tx: None,
+                    runtime_handle: None,
+                    steer_client_ids: std::collections::VecDeque::new(),
+                    steer_timestamps: std::collections::VecDeque::new(),
+                },
+            );
+            self.shards
+                .active_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
-        // Wake any `/chat/watch` observers parked waiting for this session to
-        // start a turn (event-driven push instead of client polling).
+        for alias in aliases {
+            let target = active_chat_shard_idx(&alias);
+            if let Some((_, map)) = alias_guards.iter_mut().find(|(id, _)| *id == target) {
+                map.insert(alias, operation_id.clone());
+            }
+        }
+
         if let Some(sid) = session_id.as_deref() {
-            let drained = Self::drain_standby_locked(&mut index, sid, &bus_for_drain);
+            let sess_shard = active_chat_shard_idx(sid);
+            let mut sess_guard = self.shards.sessions[sess_shard].write().await;
+            let drained = Self::drain_standby_locked(&mut sess_guard, sid, &bus_for_drain);
             if drained > 0 {
                 tracing::debug!(
                     session_id = %sid,
@@ -3545,8 +3980,9 @@ impl ActiveChatRegistry {
             }
         }
 
-        // 跨实例增量：新轮次开始 → 所有实例即时点亮该会话的活动状态。
-        if let Some(sid) = session_id.clone() {
+        drop(alias_guards);
+
+        if let Some(sid) = session_id {
             publish_global(GlobalWireEvent::Activity {
                 session_id: sid,
                 running: true,
@@ -3566,18 +4002,19 @@ impl ActiveChatRegistry {
         &self,
         operation_id: &str,
     ) -> Option<tokio::sync::broadcast::Sender<(u64, ChatEvent)>> {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .map(|op| op.event_bus.clone())
     }
 
     /// Set the human/client-visible operation status (e.g. "compacting").
     pub async fn set_operation_status(&self, operation_id: &str, status: Option<String>) {
-        let mut index = self.inner.write().await;
-        if let Some(op) = index.operations.get_mut(operation_id) {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        if let Some(op) = ops.get_mut(operation_id) {
             op.status = status;
         }
     }
@@ -3590,24 +4027,37 @@ impl ActiveChatRegistry {
         tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
         Arc<std::sync::Mutex<ReplayLog>>,
     )> {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .map(|op| (op.event_bus.clone(), op.replay.clone()))
+    }
+
+    /// Shared per-turn serialized wire cache for concurrent watchers of `session_id`.
+    async fn wire_cache_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<std::sync::Mutex<SharedChatWireCache>>> {
+        let operation_id = self.operation_for_session(session_id).await?;
+        let op_shard = active_chat_shard_idx(&operation_id);
+        self.shards.operations[op_shard]
+            .read()
+            .await
+            .get(&operation_id)
+            .map(|op| op.wire_cache.clone())
     }
 
     /// Broadcast an event to any live subscriber or parked standby watcher of `session_id`.
     /// Used for out-of-turn differential mutations (rewrite, delete, truncate) so all
     /// open tabs stay synchronized without polling or full-transcript reloads.
     pub async fn broadcast_to_session(&self, session_id: &str, event: ChatEvent) {
-        let index = self.inner.read().await;
         let mut seq = 0u64;
-        if let Some(operation_id) = index.aliases.get(session_id) {
-            if let Some(operation) = index.operations.get(operation_id) {
-                // 会话变更（删/改/截断）改写了权威转录：本回合的旧帧立即作废，
-                // 否则带旧游标或全量重连会把变更前发出的帧补回来（已删内容复活）。
+        if let Some(operation_id) = self.operation_for_session(session_id).await {
+            let op_shard = active_chat_shard_idx(&operation_id);
+            let ops = self.shards.operations[op_shard].read().await;
+            if let Some(operation) = ops.get(&operation_id) {
                 let mut log = operation
                     .replay
                     .lock()
@@ -3619,7 +4069,9 @@ impl ActiveChatRegistry {
                 let _ = operation.event_bus.send((seq, event.clone()));
             }
         }
-        if let Some(watchers) = index.standby_watchers.get(session_id) {
+        let sess_shard = active_chat_shard_idx(session_id);
+        let sessions = self.shards.sessions[sess_shard].read().await;
+        if let Some(watchers) = sessions.standby_watchers.get(session_id) {
             for tx in watchers.values() {
                 let _ = tx.send((seq, event.clone()));
             }
@@ -3636,20 +4088,19 @@ impl ActiveChatRegistry {
         Vec<(u64, ChatEvent)>,
         tokio::sync::broadcast::Receiver<(u64, ChatEvent)>,
     )> {
-        let index = self.inner.read().await;
-        let operation_id = index.aliases.get(session_id)?.clone();
-        let operation = index.operations.get(&operation_id)?;
-        // A terminal turn is NOT a reason to bail out: the terminal frame may still
-        // be queued for the fan-out. Handing back the snapshot plus the bus lets a
-        // watcher that attaches now either read the terminal from the snapshot or
-        // receive it live — instead of parking, which means keepalives only and a
-        // client that waits forever.
+        let alias_shard = active_chat_shard_idx(session_id);
+        let operation_id = self.shards.aliases[alias_shard]
+            .read()
+            .await
+            .get(session_id)?
+            .clone();
+        let op_shard = active_chat_shard_idx(&operation_id);
+        let ops = self.shards.operations[op_shard].read().await;
+        let operation = ops.get(&operation_id)?;
         let guard = operation
             .replay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // 游标就是缓冲序号（从 1 开始）：缓冲是追加式的（连续同身份合并只改最后一条的内容，
-        // 不改它的位置），所以同一个事件的 seq 永远稳定 —— 断点续传靠的就是这一点。
         let mut snapshot: Vec<(u64, ChatEvent)> = guard.events.clone();
         let rx = operation.event_bus.subscribe();
         drop(guard);
@@ -3658,7 +4109,6 @@ impl ActiveChatRegistry {
                 .iter()
                 .any(|(_, e)| matches!(e, ChatEvent::User { .. }))
             {
-                // 本轮提问的回声：不占游标（seq 0），因为它是幂等的用户气泡。
                 snapshot.insert(
                     0,
                     (
@@ -3692,11 +4142,12 @@ impl ActiveChatRegistry {
         &self,
         session_id: &str,
     ) -> (Option<ChatEvent>, Option<ChatEvent>) {
-        let index = self.inner.read().await;
-        let Some(operation_id) = index.aliases.get(session_id) else {
+        let Some(operation_id) = self.operation_for_session(session_id).await else {
             return (None, None);
         };
-        let Some(operation) = index.operations.get(operation_id) else {
+        let op_shard = active_chat_shard_idx(&operation_id);
+        let ops = self.shards.operations[op_shard].read().await;
+        let Some(operation) = ops.get(&operation_id) else {
             return (None, None);
         };
         if operation.terminal_reached || operation.stopped {
@@ -3710,13 +4161,13 @@ impl ActiveChatRegistry {
     }
 
     /// True when the turn replay already closed `call_id` (result/output/terminal).
-    /// Stale `pending_permission.json` must not restore a card in that case.
     async fn replay_resolves_call(&self, session_id: &str, call_id: &str) -> bool {
-        let index = self.inner.read().await;
-        let Some(operation_id) = index.aliases.get(session_id) else {
+        let Some(operation_id) = self.operation_for_session(session_id).await else {
             return false;
         };
-        let Some(operation) = index.operations.get(operation_id) else {
+        let op_shard = active_chat_shard_idx(&operation_id);
+        let ops = self.shards.operations[op_shard].read().await;
+        let Some(operation) = ops.get(&operation_id) else {
             return false;
         };
         let guard = operation
@@ -3727,11 +4178,7 @@ impl ActiveChatRegistry {
     }
 
     /// Subscribe to a session's turn **if one is already running**, otherwise
-    /// park the caller as a standby watcher so `admit` can wake it the instant an
-    /// API/native turn starts for this session. This is the event-driven path
-    /// that lets the WebUI observe an API turn without polling: the watch
-    /// connection stays open (SSE keepalive) while idle and is converted to a
-    /// live broadcast subscriber the moment a turn is admitted.
+    /// park the caller as a standby watcher so `admit` can wake it cleanly.
     async fn subscribe_or_standby(
         &self,
         session_id: &str,
@@ -3739,35 +4186,30 @@ impl ActiveChatRegistry {
         standby_tx: &mpsc::UnboundedSender<(u64, ChatEvent)>,
         replay_terminal: bool,
     ) -> WatchOutcome {
-        let mut index = self.inner.write().await;
-        if let Some(operation_id) = index.aliases.get(session_id).cloned() {
-            if let Some(operation) = index.operations.get(&operation_id) {
-                if !operation.terminal_reached && !operation.stopped {
-                    return WatchOutcome::Live(operation.event_bus.subscribe());
-                }
+        let alias_shard = active_chat_shard_idx(session_id);
+        let mut alias_map = self.shards.aliases[alias_shard].write().await;
+        if let Some(operation_id) = alias_map.get(session_id).cloned() {
+            let op_shard = active_chat_shard_idx(&operation_id);
+            let live_rx = {
+                let ops = self.shards.operations[op_shard].read().await;
+                ops.get(&operation_id)
+                    .filter(|op| !op.terminal_reached && !op.stopped)
+                    .map(|op| op.event_bus.subscribe())
+            };
+            if let Some(rx) = live_rx {
+                return WatchOutcome::Live(rx);
             }
-            index.aliases.remove(session_id);
+            alias_map.remove(session_id);
         }
-        // The session's turn is over (or never started). Hand the watcher the
-        // terminal frame recorded on the session — parking here would mean
-        // keepalives only and a client that waits forever for a finished turn.
-        //
-        // The lookup is by session id and deliberately independent of the alias:
-        // the alias is gone once the operation is cleaned up, and a watcher
-        // attaching after the turn ended is exactly the case that must not hang.
-        //
-        // Only the reattach path asks for it: the idle standby watcher must stay
-        // silent, or it would re-deliver the same terminal on every re-arm and
-        // spin.
+
+        let sess_shard = active_chat_shard_idx(session_id);
+        let mut sess = self.shards.sessions[sess_shard].write().await;
         if replay_terminal {
-            if let Some((seq, terminal)) = index.session_terminal.get(session_id) {
+            if let Some((seq, terminal)) = sess.session_terminal.get(session_id) {
                 let _ = standby_tx.send((*seq, terminal.clone()));
             }
         }
-        // Multi-client standby pool: prune dead senders, and update or register this client_id.
-        // A single tab refreshing reuses its client_id and replaces its own dead sender without piling up;
-        // multiple independent remote clients with distinct client_ids stay concurrently subscribed.
-        let entry = index
+        let entry = sess
             .standby_watchers
             .entry(session_id.to_string())
             .or_default();
@@ -3778,7 +4220,6 @@ impl ActiveChatRegistry {
         } else {
             cid.to_string()
         };
-        // Hard capacity cap per session (max 16 concurrent standby tabs/devices) to prevent unbounded memory growth.
         if entry.len() >= 16 && !entry.contains_key(&key) {
             if let Some(oldest_key) = entry.keys().next().cloned() {
                 entry.remove(&oldest_key);
@@ -3788,9 +4229,21 @@ impl ActiveChatRegistry {
         WatchOutcome::Standby
     }
 
+    #[cfg(test)]
+    async fn standby_watcher_keys(&self, session_id: &str) -> Vec<String> {
+        let sess_shard = active_chat_shard_idx(session_id);
+        let sess = self.shards.sessions[sess_shard].read().await;
+        let mut keys: Vec<String> = sess
+            .standby_watchers
+            .get(session_id)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        keys.sort();
+        keys
+    }
+
     /// Record the user message admitted for this turn so a *late* `/chat/watch`
-    /// subscriber (one that attaches after the broadcast, and therefore missed
-    /// the live `ChatEvent::User`) can replay it. The bus itself never replays.
+    /// subscriber can replay it.
     async fn record_user_message(
         &self,
         operation_id: &str,
@@ -3799,7 +4252,12 @@ impl ActiveChatRegistry {
         created_at: Option<u64>,
         images: Vec<ImageData>,
     ) {
-        if let Some(op) = self.inner.write().await.operations.get_mut(operation_id) {
+        let op_shard = active_chat_shard_idx(operation_id);
+        if let Some(op) = self.shards.operations[op_shard]
+            .write()
+            .await
+            .get_mut(operation_id)
+        {
             let created = created_at.or((op.started_at > 0).then_some(op.started_at));
             let client_input_id = op.request_id.clone();
             op.admitted_user = Some(AdmittedUser {
@@ -3814,16 +4272,20 @@ impl ActiveChatRegistry {
 
     /// Resolve a session alias to its currently-admitted operation id.
     async fn operation_for_session(&self, session_id: &str) -> Option<String> {
-        self.inner.read().await.aliases.get(session_id).cloned()
-    }
-
-    /// The user message admitted for `operation_id`, if the turn has already
-    /// recorded one (i.e. the turn started before this watcher subscribed).
-    async fn admitted_user_message(&self, operation_id: &str) -> Option<AdmittedUser> {
-        self.inner
+        let alias_shard = active_chat_shard_idx(session_id);
+        self.shards.aliases[alias_shard]
             .read()
             .await
-            .operations
+            .get(session_id)
+            .cloned()
+    }
+
+    /// The user message admitted for `operation_id`, if the turn has recorded one.
+    async fn admitted_user_message(&self, operation_id: &str) -> Option<AdmittedUser> {
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
+            .read()
+            .await
             .get(operation_id)
             .and_then(|op| op.admitted_user.clone())
     }
@@ -3842,9 +4304,10 @@ impl ActiveChatRegistry {
         let Some(operation_id) = self.operation_for_session(session_id).await else {
             return;
         };
+        let op_shard = active_chat_shard_idx(&operation_id);
         let (admitted, started_at) = {
-            let index = self.inner.read().await;
-            let op = index.operations.get(&operation_id);
+            let ops = self.shards.operations[op_shard].read().await;
+            let op = ops.get(&operation_id);
             (
                 op.and_then(|o| o.admitted_user.clone()),
                 op.map(|o| o.started_at).unwrap_or(0),
@@ -3875,19 +4338,19 @@ impl ActiveChatRegistry {
     }
 
     /// Drain (wake) all standby watchers parked for `session_id`, converting
-    /// each to a live broadcast subscriber on `bus`. Called from `admit` while
-    /// still holding the write lock so no watcher can be added between the
-    /// alias insert and the drain.
+    /// each to a live broadcast subscriber on `bus`.
     fn drain_standby_locked(
-        index: &mut ActiveChatIndex,
+        shard: &mut SessionChatShard,
         session_id: &str,
         bus: &tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
     ) -> usize {
-        if let Some(mut watchers) = index.standby_watchers.remove(session_id) {
+        if let Some(mut watchers) = shard.standby_watchers.remove(session_id) {
             watchers.retain(|_, tx| !tx.is_closed());
             let n = watchers.len();
+            let sid_log = session_id.to_string();
             for (_cid, tx) in watchers {
                 let mut rx = bus.subscribe();
+                let sid = sid_log.clone();
                 tokio::spawn(async move {
                     loop {
                         match rx.recv().await {
@@ -3905,7 +4368,23 @@ impl ActiveChatRegistry {
                                     break;
                                 }
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!(
+                                    session_id = %sid,
+                                    skipped,
+                                    "standby chat watcher lagged; disconnecting for resync"
+                                );
+                                let _ = tx.send((
+                                    0,
+                                    ChatEvent::Error {
+                                        message: format!(
+                                            "chat stream lagged by {skipped} events; reconnect"
+                                        ),
+                                        message_id: None,
+                                    },
+                                ));
+                                break;
+                            }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
@@ -3920,73 +4399,63 @@ impl ActiveChatRegistry {
     /// Bind the runtime's canonical session id after a first-turn session has
     /// been allocated (or a requested id has been resolved to its canonical id).
     async fn bind_session(&self, operation_id: &str, session_id: &str) -> anyhow::Result<()> {
-        let mut index = self.inner.write().await;
-        if let Some(owner) = index.aliases.get(session_id) {
+        let alias_shard = active_chat_shard_idx(session_id);
+        let mut alias_map = self.shards.aliases[alias_shard].write().await;
+        if let Some(owner) = alias_map.get(session_id) {
             if owner != operation_id {
                 anyhow::bail!("chat session {session_id} became active while this turn started");
             }
         }
-        let operation = index
-            .operations
-            .get_mut(operation_id)
-            .ok_or_else(|| anyhow::anyhow!("chat operation is no longer active"))?;
-        operation.session_id = Some(session_id.to_string());
-        if !operation.aliases.iter().any(|alias| alias == session_id) {
-            operation.aliases.push(session_id.to_string());
+        let op_shard = active_chat_shard_idx(operation_id);
+        {
+            let mut ops = self.shards.operations[op_shard].write().await;
+            let operation = ops
+                .get_mut(operation_id)
+                .ok_or_else(|| anyhow::anyhow!("chat operation is no longer active"))?;
+            operation.session_id = Some(session_id.to_string());
+            if !operation.aliases.iter().any(|alias| alias == session_id) {
+                operation.aliases.push(session_id.to_string());
+            }
         }
-        index
-            .aliases
-            .insert(session_id.to_string(), operation_id.to_string());
+        alias_map.insert(session_id.to_string(), operation_id.to_string());
         Ok(())
     }
 
     /// Mark and cooperatively cancel an operation addressed by either alias.
     async fn stop_alias(&self, alias: &str) -> bool {
-        let operation_id = {
-            let index = self.inner.read().await;
-            let Some(operation_id) = index.aliases.get(alias).cloned() else {
-                return false;
-            };
-            operation_id
+        let Some(operation_id) = self.operation_for_session(alias).await else {
+            return false;
         };
         self.stop_operation(&operation_id).await
     }
 
-    /// Stop the occupant of `alias` (same path as WebUI `/chat/stop`) and wait
-    /// until it leaves the registry. `true` means the alias is idle (already
-    /// gone, or the cancelled turn finished). `false` means the timeout fired
-    /// while the previous turn was still persisting.
-    ///
-    /// `timeout = None` waits for the release to be real instead of timing out.
-    /// Send-now callers need that verdict: a hard cap there misreported
-    /// "still busy" for turns that were already releasing, which pushed the
-    /// user's message back into the queue. `Some(limit)` keeps the bounded
-    /// behaviour of the session-deletion paths.
+    /// Stop the occupant of `alias` and wait until it leaves the registry.
     async fn stop_and_wait(&self, alias: String, timeout: Option<Duration>) -> bool {
-        let operation_id = {
-            let index = self.inner.read().await;
-            let Some(operation_id) = index.aliases.get(&alias).cloned() else {
-                return true;
-            };
-            if !index.operations.contains_key(operation_id.as_str()) {
-                return true;
-            }
-            operation_id
+        let Some(operation_id) = self.operation_for_session(&alias).await else {
+            return true;
         };
+        let op_shard = active_chat_shard_idx(&operation_id);
+        if !self.shards.operations[op_shard]
+            .read()
+            .await
+            .contains_key(operation_id.as_str())
+        {
+            return true;
+        }
         self.stop_alias_owned(alias).await;
         let await_release = async {
             loop {
                 let finished = {
-                    let index = self.inner.read().await;
-                    match index.operations.get(&operation_id) {
+                    let ops = self.shards.operations[op_shard].read().await;
+                    match ops.get(&operation_id) {
                         None => return,
                         Some(operation) => operation.finished.clone(),
                     }
                 };
                 let notified = finished.notified();
                 {
-                    let index = self.inner.read().await;
-                    if !index.operations.contains_key(&operation_id) {
+                    let ops = self.shards.operations[op_shard].read().await;
+                    if !ops.contains_key(&operation_id) {
                         return;
                     }
                 }
@@ -3995,8 +4464,6 @@ impl ActiveChatRegistry {
         };
         match timeout {
             Some(limit) => tokio::time::timeout(limit, await_release).await.is_ok(),
-            // Unterminated wait: the operation always leaves the registry (the
-            // chat task completes even on panic), so this resolves, not hangs.
             None => {
                 await_release.await;
                 true
@@ -4005,20 +4472,17 @@ impl ActiveChatRegistry {
     }
 
     async fn stop_alias_owned(&self, alias: String) -> bool {
-        let operation_id = {
-            let index = self.inner.read().await;
-            let Some(operation_id) = index.aliases.get(&alias).cloned() else {
-                return false;
-            };
-            operation_id
+        let Some(operation_id) = self.operation_for_session(&alias).await else {
+            return false;
         };
         self.stop_operation(&operation_id).await
     }
 
     async fn stop_operation(&self, operation_id: &str) -> bool {
+        let op_shard = active_chat_shard_idx(operation_id);
         let (cancellation, stop_gate, op_session_id) = {
-            let index = self.inner.read().await;
-            let Some(operation) = index.operations.get(operation_id) else {
+            let ops = self.shards.operations[op_shard].read().await;
+            let Some(operation) = ops.get(operation_id) else {
                 return false;
             };
             (
@@ -4028,22 +4492,19 @@ impl ActiveChatRegistry {
             )
         };
 
-        // This is the stop/approval linearization point. If an approval already
-        // holds the gate, its runtime consumption wins and this stop follows it.
-        // Otherwise mark stopped before the cancellation token becomes visible,
-        // so a later approval cannot cross the runtime boundary.
         {
             let mut stopped = stop_gate.lock().await;
             *stopped = true;
         }
         {
-            let mut index = self.inner.write().await;
-            if let Some(operation) = index.operations.get_mut(operation_id) {
+            let mut ops = self.shards.operations[op_shard].write().await;
+            if let Some(operation) = ops.get_mut(operation_id) {
                 operation.stopped = true;
             }
         }
         cancellation.cancel();
         if let Some(ref sid) = op_session_id {
+            jeikcode_capabilities::tools::task::cancel_subagents_for_session(sid);
             jeikcode_capabilities::tools::bash_runtime::cancel_foreground_live_bash_for_session(
                 sid,
             );
@@ -4054,19 +4515,14 @@ impl ActiveChatRegistry {
     }
 
     async fn stop_gate(&self, operation_id: &str) -> Option<Arc<Mutex<bool>>> {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .map(|operation| operation.stop_gate.clone())
     }
 
-    /// Compat latest-wins: if the session is busy, cancel the running turn
-    /// (bash/tools included), wait for snapshot persist + `complete`, then admit.
-    /// Retries until this caller occupies the aliases or `timeout` elapses.
-    ///
-    /// Takes `self` by value (cheap Arc clone) so axum handlers stay `Send`.
     async fn admit_or_preempt(
         self,
         session_id: Option<String>,
@@ -4089,10 +4545,6 @@ impl ActiveChatRegistry {
                     if remaining.is_zero() {
                         return Err(ActiveChatAdmissionError::SessionBusy);
                     }
-                    // The occupant may be keyed by UUID, by the compat `user`
-                    // alias, or both. A first turn often occupies only the user
-                    // key until `bind_session` lands — stopping only the UUID
-                    // would spin until timeout.
                     let mut keys = Vec::new();
                     if let Some(sid) = session_id.clone() {
                         keys.push(sid);
@@ -4125,19 +4577,19 @@ impl ActiveChatRegistry {
     }
 
     async fn was_stopped(&self, operation_id: &str) -> bool {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .is_some_and(|operation| operation.stopped)
     }
 
     async fn session_id(&self, operation_id: &str) -> Option<String> {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .and_then(|operation| operation.session_id.clone())
     }
@@ -4148,8 +4600,9 @@ impl ActiveChatRegistry {
         operation_id: &str,
         tx: mpsc::UnboundedSender<live_api::ChatSteerSignal>,
     ) {
-        let mut index = self.inner.write().await;
-        if let Some(operation) = index.operations.get_mut(operation_id) {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        if let Some(operation) = ops.get_mut(operation_id) {
             operation.steer_tx = Some(tx);
         }
     }
@@ -4158,9 +4611,41 @@ impl ActiveChatRegistry {
         &self,
         alias: &str,
     ) -> Option<mpsc::UnboundedSender<live_api::ChatSteerSignal>> {
-        let index = self.inner.read().await;
-        let operation_id = index.aliases.get(alias)?;
-        index.operations.get(operation_id)?.steer_tx.clone()
+        let operation_id = self.operation_for_session(alias).await?;
+        let op_shard = active_chat_shard_idx(&operation_id);
+        self.shards.operations[op_shard]
+            .read()
+            .await
+            .get(&operation_id)?
+            .steer_tx
+            .clone()
+    }
+
+    /// 绑定当前 `/chat` 回合的运行时句柄，确保 `/live/provider` 能命中纯 WebUI 对话流。
+    async fn install_runtime_handle(
+        &self,
+        operation_id: &str,
+        handle: jeikcode_coding::CodingRuntimeHandle,
+    ) {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        if let Some(operation) = ops.get_mut(operation_id) {
+            operation.runtime_handle = Some(handle);
+        }
+    }
+
+    pub(crate) async fn runtime_handle(
+        &self,
+        alias: &str,
+    ) -> Option<jeikcode_coding::CodingRuntimeHandle> {
+        let operation_id = self.operation_for_session(alias).await?;
+        let op_shard = active_chat_shard_idx(&operation_id);
+        self.shards.operations[op_shard]
+            .read()
+            .await
+            .get(&operation_id)?
+            .runtime_handle
+            .clone()
     }
 
     /// Record a `/chat/steer` submit's client correlation id and timestamp (FIFO)
@@ -4171,9 +4656,10 @@ impl ActiveChatRegistry {
         client_input_id: Option<String>,
         created_at: Option<u64>,
     ) {
-        let mut index = self.inner.write().await;
-        if let Some(operation_id) = index.aliases.get(alias).cloned() {
-            if let Some(operation) = index.operations.get_mut(&operation_id) {
+        if let Some(operation_id) = self.operation_for_session(alias).await {
+            let op_shard = active_chat_shard_idx(&operation_id);
+            let mut ops = self.shards.operations[op_shard].write().await;
+            if let Some(operation) = ops.get_mut(&operation_id) {
                 operation.steer_client_ids.push_back(client_input_id);
                 operation.steer_timestamps.push_back(created_at);
             }
@@ -4183,11 +4669,12 @@ impl ActiveChatRegistry {
     /// Remove a cancelled steer's correlation id and timestamp so a later steer
     /// fold never pops the cancelled steer's stale metadata.
     async fn cancel_steer_metadata(&self, alias: &str, client_input_id: Option<&str>) {
-        let mut index = self.inner.write().await;
-        let Some(operation_id) = index.aliases.get(alias).cloned() else {
+        let Some(operation_id) = self.operation_for_session(alias).await else {
             return;
         };
-        let Some(operation) = index.operations.get_mut(&operation_id) else {
+        let op_shard = active_chat_shard_idx(&operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        let Some(operation) = ops.get_mut(&operation_id) else {
             return;
         };
         if let Some(cid) = client_input_id.map(str::trim).filter(|s| !s.is_empty()) {
@@ -4205,17 +4692,16 @@ impl ActiveChatRegistry {
         }
     }
 
-    /// Drain up to `count` recorded steer client ids and timestamps for the operation,
-    /// matching by the kernel's preserved `SteeredInput.message_id` when present so an
-    /// out-of-band or cancelled steer cannot shift the FIFO alignment.
+    /// Drain up to `count` recorded steer client ids and timestamps for the operation.
     async fn take_steer_metadata_for_inputs(
         &self,
         operation_id: &str,
         count: usize,
         inputs: &[jeikcode_kernel::event::SteeredInput],
     ) -> (Vec<Option<String>>, Vec<Option<u64>>) {
-        let mut index = self.inner.write().await;
-        let Some(operation) = index.operations.get_mut(operation_id) else {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        let Some(operation) = ops.get_mut(operation_id) else {
             return (Vec::new(), Vec::new());
         };
         let mut ids = Vec::with_capacity(count);
@@ -4260,35 +4746,69 @@ impl ActiveChatRegistry {
     /// Remove only the exact operation that finished. A late cleanup from an
     /// older generation can never erase a replacement operation's aliases.
     async fn complete(&self, operation_id: &str) -> bool {
-        let mut index = self.inner.write().await;
-        let Some(operation) = index.operations.remove(operation_id) else {
-            return false;
-        };
-        // 会话级游标推进：把本回合已发出的帧数累加进去，下一回合从更高的序号开始。
-        // 严格单调递增，且与上下文/压缩无关。
-        let next_base = operation
-            .replay
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .high_water();
-        for alias in &operation.aliases {
-            index.session_seq.insert(alias.clone(), next_base);
-        }
-        for alias in operation.aliases {
-            if index
-                .aliases
-                .get(&alias)
-                .is_some_and(|owner| owner == operation_id)
-            {
-                index.aliases.remove(&alias);
+        let op_shard = active_chat_shard_idx(operation_id);
+        let operation = loop {
+            let expected_aliases = {
+                let ops = self.shards.operations[op_shard].read().await;
+                let Some(op) = ops.get(operation_id) else {
+                    return false;
+                };
+                op.aliases.clone()
+            };
+            let mut alias_shard_ids: Vec<usize> = expected_aliases
+                .iter()
+                .map(|a| active_chat_shard_idx(a))
+                .collect();
+            alias_shard_ids.sort_unstable();
+            alias_shard_ids.dedup();
+
+            // Strict lock order: aliases (asc) -> operations -> sessions.
+            let mut alias_guards: Vec<(
+                usize,
+                tokio::sync::RwLockWriteGuard<'_, HashMap<String, String>>,
+            )> = Vec::with_capacity(alias_shard_ids.len());
+            for shard_id in alias_shard_ids {
+                alias_guards.push((shard_id, self.shards.aliases[shard_id].write().await));
             }
-        }
+
+            let mut ops = self.shards.operations[op_shard].write().await;
+            let Some(op_ref) = ops.get(operation_id) else {
+                return false;
+            };
+            if op_ref.aliases != expected_aliases {
+                // `bind_session` added another alias while we gathered alias shards; retry.
+                continue;
+            }
+            let operation = ops.remove(operation_id).expect("verified key");
+            self.shards
+                .active_count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
+            let next_base = operation
+                .replay
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .high_water();
+            for alias in &operation.aliases {
+                let sess_shard = active_chat_shard_idx(alias);
+                self.shards.sessions[sess_shard]
+                    .write()
+                    .await
+                    .session_seq
+                    .insert(alias.clone(), next_base);
+
+                let a_shard = active_chat_shard_idx(alias);
+                if let Some((_, map)) = alias_guards.iter_mut().find(|(id, _)| *id == a_shard) {
+                    if map.get(alias).is_some_and(|owner| owner == operation_id) {
+                        map.remove(alias);
+                    }
+                }
+            }
+            break operation;
+        };
+
         operation.finished.notify_waiters();
-        // 跨实例增量：操作结束 → 活动状态回落（不触发任何整表重拉）。
         if let Some(sid) = operation.session_id.clone() {
-            // 只结束属于本次 operation 的阶段：手动压缩归 `manual:<op>`，
-            // `/chat` 自动压缩归 `turn` 前缀。绝不能无条件清掉 live 或别的 owner
-            // 正在执行的压缩（旧实现正是这样让刷新误杀另一条链路）。
             let manual_owner = manual_compaction_owner(operation_id);
             finish_compaction_phase(&sid, &manual_owner, false);
             finish_compaction_phase_prefix(&sid, COMPACTION_OWNER_TURN, false);
@@ -4302,26 +4822,13 @@ impl ActiveChatRegistry {
         true
     }
 
-    /// Mark that a terminal event (Done, Stopped, or Error) has been emitted, and
-    /// record that terminal frame **on the session** in the same critical section
-    /// that raises the flag.
-    ///
-    /// The flag used to become visible before the terminal frame existed anywhere:
-    /// the frame was still queued for the fan-out task, so a watcher attaching in
-    /// that window saw "already terminal" with nothing to replay — and it parked,
-    /// and parking means keepalives only, never a terminal. The WebUI then stayed
-    /// in "running" forever (red stop button, clock still ticking, checklist
-    /// frozen) until the user happened to switch sessions.
-    ///
-    /// Recording the frame here makes "this turn is over" and "here is its
-    /// terminal frame" a single fact, so a late watcher can always be told.
+    /// Record terminal state and frame atomically per operation/session shards.
     async fn mark_terminal(&self, operation_id: &str, terminal: &ChatEvent) {
-        let mut index = self.inner.write().await;
-        let Some(op) = index.operations.get_mut(operation_id) else {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        let Some(op) = ops.get_mut(operation_id) else {
             return;
         };
-        // The terminal frame takes the next slot in the turn's replay log, so its
-        // cursor is the same number the replay snapshot hands out.
         let seq = op
             .replay
             .lock()
@@ -4331,51 +4838,76 @@ impl ActiveChatRegistry {
         op.terminal_reached = true;
         let aliases = op.aliases.clone();
         for alias in aliases {
-            index
+            let sess_shard = active_chat_shard_idx(&alias);
+            self.shards.sessions[sess_shard]
+                .write()
+                .await
                 .session_terminal
                 .insert(alias, (seq, terminal.clone()));
         }
     }
 
-    /// Evict all in-memory tracking state (sequences, cached terminal frames, standby watchers, aliases)
-    /// when a session is deleted, preventing resource leakage across session lifecycles.
+    /// Evict all in-memory tracking state when a session is deleted.
     pub(crate) async fn clear_session(&self, session_id: &str) {
-        let mut index = self.inner.write().await;
-        index.session_seq.remove(session_id);
-        index.session_terminal.remove(session_id);
-        index.standby_watchers.remove(session_id);
-        index.aliases.remove(session_id);
+        let alias_shard = active_chat_shard_idx(session_id);
+        let sess_shard = active_chat_shard_idx(session_id);
+        let mut alias_map = self.shards.aliases[alias_shard].write().await;
+        let mut sess = self.shards.sessions[sess_shard].write().await;
+        alias_map.remove(session_id);
+        sess.session_seq.remove(session_id);
+        sess.session_terminal.remove(session_id);
+        sess.standby_watchers.remove(session_id);
     }
 
     async fn active_session_ids(&self) -> Vec<String> {
-        let mut sessions: Vec<String> = self
-            .inner
-            .read()
-            .await
-            .operations
-            .values()
-            .filter(|operation| !operation.terminal_reached)
-            .filter_map(|operation| operation.session_id.clone())
-            .collect();
+        let mut sessions: Vec<String> = Vec::new();
+        for shard in &self.shards.operations {
+            let ops = shard.read().await;
+            for operation in ops.values() {
+                if !operation.terminal_reached {
+                    if let Some(ref sid) = operation.session_id {
+                        sessions.push(sid.clone());
+                    }
+                }
+            }
+        }
         sessions.sort();
         sessions.dedup();
         sessions
     }
 
+    /// 查询会话在 `/chat` 通道上的运行状态；已进入终态但尚未完成收尾清理的操作不再视为运行中。
+    async fn runtime_status_for_session(
+        &self,
+        session_id: &str,
+    ) -> (bool, Option<String>, Option<u64>) {
+        let Some(op_id) = self.operation_for_session(session_id).await else {
+            return (false, None, None);
+        };
+        let op_shard = active_chat_shard_idx(&op_id);
+        let ops = self.shards.operations[op_shard].read().await;
+        let Some(op) = ops.get(&op_id) else {
+            return (false, None, None);
+        };
+        if op.terminal_reached {
+            return (false, None, None);
+        }
+        (true, op.status.clone(), Some(op.started_at))
+    }
+
     async fn has_active_operations(&self) -> bool {
-        !self.inner.read().await.operations.is_empty()
+        self.active_operation_count() > 0
     }
 
     #[cfg(test)]
     async fn cancel_all(&self) {
-        let cancellations: Vec<(CancellationToken, Arc<Mutex<bool>>)> = self
-            .inner
-            .read()
-            .await
-            .operations
-            .values()
-            .map(|operation| (operation.cancellation.clone(), operation.stop_gate.clone()))
-            .collect();
+        let mut cancellations: Vec<(CancellationToken, Arc<Mutex<bool>>)> = Vec::new();
+        for shard in &self.shards.operations {
+            let ops = shard.read().await;
+            for operation in ops.values() {
+                cancellations.push((operation.cancellation.clone(), operation.stop_gate.clone()));
+            }
+        }
         for (cancellation, stop_gate) in cancellations {
             *stop_gate.lock().await = true;
             cancellation.cancel();
@@ -4638,6 +5170,22 @@ pub(crate) enum GlobalWireEvent {
     /// 跟随 `mode`；为 false 时各会话恢复自己的模式。
     #[serde(rename = "mode_global")]
     ModeGlobal { enabled: bool, mode: String },
+    /// MCP / 技能等能力开关或信任状态变更（跨实例广播）。携带受影响的
+    /// 工作目录，客户端只刷新对应项目的面板，不做整页重载。
+    #[serde(rename = "capabilities_changed")]
+    CapabilitiesChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
+    /// 桌面/运行时设置（开机自启、快捷键、运行时模型切换、关闭动作、Agent 模式）
+    /// 变更后跨实例广播，打开设置弹窗的其它实例立即对齐。
+    #[serde(rename = "desktop_settings")]
+    DesktopSettingsChanged {
+        settings: crate::api_config::DesktopSettingsPayload,
+    },
+    /// 定时任务配置、开关或执行状态变更，通知所有前端实例刷新定时任务列表
+    #[serde(rename = "schedules_updated")]
+    SchedulesUpdated,
 }
 
 /// 一次模型参数变更里携带的思考强度/预算快照（两字段都序列化，`null` 即清空）。
@@ -4680,6 +5228,8 @@ pub(crate) struct SessionRowWire {
     pub updated_at: u64,
     pub message_count: u32,
     pub origin: String,
+    #[serde(default)]
+    pub is_scheduled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4698,10 +5248,12 @@ pub(crate) fn session_row_wire(
 ) -> Option<SessionRowWire> {
     let manager = NativeSessionManager::for_project(working_dir);
     let meta = manager.read_meta(session_id).ok()?;
+    let is_scheduled = meta.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled;
     let origin = match meta.origin {
         jeikcode_capabilities::session::SessionOrigin::Manual => "manual",
         jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled",
         jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol",
+        jeikcode_capabilities::session::SessionOrigin::Subagent => "subagent",
     };
     Some(SessionRowWire {
         id: session_id.to_string(),
@@ -4712,6 +5264,7 @@ pub(crate) fn session_row_wire(
         updated_at: u64::try_from(meta.updated_at.max(0)).unwrap_or(0),
         message_count: meta.message_count,
         origin: origin.to_string(),
+        is_scheduled,
         approval_mode: Some(live_api::live_display_approval_mode_wire(
             session_id,
             meta.approval_mode.as_deref(),
@@ -4731,10 +5284,12 @@ pub(crate) fn session_row_wire_in_bucket(
     let manager =
         NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(project_bucket));
     let meta = manager.read_meta(session_id).ok()?;
+    let is_scheduled = meta.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled;
     let origin = match meta.origin {
         jeikcode_capabilities::session::SessionOrigin::Manual => "manual",
         jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled",
         jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol",
+        jeikcode_capabilities::session::SessionOrigin::Subagent => "subagent",
     };
     Some(SessionRowWire {
         id: session_id.to_string(),
@@ -4745,6 +5300,7 @@ pub(crate) fn session_row_wire_in_bucket(
         updated_at: u64::try_from(meta.updated_at.max(0)).unwrap_or(0),
         message_count: meta.message_count,
         origin: origin.to_string(),
+        is_scheduled,
         approval_mode: Some(live_api::live_display_approval_mode_wire(
             session_id,
             meta.approval_mode.as_deref(),
@@ -4764,9 +5320,28 @@ pub(crate) fn publish_session_upsert(working_dir: &std::path::Path, session_id: 
 
 const GLOBAL_EVENTS_CAP: usize = 256;
 
+/// Pre-serialized global event payloads shared (`Arc<str>`) across all SSE `/events`
+/// and WebSocket `/stream/ws` subscribers so each broadcast is serialized once.
+#[derive(Clone, Debug)]
+pub(crate) struct SerializedGlobalFrame {
+    pub(crate) event_json: Arc<str>,
+    pub(crate) ws_frame: Arc<str>,
+}
+
 /// Process-wide invalidation bus shared by every connected client instance.
 pub(crate) fn global_events() -> &'static tokio::sync::broadcast::Sender<GlobalWireEvent> {
     static BUS: std::sync::OnceLock<tokio::sync::broadcast::Sender<GlobalWireEvent>> =
+        std::sync::OnceLock::new();
+    BUS.get_or_init(|| {
+        let (tx, _) = tokio::sync::broadcast::channel(GLOBAL_EVENTS_CAP);
+        tx
+    })
+}
+
+/// Zero-copy pre-serialized invalidation bus consumed by `/events` and `/stream/ws`.
+pub(crate) fn global_wire_frames() -> &'static tokio::sync::broadcast::Sender<SerializedGlobalFrame>
+{
+    static BUS: std::sync::OnceLock<tokio::sync::broadcast::Sender<SerializedGlobalFrame>> =
         std::sync::OnceLock::new();
     BUS.get_or_init(|| {
         let (tx, _) = tokio::sync::broadcast::channel(GLOBAL_EVENTS_CAP);
@@ -4795,6 +5370,14 @@ pub(crate) fn publish_model_config(
 /// Broadcast an invalidation signal. No subscribers / lagged receivers are fine:
 /// the next invalidation (or a client's cold start) reconciles the state.
 pub(crate) fn publish_global(event: GlobalWireEvent) {
+    if let Ok(ev_json) = serde_json::to_string(&event) {
+        let ws_frame: Arc<str> = Arc::from(format!(r#"{{"channel":"global","event":{ev_json}}}"#));
+        let event_json: Arc<str> = Arc::from(ev_json);
+        let _ = global_wire_frames().send(SerializedGlobalFrame {
+            event_json,
+            ws_frame,
+        });
+    }
     let _ = global_events().send(event);
 }
 
@@ -5018,6 +5601,8 @@ mod folded_steer_outline_tests {
             created_at: 1_700_000_000_000,
             message_id: Some("m-steer-1".into()),
             operation_id: Some("op-1".into()),
+            anchor_message_id: None,
+            turn_id: None,
         }];
         let mut turns = Vec::new();
         append_folded_steer_outline(
@@ -5060,6 +5645,8 @@ mod folded_steer_outline_tests {
             created_at: 1_700_000_000_000,
             message_id: Some("steer-1".into()),
             operation_id: Some("op-1".into()),
+            anchor_message_id: None,
+            turn_id: None,
         };
         jeikcode_capabilities::session::inputs::append_global(&mut input).unwrap();
 
@@ -5134,6 +5721,8 @@ mod folded_steer_outline_tests {
             created_at: 1_700_000_000_600,
             message_id: Some("steer-1".into()),
             operation_id: Some("op-1".into()),
+            anchor_message_id: None,
+            turn_id: None,
         };
         jeikcode_capabilities::session::inputs::append_global(&mut steer).unwrap();
 
@@ -5196,6 +5785,8 @@ mod folded_steer_outline_tests {
             created_at: 1_700_000_000_000,
             message_id: None,
             operation_id: Some("op-1".into()),
+            anchor_message_id: None,
+            turn_id: None,
         }];
         let mut turns = Vec::new();
         append_folded_steer_outline(
@@ -5223,6 +5814,8 @@ mod folded_steer_outline_tests {
                 created_at: 1_700_000_000_100,
                 message_id: None,
                 operation_id: Some("op-1".into()),
+                anchor_message_id: None,
+                turn_id: None,
             },
             jeikcode_capabilities::session::SessionInput {
                 id: "steer-live".into(),
@@ -5235,6 +5828,8 @@ mod folded_steer_outline_tests {
                 created_at: 1_700_000_000_200,
                 message_id: None,
                 operation_id: None,
+                anchor_message_id: None,
+                turn_id: None,
             },
         ];
         let mut turns = Vec::new();
@@ -5410,28 +6005,35 @@ async fn global_events_stream() -> axum::response::Response {
     use futures::StreamExt as _;
     use std::convert::Infallible;
 
-    let mut rx = global_events().subscribe();
-    let (tx, out_rx) = mpsc::unbounded_channel::<String>();
-    let _ = tx.send(serde_json::json!({ "type": "sync" }).to_string());
+    let mut rx = global_wire_frames().subscribe();
+    let (tx, out_rx) = mpsc::channel::<Arc<str>>(256);
+    let _ = tx.try_send(Arc::<str>::from(r#"{"type":"sync"}"#));
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(event) => match serde_json::to_string(&event) {
-                    Ok(json) => {
-                        if tx.send(json).is_err() {
-                            break;
-                        }
+                Ok(frame) => match tx.try_send(Arc::clone(&frame.event_json)) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!("closing lagging /events SSE subscriber (send queue full)");
+                        break;
                     }
-                    Err(_) => continue,
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                 },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "/events SSE lagged; requesting client resync");
+                    match tx.try_send(Arc::<str>::from(r#"{"type":"sync"}"#)) {
+                        Ok(()) => continue,
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+                        | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
 
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx)
-        .map(|json| Ok::<Event, Infallible>(Event::default().data(json)));
+    let stream = tokio_stream::wrappers::ReceiverStream::new(out_rx)
+        .map(|json| Ok::<Event, Infallible>(Event::default().data(json.as_ref())));
     let mut resp = Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
         .into_response();
@@ -5473,74 +6075,142 @@ impl ReplayLog {
     fn push(&mut self, event: ChatEvent) -> u64 {
         self.next_seq = self.next_seq.saturating_add(1);
         let seq = self.next_seq;
-        let coalesced = match (&event, self.events.last_mut()) {
-            (
-                ChatEvent::TextDelta {
-                    content,
-                    message_id,
-                    part_id,
-                    part_rev,
+        // SystemNotice 必须按 event_id 在整段缓冲内原位合并：重试过程往往夹杂 TextDelta/ToolCall，
+        // 若仅检查 last_mut()，非相邻的进度修订会在重连回放时再次吐出多张卡。
+        let coalesced = if let ChatEvent::SystemNotice {
+            event_id,
+            revision,
+            status,
+            severity,
+            text,
+            part_id,
+            kind,
+            anchor_message_id,
+            anchor_part_id,
+            created_at,
+            ..
+        } = &event
+        {
+            if let Some((
+                prev_seq,
+                ChatEvent::SystemNotice {
+                    event_id: _,
+                    revision: prev_revision,
+                    status: prev_status,
+                    severity: prev_severity,
+                    text: prev_text,
+                    part_id: prev_part_id,
+                    kind: prev_kind,
+                    anchor_message_id: prev_anchor_message_id,
+                    anchor_part_id: prev_anchor_part_id,
+                    created_at: prev_created_at,
                     ..
                 },
-                Some((
-                    prev_seq,
+            )) = self.events.iter_mut().rev().find(|(_, candidate)| {
+                matches!(
+                    candidate,
+                    ChatEvent::SystemNotice { event_id: prev_id, .. } if prev_id == event_id
+                )
+            }) {
+                let prev_settled = *prev_status == jeikcode_kernel::event::NoticeStatus::Settled;
+                let incoming_settled = *status == jeikcode_kernel::event::NoticeStatus::Settled;
+                if (!prev_settled || incoming_settled) && *revision >= *prev_revision {
+                    *prev_revision = *revision;
+                    *prev_status = *status;
+                    *prev_severity = *severity;
+                    *prev_text = text.clone();
+                    *prev_part_id = part_id.clone();
+                    *prev_kind = *kind;
+                    if anchor_message_id.is_some() {
+                        *prev_anchor_message_id = anchor_message_id.clone();
+                    }
+                    if anchor_part_id.is_some() {
+                        *prev_anchor_part_id = anchor_part_id.clone();
+                    }
+                    if prev_created_at.is_none() {
+                        *prev_created_at = *created_at;
+                    }
+                }
+                *prev_seq = seq;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let coalesced = if coalesced {
+            true
+        } else {
+            match (&event, self.events.last_mut()) {
+                (
                     ChatEvent::TextDelta {
-                        content: prev,
-                        message_id: prev_message_id,
-                        part_id: prev_part_id,
-                        part_rev: prev_part_rev,
+                        content,
+                        message_id,
+                        part_id,
+                        part_rev,
                         ..
                     },
-                )),
-            ) if message_id == prev_message_id && part_id == prev_part_id => {
-                prev.push_str(content);
-                if part_rev.is_some() {
-                    *prev_part_rev = *part_rev;
+                    Some((
+                        prev_seq,
+                        ChatEvent::TextDelta {
+                            content: prev,
+                            message_id: prev_message_id,
+                            part_id: prev_part_id,
+                            part_rev: prev_part_rev,
+                            ..
+                        },
+                    )),
+                ) if message_id == prev_message_id && part_id == prev_part_id => {
+                    prev.push_str(content);
+                    if part_rev.is_some() {
+                        *prev_part_rev = *part_rev;
+                    }
+                    *prev_seq = seq;
+                    true
                 }
-                *prev_seq = seq;
-                true
-            }
-            (
-                ChatEvent::ReasoningDelta {
-                    content,
-                    message_id,
-                    part_id,
-                    part_rev,
-                    ..
-                },
-                Some((
-                    prev_seq,
+                (
                     ChatEvent::ReasoningDelta {
-                        content: prev,
-                        message_id: prev_message_id,
-                        part_id: prev_part_id,
-                        part_rev: prev_part_rev,
+                        content,
+                        message_id,
+                        part_id,
+                        part_rev,
                         ..
                     },
-                )),
-            ) if message_id == prev_message_id && part_id == prev_part_id => {
-                prev.push_str(content);
-                if part_rev.is_some() {
-                    *prev_part_rev = *part_rev;
+                    Some((
+                        prev_seq,
+                        ChatEvent::ReasoningDelta {
+                            content: prev,
+                            message_id: prev_message_id,
+                            part_id: prev_part_id,
+                            part_rev: prev_part_rev,
+                            ..
+                        },
+                    )),
+                ) if message_id == prev_message_id && part_id == prev_part_id => {
+                    prev.push_str(content);
+                    if part_rev.is_some() {
+                        *prev_part_rev = *part_rev;
+                    }
+                    *prev_seq = seq;
+                    true
                 }
-                *prev_seq = seq;
-                true
+                (
+                    ChatEvent::ToolOutputChunk { id, chunk },
+                    Some((
+                        prev_seq,
+                        ChatEvent::ToolOutputChunk {
+                            id: prev_id,
+                            chunk: prev,
+                        },
+                    )),
+                ) if id == prev_id => {
+                    prev.push_str(chunk);
+                    *prev_seq = seq;
+                    true
+                }
+                _ => false,
             }
-            (
-                ChatEvent::ToolOutputChunk { id, chunk },
-                Some((
-                    prev_seq,
-                    ChatEvent::ToolOutputChunk {
-                        id: prev_id,
-                        chunk: prev,
-                    },
-                )),
-            ) if id == prev_id => {
-                prev.push_str(chunk);
-                *prev_seq = seq;
-                true
-            }
-            _ => false,
         };
         if !coalesced {
             self.events.push((seq, event));
@@ -5701,10 +6371,15 @@ pub(crate) fn fanout_chat_events_for_session(
                     if let Some(sid) = sid {
                         // The admitted prompt is now a real message: retire its
                         // pending input row by the same id.
-                        let _ = jeikcode_capabilities::session::inputs::mark_promoted_global(
-                            &sid,
-                            &[(client_input_id.clone(), message_id.clone())],
-                        );
+                        let sid_mark = sid.clone();
+                        let pair = (client_input_id.clone(), message_id.clone());
+                        let _ = spawn_blocking_isolated(move || {
+                            let _ = jeikcode_capabilities::session::inputs::mark_promoted_global(
+                                &sid_mark,
+                                &[pair],
+                            );
+                        })
+                        .await;
                         publish_global(GlobalWireEvent::Activity {
                             session_id: sid,
                             running: true,
@@ -5730,9 +6405,17 @@ pub(crate) fn fanout_chat_events_for_session(
                             .cloned()
                             .zip(inputs.iter().map(|input| input.message_id.clone()))
                             .collect();
-                        let _ = jeikcode_capabilities::session::inputs::mark_promoted_global(
-                            &sid, &pairs,
-                        );
+                        let sid_mark = sid.clone();
+                        let pairs_mark = pairs.clone();
+                        let anchor_mark = anchor_message_id.clone();
+                        let _ = spawn_blocking_isolated(move || {
+                            let _ = jeikcode_capabilities::session::inputs::mark_promoted_with_anchor_global(
+                                &sid_mark,
+                                &pairs_mark,
+                                anchor_mark.as_deref(),
+                            );
+                        })
+                        .await;
                         retire_folded_steers_from_queue(&sid, &pairs).await;
                         publish_global(GlobalWireEvent::SteerFolded {
                             session_id: sid,
@@ -5832,7 +6515,12 @@ pub(crate) fn fanout_chat_events_for_session(
                 publish_global(activity);
             }
             if let (Some(wd), Some(sid)) = (current_wd.as_deref(), deferred_upsert_sid.as_deref()) {
-                publish_session_upsert(wd, sid);
+                let wd_owned = wd.to_path_buf();
+                let sid_owned = sid.to_string();
+                let _ = spawn_blocking_isolated(move || {
+                    publish_session_upsert(&wd_owned, &sid_owned);
+                })
+                .await;
             }
         }
     });
@@ -6152,21 +6840,67 @@ pub struct ArtifactInfo {
 }
 
 /// Tool call info for API response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ToolCallInfo {
     pub id: String,
     pub name: String,
     pub arguments: String,
     pub display: String,
+    /// Observability timings join from the session `toolmetrics.jsonl` sidecar.
+    /// Additive/optional: older daemons omit them and the UI hides the badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_ms: Option<u64>,
+    /// `running` | `done` | `error` | `incomplete` from the metrics sidecar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// Tool result info for API response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ToolResultInfo {
     pub call_id: String,
     pub success: bool,
     pub summary: String,
     pub line_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// Structured notice sidecar attached to `turn_diagnostic` display records
+/// so WebUI cold loads and live SSE/WS deltas share identical card identity,
+/// causal anchor, severity and settled status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageNoticeInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_kind: Option<jeikcode_kernel::event::NoticeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<jeikcode_kernel::event::NoticeSeverity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<jeikcode_kernel::event::NoticeStatus>,
 }
 
 /// Message info for API response
@@ -6252,6 +6986,13 @@ pub struct MessageInfo {
     /// span) so refresh / session switch still shows the live "用时" total.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    /// Display-only runtime model-switch marker for this assistant round.
+    /// Joined from `<session>.model-switches.jsonl` by message id; never part
+    /// of the kernel conversation or a provider request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<MessageNoticeInfo>,
 }
 
 /// Serializable image payload returned in session history.
@@ -6325,6 +7066,157 @@ fn tool_result_summary(text: &str) -> String {
     }
 }
 
+/// Join the per-session `toolmetrics.jsonl` sidecar onto history rows.
+///
+/// The sidecar is observability-only: it is never part of the transcript sent to
+/// the model. Missing/corrupt metrics degrade to "no badge", never to a failed
+/// session load.
+fn annotate_tool_metrics(
+    messages: &mut [MessageInfo],
+    manager: &NativeSessionManager,
+    session_id: &str,
+) {
+    if messages.is_empty() {
+        return;
+    }
+    let Ok(metrics) = manager.read_tool_metrics(session_id) else {
+        return;
+    };
+    if metrics.is_empty() {
+        return;
+    }
+    for message in messages {
+        if let Some(calls) = message.tool_calls.as_mut() {
+            for call in calls {
+                if let Some(metric) = metrics.get(&call.id) {
+                    call.started_at = Some(metric.started_at);
+                    call.finished_at = metric.finished_at;
+                    call.duration_ms = metric.duration_ms;
+                    call.switch_ms = Some(metric.switch_ms);
+                    call.status = Some(metric.status.as_str().to_string());
+                }
+            }
+        }
+        if let Some(result) = message.tool_result.as_mut() {
+            if let Some(metric) = metrics.get(&result.call_id) {
+                result.started_at = Some(metric.started_at);
+                result.finished_at = metric.finished_at;
+                result.duration_ms = metric.duration_ms;
+                result.switch_ms = Some(metric.switch_ms);
+                result.status = Some(metric.status.as_str().to_string());
+            }
+        }
+    }
+}
+
+/// Join applied runtime model-switch markers onto their assistant rows.
+/// Display-only; the sidecar is never read into the model context.
+fn annotate_model_switches(
+    messages: &mut [MessageInfo],
+    manager: &NativeSessionManager,
+    session_id: &str,
+) {
+    let switches = manager.applied_model_switches(session_id);
+    if switches.is_empty() {
+        return;
+    }
+    for message in messages {
+        if !message.role.eq_ignore_ascii_case("assistant") {
+            continue;
+        }
+        let Some(id) = message.id.as_deref() else {
+            continue;
+        };
+        if let Some(model) = switches.get(id) {
+            message.switch_to = Some(model.clone());
+        }
+    }
+}
+
+/// Infer structured notice classification for legacy `turn_diagnostic` rows saved without
+/// explicit `NoticeKind`/`NoticeSeverity`, preventing historical errors/warnings from rendering
+/// as generic info cards.
+fn infer_legacy_notice_meta(
+    id: Option<&str>,
+    text: &str,
+) -> (
+    jeikcode_kernel::event::NoticeKind,
+    jeikcode_kernel::event::NoticeSeverity,
+) {
+    use jeikcode_kernel::event::{NoticeKind, NoticeSeverity};
+    let id_str = id.unwrap_or("");
+    let lower = text.to_ascii_lowercase();
+    if id_str.starts_with("rl:") || lower.contains("rate limit") || text.contains("429") {
+        return (NoticeKind::RateLimit, NoticeSeverity::Warning);
+    }
+    if id_str.starts_with("trunc:") || lower.contains("truncated") || text.contains("截断") {
+        return (NoticeKind::Truncation, NoticeSeverity::Warning);
+    }
+    if id_str.starts_with("warn-max-rounds:")
+        || (lower.contains("round limit (") && !id_str.starts_with("err-"))
+        || text.contains("最大轮次上限")
+    {
+        return (NoticeKind::Warning, NoticeSeverity::Warning);
+    }
+    if id_str.starts_with("err-tool-loop:")
+        || id_str.starts_with("tool-loop-warn:")
+        || lower.contains("tool loop")
+        || text.contains("工具调用死循环")
+        || text.contains("工具循环")
+    {
+        return (NoticeKind::Warning, NoticeSeverity::Warning);
+    }
+    if id_str.starts_with("err-ttft:")
+        || id_str.starts_with("err-stall:")
+        || lower.contains("timeout")
+        || text.contains("超时")
+    {
+        return (NoticeKind::Timeout, NoticeSeverity::Error);
+    }
+    if id_str.starts_with("over-window:") || id_str.starts_with("warn-") {
+        return (NoticeKind::Warning, NoticeSeverity::Warning);
+    }
+    (NoticeKind::Error, NoticeSeverity::Error)
+}
+
+/// Convert a kernel [`jeikcode_kernel::message::Message`] notice (or legacy diagnostic)
+/// into [`MessageNoticeInfo`] for API/WebUI projection.
+fn notice_info_from_kernel_message(
+    msg: &jeikcode_kernel::message::Message,
+) -> Option<MessageNoticeInfo> {
+    if let Some(meta) = &msg.notice {
+        let eid = meta.event_id.clone().or_else(|| msg.id.clone());
+        return Some(MessageNoticeInfo {
+            part_id: meta
+                .part_id
+                .clone()
+                .or_else(|| eid.as_ref().map(|id| format!("{id}:1:notice"))),
+            event_id: eid,
+            anchor_message_id: meta.anchor_message_id.clone(),
+            anchor_part_id: meta.anchor_part_id.clone(),
+            notice_kind: Some(meta.kind),
+            revision: meta.revision,
+            severity: Some(meta.severity),
+            status: Some(meta.status),
+        });
+    }
+    if msg.internal_origin.as_deref() == Some("turn_diagnostic") {
+        let eid = msg.id.clone();
+        let (kind, severity) = infer_legacy_notice_meta(eid.as_deref(), &msg.text);
+        return Some(MessageNoticeInfo {
+            part_id: eid.as_ref().map(|id| format!("{id}:1:notice")),
+            event_id: eid,
+            anchor_message_id: None,
+            anchor_part_id: None,
+            notice_kind: Some(kind),
+            revision: None,
+            severity: Some(severity),
+            status: Some(jeikcode_kernel::event::NoticeStatus::Settled),
+        });
+    }
+    None
+}
+
 impl MessageInfo {
     fn from_kernel(msg: &jeikcode_kernel::message::Message) -> Self {
         Self::from_kernel_in(msg, None)
@@ -6350,6 +7242,7 @@ impl MessageInfo {
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                     display: format_tool_args(&call.name, &call.arguments),
+                    ..Default::default()
                 })
                 .collect()
         });
@@ -6361,6 +7254,7 @@ impl MessageInfo {
                 // empty after multi-line SQL/table outputs. Full text remains in `content`.
                 summary: tool_result_summary(&msg.text),
                 line_count: msg.text.lines().count(),
+                ..Default::default()
             }
         });
         let artifacts = extract_artifacts_from_call_fields(
@@ -6421,6 +7315,8 @@ impl MessageInfo {
             images,
             created_at: (msg.created_at_ms > 0).then_some(msg.created_at_ms),
             elapsed_ms: msg.meta.as_ref().map(|m| m.elapsed_ms).filter(|&ms| ms > 0),
+            switch_to: None,
+            notice: notice_info_from_kernel_message(msg),
         }
     }
 }
@@ -7210,24 +8106,41 @@ fn is_system_temp_dir(path: &std::path::Path) -> bool {
     false
 }
 
-/// List all projects (scans sessions directory)
+/// List all projects (scans sessions directory once)
 fn list_projects() -> std::io::Result<Vec<ProjectInfo>> {
     let sessions_root = NativeSessionManager::sessions_root();
     let scan = catalog_scan_in_root(&sessions_root)?;
     let active = active_catalog_location(&scan.entries);
-    list_projects_in_root(&sessions_root, active.as_ref())
+    Ok(list_projects_from_entries(
+        &sessions_root,
+        scan.entries,
+        active.as_ref(),
+    ))
 }
 
+#[cfg(test)]
 fn list_projects_in_root(
     sessions_root: &std::path::Path,
     active: Option<&jeikcode_capabilities::session::CatalogLocation>,
 ) -> std::io::Result<Vec<ProjectInfo>> {
     let scan = catalog_scan_in_root(sessions_root)?;
+    Ok(list_projects_from_entries(
+        sessions_root,
+        scan.entries,
+        active,
+    ))
+}
+
+fn list_projects_from_entries(
+    sessions_root: &std::path::Path,
+    raw_entries: Vec<jeikcode_capabilities::session::CatalogEntry>,
+    active: Option<&jeikcode_capabilities::session::CatalogLocation>,
+) -> Vec<ProjectInfo> {
     let mut by_project_entries = std::collections::BTreeMap::<
         String,
         Vec<jeikcode_capabilities::session::CatalogEntry>,
     >::new();
-    for entry in scan.entries {
+    for entry in raw_entries {
         if is_system_temp_dir(&entry.working_dir) {
             continue;
         }
@@ -7235,7 +8148,7 @@ fn list_projects_in_root(
             continue;
         }
         by_project_entries
-            .entry(entry.project_bucket.clone())
+            .entry(NativeSessionManager::project_hash(&entry.working_dir))
             .or_default()
             .push(entry);
     }
@@ -7280,7 +8193,7 @@ fn list_projects_in_root(
         });
     }
     projects.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
-    Ok(projects)
+    projects
 }
 
 /// 根据项目哈希查找关联的项目工作目录
@@ -7327,6 +8240,10 @@ pub struct SessionSummary {
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub is_scheduled: bool,
     /// Internal protocol-key lookup only; never exposed on the session wire.
     #[serde(skip)]
     pub protocol_key: Option<String>,
@@ -7336,14 +8253,7 @@ fn catalog_scan_in_root(
     root: &std::path::Path,
 ) -> std::io::Result<jeikcode_capabilities::session::CatalogScan> {
     let scan = jeikcode_capabilities::session::SessionManager::scan_catalog(root);
-    for diagnostic in &scan.diagnostics {
-        tracing::warn!(
-            path = %diagnostic.path.display(),
-            kind = ?diagnostic.kind,
-            message = %diagnostic.message,
-            "session catalog entry was skipped"
-        );
-    }
+    crate::legacy_convert::report_catalog_diagnostics(&scan.diagnostics);
     Ok(scan)
 }
 
@@ -7356,6 +8266,13 @@ fn catalog_entry_to_session_summary(
     // 全局开关优先，其余情况磁盘元数据 > 内存热态（不再回扫会话目录）。
     let approval_mode =
         live_api::live_display_approval_mode_wire(&entry.id, entry.approval_mode.as_deref());
+    let origin = match entry.origin {
+        jeikcode_capabilities::session::SessionOrigin::Manual => "manual",
+        jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled",
+        jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol",
+        jeikcode_capabilities::session::SessionOrigin::Subagent => "subagent",
+    };
+    let is_scheduled = entry.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled;
     SessionSummary {
         id: entry.id.clone(),
         name: entry.name.clone(),
@@ -7368,6 +8285,8 @@ fn catalog_entry_to_session_summary(
         preferred_model,
         reasoning_effort: entry.reasoning_effort.clone(),
         thinking_budget: entry.thinking_budget,
+        origin: Some(origin.to_string()),
+        is_scheduled,
         protocol_key: None,
     }
 }
@@ -7376,7 +8295,7 @@ fn catalog_entry_with_project(
     entry: &jeikcode_capabilities::session::CatalogEntry,
 ) -> SessionMetaWithProject {
     SessionMetaWithProject {
-        project_hash: entry.project_bucket.clone(),
+        project_hash: NativeSessionManager::project_hash(&entry.working_dir),
         meta: catalog_entry_to_session_summary(entry),
     }
 }
@@ -7427,6 +8346,10 @@ fn catalog_entry_is_visible(
     entry: &jeikcode_capabilities::session::CatalogEntry,
     active: Option<&jeikcode_capabilities::session::CatalogLocation>,
 ) -> bool {
+    // `task` 衍生的子 Agent 会话不占用常规侧边栏或会话选择器；仅通过父会话评测联查访问。
+    if entry.origin == jeikcode_capabilities::session::SessionOrigin::Subagent {
+        return false;
+    }
     if entry.message_count > 0 {
         return true;
     }
@@ -7455,7 +8378,7 @@ where
     let permit = SESSION_CATALOG_IO.acquire().await.map_err(|error| {
         std::io::Error::other(format!("session catalog coordinator closed: {error}"))
     })?;
-    tokio::task::spawn_blocking(move || {
+    spawn_blocking_isolated(move || {
         let _permit = permit;
         operation()
     })
@@ -7465,49 +8388,85 @@ where
 
 /// List sessions for a project
 fn list_sessions(project_hash: &str) -> std::io::Result<Vec<SessionSummary>> {
-    let scan = catalog_scan_in_root(&NativeSessionManager::sessions_root())?;
+    let sessions_root = NativeSessionManager::sessions_root();
+    let scan = catalog_scan_in_root(&sessions_root)?;
     let active = active_catalog_location(&scan.entries);
-    list_sessions_in_root(
-        &NativeSessionManager::sessions_root(),
+    Ok(list_sessions_from_entries(
+        &sessions_root,
+        scan.entries,
         project_hash,
         active.as_ref(),
-    )
+    ))
 }
 
+#[cfg(test)]
 fn list_sessions_in_root(
     sessions_root: &std::path::Path,
     project_hash: &str,
     active: Option<&jeikcode_capabilities::session::CatalogLocation>,
 ) -> std::io::Result<Vec<SessionSummary>> {
-    let mut entries: Vec<_> = catalog_scan_in_root(sessions_root)?
-        .entries
+    let scan = catalog_scan_in_root(sessions_root)?;
+    Ok(list_sessions_from_entries(
+        sessions_root,
+        scan.entries,
+        project_hash,
+        active,
+    ))
+}
+
+fn list_sessions_from_entries(
+    sessions_root: &std::path::Path,
+    raw_entries: Vec<jeikcode_capabilities::session::CatalogEntry>,
+    project_hash: &str,
+    active: Option<&jeikcode_capabilities::session::CatalogLocation>,
+) -> Vec<SessionSummary> {
+    let mut entries: Vec<_> = raw_entries
         .into_iter()
         .filter(|entry| {
-            entry.project_bucket == project_hash
+            let entry_hash = NativeSessionManager::project_hash(&entry.working_dir);
+            (entry_hash == project_hash || entry.project_bucket == project_hash)
                 && catalog_entry_is_visible(sessions_root, entry, active)
         })
         .collect();
     NativeSessionManager::collapse_fork_lineages(&mut entries);
     crate::legacy_convert::repair_catalog_names_for_display_in_root(sessions_root, &mut entries);
-    Ok(entries
+    entries
         .iter()
         .map(catalog_entry_to_session_summary)
-        .collect())
+        .collect()
 }
 
 /// List all sessions across all projects
 fn list_all_sessions() -> std::io::Result<Vec<SessionMetaWithProject>> {
-    let scan = catalog_scan_in_root(&NativeSessionManager::sessions_root())?;
+    let sessions_root = NativeSessionManager::sessions_root();
+    let scan = catalog_scan_in_root(&sessions_root)?;
     let active = active_catalog_location(&scan.entries);
-    list_all_sessions_in_root(&NativeSessionManager::sessions_root(), active.as_ref())
+    Ok(list_all_sessions_from_entries(
+        &sessions_root,
+        scan.entries,
+        active.as_ref(),
+    ))
 }
 
+#[cfg(test)]
 fn list_all_sessions_in_root(
     sessions_root: &std::path::Path,
     active: Option<&jeikcode_capabilities::session::CatalogLocation>,
 ) -> std::io::Result<Vec<SessionMetaWithProject>> {
-    let mut entries: Vec<_> = catalog_scan_in_root(sessions_root)?
-        .entries
+    let scan = catalog_scan_in_root(sessions_root)?;
+    Ok(list_all_sessions_from_entries(
+        sessions_root,
+        scan.entries,
+        active,
+    ))
+}
+
+fn list_all_sessions_from_entries(
+    sessions_root: &std::path::Path,
+    raw_entries: Vec<jeikcode_capabilities::session::CatalogEntry>,
+    active: Option<&jeikcode_capabilities::session::CatalogLocation>,
+) -> Vec<SessionMetaWithProject> {
+    let mut entries: Vec<_> = raw_entries
         .into_iter()
         .filter(|entry| catalog_entry_is_visible(sessions_root, entry, active))
         .collect();
@@ -7515,7 +8474,7 @@ fn list_all_sessions_in_root(
     // Bound snapshot hydration to the same newest-50 surface the API returns.
     entries.truncate(50);
     crate::legacy_convert::repair_catalog_names_for_display_in_root(sessions_root, &mut entries);
-    Ok(entries.iter().map(catalog_entry_with_project).collect())
+    entries.iter().map(catalog_entry_with_project).collect()
 }
 
 /// Resolve a (possibly short) session id to its full record by scanning bucket
@@ -7626,6 +8585,22 @@ async fn serve_webui_index(
                     return response;
                 }
             }
+        }
+    }
+    webui::serve_webui(uri).await
+}
+
+/// SPA 静态资源回退：同时纠正用户误输入的 `/token=<value>` 路径，重定向为 `/?token=<value>` 触发正常交接鉴权。
+async fn serve_webui_fallback(uri: axum::http::Uri) -> axum::response::Response {
+    if let Some(raw_token) = uri.path().strip_prefix("/token=") {
+        let trimmed = raw_token.trim().trim_matches('/');
+        if !trimmed.is_empty()
+            && trimmed
+                .chars()
+                .all(|c| !c.is_whitespace() && c != '?' && c != '#')
+        {
+            return axum::response::Redirect::temporary(&format!("/?token={trimmed}"))
+                .into_response();
         }
     }
     webui::serve_webui(uri).await
@@ -7882,9 +8857,9 @@ async fn get_projects() -> impl IntoResponse {
 }
 
 /// GET /projects/:hash/sessions - List sessions for a project
-async fn get_project_sessions(Path(hash): Path<String>) -> impl IntoResponse {
+async fn get_project_sessions(Path(hash): Path<String>, headers: HeaderMap) -> impl IntoResponse {
     match run_session_catalog_io(move || list_sessions(&hash)).await {
-        Ok(sessions) => Json(sessions).into_response(),
+        Ok(sessions) => json_response_with_etag(&headers, &sessions),
         Err(e) => {
             let msg = format!("Failed to list sessions: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(msg)).into_response()
@@ -7892,12 +8867,57 @@ async fn get_project_sessions(Path(hash): Path<String>) -> impl IntoResponse {
     }
 }
 
+/// ETag/304 wrapper for list endpoints. The body is serialized once; a matching
+/// If-None-Match returns an empty 304 so switching sessions does not re-download
+/// a 26KB project list on every click.
+fn json_response_with_etag<T: Serialize>(
+    headers: &HeaderMap,
+    value: &T,
+) -> axum::response::Response {
+    let body = match serde_json::to_vec(value) {
+        Ok(body) => body,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    };
+    let etag = response_etag(&body);
+    let not_modified = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*"
+                    || candidate == etag
+                    || candidate
+                        .strip_prefix("W/")
+                        .is_some_and(|weak| weak == etag)
+            })
+        });
+    if not_modified {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        if let Ok(value) = HeaderValue::from_str(&etag) {
+            response.headers_mut().insert(header::ETAG, value);
+        }
+        return response;
+    }
+    let mut response = body.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&etag) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    response
+}
+
 /// GET /sessions/resolve/:id - Resolve a (short or full) session id to its full
 /// record across all projects. Backs the webui's URL-restore, which carries
 /// only a short id and must find which project bucket owns it without the
 /// 50-session cap of `/sessions`.
 async fn resolve_session(Path(id): Path<String>) -> impl IntoResponse {
-    match resolve_session_by_id(&id) {
+    match run_session_catalog_io(move || resolve_session_by_id(&id)).await {
         Ok(Some(s)) => Json(s).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, Json("Session not found")).into_response(),
         Err(e) => {
@@ -8024,8 +9044,12 @@ async fn get_session_freshness(
 
 const SESSION_DETAIL_WARN_BYTES: usize = 8 * 1024 * 1024;
 
+/// Response header carrying the daemon's epoch-ms clock at response time.
+/// Kept out of the JSON body so the strong ETag stays stable across reads.
+const SESSION_SERVER_TIME_HEADER: &str = "x-jeikcode-server-time";
+
 /// Stable, dependency-free ETag for a JSON response body.
-fn response_etag(bytes: &[u8]) -> String {
+pub(crate) fn response_etag(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -8048,6 +9072,10 @@ fn session_detail_response(headers: &HeaderMap, detail: SessionDetail) -> axum::
             return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
         }
     };
+    // A dedicated clock header (instead of a body field) keeps the strong ETag
+    // stable across reads while still letting a cold-start client convert the
+    // persisted epoch-ms tool anchors into its local clock without skew.
+    let server_ms = jeikcode_capabilities::session::now_ms().max(0).to_string();
     let etag = response_etag(&body);
     let not_modified = headers
         .get(header::IF_NONE_MATCH)
@@ -8067,6 +9095,12 @@ fn session_detail_response(headers: &HeaderMap, detail: SessionDetail) -> axum::
         if let Ok(value) = HeaderValue::from_str(&etag) {
             response.headers_mut().insert(header::ETAG, value);
         }
+        if let Ok(value) = HeaderValue::from_str(&server_ms) {
+            response.headers_mut().insert(
+                header::HeaderName::from_static(SESSION_SERVER_TIME_HEADER),
+                value,
+            );
+        }
         return response;
     }
 
@@ -8078,6 +9112,12 @@ fn session_detail_response(headers: &HeaderMap, detail: SessionDetail) -> axum::
     );
     if let Ok(value) = HeaderValue::from_str(&etag) {
         response.headers_mut().insert(header::ETAG, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&server_ms) {
+        response.headers_mut().insert(
+            header::HeaderName::from_static(SESSION_SERVER_TIME_HEADER),
+            value,
+        );
     }
     response
 }
@@ -8170,20 +9210,69 @@ async fn get_session_detail(
     Query(query): Query<SessionDetailQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    let active_ids = state.active_chats.active_session_ids().await;
+    let turn_running = active_ids.iter().any(|sid| sid == &id)
+        || crate::native_live::live_running_session_id().as_deref() == Some(id.as_str())
+        || jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+            .live_turn_session_ids()
+            .iter()
+            .any(|sid| sid == &id);
+    let current_operation = if turn_running {
+        state
+            .active_chats
+            .admitted_user_for_session(&id)
+            .await
+            .and_then(|user| user.client_input_id)
+    } else {
+        None
+    };
+    let daemon_instance_id = state.daemon_instance_id.to_string();
+    // Test-only: `ScopedChatHome` installs a THREAD-LOCAL home override so
+    // parallel tests keep private config/session roots. Capture it BEFORE the
+    // blocking hop (a worker thread does not inherit thread-locals) and
+    // re-install it inside the closure; otherwise this path reads the
+    // process-wide test home and the session looks missing (404).
+    #[cfg(test)]
+    let test_home = jeikcode_config::test_util::overridden_home();
+
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _test_home = test_home.map(jeikcode_config::test_util::IsolatedHome::at);
+        build_session_detail_response(
+            &hash,
+            &id,
+            &query,
+            &headers,
+            turn_running,
+            current_operation,
+            &daemon_instance_id,
+        )
+    })
+    .await
+    .unwrap_or_else(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to load session: {e}")),
+        )
+            .into_response()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_session_detail_response(
+    hash: &str,
+    id: &str,
+    query: &SessionDetailQuery,
+    headers: &HeaderMap,
+    turn_running: bool,
+    current_operation: Option<String>,
+    daemon_instance_id: &str,
+) -> axum::response::Response {
+    let hash = hash.to_string();
+    let id = id.to_string();
     match crate::legacy_convert::load_catalog_session_view_in_project(&hash, &id) {
         Ok(Some(session)) => {
             let _ = crate::native_live::take_session_draft(&id);
-            let turn_running = state
-                .active_chats
-                .active_session_ids()
-                .await
-                .iter()
-                .any(|sid| sid == &id)
-                || crate::native_live::live_running_session_id().as_deref() == Some(id.as_str())
-                || jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                    .live_turn_session_ids()
-                    .iter()
-                    .any(|sid| sid == &id);
             let display_manager =
                 NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(&hash));
             let snapshot_last_turn = session
@@ -8194,15 +9283,6 @@ async fn get_session_detail(
                 .map(|stat| stat.turn_id)
                 .max()
                 .unwrap_or(0);
-            let current_operation = if turn_running {
-                state
-                    .active_chats
-                    .admitted_user_for_session(&id)
-                    .await
-                    .and_then(|user| user.client_input_id)
-            } else {
-                None
-            };
             // First-paint `tail=N`: use the v4 offset index to seek directly into
             // the tail. Only for an idle, settled v4 session; running sessions need
             // the snapshot-tail overlay and keep the full read path.
@@ -8228,15 +9308,20 @@ async fn get_session_detail(
                 None
             } else {
                 read_display_cached(&display_manager, &session.meta.id).filter(|(meta, records)| {
-                    if meta.v == jeikcode_capabilities::session::DISPLAY_VERSION {
-                        // v4 normal path: exact prompt-identity coverage; no text
-                        // reconciliation. A gap (including a dropped tail whose
-                        // turn id was reused after a rewind) falls through to the
-                        // one-time canonical rebuild below.
+                    if matches!(meta.v, 4 | jeikcode_capabilities::session::DISPLAY_VERSION) {
+                        // v4/v5 normal path: exact prompt-identity coverage; v4 rows
+                        // are normalized in read_display and upgraded lazily below.
+                        let ids = display_record_ids(records);
                         meta.complete
+                            && !display_needs_compacted_steer_heal(
+                                meta,
+                                &ids,
+                                &session.snapshot.messages,
+                                &session.meta.id,
+                            )
                             && v4_display_covers_completed_user_turns(
                                 meta,
-                                &display_record_ids(records),
+                                &ids,
                                 &session.snapshot.messages,
                                 &session.meta.turn_stats,
                                 snapshot_last_turn,
@@ -8256,201 +9341,214 @@ async fn get_session_detail(
             let display_is_v4 = display
                 .as_ref()
                 .is_some_and(|(meta, _)| meta.v == jeikcode_capabilities::session::DISPLAY_VERSION);
-            let (turns, message_count, offset, messages, pinned_user_index) = if let Some(view) =
-                tail_view
-            {
-                (
-                    view.turns,
-                    view.message_count,
-                    view.offset,
-                    view.messages,
-                    view.pinned_user_index,
-                )
-            } else if let Some((meta, records)) = display {
-                let elapsed = display_turn_elapsed_overrides(&records, &session.meta.turn_stats);
-                // A hook-created log begins at the first user turn; a backfill
-                // already contains the session-start prefix. Prepend the prefix
-                // only in the former case so indices stay stable across upgrades.
-                let already_prefixed = meta.backfilled
-                    || records.first().is_some_and(|record| {
-                        record.role.eq_ignore_ascii_case("system")
-                            || (record.role.eq_ignore_ascii_case("user") && record.synthetic)
-                    });
-                let prefix = if already_prefixed {
-                    Vec::new()
-                } else {
-                    display_prefix_messages(&session)
-                };
-                let prefix_len = prefix.len();
-
-                // 1. 全会话大纲零开销提取：直接从 DisplayRecord 提炼，确保右栏大纲与 "(13 questions left)" 100% 精确，
-                // 并且无需将整仓几千行无用工具行堆分配转化为 MessageInfo。
-                let mut turns = session_user_outline(&prefix);
-                let record_turns = session_records_user_outline(&records, prefix_len);
-                let turns_offset = turns.len();
-                turns.extend(record_turns.into_iter().map(|mut t| {
-                    t.ordinal += turns_offset;
-                    t
-                }));
-
-                let mut full_messages = prefix;
-                full_messages.extend(records.iter().enumerate().map(|(index, record)| {
-                    let mut message = display_record_to_message_info(record);
-                    if let Some(duration) = elapsed.get(&index) {
-                        message.elapsed_ms = Some(*duration);
-                    }
-                    message
-                }));
-                let snapshot_ids: std::collections::HashSet<&str> = session
-                    .snapshot
-                    .messages
-                    .iter()
-                    .filter_map(|message| message.id.as_deref())
-                    .collect();
-                mark_display_only_archive_rows(
-                    records.as_slice(),
-                    &mut full_messages[prefix_len..],
-                    &snapshot_ids,
-                    snapshot_last_turn,
-                    !turn_running && meta.last_turn_id <= snapshot_last_turn,
-                );
-                // 展示日志在 turn_complete 才落盘。运行中/刚停止/硬杀死的尾巴只存在于
-                // inflight 快照：按最后一条共享 id 之后整段投影，画布与大纲共用
-                // 同一套绝对下标，刷新后与直播看到的完全一致。
-                // The append is idempotent (only rows after the last shared id), so
-                // a fully settled v4 log is untouched; an idle crashed turn (no
-                // completed `turn_stat`, so `v4_display_covers...` cannot see it)
-                // still gets its checkpointed tail back.
-                append_snapshot_tail(
-                    &mut full_messages,
-                    &mut turns,
-                    &session.snapshot.messages,
-                    std::path::Path::new(&session.meta.working_dir),
-                );
-                if !display_is_v4 && !turn_running && !full_messages.is_empty() {
-                    // Lazy v3 -> v4 migration: the current merged projection is
-                    // complete enough to become the v4 source of truth. The next
-                    // read never re-enters this branch.
-                    let records: Vec<_> = full_messages
-                        .iter()
-                        .enumerate()
-                        .map(|(index, message)| {
-                            display_record_from_message_info(&session.meta.id, index, message)
-                        })
-                        .collect();
-                    let _ = display_manager.write_display_backfill(
-                        &session.meta.id,
-                        &records,
-                        snapshot_last_turn,
-                    );
-                }
-                append_streaming_before_pending(
-                    &mut full_messages,
-                    &mut turns,
-                    &session.meta.id,
-                    current_operation.as_deref(),
-                    std::path::Path::new(&session.meta.working_dir),
-                    0,
-                );
-                annotate_client_input_ids(&mut full_messages, &session.meta.id);
-                attach_display_images(
-                    &mut full_messages,
-                    std::path::Path::new(&session.meta.working_dir),
-                    &session.meta.id,
-                );
-                repair_display_clock(&mut full_messages);
-                let (message_count, offset, window, pinned) =
-                    if let Some(after_seq) = query.after_seq {
-                        take_session_after(full_messages, after_seq)
-                    } else {
-                        take_session_page(full_messages, &query)
-                    };
-                (turns, message_count, offset, window, pinned)
-            } else {
-                // v4 missing/incomplete: one-time migration or explicit-mutation
-                // rebuild. This branch writes v4 before returning; a normal
-                // settled session never re-enters it.
-                let mut messages = match merge_catalog_session_messages_for_display(&session) {
-                    Ok(messages) => messages,
-                    Err(error) => {
-                        let msg = format!("Failed to load session: {error}");
-                        return (StatusCode::NOT_FOUND, Json(msg)).into_response();
-                    }
-                };
-                // 旧快照可能没有 message id（功能引入前写入）：补确定性 id，
-                // 保证新契约下的右栏锚点 / 编辑 / 删除不退化。
-                mint_legacy_message_ids(&mut messages);
-                // Compaction drains model context from the snapshot, but the raw
-                // transcript is append-only. Rebuild the pre-compaction display
-                // prefix from it so the question rail and canvas never lose turns
-                // after a refresh. Presentation entries already merged into the
-                // list are display-only rows: the splice keeps any that are not
-                // covered by the rebuilt transcript.
-                if let Some(anchor) = messages.iter().position(|message| {
-                    message.role.eq_ignore_ascii_case("user")
-                        && message.synthetic
-                        && jeikcode_capabilities::compaction::is_compaction_anchor_text(
-                            &message.content,
-                        )
-                }) {
-                    if let Some(turns) = load_display_transcript(&hash, &session.meta.id) {
-                        let boundary = messages[anchor + 1..].iter().find(|message| {
-                            message.role.eq_ignore_ascii_case("user") && !message.synthetic
+            let (turns, message_count, offset, mut messages, pinned_user_index) =
+                if let Some(view) = tail_view {
+                    (
+                        view.turns,
+                        view.message_count,
+                        view.offset,
+                        view.messages,
+                        view.pinned_user_index,
+                    )
+                } else if let Some((meta, records)) = display {
+                    let elapsed =
+                        display_turn_elapsed_overrides(&records, &session.meta.turn_stats);
+                    // A hook-created log begins at the first user turn; a backfill
+                    // already contains the session-start prefix. Prepend the prefix
+                    // only in the former case so indices stay stable across upgrades.
+                    let already_prefixed = meta.backfilled
+                        || records.first().is_some_and(|record| {
+                            record.role.eq_ignore_ascii_case("system")
+                                || (record.role.eq_ignore_ascii_case("user") && record.synthetic)
                         });
-                        let prefix = display_prefix_from_transcript(
-                            &turns,
-                            boundary.and_then(|message| message.created_at),
-                            boundary.map(|message| message.content.as_str()),
-                        );
-                        messages = splice_compacted_display(messages, prefix);
-                    }
-                }
-                // One-time upgrade path for sessions created before the display
-                // log existed. Only settled sessions are materialized so a live
-                // turn is never frozen into the log half-way. If an existing log
-                // is already beyond the readable ceiling, do not rewrite it on
-                // every read (the next read would fail the same way).
-                let display_too_large = display_manager
-                    .display_path(&session.meta.id)
-                    .ok()
-                    .and_then(|path| std::fs::metadata(path).ok())
-                    .is_some_and(|metadata| {
-                        metadata.len()
-                            > jeikcode_capabilities::session::display::MAX_DISPLAY_READ_BYTES as u64
-                    });
-                if !turn_running && !messages.is_empty() && !display_too_large {
-                    let records: Vec<_> = messages
-                        .iter()
-                        .enumerate()
-                        .map(|(index, message)| {
-                            display_record_from_message_info(&session.meta.id, index, message)
-                        })
-                        .collect();
-                    let _ = display_manager.write_display_backfill(
-                        &session.meta.id,
-                        &records,
-                        snapshot_last_turn,
-                    );
-                }
-                let mut turns = session_user_outline(&messages);
-                append_streaming_before_pending(
-                    &mut messages,
-                    &mut turns,
-                    &id,
-                    current_operation.as_deref(),
-                    std::path::Path::new(&session.meta.working_dir),
-                    0,
-                );
-                annotate_client_input_ids(&mut messages, &id);
-                repair_display_clock(&mut messages);
-                let (message_count, offset, messages, pinned_user_index) =
-                    if let Some(after_seq) = query.after_seq {
-                        take_session_after(messages, after_seq)
+                    let prefix = if already_prefixed {
+                        Vec::new()
                     } else {
-                        take_session_page(messages, &query)
+                        display_prefix_messages(&session)
                     };
-                (turns, message_count, offset, messages, pinned_user_index)
-            };
+                    let prefix_len = prefix.len();
+
+                    // 1. 全会话大纲零开销提取：直接从 DisplayRecord 提炼，确保右栏大纲与 "(13 questions left)" 100% 精确，
+                    // 并且无需将整仓几千行无用工具行堆分配转化为 MessageInfo。
+                    let mut turns = session_user_outline(&prefix);
+                    let record_turns = session_records_user_outline(&records, prefix_len);
+                    let turns_offset = turns.len();
+                    turns.extend(record_turns.into_iter().map(|mut t| {
+                        t.ordinal += turns_offset;
+                        t
+                    }));
+
+                    let mut full_messages = prefix;
+                    full_messages.extend(records.iter().enumerate().map(|(index, record)| {
+                        let mut message = display_record_to_message_info(record);
+                        if let Some(duration) = elapsed.get(&index) {
+                            message.elapsed_ms = Some(*duration);
+                        }
+                        message
+                    }));
+                    let snapshot_ids: std::collections::HashSet<&str> = session
+                        .snapshot
+                        .messages
+                        .iter()
+                        .filter_map(|message| message.id.as_deref())
+                        .collect();
+                    mark_display_only_archive_rows(
+                        records.as_slice(),
+                        &mut full_messages[prefix_len..],
+                        &snapshot_ids,
+                        snapshot_last_turn,
+                        !turn_running && meta.last_turn_id <= snapshot_last_turn,
+                    );
+                    // 展示日志在 turn_complete 才落盘。运行中/刚停止/硬杀死的尾巴只存在于
+                    // inflight 快照：按最后一条共享 id 之后整段投影，画布与大纲共用
+                    // 同一套绝对下标，刷新后与直播看到的完全一致。
+                    // The append is idempotent (only rows after the last shared id), so
+                    // a fully settled v4 log is untouched; an idle crashed turn (no
+                    // completed `turn_stat`, so `v4_display_covers...` cannot see it)
+                    // still gets its checkpointed tail back.
+                    append_snapshot_tail(
+                        &mut full_messages,
+                        &mut turns,
+                        &session.snapshot.messages,
+                        std::path::Path::new(&session.meta.working_dir),
+                    );
+                    if !display_is_v4 && !turn_running && !full_messages.is_empty() {
+                        // Lazy v3 -> v4 migration: the current merged projection is
+                        // complete enough to become the v4 source of truth. The next
+                        // read never re-enters this branch.
+                        let records: Vec<_> = full_messages
+                            .iter()
+                            .enumerate()
+                            .map(|(index, message)| {
+                                display_record_from_message_info(&session.meta.id, index, message)
+                            })
+                            .collect();
+                        let _ = display_manager.write_display_backfill(
+                            &session.meta.id,
+                            &records,
+                            snapshot_last_turn,
+                        );
+                    }
+                    append_streaming_before_pending(
+                        &mut full_messages,
+                        &mut turns,
+                        &session.meta.id,
+                        current_operation.as_deref(),
+                        std::path::Path::new(&session.meta.working_dir),
+                        0,
+                    );
+                    annotate_client_input_ids(&mut full_messages, &session.meta.id);
+                    attach_display_images(
+                        &mut full_messages,
+                        std::path::Path::new(&session.meta.working_dir),
+                        &session.meta.id,
+                    );
+                    repair_display_clock(&mut full_messages);
+                    let (message_count, offset, window, pinned) =
+                        if let Some(after_seq) = query.after_seq {
+                            take_session_after(full_messages, after_seq)
+                        } else {
+                            take_session_page(full_messages, &query)
+                        };
+                    (turns, message_count, offset, window, pinned)
+                } else {
+                    // v4 missing/incomplete: one-time migration or explicit-mutation
+                    // rebuild. This branch writes v4 before returning; a normal
+                    // settled session never re-enters it.
+                    let mut messages = match merge_catalog_session_messages_for_display(&session) {
+                        Ok(messages) => messages,
+                        Err(error) => {
+                            let msg = format!("Failed to load session: {error}");
+                            return (StatusCode::NOT_FOUND, Json(msg)).into_response();
+                        }
+                    };
+                    // 旧快照可能没有 message id（功能引入前写入）：补确定性 id，
+                    // 保证新契约下的右栏锚点 / 编辑 / 删除不退化。
+                    mint_legacy_message_ids(&mut messages);
+                    // Compaction drains model context from the snapshot, but the raw
+                    // transcript is append-only. Rebuild the pre-compaction display
+                    // prefix from it so the question rail and canvas never lose turns
+                    // after a refresh. Presentation entries already merged into the
+                    // list are display-only rows: the splice keeps any that are not
+                    // covered by the rebuilt transcript.
+                    if let Some(anchor) = messages.iter().position(is_compaction_anchor_message) {
+                        if let Some(turns) = load_display_transcript(&hash, &session.meta.id) {
+                            let boundary = messages[anchor + 1..].iter().find(|message| {
+                                message.role.eq_ignore_ascii_case("user") && !message.synthetic
+                            });
+                            let inputs = jeikcode_capabilities::session::inputs::list_global(
+                                &session.meta.id,
+                            );
+                            let prefix = display_prefix_from_transcript_with_inputs(
+                                &turns,
+                                &inputs,
+                                std::path::Path::new(&session.meta.working_dir),
+                                boundary.and_then(|message| message.created_at),
+                                boundary.map(|message| message.content.as_str()),
+                            );
+                            messages = splice_compacted_display(messages, prefix);
+                            propagate_contiguous_turn_ids(&mut messages);
+                            stamp_turn_elapsed_on_last_assistants(
+                                &mut messages,
+                                &session.meta.turn_stats,
+                            );
+                        }
+                    }
+                    repair_display_clock(&mut messages);
+                    // One-time upgrade path for sessions created before the display
+                    // log existed. Only settled sessions are materialized so a live
+                    // turn is never frozen into the log half-way. If an existing log
+                    // is already beyond the readable ceiling, do not rewrite it on
+                    // every read (the next read would fail the same way).
+                    let display_too_large = display_manager
+                        .display_path(&session.meta.id)
+                        .ok()
+                        .and_then(|path| std::fs::metadata(path).ok())
+                        .is_some_and(|metadata| {
+                            metadata.len()
+                                > jeikcode_capabilities::session::display::MAX_DISPLAY_READ_BYTES
+                                    as u64
+                        });
+                    if !turn_running && !messages.is_empty() && !display_too_large {
+                        let records: Vec<_> = messages
+                            .iter()
+                            .enumerate()
+                            .map(|(index, message)| {
+                                display_record_from_message_info(&session.meta.id, index, message)
+                            })
+                            .collect();
+                        if display_manager
+                            .write_display_backfill(&session.meta.id, &records, snapshot_last_turn)
+                            .is_ok()
+                        {
+                            for (index, message) in messages.iter_mut().enumerate() {
+                                message.seq = Some((index + 1) as u64);
+                            }
+                        }
+                    }
+                    let mut turns = session_user_outline(&messages);
+                    append_streaming_before_pending(
+                        &mut messages,
+                        &mut turns,
+                        &id,
+                        current_operation.as_deref(),
+                        std::path::Path::new(&session.meta.working_dir),
+                        0,
+                    );
+                    annotate_client_input_ids(&mut messages, &id);
+                    repair_display_clock(&mut messages);
+                    let (message_count, offset, messages, pinned_user_index) =
+                        if let Some(after_seq) = query.after_seq {
+                            take_session_after(messages, after_seq)
+                        } else {
+                            take_session_page(messages, &query)
+                        };
+                    (turns, message_count, offset, messages, pinned_user_index)
+                };
+            // 跨实例 / 冷启动：把工具执行耗时与切换延迟从会话侧车回填到工具行。
+            // 只影响 API 响应，绝不进入模型上下文。
+            annotate_tool_metrics(&mut messages, &display_manager, &id);
+            annotate_model_switches(&mut messages, &display_manager, &id);
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
             let (todos, todos_revision) = session_todo_snapshot(&id);
             let cursor = SessionCursor {
@@ -8499,7 +9597,7 @@ async fn get_session_detail(
                 origin: session.meta.origin,
                 todos,
                 todos_revision,
-                daemon_instance_id: state.daemon_instance_id.to_string(),
+                daemon_instance_id: daemon_instance_id.to_string(),
             };
             session_detail_response(&headers, detail)
         }
@@ -8537,7 +9635,7 @@ async fn get_session_detail(
                 origin: jeikcode_capabilities::session::SessionOrigin::Manual,
                 todos: Vec::new(),
                 todos_revision: 0,
-                daemon_instance_id: state.daemon_instance_id.to_string(),
+                daemon_instance_id: daemon_instance_id.to_string(),
             };
             session_detail_response(&headers, detail)
         }
@@ -8644,8 +9742,9 @@ pub(crate) fn attach_display_images(
 }
 
 fn is_steer_user_message(msg: &MessageInfo) -> bool {
-    msg.role == "user"
-        && (msg.content.contains("[jeikcode-steer]")
+    msg.role.eq_ignore_ascii_case("user")
+        && (msg.internal_origin.as_deref() == Some("promoted_steer")
+            || msg.content.contains("[jeikcode-steer]")
             || (msg.content.contains("<user-query>") && msg.content.contains("</user-query>")))
 }
 
@@ -8657,16 +9756,94 @@ fn is_visible_assistant_reply(msg: &MessageInfo) -> bool {
     msg.role == "assistant" && msg.internal_origin.as_deref() != Some("turn_diagnostic")
 }
 
+fn is_compaction_anchor_message(msg: &MessageInfo) -> bool {
+    msg.role.eq_ignore_ascii_case("user")
+        && msg.synthetic
+        && jeikcode_capabilities::compaction::is_compaction_anchor_text(&msg.content)
+}
+
+/// 将压缩锚点之后连续回合中 Assistant 携带的真实 `turn_id` 传播到同一回合的
+/// `user` / `steer` / `tool` 行，确保前端（如 `turnTimer`）与后端耗时回填能通过稳定 ID
+/// 对齐，而不再依赖脆弱的位置序号或穿透到已结束的上一轮。
+pub(crate) fn propagate_contiguous_turn_ids(messages: &mut [MessageInfo]) {
+    let start = messages
+        .iter()
+        .rposition(is_compaction_anchor_message)
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+
+    // 反向传递：同一连续片段中紧跟在某 Assistant 之前的 kernel user / steer 行继承其 turn_id；
+    // 遇到非 steer 的根提问后清零，避免向前越界污染上一轮。
+    let mut next_turn_id: Option<u64> = None;
+    for msg in messages[start..].iter_mut().rev() {
+        if msg.role.eq_ignore_ascii_case("assistant")
+            && !msg.synthetic
+            && msg.internal_origin.as_deref() != Some("presentation")
+        {
+            if let Some(tid) = msg.turn_id.filter(|&tid| tid > 0) {
+                next_turn_id = Some(tid);
+            }
+            continue;
+        }
+        if msg.role.eq_ignore_ascii_case("user")
+            && !msg.synthetic
+            && msg.internal_origin.as_deref() != Some("presentation")
+        {
+            if msg.turn_id.is_none() {
+                msg.turn_id = next_turn_id;
+            }
+            if !is_steer_user_message(msg) {
+                next_turn_id = None;
+            }
+        }
+    }
+
+    // 正向传递：同一 Assistant 工具调用紧随其后的 `tool` 结果继承该 Assistant 的 turn_id。
+    let mut active_asst_turn_id: Option<u64> = None;
+    for msg in messages[start..].iter_mut() {
+        if msg.role.eq_ignore_ascii_case("user") && !msg.synthetic {
+            active_asst_turn_id = None;
+            continue;
+        }
+        if msg.role.eq_ignore_ascii_case("assistant")
+            && !msg.synthetic
+            && msg.internal_origin.as_deref() != Some("presentation")
+        {
+            active_asst_turn_id = msg.turn_id.filter(|&tid| tid > 0);
+            continue;
+        }
+        if msg.role.eq_ignore_ascii_case("tool")
+            && msg.internal_origin.as_deref() != Some("presentation")
+            && msg.turn_id.is_none()
+        {
+            msg.turn_id = active_asst_turn_id;
+        }
+    }
+}
+
 /// Stamp each user-turn's last assistant with the full agent-loop wall clock.
 ///
 /// Live WebUI measures user-bubble → final answer. Kernel `MessageMeta.elapsed_ms`
 /// is only the last LLM round, so a reload would otherwise shrink "用时 20min"
-/// down to the last reply. Prefer persisted [`TurnStat::duration_ms`], then the
-/// user/assistant `created_at` span.
+/// down to the last reply. Prefer persisted [`TurnStat::duration_ms`] matched by
+/// `turn_id` when available, falling back to positional alignment only for legacy
+/// rows without `turn_id`, then valid user/assistant `created_at` span (never
+/// crossing a compaction boundary or mismatched turn id).
 pub(crate) fn stamp_turn_elapsed_on_last_assistants(
     messages: &mut [MessageInfo],
     turn_stats: &[jeikcode_capabilities::session::TurnStat],
 ) {
+    use std::collections::{HashMap, HashSet};
+
+    let stat_by_turn_id: HashMap<u64, u64> = turn_stats
+        .iter()
+        .filter(|stat| stat.turn_id > 0 && stat.duration_ms > 0)
+        .fold(HashMap::new(), |mut map, stat| {
+            *map.entry(stat.turn_id).or_insert(0) += stat.duration_ms;
+            map
+        });
+    let has_turn_id_stats = turn_stats.iter().any(|stat| stat.turn_id > 0);
+
     let total_root_turns = messages
         .iter()
         .filter(|m| is_visible_user_turn_start(m))
@@ -8675,40 +9852,88 @@ pub(crate) fn stamp_turn_elapsed_on_last_assistants(
     let mut i = 0usize;
     let mut turn_i = 0usize;
     while i < messages.len() {
-        if !is_visible_user_turn_start(&messages[i]) {
+        let starts_by_root = is_visible_user_turn_start(&messages[i]);
+        if !starts_by_root {
             i += 1;
             continue;
         }
+        let root_turn_id = messages[i].turn_id.filter(|&tid| tid > 0);
         let user_ts = messages[i].created_at;
         let mut last_asst = None;
         let mut steer_count = 0usize;
+        let mut span_turn_ids: HashSet<u64> = root_turn_id.into_iter().collect();
+        let mut span_non_zero_asst_tid = None;
         let mut j = i + 1;
         while j < messages.len() && !is_visible_user_turn_start(&messages[j]) {
             if is_steer_user_message(&messages[j]) {
+                // 若持久化 turn_id 表明该 steer 已属于与当前已知轮次不同的新 turn，
+                // 说明上一轮已结束，在此切开回合边界，避免误吸下一轮的耗时与时间戳。
+                if let Some(steer_tid) = messages[j].turn_id.filter(|&tid| tid > 0) {
+                    let prior_tid = span_non_zero_asst_tid.or(root_turn_id);
+                    if prior_tid.is_some_and(|prev| prev != steer_tid) {
+                        break;
+                    }
+                    span_turn_ids.insert(steer_tid);
+                }
                 steer_count += 1;
             }
             if is_visible_assistant_reply(&messages[j]) {
+                if let Some(asst_tid) = messages[j].turn_id.filter(|&tid| tid > 0) {
+                    span_turn_ids.insert(asst_tid);
+                    span_non_zero_asst_tid = Some(asst_tid);
+                }
                 last_asst = Some(j);
             }
             j += 1;
         }
+
+        // 若因 post-stop steer 独立成新轮而在中间退出，确保后续该 steer 也能作为新轮起点处理。
+        let split_at_post_stop_steer = j < messages.len()
+            && is_steer_user_message(&messages[j])
+            && !is_visible_user_turn_start(&messages[j]);
+
         let consumed_extra = steer_count.min(extra_stats);
         extra_stats -= consumed_extra;
         let stats_for_turn = 1 + consumed_extra;
         if let Some(ai) = last_asst {
-            let from_ts = match (user_ts, messages[ai].created_at) {
-                (Some(user), Some(asst)) if asst > user => Some(asst - user),
-                _ => None,
-            };
-            let slice_end = (turn_i + stats_for_turn).min(turn_stats.len());
-            let from_stat = if turn_i < slice_end {
-                let sum: u64 = turn_stats[turn_i..slice_end]
-                    .iter()
-                    .map(|stat| stat.duration_ms)
-                    .sum();
-                (sum > 0).then_some(sum)
-            } else {
+            let last_asst_tid = messages[ai].turn_id.filter(|&tid| tid > 0);
+            let crosses_compaction = messages[i..j].iter().any(is_compaction_anchor_message);
+            let mismatched_single_turn_id = steer_count == 0
+                && root_turn_id.is_some()
+                && last_asst_tid.is_some()
+                && root_turn_id != last_asst_tid;
+            let from_ts = if crosses_compaction || mismatched_single_turn_id {
                 None
+            } else {
+                match (user_ts, messages[ai].created_at) {
+                    (Some(user), Some(asst)) if asst > user => Some(asst - user),
+                    _ => None,
+                }
+            };
+
+            let from_stat = if let (Some(asst_tid), true) = (last_asst_tid, has_turn_id_stats) {
+                // ID 模式：严格按 turn_id 查找持久化耗时，绝不在压缩裁掉旧TurnStat后错位借用后续轮次。
+                if steer_count == 0 {
+                    stat_by_turn_id.get(&asst_tid).copied().filter(|&ms| ms > 0)
+                } else {
+                    let sum: u64 = span_turn_ids
+                        .iter()
+                        .filter_map(|tid| stat_by_turn_id.get(tid))
+                        .sum();
+                    (sum > 0).then_some(sum)
+                }
+            } else {
+                // 兼容缺少 turn_id 的旧数据 / 测试用例：保留顺序回退。
+                let slice_end = (turn_i + stats_for_turn).min(turn_stats.len());
+                if turn_i < slice_end {
+                    let sum: u64 = turn_stats[turn_i..slice_end]
+                        .iter()
+                        .map(|stat| stat.duration_ms)
+                        .sum();
+                    (sum > 0).then_some(sum)
+                } else {
+                    None
+                }
             };
             let total = match (from_stat, from_ts) {
                 (Some(stat_ms), Some(ts_ms)) if steer_count > 0 => Some(stat_ms.max(ts_ms)),
@@ -8719,8 +9944,98 @@ pub(crate) fn stamp_turn_elapsed_on_last_assistants(
             }
         }
         turn_i += stats_for_turn;
-        i = j;
+        if split_at_post_stop_steer {
+            // 将独立成轮的 post-stop steer 视为新回合起点（一次只扫描这一新 steer 回合）
+            i = stamp_post_stop_steer_subturn(
+                messages,
+                j,
+                &stat_by_turn_id,
+                has_turn_id_stats,
+                &turn_stats,
+                &mut turn_i,
+            );
+        } else {
+            i = j;
+        }
     }
+}
+
+fn stamp_post_stop_steer_subturn(
+    messages: &mut [MessageInfo],
+    mut start: usize,
+    stat_by_turn_id: &std::collections::HashMap<u64, u64>,
+    has_turn_id_stats: bool,
+    turn_stats: &[jeikcode_capabilities::session::TurnStat],
+    turn_i: &mut usize,
+) -> usize {
+    use std::collections::HashSet;
+
+    while start < messages.len()
+        && is_steer_user_message(&messages[start])
+        && !is_visible_user_turn_start(&messages[start])
+    {
+        let root_tid = messages[start].turn_id.filter(|&tid| tid > 0);
+        let user_ts = messages[start].created_at;
+        let mut last_asst = None;
+        let mut steer_count = 0usize;
+        let mut span_turn_ids: HashSet<u64> = root_tid.into_iter().collect();
+        let mut j = start + 1;
+        while j < messages.len() && !is_visible_user_turn_start(&messages[j]) {
+            if is_steer_user_message(&messages[j]) {
+                if let Some(stid) = messages[j].turn_id.filter(|&tid| tid > 0) {
+                    if root_tid.is_some_and(|prev| prev != stid) {
+                        break;
+                    }
+                    span_turn_ids.insert(stid);
+                }
+                steer_count += 1;
+            }
+            if is_visible_assistant_reply(&messages[j]) {
+                if let Some(atid) = messages[j].turn_id.filter(|&tid| tid > 0) {
+                    span_turn_ids.insert(atid);
+                }
+                last_asst = Some(j);
+            }
+            j += 1;
+        }
+        if let Some(ai) = last_asst {
+            let asst_tid = messages[ai].turn_id.filter(|&tid| tid > 0);
+            let crosses_compaction = messages[start..j].iter().any(is_compaction_anchor_message);
+            let from_ts = if crosses_compaction {
+                None
+            } else {
+                match (user_ts, messages[ai].created_at) {
+                    (Some(user), Some(asst)) if asst > user => Some(asst - user),
+                    _ => None,
+                }
+            };
+            let from_stat = if let (Some(tid), true) = (asst_tid, has_turn_id_stats) {
+                let sum: u64 = span_turn_ids
+                    .iter()
+                    .filter_map(|id| stat_by_turn_id.get(id))
+                    .sum();
+                (sum > 0)
+                    .then_some(sum)
+                    .or_else(|| stat_by_turn_id.get(&tid).copied().filter(|&ms| ms > 0))
+            } else {
+                let s = turn_stats
+                    .get(*turn_i)
+                    .map(|stat| stat.duration_ms)
+                    .filter(|&ms| ms > 0);
+                *turn_i += 1;
+                s
+            };
+            let total = match (from_stat, from_ts) {
+                (Some(stat_ms), Some(ts_ms)) if steer_count > 0 => Some(stat_ms.max(ts_ms)),
+                (stat_ms, ts_ms) => stat_ms.or(ts_ms),
+            };
+            if let Some(total) = total {
+                messages[ai].elapsed_ms = Some(total);
+            }
+        }
+        start = j;
+    }
+    start
 }
 
 /// Pure matcher (see [`attach_display_images`]): replace each VL-marker user message's
@@ -8841,10 +10156,33 @@ impl DisplayLogCache {
     }
 }
 
+const DISPLAY_CACHE_SHARDS: usize = 16;
+
+fn display_cache_shard_idx(key: &str) -> usize {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash as usize) % DISPLAY_CACHE_SHARDS
+}
+
+#[cfg(test)]
 fn display_log_cache() -> &'static std::sync::Mutex<DisplayLogCache> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<DisplayLogCache>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(DisplayLogCache::default()))
+}
+
+fn display_log_cache_shard(id: &str) -> &'static std::sync::Mutex<DisplayLogCache> {
+    static SHARDS: std::sync::OnceLock<Vec<std::sync::Mutex<DisplayLogCache>>> =
+        std::sync::OnceLock::new();
+    let shards = SHARDS.get_or_init(|| {
+        (0..DISPLAY_CACHE_SHARDS)
+            .map(|_| std::sync::Mutex::new(DisplayLogCache::default()))
+            .collect()
+    });
+    &shards[display_cache_shard_idx(id)]
 }
 
 /// Read a complete display log with an mtime+length guarded cache. The log is
@@ -8857,7 +10195,7 @@ fn read_display_cached(
     jeikcode_capabilities::session::DisplayMeta,
     Arc<Vec<jeikcode_capabilities::session::DisplayRecord>>,
 )> {
-    read_display_with_cache(manager, id, display_log_cache())
+    read_display_with_cache(manager, id, display_log_cache_shard(id))
 }
 
 fn read_display_with_cache(
@@ -8920,14 +10258,21 @@ struct DisplayTranscriptCache {
     turns: Arc<Vec<jeikcode_capabilities::session::TurnRecord>>,
 }
 
-fn display_transcript_cache() -> &'static std::sync::Mutex<Option<DisplayTranscriptCache>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<DisplayTranscriptCache>>> =
+fn display_transcript_cache_shard(
+    key: &str,
+) -> &'static std::sync::Mutex<Option<DisplayTranscriptCache>> {
+    static SHARDS: std::sync::OnceLock<Vec<std::sync::Mutex<Option<DisplayTranscriptCache>>>> =
         std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+    let shards = SHARDS.get_or_init(|| {
+        (0..DISPLAY_CACHE_SHARDS)
+            .map(|_| std::sync::Mutex::new(None))
+            .collect()
+    });
+    &shards[display_cache_shard_idx(key)]
 }
 
 /// Read the append-only transcript for display reconstruction, with a
-/// fingerprint-guarded single-entry cache. `None` means the transcript cannot
+/// fingerprint-guarded per-shard cache. `None` means the transcript cannot
 /// be read (no file / corrupt); callers then keep the snapshot-only projection.
 fn load_display_transcript(
     project_hash: &str,
@@ -8940,8 +10285,9 @@ fn load_display_transcript(
     let mtime = metadata.as_ref().and_then(|m| m.modified().ok());
     let len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
     let key = format!("{project_hash}/{id}");
+    let cache_shard = display_transcript_cache_shard(&key);
 
-    let mut guard = display_transcript_cache().lock().ok()?;
+    let mut guard = cache_shard.lock().ok()?;
     if let Some(cache) = guard.as_ref() {
         if cache.key == key && cache.mtime == mtime && cache.len == len {
             return Some(cache.turns.clone());
@@ -8963,14 +10309,119 @@ fn normalized_display_text(text: &str) -> String {
 
 /// Rebuild display rows for every transcript turn before `boundary`. The raw
 /// transcript is never compacted; this is the authoritative pre-compaction
-/// display history. Timestamps are intentionally omitted for user rows because
-/// `TurnRecord.ts` is the turn's FLUSH time, not the prompt time.
+/// display history. Timestamps are intentionally omitted for user rows when no
+/// durable input timestamp exists because `TurnRecord.ts` is the turn's FLUSH
+/// time, not the prompt time.
+#[allow(dead_code)]
 fn display_prefix_from_transcript(
     turns: &[jeikcode_capabilities::session::TurnRecord],
     boundary_ts: Option<u64>,
     boundary_user: Option<&str>,
 ) -> Vec<MessageInfo> {
+    display_prefix_from_transcript_with_inputs(
+        turns,
+        &[],
+        std::path::Path::new("."),
+        boundary_ts,
+        boundary_user,
+    )
+}
+
+fn normalized_user_input_text(working_dir: &std::path::Path, text: &str) -> String {
+    let displayed = jeikcode_capabilities::session::user_text_for_display(working_dir, text);
+    let unwrapped = outline_label_unwrapped(&displayed);
+    normalized_display_text(unwrapped)
+}
+
+fn outline_label_unwrapped(text: &str) -> &str {
+    if let Some(start) = text.find("<user-query>") {
+        if let Some(end) = text.find("</user-query>") {
+            if start + "<user-query>".len() <= end {
+                return &text[start + "<user-query>".len()..end];
+            }
+        }
+    }
+    if let Some(idx) = text.find("[jeikcode-steer]") {
+        let before = text[..idx].trim();
+        if !before.is_empty() {
+            return before;
+        }
+    }
+    text
+}
+
+fn display_prefix_steer_row(
+    input: &jeikcode_capabilities::session::SessionInput,
+    working_dir: &std::path::Path,
+    turn_id: Option<u64>,
+    display_origin: &str,
+) -> Option<MessageInfo> {
+    let displayed = jeikcode_capabilities::session::user_text_for_display(working_dir, &input.text);
+    let images: Vec<ImageData> = input
+        .images
+        .iter()
+        .map(|image| ImageData {
+            media_type: image.media_type.clone(),
+            data: image.data.clone(),
+            missing: false,
+        })
+        .collect();
+    if displayed.trim().is_empty() && images.is_empty() {
+        return None;
+    }
+    let content = if displayed.contains("[jeikcode-steer]")
+        || (displayed.contains("<user-query>") && displayed.contains("</user-query>"))
+    {
+        displayed
+    } else {
+        format!(
+            "<user-query>\n{}\n</user-query>\n\n[jeikcode-steer]",
+            displayed.trim()
+        )
+    };
+    let primary_id = input
+        .message_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| input.id.clone());
+    Some(message_info! {
+        seq: None,
+        turn_id: turn_id.or(input.turn_id).filter(|&id| id > 0),
+        role: "user".into(),
+        id: Some(primary_id),
+        client_input_id: Some(input.id.clone()),
+        content,
+        reasoning: None,
+        synthetic: false,
+        internal_origin: Some(display_origin.into()),
+        display_text: Some(
+            jeikcode_capabilities::session::user_text_for_display(working_dir, &input.text),
+        ),
+        internal: Some(false),
+        editable: Some(false),
+        tool_calls: None,
+        tool_result: None,
+        artifacts: None,
+        images: (!images.is_empty()).then_some(images),
+        created_at: (input.created_at > 0).then_some(input.created_at),
+        elapsed_ms: None,
+    })
+}
+
+/// 在仅凭 transcript 重建压缩前展示历史的同时，按因果顺序与持久输入日志中的
+/// `prompt` / `promoted` `steer` 归并：恢复中途被压缩掉的 steer 气泡与真实时间戳，
+/// 避免这些历史 steer 丢失或被当成末尾 pending 投影到会话最后。
+fn display_prefix_from_transcript_with_inputs(
+    turns: &[jeikcode_capabilities::session::TurnRecord],
+    inputs: &[jeikcode_capabilities::session::SessionInput],
+    working_dir: &std::path::Path,
+    boundary_ts: Option<u64>,
+    boundary_user: Option<&str>,
+) -> Vec<MessageInfo> {
     let boundary_text = boundary_user.map(normalized_display_text);
+    let boundary_unwrapped = boundary_user
+        .map(|raw| normalized_user_input_text(working_dir, raw))
+        .unwrap_or_default();
     let split = turns
         .iter()
         .position(|turn| match boundary_ts {
@@ -8989,15 +10440,94 @@ fn display_prefix_from_transcript(
     // Display-only reconstruction: these rows have no kernel counterpart, so
     // mutation APIs (edit/delete/regenerate by array index) must stay disabled.
     const DISPLAY_ORIGIN: &str = "transcript_archive";
+
+    let mut ordered_inputs: Vec<&jeikcode_capabilities::session::SessionInput> = inputs
+        .iter()
+        .filter(|input| {
+            input.status == "promoted"
+                && (input.delivery == "steer" || input.delivery == "prompt")
+                && (!input.text.trim().is_empty() || !input.images.is_empty())
+        })
+        .collect();
+    ordered_inputs.sort_by_key(|input| (input.created_at, input.seq));
+    let mut used = vec![false; ordered_inputs.len()];
+
     let mut rows = Vec::new();
     for turn in &turns[..split] {
+        let turn_id_opt = (turn.turn_id > 0).then_some(turn.turn_id);
+        let turn_flush_ts = u64::try_from(turn.ts).ok();
+        let norm_turn_user = normalized_user_input_text(working_dir, &turn.user);
+
+        // 若输入日志中有与本轮开头用户消息匹配的持久化输入，恢复其真实 message_id 与时间戳。
+        let matched_prompt_idx = if norm_turn_user.is_empty() {
+            None
+        } else {
+            ordered_inputs
+                .iter()
+                .enumerate()
+                .find(|(idx, input)| {
+                    if used[*idx] {
+                        return false;
+                    }
+                    if let (Some(tid), Some(itid)) = (turn_id_opt, input.turn_id) {
+                        if tid == itid && input.delivery == "prompt" {
+                            return true;
+                        }
+                    }
+                    if turn_flush_ts.is_some_and(|ts| input.created_at > ts) {
+                        return false;
+                    }
+                    let norm_in = normalized_user_input_text(working_dir, &input.text);
+                    !norm_in.is_empty()
+                        && (norm_in == norm_turn_user
+                            || norm_turn_user.starts_with(&norm_in)
+                            || norm_in.starts_with(&norm_turn_user))
+                })
+                .map(|(idx, _)| idx)
+        };
+        let (user_id, client_input_id, user_ts, matched_is_steer) =
+            if let Some(idx) = matched_prompt_idx {
+                used[idx] = true;
+                let input = ordered_inputs[idx];
+                let primary_id = input
+                    .message_id
+                    .clone()
+                    .filter(|id| !id.trim().is_empty())
+                    .unwrap_or_else(|| format!("{ID_PREFIX}-{}-user", turn.turn_id));
+                (
+                    primary_id,
+                    Some(input.id.clone()),
+                    (input.created_at > 0).then_some(input.created_at),
+                    input.delivery == "steer",
+                )
+            } else {
+                (
+                    format!("{ID_PREFIX}-{}-user", turn.turn_id),
+                    None,
+                    None,
+                    false,
+                )
+            };
+
         if !turn.user.trim().is_empty() {
+            let user_content = if matched_is_steer
+                && !turn.user.contains("[jeikcode-steer]")
+                && !(turn.user.contains("<user-query>") && turn.user.contains("</user-query>"))
+            {
+                format!(
+                    "<user-query>\n{}\n</user-query>\n\n[jeikcode-steer]",
+                    turn.user.trim()
+                )
+            } else {
+                turn.user.clone()
+            };
             rows.push(message_info! {
                 seq: None,
-                turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                turn_id: turn_id_opt,
                 role: "user".into(),
-                id: Some(format!("{ID_PREFIX}-{}-user", turn.turn_id)),
-                content: turn.user.clone(),
+                id: Some(user_id),
+                client_input_id,
+                content: user_content,
                 reasoning: None,
                 synthetic: false,
                 internal_origin: Some(DISPLAY_ORIGIN.into()),
@@ -9005,10 +10535,34 @@ fn display_prefix_from_transcript(
                 tool_result: None,
                 artifacts: None,
                 images: None,
-                created_at: None,
+                created_at: user_ts,
                 elapsed_ms: None,
             });
         }
+
+        // 同一回合运行期间插入的中途 `promoted` steer 按时间序归位在该回合 root user 之后、
+        // 回合最终工具/回答行之前（严格不跨过 boundary_ts 吞并后续已留存尾巴的 steer）。
+        for (idx, input) in ordered_inputs.iter().enumerate() {
+            if used[idx] || input.delivery != "steer" {
+                continue;
+            }
+            if boundary_ts.is_some_and(|b| b > 0 && input.created_at >= b) {
+                continue;
+            }
+            let by_id = turn_id_opt.is_some() && input.turn_id == turn_id_opt;
+            let by_time = (input.turn_id.is_none() || input.turn_id == turn_id_opt)
+                && input.created_at > 0
+                && turn_flush_ts.is_some_and(|ts| input.created_at <= ts);
+            if by_id || by_time {
+                used[idx] = true;
+                if let Some(steer_row) =
+                    display_prefix_steer_row(input, working_dir, turn_id_opt, DISPLAY_ORIGIN)
+                {
+                    rows.push(steer_row);
+                }
+            }
+        }
+
         let calls: Vec<ToolCallInfo> = turn
             .tools
             .iter()
@@ -9018,6 +10572,23 @@ fn display_prefix_from_transcript(
                 name: tool.name.clone(),
                 arguments: tool.args.clone(),
                 display: format_tool_args(&tool.name, &tool.args),
+                started_at: tool.started_at,
+                finished_at: tool
+                    .started_at
+                    .zip(tool.duration_ms)
+                    .map(|(started, duration)| started.saturating_add(duration)),
+                duration_ms: tool.duration_ms,
+                switch_ms: tool.switch_ms,
+                status: Some(
+                    if tool.is_error {
+                        "error"
+                    } else if tool.duration_ms.is_some() {
+                        "done"
+                    } else {
+                        "incomplete"
+                    }
+                    .to_string(),
+                ),
             })
             .collect();
         let has_tools = !calls.is_empty();
@@ -9030,7 +10601,7 @@ fn display_prefix_from_transcript(
             // Phase 1: Tool execution message (thinking + tool calls)
             rows.push(message_info! {
                 seq: None,
-                turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                turn_id: turn_id_opt,
                 role: "assistant".into(),
                 id: Some(format!("{ID_PREFIX}-{}-assistant-tools", turn.turn_id)),
                 content: String::new(),
@@ -9047,7 +10618,7 @@ fn display_prefix_from_transcript(
             for (index, tool) in turn.tools.iter().enumerate() {
                 rows.push(message_info! {
                     seq: None,
-                    turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                    turn_id: turn_id_opt,
                     role: "tool".into(),
                     id: Some(format!("{ID_PREFIX}-{}-tool-{index}", turn.turn_id)),
                     content: tool.result.clone(),
@@ -9060,6 +10631,23 @@ fn display_prefix_from_transcript(
                         success: !tool.is_error,
                         summary: tool_result_summary(&tool.result),
                         line_count: tool.result.lines().count(),
+                        started_at: tool.started_at,
+                        finished_at: tool
+                            .started_at
+                            .zip(tool.duration_ms)
+                            .map(|(started, duration)| started.saturating_add(duration)),
+                        duration_ms: tool.duration_ms,
+                        switch_ms: tool.switch_ms,
+                        status: Some(
+                            if tool.is_error {
+                                "error"
+                            } else if tool.duration_ms.is_some() {
+                                "done"
+                            } else {
+                                "incomplete"
+                            }
+                            .to_string(),
+                        ),
                     }),
                     artifacts: None,
                     images: None,
@@ -9071,7 +10659,7 @@ fn display_prefix_from_transcript(
             if has_text {
                 rows.push(message_info! {
                     seq: None,
-                    turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                    turn_id: turn_id_opt,
                     role: "assistant".into(),
                     id: Some(format!("{ID_PREFIX}-{}-assistant", turn.turn_id)),
                     content: turn.assistant.clone(),
@@ -9089,7 +10677,7 @@ fn display_prefix_from_transcript(
         } else {
             rows.push(message_info! {
                 seq: None,
-                turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                turn_id: turn_id_opt,
                 role: "assistant".into(),
                 id: Some(format!("{ID_PREFIX}-{}-assistant", turn.turn_id)),
                 content: turn.assistant.clone(),
@@ -9105,6 +10693,82 @@ fn display_prefix_from_transcript(
             });
         }
     }
+
+    // 处理回合内压缩（mid-turn compaction）：`turns[split]` 在压缩之后才 flush，但其开场提问或早期 steer
+    // 发生在 `boundary_ts` 之前并被压缩截断；把这些早于 `boundary_ts` 的残留输入按时间序补回 prefix 末尾。
+    if let Some(boundary) = boundary_ts.filter(|&ts| ts > 0) {
+        let boundary_turn_id = turns
+            .get(split)
+            .and_then(|t| (t.turn_id > 0).then_some(t.turn_id));
+        if let Some(split_turn) = turns.get(split) {
+            let norm_split_user = normalized_user_input_text(working_dir, &split_turn.user);
+            let split_matches_boundary = !boundary_unwrapped.is_empty()
+                && !norm_split_user.is_empty()
+                && (boundary_unwrapped.starts_with(&norm_split_user)
+                    || norm_split_user.starts_with(&boundary_unwrapped));
+            if !split_matches_boundary && !split_turn.user.trim().is_empty() {
+                if let Some((idx, _)) = ordered_inputs.iter().enumerate().find(|(idx, input)| {
+                    !used[*idx]
+                        && input.delivery == "prompt"
+                        && input.created_at > 0
+                        && input.created_at < boundary
+                        && !norm_split_user.is_empty()
+                        && {
+                            let norm_in = normalized_user_input_text(working_dir, &input.text);
+                            !norm_in.is_empty()
+                                && (norm_in == norm_split_user
+                                    || norm_split_user.starts_with(&norm_in)
+                                    || norm_in.starts_with(&norm_split_user))
+                        }
+                }) {
+                    used[idx] = true;
+                    let input = ordered_inputs[idx];
+                    let primary_id = input
+                        .message_id
+                        .clone()
+                        .filter(|id| !id.trim().is_empty())
+                        .unwrap_or_else(|| format!("{ID_PREFIX}-{}-user", split_turn.turn_id));
+                    rows.push(message_info! {
+                        seq: None,
+                        turn_id: boundary_turn_id,
+                        role: "user".into(),
+                        id: Some(primary_id),
+                        client_input_id: Some(input.id.clone()),
+                        content: split_turn.user.clone(),
+                        reasoning: None,
+                        synthetic: false,
+                        internal_origin: Some(DISPLAY_ORIGIN.into()),
+                        tool_calls: None,
+                        tool_result: None,
+                        artifacts: None,
+                        images: None,
+                        created_at: (input.created_at > 0).then_some(input.created_at),
+                        elapsed_ms: None,
+                    });
+                }
+            }
+        }
+        let fallback_turn_id = boundary_turn_id.or_else(|| {
+            turns[..split]
+                .last()
+                .and_then(|t| (t.turn_id > 0).then_some(t.turn_id))
+        });
+        for (idx, input) in ordered_inputs.iter().enumerate() {
+            if used[idx]
+                || input.delivery != "steer"
+                || input.created_at == 0
+                || input.created_at >= boundary
+            {
+                continue;
+            }
+            used[idx] = true;
+            if let Some(steer_row) =
+                display_prefix_steer_row(input, working_dir, fallback_turn_id, DISPLAY_ORIGIN)
+            {
+                rows.push(steer_row);
+            }
+        }
+    }
     rows
 }
 
@@ -9114,19 +10778,27 @@ fn display_prefix_from_transcript(
 /// duplicate "你好啊". Invisible scaffolding and display-only presentation rows
 /// are preserved. Tool rows before the anchor are always covered by the prefix.
 fn splice_compacted_display(
-    mut messages: Vec<MessageInfo>,
-    prefix: Vec<MessageInfo>,
+    messages: Vec<MessageInfo>,
+    mut prefix: Vec<MessageInfo>,
 ) -> Vec<MessageInfo> {
     if prefix.is_empty() {
         return messages;
     }
-    let Some(anchor) = messages.iter().position(|m| {
-        m.role.eq_ignore_ascii_case("user")
-            && m.synthetic
-            && jeikcode_capabilities::compaction::is_compaction_anchor_text(&m.content)
-    }) else {
+    let Some(anchor) = messages.iter().position(is_compaction_anchor_message) else {
         return messages;
     };
+
+    let prefix_has_timestamps = prefix.iter().any(|m| m.created_at.is_some());
+    let (head, rest) = messages.split_at(anchor);
+    let tail = rest.get(1..).unwrap_or(&[]);
+
+    // 先收集已保留尾巴中的真实 ID，避免 prefix 与 tail 出现重复 ID 行。
+    let tail_ids: std::collections::HashSet<String> =
+        tail.iter().filter_map(|m| m.id.clone()).collect();
+    prefix.retain(|m| m.id.as_deref().is_none_or(|id| !tail_ids.contains(id)));
+    if prefix.is_empty() {
+        return messages;
+    }
 
     let prefix_users: Vec<String> = prefix
         .iter()
@@ -9141,23 +10813,58 @@ fn splice_compacted_display(
         .filter(|text| !text.is_empty())
         .collect();
 
-    let (head, rest) = messages.split_at(anchor);
-    let tail = rest.get(1..).unwrap_or(&[]);
-    let mut out = Vec::with_capacity(prefix.len() + head.len() + tail.len());
-    out.extend(prefix);
+    // 记录 prefix 用户行下标，便于把快照 `head` 中幸存用户行的真实 `id` / `created_at`
+    // 继承回对应的 `prefix` 用户行，防止覆盖丢 ID 导致尾视图无法与快照对齐。
+    let mut moved_head = Vec::new();
     for message in head {
         if message.role.eq_ignore_ascii_case("system") || message.synthetic {
-            out.push(message.clone());
+            let mut preserved = message.clone();
+            if prefix_has_timestamps {
+                // `head` 中的 `system` / `synthetic` 脚手架行保留在 `prefix` 之后（如 `sys`），
+                // 必须清空其早期创建时间，避免 `repair_display_clock` 倒查时把整个 `prefix`
+                // 的时间都拉回会话创建时刻。
+                preserved.created_at = None;
+            }
+            moved_head.push(preserved);
             continue;
         }
         let text = message.content.trim();
-        if message.role.eq_ignore_ascii_case("user")
-            && prefix_users.iter().any(|prefix_text| {
+        if message.role.eq_ignore_ascii_case("user") {
+            let matched_idx = prefix.iter().enumerate().find_map(|(idx, p)| {
+                if !p.role.eq_ignore_ascii_case("user") {
+                    return None;
+                }
+                if message.id.is_some() && p.id == message.id {
+                    return Some(idx);
+                }
+                let pt = p.content.trim();
+                (!pt.is_empty()
+                    && !text.is_empty()
+                    && (text.starts_with(pt) || pt.starts_with(text)))
+                .then_some(idx)
+            });
+            if let Some(idx) = matched_idx {
+                let target = &mut prefix[idx];
+                if let Some(real_id) = &message.id {
+                    if target
+                        .id
+                        .as_deref()
+                        .is_none_or(|id| id.starts_with("transcript-"))
+                    {
+                        target.id = Some(real_id.clone());
+                    }
+                }
+                if target.created_at.is_none() && message.created_at.is_some() {
+                    target.created_at = message.created_at;
+                }
+                continue;
+            }
+            if prefix_users.iter().any(|prefix_text| {
                 !prefix_text.is_empty()
                     && (text.starts_with(prefix_text.as_str()) || prefix_text.starts_with(text))
-            })
-        {
-            continue;
+            }) {
+                continue;
+            }
         }
         if message.role.eq_ignore_ascii_case("assistant")
             && prefix_assistants
@@ -9169,8 +10876,12 @@ fn splice_compacted_display(
         if message.role.eq_ignore_ascii_case("tool") {
             continue;
         }
-        out.push(message.clone());
+        moved_head.push(message.clone());
     }
+
+    let mut out = Vec::with_capacity(prefix.len() + moved_head.len() + tail.len());
+    out.extend(prefix);
+    out.extend(moved_head);
     out.extend(tail.iter().cloned());
     out
 }
@@ -9273,6 +10984,7 @@ fn display_record_to_message_info(
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
                 display: format_tool_args(&call.name, &call.arguments),
+                ..Default::default()
             })
             .collect::<Vec<_>>()
     });
@@ -9284,6 +10996,7 @@ fn display_record_to_message_info(
             success: !record.is_error,
             summary: tool_result_summary(&record.content),
             line_count: record.content.lines().count(),
+            ..Default::default()
         });
     let artifacts = extract_artifacts_from_call_fields(
         record
@@ -9303,6 +11016,30 @@ fn display_record_to_message_info(
                 Some("transcript_archive") | Some("presentation") | Some("pending_input")
             )
     });
+    let notice = (record.internal_origin.as_deref() == Some("turn_diagnostic")
+        || record.notice_kind.is_some()
+        || record.event_id.is_some())
+    .then(|| {
+        let eid = record.event_id.clone().or_else(|| record.id.clone());
+        let (inferred_kind, inferred_severity) = infer_legacy_notice_meta(eid.as_deref(), &content);
+        MessageNoticeInfo {
+            part_id: record
+                .part_id
+                .clone()
+                .or_else(|| eid.as_ref().map(|id| format!("{id}:1:notice"))),
+            event_id: eid,
+            anchor_message_id: record.anchor_message_id.clone(),
+            anchor_part_id: record.anchor_part_id.clone(),
+            notice_kind: Some(record.notice_kind.unwrap_or(inferred_kind)),
+            revision: record.revision,
+            severity: Some(record.severity.unwrap_or(inferred_severity)),
+            status: Some(
+                record
+                    .status
+                    .unwrap_or(jeikcode_kernel::event::NoticeStatus::Settled),
+            ),
+        }
+    });
     message_info! {
         turn_id: (record.turn_id > 0).then_some(record.turn_id),
         seq: (record.seq > 0).then_some(record.seq),
@@ -9321,6 +11058,7 @@ fn display_record_to_message_info(
         images,
         created_at: record.created_at,
         elapsed_ms: record.elapsed_ms,
+        notice,
     }
 }
 
@@ -9473,6 +11211,20 @@ fn display_record_from_message_info(
             .unwrap_or_default(),
         created_at: message.created_at,
         elapsed_ms: message.elapsed_ms,
+        event_id: message.notice.as_ref().and_then(|n| n.event_id.clone()),
+        part_id: message.notice.as_ref().and_then(|n| n.part_id.clone()),
+        anchor_message_id: message
+            .notice
+            .as_ref()
+            .and_then(|n| n.anchor_message_id.clone()),
+        anchor_part_id: message
+            .notice
+            .as_ref()
+            .and_then(|n| n.anchor_part_id.clone()),
+        notice_kind: message.notice.as_ref().and_then(|n| n.notice_kind),
+        revision: message.notice.as_ref().and_then(|n| n.revision),
+        severity: message.notice.as_ref().and_then(|n| n.severity),
+        status: message.notice.as_ref().and_then(|n| n.status),
     }
 }
 
@@ -9732,6 +11484,7 @@ fn merge_catalog_session_messages_for_display(
         std::path::Path::new(&session.meta.working_dir),
         &session.meta.id,
     );
+    propagate_contiguous_turn_ids(&mut messages);
     stamp_turn_elapsed_on_last_assistants(&mut messages, &session.meta.turn_stats);
     Ok(messages)
 }
@@ -9750,17 +11503,28 @@ fn fill_missing_display_clock(messages: &mut [MessageInfo], seed: u64) {
     }
 }
 
+fn can_clamp_fabricated_display_clock(message: &MessageInfo) -> bool {
+    message.role.eq_ignore_ascii_case("tool")
+        || message.role.eq_ignore_ascii_case("system")
+        || message.synthetic
+        || matches!(
+            message.internal_origin.as_deref(),
+            Some("turn_diagnostic") | Some("presentation")
+        )
+}
+
 /// 展示时间戳校准：把旧版本已落盘、比下一行还晚的伪造时间拉回行序。
 ///
-/// 转录行序本身就是时间序，所以只做「向下拉平」：一个比下一行更晚的时刻只可能
-/// 来自旧版本用会话 `updated_at` 补洞的伪造值（注入提示的 user 行也会命中）。
+/// 仅对可能由旧版 `updated_at` 补洞产生伪造时间戳的脚手架/工具行做「向下拉平」，
+/// 绝不因尾部存在乱序旧行而将真实 `user` / `assistant` 的壁钟（例如跨越零点的 `00:14`）
+/// 倒拽回前一天。
 fn repair_display_clock(messages: &mut [MessageInfo]) {
     let mut next_known: Option<u64> = None;
     for message in messages.iter_mut().rev() {
         match message.created_at {
             Some(ts) => {
                 let repaired = match next_known {
-                    Some(next) if ts > next => next,
+                    Some(next) if ts > next && can_clamp_fabricated_display_clock(message) => next,
                     _ => ts,
                 };
                 message.created_at = Some(repaired);
@@ -9784,6 +11548,151 @@ async fn get_all_sessions() -> impl IntoResponse {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(msg)).into_response()
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct BootstrapResponse {
+    project: ProjectStateResponse,
+    projects: Vec<ProjectInfo>,
+    sessions: Vec<SessionMetaWithProject>,
+    sidebar: sidebar_projects::SidebarView,
+    active_chat_ids: Vec<String>,
+    runtime_sessions: Vec<RuntimeSessionRow>,
+    approval_mode: live_api::ApprovalModeResp,
+    models: Vec<ModelInfo>,
+    health: HealthResponse,
+}
+
+async fn collect_active_chat_ids(state: &AppState) -> Vec<String> {
+    use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
+    use std::collections::HashSet;
+
+    let mut ids: HashSet<String> = state
+        .active_chats
+        .active_session_ids()
+        .await
+        .into_iter()
+        .collect();
+    if let Some(live_id) = crate::native_live::live_running_session_id() {
+        ids.insert(live_id);
+    }
+    for id in SessionRuntimeRegistry::global().live_turn_session_ids() {
+        ids.insert(id);
+    }
+    for id in crate::controller_running_session_ids() {
+        ids.insert(id);
+    }
+    for id in crate::compaction_running_session_ids() {
+        ids.insert(id);
+    }
+    ids.into_iter().collect()
+}
+
+fn collect_runtime_session_rows() -> Vec<RuntimeSessionRow> {
+    use jeikcode_coding::session_runtime_registry::{RuntimeActivity, SessionRuntimeRegistry};
+
+    fn activity_label(activity: RuntimeActivity) -> &'static str {
+        match activity {
+            RuntimeActivity::Starting => "starting",
+            RuntimeActivity::Ready => "ready",
+            RuntimeActivity::Running => "running",
+            RuntimeActivity::WaitingApproval => "waiting_approval",
+            RuntimeActivity::WaitingUserInput => "waiting_user_input",
+            RuntimeActivity::Reconfiguring => "reconfiguring",
+            RuntimeActivity::Stopping => "stopping",
+            RuntimeActivity::Stopped => "stopped",
+            RuntimeActivity::Failed => "failed",
+        }
+    }
+
+    SessionRuntimeRegistry::global()
+        .list_all()
+        .into_iter()
+        .map(|entry| RuntimeSessionRow {
+            session_id: entry.session_id,
+            working_dir: entry.working_dir.to_string_lossy().into_owned(),
+            activity: activity_label(entry.activity).to_string(),
+            last_terminal: entry.last_terminal,
+            terminal_seq: entry.terminal_seq,
+        })
+        .collect()
+}
+
+/// GET /api/bootstrap — 聚合首屏冷启动必需基础数据（单次请求 + 单次 catalog 扫描），大幅压低首屏并发数。
+async fn bootstrap_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let catalog_fut = run_session_catalog_io(|| {
+        let sessions_root = NativeSessionManager::sessions_root();
+        let scan = catalog_scan_in_root(&sessions_root)?;
+        let active = active_catalog_location(&scan.entries);
+        let projects =
+            list_projects_from_entries(&sessions_root, scan.entries.clone(), active.as_ref());
+        let sessions =
+            list_all_sessions_from_entries(&sessions_root, scan.entries, active.as_ref());
+        Ok((projects, sessions))
+    });
+
+    let config_sidebar_fut = tokio::task::spawn_blocking(|| {
+        let sidebar = sidebar_projects::snapshot();
+        let models = Config::load(&Config::default_path())
+            .map(|c| models_from_config(&c))
+            .unwrap_or_default();
+        let runtime_rows = collect_runtime_session_rows();
+        let binary_hash = executable_sha256();
+        (sidebar, models, runtime_rows, binary_hash)
+    });
+
+    let project_fut = async {
+        let proj = state.project.read().await;
+        ProjectStateResponse {
+            working_dir: proj.working_dir.clone(),
+            previous_dir: proj.previous_dir.clone(),
+            recent_dirs: proj.recent_dirs.clone(),
+            name: proj.name.clone(),
+            project_hash: hash_path(&proj.working_dir),
+        }
+    };
+
+    let (catalog_res, cfg_res, project, active_chat_ids) = tokio::join!(
+        catalog_fut,
+        config_sidebar_fut,
+        project_fut,
+        collect_active_chat_ids(&state),
+    );
+
+    let (projects, sessions) = catalog_res.unwrap_or_default();
+    let (sidebar, models, runtime_sessions, binary_hash) = cfg_res.unwrap_or_else(|_| {
+        (
+            sidebar_projects::SidebarView {
+                hidden: Vec::new(),
+                pinned: Vec::new(),
+            },
+            Vec::new(),
+            Vec::new(),
+            "unknown",
+        )
+    });
+
+    Json(BootstrapResponse {
+        project,
+        projects,
+        sessions,
+        sidebar,
+        active_chat_ids,
+        runtime_sessions,
+        approval_mode: live_api::ApprovalModeResp {
+            ok: true,
+            mode: live_api::live_session_approval_mode(None),
+            global: live_api::live_global_mode_enabled(),
+        },
+        models,
+        health: HealthResponse {
+            status: "ok",
+            version: env!("CARGO_PKG_VERSION"),
+            service: "jeikcode-daemon",
+            binary_hash,
+            instance_id: state.daemon_instance_id.to_string(),
+        },
+    })
 }
 
 /// POST /sessions - Create a new session
@@ -10328,6 +12237,9 @@ async fn delete_session(
                     pool.retire_session_id(&id_for_cleanup).await;
 
                     // Cascade terminate all background services owned by this session
+                    jeikcode_capabilities::tools::task::cancel_subagents_for_session(
+                        &id_for_cleanup,
+                    );
                     jeikcode_capabilities::tools::bash_runtime::kill_by_session_id(&id_for_cleanup);
 
                     // Delete all ephemeral log files matching jeikcode-back-{session_id}-*.log
@@ -10686,11 +12598,17 @@ async fn get_session_inputs(
     Path((_hash, id)): Path<(String, String)>,
     Query(query): Query<SessionInputsQuery>,
 ) -> impl IntoResponse {
-    let cursor = jeikcode_capabilities::session::inputs::cursor_global(&id);
-    let inputs: Vec<_> = jeikcode_capabilities::session::inputs::list_global(&id)
-        .into_iter()
-        .filter(|input| input.seq > query.after_seq)
-        .collect();
+    let after_seq = query.after_seq;
+    let (cursor, inputs) = spawn_blocking_isolated(move || {
+        let cursor = jeikcode_capabilities::session::inputs::cursor_global(&id);
+        let inputs: Vec<_> = jeikcode_capabilities::session::inputs::list_global(&id)
+            .into_iter()
+            .filter(|input| input.seq > after_seq)
+            .collect();
+        (cursor, inputs)
+    })
+    .await
+    .unwrap_or_default();
     Json(serde_json::json!({
         "success": true,
         "cursor": cursor,
@@ -11673,6 +13591,9 @@ pub struct ChatRequest {
     /// Optional display name for a newly created session (OpenAI `user` / user_title).
     #[serde(default)]
     pub session_title: Option<String>,
+    /// 标记本次请求是否源自后台定时任务触发（用于打上 SessionOrigin::Scheduled 标签）
+    #[serde(default)]
+    pub is_scheduled: bool,
 }
 
 /// One attached image from the webui (base64-encoded), mapped to core `ImagePart`.
@@ -11798,6 +13719,40 @@ pub enum ChatEvent {
         /// its remaining tool calls still stream in.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
+    },
+    /// Observability-only timing frame for one tool row. Carries no model text
+    /// and is never persisted into the conversation: it lets every WebUI
+    /// instance paint the same live `cost` stopwatch (anchored on `started_at`)
+    /// and the frozen `switch` latency, and lets a cold start rehydrate the
+    /// exact same values from the session metrics sidecar.
+    #[serde(rename = "tool_timing")]
+    ToolTiming {
+        id: String,
+        name: String,
+        /// `running` | `done` | `error` | `incomplete`
+        status: String,
+        /// Epoch milliseconds (server clock) when execution started.
+        started_at: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finished_at: Option<u64>,
+        /// Daemon-measured execution wall-clock; frozen once terminal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// Gap from the previous turn activity to this tool's start.
+        #[serde(default)]
+        switch_ms: u64,
+    },
+    /// Display-only marker: a queued runtime model switch took effect at this
+    /// assistant message's round boundary. It is joined to `message_id`, never
+    /// written into the conversation, and persisted in the model-switch log so
+    /// refresh/cold start renders the same chip.
+    #[serde(rename = "model_switch")]
+    ModelSwitch {
+        provider: String,
+        model: String,
+        message_id: String,
+        requested_at: u64,
+        applied_at: u64,
     },
     /// Real-time tool output chunk (stdout). `id` is the tool call id so parallel
     /// tools can be attributed correctly on the OpenAI/Anthropic compat surface.
@@ -11959,6 +13914,24 @@ pub enum ChatEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_at: Option<u64>,
     },
+    /// 统一结构化系统通知：同 `event_id` 按 `revision` 原地更新并按 `anchor_message_id` 就位。
+    #[serde(rename = "system_notice")]
+    SystemNotice {
+        session_id: String,
+        event_id: String,
+        part_id: String,
+        kind: jeikcode_kernel::event::NoticeKind,
+        severity: jeikcode_kernel::event::NoticeSeverity,
+        status: jeikcode_kernel::event::NoticeStatus,
+        revision: u32,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<u64>,
+    },
     /// Auxiliary session persistence failed. Clients must display this outside
     /// the assistant message timeline.
     #[serde(rename = "persistence_warning")]
@@ -11980,6 +13953,17 @@ pub enum ChatEvent {
         /// 同 `Warning`：提示所属的 assistant 消息 id，供客户端定向挂载与重放去重。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<String>,
+    },
+    /// 连接建立时的权威运行状态：非 standby 重连若发现回合已空闲且无终态重放，直接收敛。
+    #[serde(rename = "state")]
+    State {
+        running: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// AI session title generated / renamed
     #[serde(rename = "session_renamed")]
@@ -12105,6 +14089,7 @@ mod session_token_usage_tests {
                 },
                 pricing: None,
             }],
+            stop_reason: None,
         }
     }
 
@@ -12145,6 +14130,7 @@ mod session_token_usage_tests {
                 used_tokens: 10_000,
                 ctx_window: 0,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
             TurnStat {
                 after_message: 2,
@@ -12158,6 +14144,7 @@ mod session_token_usage_tests {
                 used_tokens: 38_555,
                 ctx_window: 1_000_000,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
         ];
         let usage = session_token_usage_from_meta(&meta).unwrap();
@@ -12195,6 +14182,7 @@ mod session_token_usage_tests {
                     },
                     pricing: None,
                 }],
+                stop_reason: None,
             },
         ];
         let usage = session_token_usage_from_meta(&meta).unwrap();
@@ -12240,6 +14228,7 @@ mod session_token_usage_tests {
                 },
                 pricing: None,
             }],
+            stop_reason: None,
         }];
         assert_eq!(session_token_usage_from_meta(&meta), None);
     }
@@ -12285,6 +14274,7 @@ mod session_token_usage_tests {
                 },
                 pricing: None,
             }],
+            stop_reason: None,
         }];
 
         let usage = session_token_usage_from_session(&meta, &snapshot).unwrap();
@@ -12433,6 +14423,232 @@ mod chat_event_type_tests {
 
         assert_eq!(json["type"], "session_assigned");
         assert_eq!(json["session_id"], "session-1");
+    }
+
+    #[test]
+    fn model_switch_marker_binds_to_the_next_assistant_round() {
+        use jeikcode_coding::runtime::CodingRuntimeEvent;
+        use jeikcode_kernel::event::AgentEvent;
+
+        let mut projector = ChatRuntimeProjector::default();
+        let applied = projector.project_runtime(
+            CodingRuntimeEvent::ModelSwitched {
+                provider: "provider-b".into(),
+                model: "model-b".into(),
+                requested_at: 10,
+                applied_at: 25,
+            },
+            "sess-switch",
+        );
+        assert!(applied.is_empty(), "the marker waits for the new round");
+
+        projector.project_runtime(
+            CodingRuntimeEvent::Agent(AgentEvent::AssistantMessage {
+                message_id: "m-next".into(),
+            }),
+            "sess-switch",
+        );
+        let events = projector.project_runtime(
+            CodingRuntimeEvent::Agent(AgentEvent::TextDelta("hello".into())),
+            "sess-switch",
+        );
+        let ChatEvent::ModelSwitch {
+            provider,
+            model,
+            message_id,
+            requested_at,
+            applied_at,
+        } = events
+            .iter()
+            .find(|event| matches!(event, ChatEvent::ModelSwitch { .. }))
+            .expect("switch marker")
+        else {
+            unreachable!()
+        };
+        assert_eq!(provider, "provider-b");
+        assert_eq!(model, "model-b");
+        assert_eq!(message_id, "m-next");
+        assert_eq!(*requested_at, 10);
+        assert_eq!(*applied_at, 25);
+        assert!(
+            matches!(events.last(), Some(ChatEvent::ModelSwitch { .. })),
+            "the marker follows the first visible part so the row already exists"
+        );
+    }
+
+    #[test]
+    fn turn_finished_clears_unapplied_pending_model_switch() {
+        use jeikcode_coding::runtime::{CodingRuntimeEvent, RuntimeTurnStats};
+        use jeikcode_coding::TurnCompletion;
+        use jeikcode_kernel::event::{AgentEvent, StopReason};
+        use jeikcode_kernel::message::SessionSnapshot;
+        use std::sync::Arc;
+
+        let mut projector = ChatRuntimeProjector::default();
+        projector.project_runtime(
+            CodingRuntimeEvent::ModelSwitched {
+                provider: "provider-b".into(),
+                model: "model-b".into(),
+                requested_at: 10,
+                applied_at: 20,
+            },
+            "sess-clear",
+        );
+        let _ = projector.project_runtime(
+            CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed {
+                turn_id: 1,
+                reason: StopReason::Stopped,
+                snapshot: Arc::new(SessionSnapshot::new(Vec::new())),
+                stats: RuntimeTurnStats::default(),
+            }),
+            "sess-clear",
+        );
+        projector.project_runtime(
+            CodingRuntimeEvent::Agent(AgentEvent::AssistantMessage {
+                message_id: "m-next-turn".into(),
+            }),
+            "sess-clear",
+        );
+        let next = projector.project_runtime(
+            CodingRuntimeEvent::Agent(AgentEvent::TextDelta("hi".into())),
+            "sess-clear",
+        );
+        assert!(
+            !next
+                .iter()
+                .any(|event| matches!(event, ChatEvent::ModelSwitch { .. })),
+            "上一轮未消费的切换标记不得泄漏到下一轮"
+        );
+    }
+
+    #[test]
+    fn tool_timing_frames_carry_persistable_switch_and_frozen_cost() {
+        use jeikcode_kernel::event::AgentEvent;
+        use jeikcode_kernel::tool::{ToolCall, ToolResult};
+
+        let mut projector = ChatRuntimeProjector::default();
+        projector.project_agent(
+            AgentEvent::UserMessage {
+                message_id: "u1".into(),
+                turn_ordinal: 1,
+                message_index: 0,
+            },
+            "sess-timing",
+        );
+        projector.project_agent(AgentEvent::TextDelta("thinking".into()), "sess-timing");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let started = projector.project_agent(
+            AgentEvent::ToolStarted {
+                call: ToolCall {
+                    id: "call-1".into(),
+                    name: "run_command".into(),
+                    arguments: "{\"command\":\"echo hi\"}".into(),
+                },
+            },
+            "sess-timing",
+        );
+        let ChatEvent::ToolTiming {
+            status,
+            started_at,
+            switch_ms,
+            duration_ms,
+            ..
+        } = started
+            .iter()
+            .find(|event| matches!(event, ChatEvent::ToolTiming { .. }))
+            .expect("running timing frame")
+        else {
+            unreachable!()
+        };
+        assert_eq!(status, "running");
+        assert!(*started_at > 0);
+        assert!(*switch_ms >= 5, "switch must span the text-to-tool gap");
+        assert_eq!(*duration_ms, None);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let finished = projector.project_agent(
+            AgentEvent::ToolFinished {
+                call_id: "call-1".into(),
+                is_error: false,
+            },
+            "sess-timing",
+        );
+        let ChatEvent::ToolTiming {
+            status,
+            finished_at,
+            duration_ms,
+            ..
+        } = finished
+            .iter()
+            .find(|event| matches!(event, ChatEvent::ToolTiming { .. }))
+            .expect("terminal timing frame")
+        else {
+            unreachable!()
+        };
+        assert_eq!(status, "done");
+        assert!(finished_at.is_some());
+        assert!(duration_ms.unwrap_or(0) >= 10);
+
+        // The authoritative result reuses the SAME duration; no second timing frame.
+        let result = projector.project_agent(
+            AgentEvent::ToolResult {
+                result: ToolResult {
+                    call_id: "call-1".into(),
+                    content: "hi".into(),
+                    is_error: false,
+                    images: Vec::new(),
+                },
+            },
+            "sess-timing",
+        );
+        let ChatEvent::ToolCallResult { duration_ms, .. } = result
+            .iter()
+            .find(|event| matches!(event, ChatEvent::ToolCallResult { .. }))
+            .expect("tool result")
+        else {
+            unreachable!()
+        };
+        assert!(*duration_ms >= 10);
+        assert!(!result
+            .iter()
+            .any(|event| matches!(event, ChatEvent::ToolTiming { .. })));
+    }
+
+    #[test]
+    fn unfinished_tools_freeze_as_incomplete_at_terminal() {
+        use jeikcode_kernel::event::AgentEvent;
+        use jeikcode_kernel::tool::ToolCall;
+
+        let mut projector = ChatRuntimeProjector::default();
+        projector.project_agent(
+            AgentEvent::ToolStarted {
+                call: ToolCall {
+                    id: "call-2".into(),
+                    name: "run_command".into(),
+                    arguments: "{}".into(),
+                },
+            },
+            "sess-incomplete",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let drained = projector.drain_unfinished_tool_timings();
+        assert_eq!(drained.len(), 1);
+        let ChatEvent::ToolTiming {
+            id,
+            status,
+            duration_ms,
+            finished_at,
+            ..
+        } = &drained[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(id, "call-2");
+        assert_eq!(status, "incomplete");
+        assert!(finished_at.is_some());
+        assert!(duration_ms.unwrap_or(0) >= 3);
+        assert!(projector.drain_unfinished_tool_timings().is_empty());
     }
 
     #[test]
@@ -13570,9 +15786,35 @@ mod agent_warning_i18n_tests {
     }
 }
 
+/// Per-call execution timing tracked by the projector. `started` (Instant) is
+/// the precise duration source; `started_at_ms` (epoch) is the cross-instance /
+/// cold-start anchor persisted in the session metrics sidecar.
+struct LiveToolTiming {
+    name: String,
+    started: std::time::Instant,
+    started_at_ms: u64,
+    switch_ms: u64,
+    finished_at_ms: Option<u64>,
+    duration_ms: Option<u64>,
+}
+
+/// A model switch that already applied at a round boundary; the projector emits
+/// its display marker on the first visible part of the new assistant message.
+struct PendingModelSwitch {
+    provider: String,
+    model: String,
+    requested_at: u64,
+    applied_at: u64,
+}
+
 struct ChatRuntimeProjector {
     artifacts: ArtifactDetector,
-    live_tools: HashMap<String, (String, std::time::Instant)>,
+    live_tools: HashMap<String, LiveToolTiming>,
+    /// Epoch ms of the last user-visible activity in this turn (user echo,
+    /// text/reasoning delta, tool completion). Drives the per-tool `switch`
+    /// latency: how long the agent took to move from that edge to the next tool.
+    last_activity_at_ms: u64,
+    pending_model_switch: Option<PendingModelSwitch>,
     total_tokens: usize,
     tool_call_count: usize,
     terminal_reason: Option<jeikcode_kernel::event::StopReason>,
@@ -13609,6 +15851,9 @@ struct ChatRuntimeProjector {
     partial_last_save: Option<std::time::Instant>,
     partial_bytes_since_save: usize,
     partial_tools: Vec<jeikcode_capabilities::session::PartialToolCall>,
+    /// 最近一次已通过 `SystemNotice` 收口终态错误的文本，避免伴随 `Agent::Error` 重复成卡。
+    last_settled_error_notice_text: Option<String>,
+    pending_rate_limit_notice: Option<(String, Option<String>)>,
 }
 
 impl Default for ChatRuntimeProjector {
@@ -13616,6 +15861,8 @@ impl Default for ChatRuntimeProjector {
         Self {
             artifacts: ArtifactDetector::new(),
             live_tools: HashMap::new(),
+            last_activity_at_ms: ChatRuntimeProjector::now_ms(),
+            pending_model_switch: None,
             total_tokens: 0,
             tool_call_count: 0,
             terminal_reason: None,
@@ -13635,14 +15882,14 @@ impl Default for ChatRuntimeProjector {
             partial_last_save: None,
             partial_bytes_since_save: 0,
             partial_tools: Vec::new(),
+            last_settled_error_notice_text: None,
+            pending_rate_limit_notice: None,
         }
     }
 }
 
-/// 保证在压缩改写 `snapshot.json` 或追加独立显示通知之前，会话的 v4 `display.jsonl`
-/// 已经完整落地。若该会话此前因 `/undo`、编辑、删除或旧格式导入而缺少完整 v4 日志，
-/// 直接调 `append_display_notice` 会返回 `Ok(None)`，导致压缩标记既写不进磁盘、
-/// 也不会广播给其它实例。
+/// 保证在压缩改写 `snapshot.json` 或追加独立显示通知之前，会话的 v5/v4 `display.jsonl`
+/// 已经完整落地。
 pub(crate) fn ensure_v4_display_for_session(
     manager: &NativeSessionManager,
     loaded: &jeikcode_capabilities::session::LoadedSession,
@@ -13660,7 +15907,7 @@ pub(crate) fn ensure_v4_display_for_session(
         .ok()
         .flatten()
         .is_some_and(|(meta, records)| {
-            meta.v == jeikcode_capabilities::session::DISPLAY_VERSION
+            matches!(meta.v, 4 | jeikcode_capabilities::session::DISPLAY_VERSION)
                 && meta.complete
                 && v4_display_covers_completed_user_turns(
                     &meta,
@@ -13693,34 +15940,52 @@ pub(crate) fn ensure_v4_display_for_session(
     let _ = manager.write_display_backfill(&loaded.meta.id, &records, snapshot_last_turn);
 }
 
-pub(crate) fn persist_session_display_notice(
-    session_id: &str,
-    message: &str,
-    notice_id: Option<String>,
-) -> Option<jeikcode_capabilities::session::DisplayRecord> {
-    if session_id.trim().is_empty() || message.trim().is_empty() {
-        return None;
-    }
-    let resolved = resolve_session_by_id(session_id).ok().flatten()?;
-    let mgr = NativeSessionManager::with_root(
-        NativeSessionManager::sessions_root().join(&resolved.project_hash),
-    );
-    if let Ok(loaded) = mgr.load_native_session(&resolved.meta.id) {
-        ensure_v4_display_for_session(&mgr, &loaded);
-    }
-    let record = mgr
-        .append_display_notice(&resolved.meta.id, message, notice_id)
-        .ok()
-        .flatten();
-    if record.is_some() {
-        publish_global(GlobalWireEvent::DisplayAppended {
-            session_id: resolved.meta.id,
-        });
-    }
-    record
-}
-
 impl ChatRuntimeProjector {
+    /// Epoch-ms clock for the persisted timing anchors (the kernel stays
+    /// clock-free; observability time lives at the daemon boundary).
+    fn now_ms() -> u64 {
+        u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0)
+    }
+
+    /// Mark the latest user-visible activity edge. The next tool's `switch_ms`
+    /// is measured from here, so a tool following a long thinking/text stream
+    /// reports the real gap instead of a meaningless 0.
+    fn note_activity(&mut self) {
+        self.last_activity_at_ms = Self::now_ms();
+    }
+
+    /// Freeze the gap from the previous activity edge and move the edge to this
+    /// tool's start (parallel batch siblings therefore report near-zero gaps).
+    fn take_switch_ms(&mut self, now: u64) -> u64 {
+        let gap = now.saturating_sub(self.last_activity_at_ms);
+        self.last_activity_at_ms = now;
+        gap
+    }
+
+    /// Emit `incomplete` timing frames for tools whose execution never returned
+    /// (turn cancelled / runtime died between start and result). Called once at
+    /// the terminal so a cold start still shows a frozen cost instead of an
+    /// eternally growing one.
+    pub(crate) fn drain_unfinished_tool_timings(&mut self) -> Vec<ChatEvent> {
+        let now = Self::now_ms();
+        let events = self
+            .live_tools
+            .iter()
+            .filter(|(_, metric)| metric.finished_at_ms.is_none())
+            .map(|(id, metric)| ChatEvent::ToolTiming {
+                id: id.clone(),
+                name: metric.name.clone(),
+                status: "incomplete".to_string(),
+                started_at: metric.started_at_ms,
+                finished_at: Some(now),
+                duration_ms: Some(metric.started.elapsed().as_millis() as u64),
+                switch_ms: metric.switch_ms,
+            })
+            .collect();
+        self.live_tools.clear();
+        events
+    }
+
     fn reset_partial_stream(&mut self) {
         self.partial_text.clear();
         self.partial_reasoning.clear();
@@ -13804,7 +16069,25 @@ impl ChatRuntimeProjector {
         use jeikcode_coding::TurnCompletion;
 
         match event {
-            CodingRuntimeEvent::Agent(event) => self.project_agent(event, permission_session_id),
+            CodingRuntimeEvent::Agent(event) => {
+                self.project_agent_with_switch(event, permission_session_id)
+            }
+            CodingRuntimeEvent::ModelSwitched {
+                provider,
+                model,
+                requested_at,
+                applied_at,
+            } => {
+                // Applied at a real kernel round boundary. The visible marker is
+                // emitted with the first part of the NEW assistant message below.
+                self.pending_model_switch = Some(PendingModelSwitch {
+                    provider,
+                    model,
+                    requested_at,
+                    applied_at,
+                });
+                Vec::new()
+            }
             CodingRuntimeEvent::Request(request) => {
                 use jeikcode_capabilities::tools::{
                     request_user_input::REQUEST_USER_INPUT_KIND, ApprovalRequest, APPROVAL_KIND,
@@ -13845,34 +16128,14 @@ impl ChatRuntimeProjector {
             CodingRuntimeEvent::CompactionFinished {
                 completion: CompactionCompletion::Completed(outcome),
             } if outcome.committed => {
-                // Clear the driver's "compacting" status (the kernel announced it for
-                // every pass) and refresh the footer meter with the post-compaction size.
+                // 压缩阶段结束且刷新页脚上下文计数；压缩边界通知卡片由 kernel 紧随
+                // 发出的 AgentEvent::SystemNotice 与 DisplayHook 单入口共同承担，避免双写。
                 crate::finish_compaction_phase(
                     permission_session_id,
                     crate::COMPACTION_OWNER_TURN,
                     true,
                 );
-                let mark = jeikcode_config::i18n::format_compaction_mark(
-                    outcome.removed_messages,
-                    outcome.estimated_tokens_before,
-                    outcome.estimated_tokens_after,
-                );
-                let notice_event =
-                    match persist_session_display_notice(permission_session_id, &mark, None) {
-                        Some(record) => ChatEvent::DisplayNotice {
-                            session_id: permission_session_id.to_string(),
-                            id: record.id.unwrap_or_default(),
-                            display_seq: record.seq,
-                            text: record.content,
-                            created_at: record.created_at,
-                        },
-                        None => ChatEvent::Warning {
-                            message: mark,
-                            message_id: self.notice_anchor(),
-                        },
-                    };
                 vec![
-                    notice_event,
                     ChatEvent::ContextCompacted {
                         session_id: permission_session_id.to_string(),
                         tokens: outcome.estimated_tokens_after as u32,
@@ -13977,6 +16240,12 @@ impl ChatRuntimeProjector {
                 }
                 self.terminal_seen = true;
                 self.terminal_reason = Some(reason);
+                self.pending_model_switch = None;
+                // 回合已到达终态，清理本回合登记的压缩阶段，避免 /chat/runtime 在 complete() 之前继续报告 running。
+                let _ = crate::note_compaction_finished_for_prefix(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                );
                 if let Some(usage) = stats.last_usage {
                     self.total_tokens = (usage.tokens.prompt + usage.tokens.completion) as usize;
                 }
@@ -14011,6 +16280,12 @@ impl ChatRuntimeProjector {
                 }
                 self.terminal_seen = true;
                 self.terminal_reason = Some(reason);
+                self.pending_model_switch = None;
+                // 异常终态同样需要清理本回合登记的压缩阶段。
+                let _ = crate::note_compaction_finished_for_prefix(
+                    permission_session_id,
+                    crate::COMPACTION_OWNER_TURN,
+                );
                 self.last_error = Some(error.message.clone());
                 let mut events = Vec::new();
                 if let Some(event) = self.finish() {
@@ -14151,6 +16426,45 @@ impl ChatRuntimeProjector {
             .or_else(|| self.current_user_message_id.clone())
     }
 
+    /// Project an agent event and, when a provider switch just applied, append
+    /// the display-only `ModelSwitch` marker after the first visible part of the
+    /// new round. The marker is bound to that round's stable assistant message id,
+    /// so no part ids are invented/misaligned.
+    fn project_agent_with_switch(
+        &mut self,
+        event: jeikcode_kernel::event::AgentEvent,
+        session_id: &str,
+    ) -> Vec<ChatEvent> {
+        let events = self.project_agent(event, session_id);
+        if self.pending_model_switch.is_some()
+            && events.iter().any(|event| {
+                matches!(
+                    event,
+                    ChatEvent::TextDelta { .. }
+                        | ChatEvent::ReasoningDelta { .. }
+                        | ChatEvent::ToolCallStarted { .. }
+                        | ChatEvent::ArtifactStart { .. }
+                        | ChatEvent::ArtifactContent { .. }
+                )
+            })
+        {
+            if let Some(message_id) = self.current_message_id.clone() {
+                if let Some(switch) = self.pending_model_switch.take() {
+                    let mut events = events;
+                    events.push(ChatEvent::ModelSwitch {
+                        provider: switch.provider,
+                        model: switch.model,
+                        message_id,
+                        requested_at: switch.requested_at,
+                        applied_at: switch.applied_at,
+                    });
+                    return events;
+                }
+            }
+        }
+        events
+    }
+
     fn project_agent(
         &mut self,
         event: jeikcode_kernel::event::AgentEvent,
@@ -14162,6 +16476,8 @@ impl ChatRuntimeProjector {
         match event {
             Agent::AssistantMessage { message_id } => {
                 // Boundary marker: tag subsequent deltas with this identity.
+                // 不在此处刷新活动时间戳，与 `SessionTraceHook` 保持一致（仅在真实用户消息、
+                // 思考/文本增量与工具完成处记活动边沿），避免实时 `switch_ms` 与落盘口径不一致。
                 self.current_message_id = Some(message_id.clone());
                 self.part_seq = 0;
                 self.part_rev = 0;
@@ -14183,6 +16499,7 @@ impl ChatRuntimeProjector {
                 // 否则会挂到上一轮回答底部 / 下一条 loop 下面。
                 self.current_user_message_id = Some(message_id.clone());
                 self.current_message_id = None;
+                self.note_activity();
                 // A new turn starts: the previous turn's partial must have been
                 // committed/cleared; drop any stale checkpoint.
                 self.reset_partial_stream();
@@ -14194,6 +16511,7 @@ impl ChatRuntimeProjector {
                 }]
             }
             Agent::TextDelta(text) => {
+                self.note_activity();
                 let (message_id, part_id, part_seq, part_rev) = self.next_part_stamp("text");
                 self.note_partial_delta("text", &message_id, &part_id, &text);
                 let mut events = if self.keep_raw_markdown {
@@ -14244,6 +16562,7 @@ impl ChatRuntimeProjector {
                 events
             }
             Agent::Reasoning(content) => {
+                self.note_activity();
                 let (message_id, part_id, part_seq, part_rev) = self.next_part_stamp("reasoning");
                 self.note_partial_delta("reasoning", &message_id, &part_id, &content);
                 vec![ChatEvent::ReasoningDelta {
@@ -14294,7 +16613,35 @@ impl ChatRuntimeProjector {
                 }
                 self.maybe_save_partial();
                 self.end_streaming_part();
-                self.project_tool_started(call)
+                // Capture the timing edges BEFORE `call` is moved into the projector:
+                // `started_at` is the cross-instance/cold-start anchor, `switch_ms`
+                // the frozen gap from the previous activity edge.
+                let started_at = Self::now_ms();
+                let switch_ms = self.take_switch_ms(started_at);
+                self.live_tools.insert(
+                    call.id.clone(),
+                    LiveToolTiming {
+                        name: call.name.clone(),
+                        started: std::time::Instant::now(),
+                        started_at_ms: started_at,
+                        switch_ms,
+                        finished_at_ms: None,
+                        duration_ms: None,
+                    },
+                );
+                let id = call.id.clone();
+                let name = call.name.clone();
+                let mut events = self.project_tool_started(call);
+                events.push(ChatEvent::ToolTiming {
+                    id,
+                    name,
+                    status: "running".to_string(),
+                    started_at,
+                    finished_at: None,
+                    duration_ms: None,
+                    switch_ms,
+                });
+                events
             }
             Agent::ToolCallStreaming {
                 index,
@@ -14342,22 +16689,71 @@ impl ChatRuntimeProjector {
                     }]
                 }
             }
-            Agent::ToolFinished { call_id, is_error } => vec![ChatEvent::ToolFinished {
-                id: call_id,
-                success: !is_error,
-            }],
+            Agent::ToolFinished { call_id, is_error } => {
+                let finished_at = Self::now_ms();
+                let duration_ms = self.live_tools.get_mut(&call_id).map(|metric| {
+                    let duration = metric.started.elapsed().as_millis() as u64;
+                    metric.finished_at_ms = Some(finished_at);
+                    metric.duration_ms = Some(duration);
+                    duration
+                });
+                // A tool returning is a real activity edge: the next tool's
+                // `switch` measures the agent's reaction after this completion.
+                self.last_activity_at_ms = finished_at;
+                let mut events = vec![ChatEvent::ToolFinished {
+                    id: call_id.clone(),
+                    success: !is_error,
+                }];
+                if let Some(metric) = self.live_tools.get(&call_id) {
+                    if let Some(duration_ms) = duration_ms {
+                        events.push(ChatEvent::ToolTiming {
+                            id: call_id,
+                            name: metric.name.clone(),
+                            status: if is_error { "error" } else { "done" }.to_string(),
+                            started_at: metric.started_at_ms,
+                            finished_at: Some(finished_at),
+                            duration_ms: Some(duration_ms),
+                            switch_ms: metric.switch_ms,
+                        });
+                    }
+                }
+                events
+            }
             Agent::ToolResult { result } => {
-                let (name, started) = self
-                    .live_tools
-                    .remove(&result.call_id)
-                    .unwrap_or_else(|| ("tool".into(), std::time::Instant::now()));
-                vec![ChatEvent::ToolCallResult {
-                    id: result.call_id,
+                let metric = self.live_tools.remove(&result.call_id);
+                let (name, duration_ms) = match &metric {
+                    Some(metric) => (
+                        metric.name.clone(),
+                        metric
+                            .duration_ms
+                            .unwrap_or_else(|| metric.started.elapsed().as_millis() as u64),
+                    ),
+                    None => ("tool".into(), 0),
+                };
+                let mut events = vec![ChatEvent::ToolCallResult {
+                    id: result.call_id.clone(),
                     name,
                     output: result.content,
                     success: !result.is_error,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                }]
+                    duration_ms,
+                }];
+                // Defensive: a result that never saw `ToolFinished` (driver
+                // restart / synthetic path) still gets one terminal timing frame
+                // so every client freezes at the same authoritative duration.
+                if let Some(metric) = metric.filter(|m| m.finished_at_ms.is_none()) {
+                    let finished_at = Self::now_ms();
+                    self.last_activity_at_ms = finished_at;
+                    events.push(ChatEvent::ToolTiming {
+                        id: result.call_id,
+                        name: metric.name.clone(),
+                        status: if result.is_error { "error" } else { "done" }.to_string(),
+                        started_at: metric.started_at_ms,
+                        finished_at: Some(finished_at),
+                        duration_ms: Some(duration_ms),
+                        switch_ms: metric.switch_ms,
+                    });
+                }
+                events
             }
             Agent::Usage(meta) => {
                 let prompt = meta.tokens.prompt as usize;
@@ -14372,25 +16768,67 @@ impl ChatRuntimeProjector {
                     cached,
                 }]
             }
+            Agent::SystemNotice(notice) => {
+                if notice.kind == jeikcode_kernel::event::NoticeKind::RateLimit {
+                    // 限流由紧随其后的 Agent::RateLimited 结合 WebUI 本地化文案统一出卡，
+                    // 在此暂存 event_id 与因果锚点，避免实时阶段出现两张卡。
+                    self.pending_rate_limit_notice =
+                        Some((notice.event_id, notice.anchor_message_id));
+                    return Vec::new();
+                }
+                if notice.status == jeikcode_kernel::event::NoticeStatus::Settled
+                    && notice.severity == jeikcode_kernel::event::NoticeSeverity::Error
+                {
+                    self.last_settled_error_notice_text = Some(notice.text.trim().to_string());
+                }
+                vec![ChatEvent::SystemNotice {
+                    session_id: session_id.to_string(),
+                    event_id: notice.event_id,
+                    part_id: notice.part_id,
+                    kind: notice.kind,
+                    severity: notice.severity,
+                    status: notice.status,
+                    revision: notice.revision,
+                    text: notice.text,
+                    anchor_message_id: notice.anchor_message_id.or_else(|| self.notice_anchor()),
+                    anchor_part_id: notice.anchor_part_id,
+                    created_at: None,
+                }]
+            }
             Agent::Error { message, .. } => {
                 self.last_error = Some(message.clone());
                 // Agent errors are diagnostics until the runtime emits TurnFinished.
-                // Emitting a terminal HTTP error here would create Error + Done for one turn.
+                // 若前面已有同文 Settled Error SystemNotice 收口，则不再额外发第二张 Warning 卡。
+                if self.last_settled_error_notice_text.as_deref() == Some(message.trim()) {
+                    return Vec::new();
+                }
                 vec![ChatEvent::Warning {
                     message,
                     message_id: self.notice_anchor(),
                 }]
             }
+            Agent::RetryNotice {
+                notice_id,
+                part_id,
+                message,
+                attempt,
+                ..
+            } => vec![ChatEvent::SystemNotice {
+                session_id: session_id.to_string(),
+                event_id: notice_id,
+                part_id,
+                kind: jeikcode_kernel::event::NoticeKind::Retry,
+                severity: jeikcode_kernel::event::NoticeSeverity::Warning,
+                status: jeikcode_kernel::event::NoticeStatus::Active,
+                revision: attempt.max(1),
+                text: message,
+                anchor_message_id: self.notice_anchor(),
+                anchor_part_id: None,
+                created_at: None,
+            }],
             Agent::Warning(message) => {
-                // Liveness / retry advisories are TRANSIENT: they belong to the
-                // live turn, not the durable transcript. Persisting them here put
-                // them at the end of display.jsonl (assistant rounds are flushed
-                // only at turn_complete), where every later refresh rendered
-                // them below the final answer. Keep only the live wire event;
-                // durable boundary notices use `Compacted`/`DisplayNotice`.
-                let localized = localize_agent_warning(&message);
                 vec![ChatEvent::Warning {
-                    message: localized,
+                    message: localize_agent_warning(&message),
                     message_id: self.notice_anchor(),
                 }]
             }
@@ -14400,14 +16838,22 @@ impl ChatRuntimeProjector {
                 secs_until_reset,
                 auto_resuming,
                 server_message,
-            } => vec![ChatEvent::RateLimited {
-                reset_at_display,
-                reset_label,
-                secs_until_reset,
-                auto_resuming,
-                server_message,
-                message_id: self.notice_anchor(),
-            }],
+            } => {
+                let (event_id, anchor) = self
+                    .pending_rate_limit_notice
+                    .take()
+                    .map(|(id, a)| (Some(id), a))
+                    .unwrap_or((None, None));
+                vec![ChatEvent::RateLimited {
+                    reset_at_display,
+                    reset_label,
+                    secs_until_reset,
+                    auto_resuming,
+                    server_message,
+                    message_id: anchor.or_else(|| self.notice_anchor()),
+                    event_id,
+                }]
+            }
             Agent::Steered { count, inputs } => {
                 let anchor_message_id = self.current_message_id.clone();
                 let mut events = Vec::new();
@@ -14439,36 +16885,19 @@ impl ChatRuntimeProjector {
                 }]
             }
             Agent::Compacted {
-                removed,
-                bytes_before,
                 bytes_after,
                 committed: true,
                 ..
             } => {
                 crate::finish_compaction_phase(session_id, crate::COMPACTION_OWNER_TURN, true);
-                let est_before = (bytes_before as f32 / 3.5).ceil() as usize;
                 let est_after = (bytes_after as f32 / 3.5).ceil() as usize;
-                let mark =
-                    jeikcode_config::i18n::format_compaction_mark(removed, est_before, est_after);
-                let notice_event = match persist_session_display_notice(session_id, &mark, None) {
-                    Some(record) => ChatEvent::DisplayNotice {
-                        session_id: session_id.to_string(),
-                        id: record.id.unwrap_or_default(),
-                        display_seq: record.seq,
-                        text: record.content,
-                        created_at: record.created_at,
-                    },
-                    None => ChatEvent::Warning {
-                        message: mark,
-                        message_id: self.notice_anchor(),
-                    },
-                };
+                // 边界通知卡由紧随其后的 Agent::SystemNotice 与 DisplayHook 单入口负责，
+                // 不再双写账本或发重复通知卡。
                 vec![
                     ChatEvent::SessionStatus {
                         session_id: session_id.to_string(),
                         status: "running".to_string(),
                     },
-                    notice_event,
                     ChatEvent::ContextCompacted {
                         session_id: session_id.to_string(),
                         tokens: est_after as u32,
@@ -14504,18 +16933,13 @@ impl ChatRuntimeProjector {
             | Agent::Request { .. }
             | Agent::Snapshot { .. }
             | Agent::TurnComplete { .. }
-            | Agent::Cancelled
-            | Agent::Compacted { .. } => Vec::new(),
+            | Agent::Cancelled => Vec::new(),
             _ => Vec::new(),
         }
     }
 
     fn project_tool_started(&mut self, call: jeikcode_kernel::tool::ToolCall) -> Vec<ChatEvent> {
         self.tool_call_count += 1;
-        self.live_tools.insert(
-            call.id.clone(),
-            (call.name.clone(), std::time::Instant::now()),
-        );
         let mut events = vec![ChatEvent::ToolCallStarted {
             id: call.id,
             name: call.name.clone(),
@@ -14602,7 +17026,13 @@ pub(crate) struct AdmittedChatTurn {
 /// Persist the admitted prompt before any model request. This is the exact
 /// behavior of a WebUI send: the prompt gets an identity, an input-log row and
 /// a display admission row even if the client disconnects before the first frame.
-fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_id: &str) {
+fn persist_admitted_user_fields(
+    message: &str,
+    images: &[ImageInput],
+    working_dir: Option<&std::path::Path>,
+    session_id: &str,
+    client_input_id: &str,
+) {
     let created_at = u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0);
     let mut input = jeikcode_capabilities::session::SessionInput {
         id: client_input_id.to_string(),
@@ -14610,9 +17040,8 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
         session_id: session_id.to_string(),
         delivery: "prompt".into(),
         status: "admitted".into(),
-        text: request.message.clone(),
-        images: request
-            .images
+        text: message.to_string(),
+        images: images
             .iter()
             .map(|image| jeikcode_kernel::message::ImageContent {
                 media_type: image.media_type.clone(),
@@ -14622,6 +17051,8 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
         created_at,
         message_id: Some(client_input_id.to_string()),
         operation_id: Some(client_input_id.to_string()),
+        anchor_message_id: None,
+        turn_id: None,
     };
     if let Err(error) = jeikcode_capabilities::session::inputs::append_global(&mut input) {
         tracing::warn!(
@@ -14632,7 +17063,7 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
         );
     }
 
-    let bucket = if let Some(dir) = request.working_dir.as_deref() {
+    let bucket = if let Some(dir) = working_dir {
         NativeSessionManager::project_hash(dir)
     } else if let Ok(Some(resolved)) = resolve_session_by_id(session_id) {
         resolved.project_hash
@@ -14644,8 +17075,7 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
     }
     let manager =
         NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(&bucket));
-    let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = request
-        .images
+    let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = images
         .iter()
         .map(|image| jeikcode_capabilities::session::DisplayImage {
             media_type: image.media_type.clone(),
@@ -14656,7 +17086,7 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
     if let Err(error) = manager.append_display_user(
         session_id,
         client_input_id,
-        &request.message,
+        message,
         &display_images,
         Some(created_at),
     ) {
@@ -14666,6 +17096,28 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
             error = %error,
             "chat admission: display admission append failed"
         );
+    }
+}
+
+async fn persist_admitted_user_async(
+    message: String,
+    images: Vec<ImageInput>,
+    working_dir: Option<std::path::PathBuf>,
+    session_id: String,
+    client_input_id: String,
+) {
+    if let Err(error) = spawn_blocking_isolated(move || {
+        persist_admitted_user_fields(
+            &message,
+            &images,
+            working_dir.as_deref(),
+            &session_id,
+            &client_input_id,
+        );
+    })
+    .await
+    {
+        tracing::warn!(%error, "chat admission: persist_admitted_user task panicked");
     }
 }
 
@@ -14726,7 +17178,14 @@ pub(crate) async fn admit_chat_turn(
         }
     }?;
 
-    persist_admitted_user(&request, &session_id, &client_input_id);
+    persist_admitted_user_async(
+        request.message.clone(),
+        request.images.clone(),
+        request.working_dir.clone(),
+        session_id.clone(),
+        client_input_id.clone(),
+    )
+    .await;
 
     let (client_tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
     let event_bus = state
@@ -14956,6 +17415,12 @@ async fn chat_stream(
         );
         let mut val = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
         if let serde_json::Value::Object(ref mut map) = val {
+            map.insert(
+                "server_ts".to_string(),
+                serde_json::Value::from(
+                    u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0),
+                ),
+            );
             if !map.contains_key("session_id") {
                 map.insert(
                     "session_id".to_string(),
@@ -15005,7 +17470,7 @@ async fn chat_stream(
 
 /// Await the inner chat task, translating its outcome into SSE events and
 /// always calling `active_chats.complete()` afterwards — even on panic.
-async fn finalize_chat_task(
+pub(crate) async fn finalize_chat_task(
     inner: tokio::task::JoinHandle<anyhow::Result<()>>,
     event_tx: &mpsc::UnboundedSender<ChatEvent>,
     cleanup_chats: &ActiveChatRegistry,
@@ -15093,6 +17558,9 @@ mod admission_identity_tests {
     }
 }
 
+/// Persist one `tool_timing` frame to `<session>.toolmetrics.jsonl`.
+///
+/// Observability-only sidecar: nothing here is ever read back into the model
 /// Process a chat request and stream events
 pub(crate) async fn process_chat_request(
     req: ChatRequest,
@@ -15207,15 +17675,47 @@ pub(crate) async fn process_chat_request(
         req.session_title.as_deref(),
         Some(&req.message),
         initial_preferred.as_deref(),
+        Some(approval_mode),
+        req.is_scheduled,
     )?;
-    if !is_new_session
-        && req
+    if !is_new_session {
+        if req.is_scheduled {
+            let trimmed_title = req
+                .session_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty());
+            let mgr = NativeSessionManager::for_project(&working_dir);
+            let now_ms = jeikcode_capabilities::session::now_ms();
+            let _ = mgr.update_meta(&session_id, |meta| {
+                meta.origin = jeikcode_capabilities::session::SessionOrigin::Scheduled;
+                if let Some(title) = trimmed_title {
+                    meta.name = title.to_string();
+                    meta.user_renamed = true;
+                }
+                meta.updated_at = now_ms;
+            });
+            if let Some(title) = trimmed_title {
+                let _ = event_tx.send(ChatEvent::SessionRenamed {
+                    session_id: session_id.clone(),
+                    name: title.to_string(),
+                });
+            }
+            publish_session_upsert(&working_dir, &session_id);
+            publish_global(GlobalWireEvent::Activity {
+                session_id: session_id.clone(),
+                running: true,
+                terminal: None,
+                status: None,
+            });
+        } else if req
             .session_title
             .as_deref()
             .map(str::trim)
             .is_some_and(|title| !title.is_empty())
-    {
-        mark_protocol_origin(&working_dir, &session_id, req.session_title.as_deref());
+        {
+            mark_protocol_origin(&working_dir, &session_id, req.session_title.as_deref());
+        }
     }
 
     // AI session title is owned exclusively by CodingRuntime (first-submit
@@ -15402,7 +17902,12 @@ pub(crate) async fn process_chat_request(
                 eprintln!("Warning: Failed to save native session after early stop: {e}");
             }
         }
-        let _ = event_tx.send(ChatEvent::Stopped);
+        let early_stopped = ChatEvent::Stopped;
+        terminal_sent.store(true, std::sync::atomic::Ordering::Release);
+        active_chats
+            .mark_terminal(&operation_id, &early_stopped)
+            .await;
+        let _ = event_tx.send(early_stopped);
         // Turn never ran — the turn task (which registers the responder) never
         // spawned, so this is a defensive no-op cleanup for interactive modes.
         if registered_permission_responder {
@@ -15424,7 +17929,9 @@ pub(crate) async fn process_chat_request(
         live_api::apply_session_effort_override(&mut runtime_cfg, &working_dir, Some(&session_id));
         runtime_cfg.shared_mcp_registry = shared_mcp_reg;
         runtime_cfg.extra_system_append = req.extra_system_append.clone();
-        runtime_cfg.session_display_name = req.session_title.clone();
+        runtime_cfg.session_display_name = (!req.is_scheduled)
+            .then(|| req.session_title.clone())
+            .flatten();
         runtime_cfg.dangerously_skip_permissions = approval_mode
             == crate::approval_mode::ApprovalMode::Auto
             || (approval_mode == crate::approval_mode::ApprovalMode::Build
@@ -15443,6 +17950,16 @@ pub(crate) async fn process_chat_request(
         let runtime_user_inputs = pending_user_inputs.clone();
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         active_chats.install_steer(&operation_id, steer_tx).await;
+        let (runtime_handle_tx, runtime_handle_rx) = tokio::sync::oneshot::channel();
+        {
+            let active_chats = active_chats.clone();
+            let op_id = operation_id.clone();
+            tokio::spawn(async move {
+                if let Ok(handle) = runtime_handle_rx.await {
+                    active_chats.install_runtime_handle(&op_id, handle).await;
+                }
+            });
+        }
         // 本回合的客户端关联键 = 落盘消息 id：在 spawn 之前取出，供内核沿用。
         let turn_client_input_id = active_chats
             .admitted_user_message(&operation_id)
@@ -15466,6 +17983,7 @@ pub(crate) async fn process_chat_request(
                     approval_mode,
                     steer_rx,
                     turn_client_input_id,
+                    Some(runtime_handle_tx),
                 )
                 .await;
             })
@@ -15477,6 +17995,8 @@ pub(crate) async fn process_chat_request(
         keep_raw_markdown,
         ..ChatRuntimeProjector::default()
     };
+    // 模型切换旁路账本复用同一会话存储管理器；工具指标由 SessionTraceHook 在统一底座落盘。
+    let switch_metrics_manager = NativeSessionManager::for_project(&working_dir);
     let mut first_ttft_promoted = false;
     let effective_provider_for_default = provider_name.clone();
     let opening_client_input_id = active_chats
@@ -15486,7 +18006,7 @@ pub(crate) async fn process_chat_request(
 
     while let Some(event) = runtime_event_rx.recv().await {
         for mut chat_event in projector.project_runtime(event, &perm_session_key) {
-            if !first_ttft_promoted && is_first_turn_for_default {
+            if !first_ttft_promoted && is_first_turn_for_default && !req.is_scheduled {
                 if matches!(
                     chat_event,
                     ChatEvent::TextDelta { .. }
@@ -15569,9 +18089,50 @@ pub(crate) async fn process_chat_request(
                 ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
             ) {
                 terminal_sent.store(true, std::sync::atomic::Ordering::Release);
+                // Freeze any tool that never returned BEFORE the terminal frame, so
+                // 工具指标的权威落盘（含 incomplete 兜底）已由 `SessionTraceHook` 在内核生命周期钩子统一完成；
+                // 此处仅保留 SSE `ToolTiming` 事件推送，维持前端实时计时卡片兼容。
+                for timing in projector.drain_unfinished_tool_timings() {
+                    let _ = event_tx.send(timing);
+                }
                 // Record the terminal frame on the session before the flag becomes
                 // visible, so a watcher attaching right now can always be told.
                 active_chats.mark_terminal(&operation_id, &chat_event).await;
+            }
+            if let ChatEvent::ModelSwitch {
+                provider,
+                model,
+                message_id,
+                requested_at,
+                applied_at,
+            } = &chat_event
+            {
+                let record = jeikcode_capabilities::session::ModelSwitchRecord {
+                    v: jeikcode_capabilities::session::MODEL_SWITCH_VERSION,
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    status: "applied".to_string(),
+                    requested_at: *requested_at,
+                    applied_at: Some(*applied_at),
+                    message_id: Some(message_id.clone()),
+                    wait_ms: Some(applied_at.saturating_sub(*requested_at)),
+                };
+                if let Err(error) =
+                    switch_metrics_manager.append_model_switch(&perm_session_key, &record)
+                {
+                    eprintln!(
+                        "[model-switch] failed to persist applied switch (session {perm_session_key}): {error}"
+                    );
+                } else {
+                    tracing::info!(
+                        session_id = %perm_session_key,
+                        %provider,
+                        %model,
+                        %message_id,
+                        wait_ms = record.wait_ms.unwrap_or(0),
+                        "runtime model switch applied at round boundary"
+                    );
+                }
             }
             let _ = event_tx.send(chat_event);
         }
@@ -15580,6 +18141,9 @@ pub(crate) async fn process_chat_request(
     // A closed producer is not success by itself. Only the native runtime's
     // TurnFinished event can authorize `done`.
     if !projector.terminal_seen {
+        for timing in projector.drain_unfinished_tool_timings() {
+            let _ = event_tx.send(timing);
+        }
         if let Some(event) = projector.finish() {
             let _ = event_tx.send(event);
         }
@@ -15587,10 +18151,15 @@ pub(crate) async fn process_chat_request(
             .last_error
             .clone()
             .unwrap_or_else(|| "coding runtime event stream closed before turn terminal".into());
-        let _ = event_tx.send(ChatEvent::Error {
+        let fallback_error = ChatEvent::Error {
             message,
             message_id: None,
-        });
+        };
+        terminal_sent.store(true, std::sync::atomic::Ordering::Release);
+        active_chats
+            .mark_terminal(&operation_id, &fallback_error)
+            .await;
+        let _ = event_tx.send(fallback_error);
     }
 
     // The native runtime owns turn boundaries, mid-turn cancel cleanup
@@ -15643,6 +18212,8 @@ fn publish_chat_session_assignment(
     session_title: Option<&str>,
     first_user_prompt: Option<&str>,
     preferred_model: Option<&str>,
+    resolved_approval_mode: Option<crate::approval_mode::ApprovalMode>,
+    is_scheduled: bool,
 ) -> anyhow::Result<()> {
     let mut provisional_name = None;
     if is_new_session {
@@ -15660,27 +18231,43 @@ fn publish_chat_session_assignment(
             .map(str::trim)
             .is_some_and(|title| !title.is_empty());
         // Protocol sessions are automation-owned: their durable mode is Auto.
-        // Native WebUI sessions keep the live session/global mode.
-        meta.approval_mode = Some(if has_protocol_title {
-            crate::approval_mode::ApprovalMode::Auto.wire().to_string()
+        // Scheduled sessions honor resolved_approval_mode (which defaults to Auto).
+        // Native WebUI sessions persist the turn's resolved session/global mode
+        // so creating or chatting from a draft session remembers the chosen mode
+        // across restarts and cross-instance upserts.
+        let persisted_mode = if is_scheduled {
+            resolved_approval_mode.unwrap_or(crate::approval_mode::ApprovalMode::Auto)
+        } else if has_protocol_title {
+            crate::approval_mode::ApprovalMode::Auto
         } else {
-            live_api::live_session_approval_mode(Some(session_id))
-                .wire()
-                .to_string()
-        });
+            let mode = resolved_approval_mode
+                .unwrap_or_else(|| live_api::live_session_approval_mode(Some(session_id)));
+            live_api::live_remember_session_mode(session_id, mode);
+            mode
+        };
+        meta.approval_mode = Some(persisted_mode.wire().to_string());
         meta.message_count = 1;
         if let Some(title) = session_title.map(str::trim).filter(|t| !t.is_empty()) {
             meta.name = title.to_string();
-            // Pin API / client-provided titles (including ephemeral api-<uuid>
-            // keys) so turn-complete auto-name and AI naming leave them alone.
+            // Pin API / client-provided / scheduled timestamped titles so
+            // turn-complete auto-name and AI naming leave them alone.
             meta.user_renamed = true;
-            meta.protocol_key = Some(title.to_string());
-            meta.origin = jeikcode_capabilities::session::SessionOrigin::Protocol;
-        } else if let Some(provisional) = first_user_prompt
-            .and_then(jeikcode_coding::session_title::provisional_title_from_user_input)
-        {
-            meta.name = provisional.clone();
-            provisional_name = Some(provisional);
+            if is_scheduled {
+                meta.origin = jeikcode_capabilities::session::SessionOrigin::Scheduled;
+            } else {
+                meta.protocol_key = Some(title.to_string());
+                meta.origin = jeikcode_capabilities::session::SessionOrigin::Protocol;
+            }
+        } else {
+            if is_scheduled {
+                meta.origin = jeikcode_capabilities::session::SessionOrigin::Scheduled;
+            }
+            if let Some(provisional) = first_user_prompt
+                .and_then(jeikcode_coding::session_title::provisional_title_from_user_input)
+            {
+                meta.name = provisional.clone();
+                provisional_name = Some(provisional);
+            }
         }
         manager.commit_native_import(
             &lease,
@@ -15759,6 +18346,15 @@ fn chat_watch_frame_json_with_tail(
 ) -> String {
     let mut val = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
     if let serde_json::Value::Object(ref mut map) = val {
+        // Server clock cast with every frame: the WebUI derives a clock offset
+        // once and then paints `cost` from the persisted epoch-ms `started_at`,
+        // so tabs/devices with skewed clocks show the same elapsed time.
+        map.insert(
+            "server_ts".to_string(),
+            serde_json::Value::from(
+                u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0),
+            ),
+        );
         if !map.contains_key("session_id") {
             map.insert(
                 "session_id".to_string(),
@@ -15802,6 +18398,22 @@ fn chat_watch_session_start_json(session_id: &str, cursor: u64) -> String {
         "caps": session_capabilities(),
     })
     .to_string()
+}
+
+/// 构造 `/chat/watch` 握手阶段下发的权威运行态帧（不占游标 `seq`）。
+fn chat_watch_state_json(session_id: &str, running: bool) -> String {
+    chat_watch_frame_json_with_tail(
+        &ChatEvent::State {
+            running,
+            stop_reason: None,
+            message: None,
+        },
+        session_id,
+        None,
+        false,
+        false,
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -15898,6 +18510,17 @@ mod chat_watch_frame_tests {
         assert_eq!(handshake["type"], "session_start");
         assert_eq!(handshake["session_id"], "s-1");
         assert_eq!(handshake["cursor"], serde_json::Value::Number(42.into()));
+    }
+
+    #[test]
+    fn standby_state_frame_reports_authority_without_advancing_cursor() {
+        let state_frame: serde_json::Value =
+            serde_json::from_str(&chat_watch_state_json("s-1", false)).unwrap();
+        assert_eq!(state_frame["type"], "state");
+        assert_eq!(state_frame["running"], false);
+        assert_eq!(state_frame["session_id"], "s-1");
+        assert_eq!(state_frame["replay"], false);
+        assert!(state_frame.get("seq").is_none());
     }
 }
 
@@ -16020,13 +18643,20 @@ struct ChatWatchQuery {
 ///
 /// Emits the same `ChatEvent` JSON SSE frames as `POST /chat`, so the WebUI can
 /// stream progress for OpenAI/API-started turns instead of only polling history.
-async fn chat_watch(
-    State(state): State<AppState>,
-    axum::extract::Query(q): axum::extract::Query<ChatWatchQuery>,
-) -> axum::response::Response {
+struct PreparedChatWatch {
+    session_id: String,
+    head_json: Vec<String>,
+    rx: mpsc::UnboundedReceiver<(u64, ChatEvent)>,
+    operation_id: Option<String>,
+}
+
+async fn prepare_chat_watch(
+    state: &AppState,
+    q: &ChatWatchQuery,
+) -> Result<PreparedChatWatch, axum::response::Response> {
     let session_id = q.session_id.trim().to_string();
     if session_id.is_empty() {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiError {
                 success: false,
@@ -16035,7 +18665,7 @@ async fn chat_watch(
                 retryable: Some(false),
             }),
         )
-            .into_response();
+            .into_response());
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<(u64, ChatEvent)>();
@@ -16045,18 +18675,24 @@ async fn chat_watch(
     //   after_seq = N  → 只补 seq >= N 的回放帧，然后转实时
     //   缺省           → 全量补发（无游标兜底，前端按身份幂等收敛）
     let mut replay_head: Vec<(u64, ChatEvent)> = Vec::new();
-    let mut handshake: Option<String> = None;
+    let mut handshake: Vec<String> = Vec::new();
     // Prefer atomic snapshot+subscribe when a turn is live so a mid-stream
     // browser refresh gets the full thinking/text/tool history, not only
     // deltas after reconnect. Idle standby watchers skip this so a leftover
     // alias cannot replay a finished turn into the composer.
     if !q.standby {
-        if let Some((snapshot, mut bus_rx)) = state
+        if let Some((snapshot, bus_rx)) = state
             .active_chats
             .subscribe_live_with_replay(&session_id)
             .await
         {
             let buffer_len = snapshot.iter().map(|(seq, _)| *seq).max().unwrap_or(0);
+            let snapshot_had_terminal = snapshot.iter().any(|(_, event)| {
+                matches!(
+                    event,
+                    ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                )
+            });
             tracing::debug!(
                 session_id = %session_id,
                 replay_events = snapshot.len(),
@@ -16071,7 +18707,7 @@ async fn chat_watch(
             match q.after_seq {
                 Some(-1) if snapshot.is_empty() => {
                     // 新会话且当前无在途输出：只给一个起始游标。
-                    handshake = Some(chat_watch_session_start_json(&session_id, buffer_len));
+                    handshake.push(chat_watch_session_start_json(&session_id, buffer_len));
                     if let Some(user) = opening_user {
                         replay_head = vec![user];
                     }
@@ -16155,30 +18791,15 @@ async fn chat_watch(
             if let Some(cut) = terminal_at {
                 replay_head.truncate(cut + 1);
             }
-            if terminal_at.is_none() {
-                tokio::spawn(async move {
-                    loop {
-                        match bus_rx.recv().await {
-                            Ok((seq, event)) => {
-                                let terminal = matches!(
-                                    event,
-                                    ChatEvent::Done { .. }
-                                        | ChatEvent::Error { .. }
-                                        | ChatEvent::Stopped
-                                );
-                                if tx.send((seq, event)).is_err() {
-                                    break;
-                                }
-                                if terminal {
-                                    break;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                });
+            if terminal_at.is_none() && !snapshot_had_terminal {
+                spawn_chat_watch_bus_pump(session_id.clone(), bus_rx, tx);
             } else {
+                // 快照已终态且游标已越过终态帧：客户端拿不到 Done/Error，
+                // 补充权威 `state` 帧让重连立即收敛，随后关闭传输。
+                if terminal_at.is_none() {
+                    let running_now = session_is_authoritatively_running(&state, &session_id).await;
+                    handshake.push(chat_watch_state_json(&session_id, running_now));
+                }
                 // No live pump: drop the sender so the SSE stream ends cleanly
                 // after the replayed terminal instead of hanging on keepalive.
                 drop(tx);
@@ -16189,7 +18810,7 @@ async fn chat_watch(
                 .subscribe_or_standby(&session_id, q.client_id.as_deref(), &tx, true)
                 .await
             {
-                WatchOutcome::Live(mut bus_rx) => {
+                WatchOutcome::Live(bus_rx) => {
                     // Race: turn admitted between the two lookups — no replay buffer
                     // snapshot, fall back to live-only + admitted user message.
                     tracing::debug!(
@@ -16200,32 +18821,16 @@ async fn chat_watch(
                         .active_chats
                         .replay_admitted_user(&session_id, &tx)
                         .await;
-                    tokio::spawn(async move {
-                        loop {
-                            match bus_rx.recv().await {
-                                Ok((seq, event)) => {
-                                    let terminal = matches!(
-                                        event,
-                                        ChatEvent::Done { .. }
-                                            | ChatEvent::Error { .. }
-                                            | ChatEvent::Stopped
-                                    );
-                                    if tx.send((seq, event)).is_err() {
-                                        break;
-                                    }
-                                    if terminal {
-                                        break;
-                                    }
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                    });
+                    spawn_chat_watch_bus_pump(session_id.clone(), bus_rx, tx);
                 }
                 WatchOutcome::Standby => {
+                    // 非 standby 主动重连进待机且没有可重放的终态事件（例如服务重启后
+                    // 或缓存已回收）：立即下发一条权威 `state` 帧，防止客户端停留在重连死等。
+                    if rx.is_empty() {
+                        let running_now =
+                            session_is_authoritatively_running(&state, &session_id).await;
+                        handshake.push(chat_watch_state_json(&session_id, running_now));
+                    }
                     tracing::debug!(
                         session_id = %session_id,
                         "chat_watch: STANDBY until next admit"
@@ -16239,7 +18844,7 @@ async fn chat_watch(
             .subscribe_or_standby(&session_id, q.client_id.as_deref(), &tx, false)
             .await
         {
-            WatchOutcome::Live(mut bus_rx) => {
+            WatchOutcome::Live(bus_rx) => {
                 tracing::debug!(
                     session_id = %session_id,
                     "chat_watch: STANDBY-ONLY attached live (admitted user + live)"
@@ -16252,28 +18857,7 @@ async fn chat_watch(
                     .active_chats
                     .replay_admitted_user(&session_id, &tx)
                     .await;
-                tokio::spawn(async move {
-                    loop {
-                        match bus_rx.recv().await {
-                            Ok((seq, event)) => {
-                                let terminal = matches!(
-                                    event,
-                                    ChatEvent::Done { .. }
-                                        | ChatEvent::Error { .. }
-                                        | ChatEvent::Stopped
-                                );
-                                if tx.send((seq, event)).is_err() {
-                                    break;
-                                }
-                                if terminal {
-                                    break;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                });
+                spawn_chat_watch_bus_pump(session_id.clone(), bus_rx, tx);
             }
             WatchOutcome::Standby => {
                 tracing::debug!(
@@ -16284,10 +18868,7 @@ async fn chat_watch(
         }
     }
 
-    let active_conns = state.active_connections.clone();
-    active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let head_session_id = session_id.clone();
-    let live_session_id = session_id.clone();
     // Client correlation id of the running turn (= persisted user message id).
     // Stamped on terminal frames so a late terminal for a displaced turn is
     // ignorable by the reattached browser.
@@ -16296,7 +18877,6 @@ async fn chat_watch(
         .admitted_user_for_session(&session_id)
         .await
         .and_then(|user| user.client_input_id);
-    let live_operation_id = watch_operation_id.clone();
     // live 与 replay 共用同一个 session 级 seq；replay 布尔只描述送达路径。
     // 前端按 seq 只应用一次，live 追加、replay 替换。
     let replay_len = replay_head.len();
@@ -16313,20 +18893,119 @@ async fn chat_watch(
             )
         }))
         .collect();
-    let head_stream = futures::stream::iter(head_json).map(|json| {
+    Ok(PreparedChatWatch {
+        session_id,
+        head_json,
+        rx,
+        operation_id: watch_operation_id,
+    })
+}
+
+fn spawn_chat_watch_bus_pump(
+    session_id: String,
+    mut bus_rx: tokio::sync::broadcast::Receiver<(u64, ChatEvent)>,
+    tx: mpsc::UnboundedSender<(u64, ChatEvent)>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match bus_rx.recv().await {
+                Ok((seq, event)) => {
+                    let terminal = matches!(
+                        event,
+                        ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                    );
+                    if tx.send((seq, event)).is_err() {
+                        break;
+                    }
+                    if terminal {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        skipped,
+                        "chat_watch stream lagged; disconnecting client for resync"
+                    );
+                    let _ = tx.send((
+                        0,
+                        ChatEvent::Error {
+                            message: format!("chat stream lagged by {skipped} events; reconnect"),
+                            message_id: None,
+                        },
+                    ));
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// GET /chat/watch?session_id=… — reattach to a turn owned by another client (SSE fallback).
+async fn chat_watch(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ChatWatchQuery>,
+) -> axum::response::Response {
+    let prepared = match prepare_chat_watch(&state, &q).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+
+    let active_conns = state.active_connections.clone();
+    active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let live_session_id = prepared.session_id.clone();
+    let live_operation_id = prepared.operation_id.clone();
+    let chats = state.active_chats.clone();
+    let sid_json = serde_json::to_string(&live_session_id).unwrap_or_else(|_| "\"\"".to_string());
+
+    let head_stream = futures::stream::iter(prepared.head_json).map(|json| {
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json))
     });
 
-    let live_stream = UnboundedReceiverStream::new(rx).map(move |(seq, event)| {
-        Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
-            chat_watch_frame_json(
-                &event,
-                &live_session_id,
-                Some(seq),
-                false,
-                live_operation_id.as_deref(),
-            ),
-        ))
+    let (sse_tx, sse_rx) = mpsc::channel::<Arc<str>>(1024);
+    let mut raw_rx = prepared.rx;
+    tokio::spawn(async move {
+        let mut cached_wire: Option<Arc<std::sync::Mutex<SharedChatWireCache>>> = None;
+        while let Some((seq, event)) = raw_rx.recv().await {
+            if cached_wire.is_none() {
+                cached_wire = chats.wire_cache_for_session(&live_session_id).await;
+            }
+            let watch_json: Arc<str> = if let Some(ref cache) = cached_wire {
+                get_or_build_chat_watch_frame(
+                    cache,
+                    &event,
+                    &live_session_id,
+                    &sid_json,
+                    seq,
+                    live_operation_id.as_deref(),
+                )
+                .0
+            } else {
+                Arc::from(chat_watch_frame_json(
+                    &event,
+                    &live_session_id,
+                    Some(seq),
+                    false,
+                    live_operation_id.as_deref(),
+                ))
+            };
+            match sse_tx.try_send(watch_json) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        session_id = %live_session_id,
+                        "closing lagging /chat/watch SSE subscriber (queue full)"
+                    );
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+            }
+        }
+    });
+
+    let live_stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(|json| {
+        Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json.as_ref()))
     });
     let stream = head_stream.chain(live_stream);
     let conn_guard = SseConnectionGuard(active_conns);
@@ -16351,6 +19030,303 @@ async fn chat_watch(
         axum::http::HeaderValue::from_static("no"),
     );
     resp
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum StreamWsClientCmd {
+    Watch {
+        session_id: String,
+        #[serde(default)]
+        standby: bool,
+        #[serde(default)]
+        after_seq: Option<i64>,
+        #[serde(default)]
+        client_id: Option<String>,
+    },
+    Unwatch {
+        session_id: String,
+    },
+    Ping,
+}
+
+fn wrap_chat_ws_frame(session_id_json: &str, raw_event_json: &str) -> String {
+    format!(r#"{{"channel":"chat","session_id":{session_id_json},"event":{raw_event_json}}}"#)
+}
+
+/// GET /stream/ws — 单连接 WebSocket 多路复用通道，同时承载 `/events` 全局事件与按需 `watch/unwatch` 的会话流。
+///
+/// 彻底摆脱 HTTP/1.1 同源 6 连接上限导致的请求排队卡死。
+async fn stream_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_stream_ws_socket(socket, state))
+}
+
+const STREAM_WS_OUTBOUND_CAP: usize = 1024;
+
+fn try_push_ws_frame(
+    tx: &mpsc::Sender<axum::extract::ws::Message>,
+    socket_cancel: &CancellationToken,
+    msg: axum::extract::ws::Message,
+    context: &str,
+) -> bool {
+    match tx.try_send(msg) {
+        Ok(()) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                context,
+                "closing lagging /stream/ws client (outbound queue full)"
+            );
+            socket_cancel.cancel();
+            false
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            socket_cancel.cancel();
+            false
+        }
+    }
+}
+
+async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: AppState) {
+    use axum::extract::ws::Message as WsMessage;
+    use futures::{SinkExt, StreamExt};
+
+    let active_conns = state.active_connections.clone();
+    active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _conn_guard = SseConnectionGuard(active_conns);
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(STREAM_WS_OUTBOUND_CAP);
+    let socket_cancel = CancellationToken::new();
+
+    let writer_cancel = socket_cancel.clone();
+    let writer_task = tokio::spawn(async move {
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = writer_cancel.cancelled() => break,
+                maybe_msg = out_rx.recv() => {
+                    match maybe_msg {
+                        Some(msg) => {
+                            if ws_sender.send(msg).await.is_err() {
+                                writer_cancel.cancel();
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    if ws_sender.send(WsMessage::Ping(Vec::new())).await.is_err() {
+                        writer_cancel.cancel();
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // 启动全局增量事件转发（首帧与 /events 一致推送 sync，共享 Arc<str> 序列化载荷）
+    let global_out = out_tx.clone();
+    let global_cancel = socket_cancel.clone();
+    let global_task = tokio::spawn(async move {
+        if !try_push_ws_frame(
+            &global_out,
+            &global_cancel,
+            WsMessage::Text(r#"{"channel":"global","event":{"type":"sync"}}"#.to_string()),
+            "global-sync",
+        ) {
+            return;
+        }
+        let mut rx = global_wire_frames().subscribe();
+        loop {
+            tokio::select! {
+                _ = global_cancel.cancelled() => break,
+                res = rx.recv() => match res {
+                    Ok(frame) => {
+                        if !try_push_ws_frame(
+                            &global_out,
+                            &global_cancel,
+                            WsMessage::Text(frame.ws_frame.as_ref().to_string()),
+                            "global-event",
+                        ) {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "/stream/ws global bus lagged; requesting client resync");
+                        if !try_push_ws_frame(
+                            &global_out,
+                            &global_cancel,
+                            WsMessage::Text(r#"{"channel":"global","event":{"type":"sync"}}"#.to_string()),
+                            "global-resync",
+                        ) {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    });
+
+    let mut watch_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut watch_gen_counter: u64 = 0;
+
+    loop {
+        let next = tokio::select! {
+            _ = socket_cancel.cancelled() => break,
+            frame = ws_receiver.next() => frame,
+        };
+        let Some(Ok(msg)) = next else {
+            break;
+        };
+        match msg {
+            WsMessage::Text(text) => {
+                let Ok(cmd) = serde_json::from_str::<StreamWsClientCmd>(&text) else {
+                    continue;
+                };
+                match cmd {
+                    StreamWsClientCmd::Ping => {
+                        if !try_push_ws_frame(
+                            &out_tx,
+                            &socket_cancel,
+                            WsMessage::Text(r#"{"channel":"pong"}"#.to_string()),
+                            "pong",
+                        ) {
+                            break;
+                        }
+                    }
+                    StreamWsClientCmd::Unwatch { session_id } => {
+                        let sid = session_id.trim();
+                        if let Some(handle) = watch_tasks.remove(sid) {
+                            handle.abort();
+                        }
+                    }
+                    StreamWsClientCmd::Watch {
+                        session_id,
+                        standby,
+                        after_seq,
+                        client_id,
+                    } => {
+                        let sid = session_id.trim().to_string();
+                        if sid.is_empty() {
+                            continue;
+                        }
+                        if let Some(prev) = watch_tasks.remove(&sid) {
+                            prev.abort();
+                        }
+                        watch_gen_counter = watch_gen_counter.wrapping_add(1);
+                        let q = ChatWatchQuery {
+                            session_id: sid.clone(),
+                            standby,
+                            after_seq,
+                            client_id,
+                        };
+                        match prepare_chat_watch(&state, &q).await {
+                            Ok(mut prepared) => {
+                                let sid_json = serde_json::to_string(&prepared.session_id)
+                                    .unwrap_or_else(|_| "\"\"".to_string());
+                                for head in &prepared.head_json {
+                                    let frame = wrap_chat_ws_frame(&sid_json, head);
+                                    if !try_push_ws_frame(
+                                        &out_tx,
+                                        &socket_cancel,
+                                        WsMessage::Text(frame),
+                                        "chat-head",
+                                    ) {
+                                        break;
+                                    }
+                                }
+                                let pump_out = out_tx.clone();
+                                let pump_cancel = socket_cancel.clone();
+                                let live_sid = prepared.session_id.clone();
+                                let live_op_id = prepared.operation_id.clone();
+                                let chats = state.active_chats.clone();
+                                let handle = tokio::spawn(async move {
+                                    let mut cached_wire: Option<
+                                        Arc<std::sync::Mutex<SharedChatWireCache>>,
+                                    > = chats.wire_cache_for_session(&live_sid).await;
+                                    while let Some((seq, event)) = prepared.rx.recv().await {
+                                        if cached_wire.is_none() {
+                                            cached_wire =
+                                                chats.wire_cache_for_session(&live_sid).await;
+                                        }
+                                        let ws_frame: Arc<str> =
+                                            if let Some(ref cache) = cached_wire {
+                                                get_or_build_chat_watch_frame(
+                                                    cache,
+                                                    &event,
+                                                    &live_sid,
+                                                    &sid_json,
+                                                    seq,
+                                                    live_op_id.as_deref(),
+                                                )
+                                                .1
+                                            } else {
+                                                let ev_json = chat_watch_frame_json(
+                                                    &event,
+                                                    &live_sid,
+                                                    Some(seq),
+                                                    false,
+                                                    live_op_id.as_deref(),
+                                                );
+                                                Arc::from(wrap_chat_ws_frame(&sid_json, &ev_json))
+                                            };
+                                        if !try_push_ws_frame(
+                                            &pump_out,
+                                            &pump_cancel,
+                                            WsMessage::Text(ws_frame.as_ref().to_string()),
+                                            "chat-live",
+                                        ) {
+                                            return;
+                                        }
+                                    }
+                                    let ended = format!(
+                                        r#"{{"channel":"chat","session_id":{sid_json},"ended":true}}"#
+                                    );
+                                    let _ = try_push_ws_frame(
+                                        &pump_out,
+                                        &pump_cancel,
+                                        WsMessage::Text(ended),
+                                        "chat-ended",
+                                    );
+                                });
+                                watch_tasks.insert(sid, handle);
+                            }
+                            Err(_) => {
+                                let sid_json = serde_json::to_string(&sid)
+                                    .unwrap_or_else(|_| "\"\"".to_string());
+                                let ended = format!(
+                                    r#"{{"channel":"chat","session_id":{sid_json},"ended":true,"error":"invalid_session"}}"#
+                                );
+                                if !try_push_ws_frame(
+                                    &out_tx,
+                                    &socket_cancel,
+                                    WsMessage::Text(ended),
+                                    "chat-invalid",
+                                ) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            WsMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    socket_cancel.cancel();
+    for (_, handle) in watch_tasks {
+        handle.abort();
+    }
+    global_task.abort();
+    writer_task.abort();
 }
 
 /// POST /chat/stop - Stop a running chat session
@@ -16492,8 +19468,24 @@ static SESSION_QUEUE_CLAIMS: tokio::sync::OnceCell<
     tokio::sync::RwLock<HashMap<String, Vec<String>>>,
 > = tokio::sync::OnceCell::const_new();
 
-/// Serializes claim/release/update so two tabs cannot both "win" the same card.
-static QUEUE_CLAIM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Serializes claim/release/update per session across 64 hash-sharded mutexes so
+/// concurrent tabs on one session serialize without blocking unrelated sessions.
+const QUEUE_CLAIM_SHARDS: usize = 64;
+
+fn queue_claim_lock_for_session(session_id: &str) -> &'static tokio::sync::Mutex<()> {
+    static SHARDS: std::sync::OnceLock<Vec<tokio::sync::Mutex<()>>> = std::sync::OnceLock::new();
+    let shards = SHARDS.get_or_init(|| {
+        (0..QUEUE_CLAIM_SHARDS)
+            .map(|_| tokio::sync::Mutex::new(()))
+            .collect()
+    });
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in session_id.trim().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    &shards[(hash as usize) % QUEUE_CLAIM_SHARDS]
+}
 
 const MAX_QUEUE_CLAIMS: usize = 512;
 
@@ -16506,7 +19498,7 @@ fn decode_queue_file(content: &str) -> Option<(Vec<QueuedMessageItem>, u64)> {
         .ok()
 }
 
-/// Must be called while holding `QUEUE_CLAIM_LOCK`, so the first read cannot
+/// Must be called while holding [`queue_claim_lock_for_session`], so the first read cannot
 /// race a claim or whole-list update for this session.
 async fn ensure_session_queue_loaded(session_id: &str) {
     let map = get_session_queues_map().await;
@@ -16721,7 +19713,7 @@ async fn retire_folded_steers_from_queue(
     if retired_ids.is_empty() {
         return;
     }
-    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let _claim_guard = queue_claim_lock_for_session(sid).lock().await;
     ensure_session_queue_loaded(sid).await;
     let mut claims = load_queue_claims(sid).await;
     let mut claims_changed = false;
@@ -16825,7 +19817,7 @@ async fn update_chat_queue_steer_state(
     if sid.is_empty() || cid.is_empty() {
         return;
     }
-    let guard = QUEUE_CLAIM_LOCK.lock().await;
+    let guard = queue_claim_lock_for_session(sid).lock().await;
     ensure_session_queue_loaded(sid).await;
     let claims = load_effective_queue_claims(sid).await;
     if claims.iter().any(|claimed| claimed == cid) {
@@ -16851,14 +19843,18 @@ async fn update_chat_queue_steer_state(
 }
 
 async fn reconcile_stale_steer_queue(session_id: &str) {
-    let guard = QUEUE_CLAIM_LOCK.lock().await;
+    let guard = queue_claim_lock_for_session(session_id).lock().await;
     ensure_session_queue_loaded(session_id).await;
     let claims = load_effective_queue_claims(session_id).await;
-    let status_by_id: HashMap<String, String> =
-        jeikcode_capabilities::session::inputs::list_global(session_id)
+    let sid_owned = session_id.to_string();
+    let status_by_id: HashMap<String, String> = spawn_blocking_isolated(move || {
+        jeikcode_capabilities::session::inputs::list_global(&sid_owned)
             .into_iter()
             .map(|row| (row.id, row.status))
-            .collect();
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
     let map = get_session_queues_map().await;
     let mut downgraded = Vec::new();
     let changed = {
@@ -16889,8 +19885,15 @@ async fn reconcile_stale_steer_queue(session_id: &str) {
         persist_session_queue(session_id).await;
     }
     drop(guard);
-    for id in downgraded {
-        let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(session_id, &id);
+    if !downgraded.is_empty() {
+        let sid_owned = session_id.to_string();
+        let _ = spawn_blocking_isolated(move || {
+            for id in downgraded {
+                let _ =
+                    jeikcode_capabilities::session::inputs::mark_rejected_global(&sid_owned, &id);
+            }
+        })
+        .await;
     }
     if changed {
         publish_global(GlobalWireEvent::QueueUpdated {
@@ -16925,7 +19928,7 @@ async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
     if sid.is_empty() {
         return Json(serde_json::json!({ "revision": 0, "items": [] }));
     }
-    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let _claim_guard = queue_claim_lock_for_session(sid).lock().await;
     ensure_session_queue_loaded(sid).await;
     let claims = load_effective_queue_claims(sid).await;
     let map = get_session_queues_map().await;
@@ -16986,7 +19989,7 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
     if !sid.is_empty() {
         // Serialize with claim/release: a stale whole-list write must not
         // resurrect a card another tab already claimed.
-        let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+        let _claim_guard = queue_claim_lock_for_session(&sid).lock().await;
         ensure_session_queue_loaded(&sid).await;
         // CAS: a stale tab's whole-list write is rejected instead of overwriting
         // a newer queue. The caller re-pulls and merges.
@@ -16995,6 +19998,17 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
             if base != current {
                 let map = get_session_queues_map().await;
                 let items = map.read().await.get(&sid).cloned().unwrap_or_default();
+                // An empty whole-list write is a no-op when the server queue is
+                // already empty. Returning 409 here only creates console noise
+                // and a redundant merge request from every newly opened tab.
+                if req.items.is_empty() && items.is_empty() {
+                    return Json(serde_json::json!({
+                        "success": true,
+                        "revision": current,
+                        "items": [],
+                    }))
+                    .into_response();
+                }
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({
@@ -17050,7 +20064,7 @@ async fn claim_chat_queue(Json(req): Json<ChatQueueClaimRequest>) -> impl IntoRe
         )
             .into_response();
     }
-    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let _claim_guard = queue_claim_lock_for_session(&sid).lock().await;
     ensure_session_queue_loaded(&sid).await;
     let mut claims = load_queue_claims(&sid).await;
     let map = get_session_queues_map().await;
@@ -17089,7 +20103,7 @@ async fn release_chat_queue(Json(req): Json<ChatQueueReleaseRequest>) -> impl In
         )
             .into_response();
     }
-    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let _claim_guard = queue_claim_lock_for_session(&sid).lock().await;
     let mut claims = load_queue_claims(&sid).await;
     claims.retain(|claimed| claimed != &cid);
     save_queue_claims(&sid, &claims).await;
@@ -18560,6 +21574,46 @@ fn steer_queue_item(req: &ChatSteerRequest, client_id: String, kind: &str) -> Qu
     }
 }
 
+async fn find_session_input_async(
+    session_id: &str,
+    client_input_id: &str,
+) -> Option<jeikcode_capabilities::session::SessionInput> {
+    let sid = session_id.to_string();
+    let cid = client_input_id.to_string();
+    spawn_blocking_isolated(move || jeikcode_capabilities::session::inputs::find_global(&sid, &cid))
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn append_session_input_async(
+    mut input: jeikcode_capabilities::session::SessionInput,
+) -> bool {
+    spawn_blocking_isolated(move || {
+        jeikcode_capabilities::session::inputs::append_global(&mut input).is_ok()
+    })
+    .await
+    .unwrap_or(false)
+}
+
+async fn mark_input_rejected_async(session_id: &str, client_input_id: &str) {
+    let sid = session_id.to_string();
+    let cid = client_input_id.to_string();
+    let _ = spawn_blocking_isolated(move || {
+        let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(&sid, &cid);
+    })
+    .await;
+}
+
+async fn mark_input_submitted_async(session_id: &str, client_input_id: &str) {
+    let sid = session_id.to_string();
+    let cid = client_input_id.to_string();
+    let _ = spawn_blocking_isolated(move || {
+        let _ = jeikcode_capabilities::session::inputs::mark_submitted_global(&sid, &cid);
+    })
+    .await;
+}
+
 /// POST /chat/steer/admit — durably reserve the steer intent + queue card
 /// before the client tries to submit it. This is the only client write needed;
 /// a refresh can then render the server-owned `steering` card and replay
@@ -18597,9 +21651,7 @@ async fn admit_chat_steer(
         .steer_sender(&req.session_id)
         .await
         .is_some();
-    if let Some(existing) =
-        jeikcode_capabilities::session::inputs::find_global(&req.session_id, &client_id)
-    {
+    if let Some(existing) = find_session_input_async(&req.session_id, &client_id).await {
         match existing.status.as_str() {
             "promoted" => {
                 retire_folded_steers_from_queue(
@@ -18617,10 +21669,7 @@ async fn admit_chat_steer(
             }
             "submitted" => {
                 if !active_turn {
-                    let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
-                        &req.session_id,
-                        &client_id,
-                    );
+                    mark_input_rejected_async(&req.session_id, &client_id).await;
                     update_chat_queue_steer_state(
                         &req.session_id,
                         &client_id,
@@ -18663,10 +21712,7 @@ async fn admit_chat_steer(
             }
             "admitted" => {
                 if !active_turn {
-                    let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
-                        &req.session_id,
-                        &client_id,
-                    );
+                    mark_input_rejected_async(&req.session_id, &client_id).await;
                     update_chat_queue_steer_state(
                         &req.session_id,
                         &client_id,
@@ -18715,7 +21761,7 @@ async fn admit_chat_steer(
         .admitted_user_for_session(&req.session_id)
         .await
         .and_then(|user| user.client_input_id);
-    let mut input = jeikcode_capabilities::session::SessionInput {
+    let input = jeikcode_capabilities::session::SessionInput {
         id: client_id.clone(),
         seq: 0,
         session_id: req.session_id.clone(),
@@ -18735,8 +21781,10 @@ async fn admit_chat_steer(
         }),
         message_id: None,
         operation_id,
+        anchor_message_id: None,
+        turn_id: None,
     };
-    if jeikcode_capabilities::session::inputs::append_global(&mut input).is_err() {
+    if !append_session_input_async(input).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ChatSteerResponse {
@@ -18833,9 +21881,10 @@ async fn chat_steer(
     };
     // Idempotent admission state machine: submitted/promoted requests are already
     // owned by the kernel and must never be appended or submitted a second time.
-    let existing = req.client_input_id.as_deref().and_then(|client_id| {
-        jeikcode_capabilities::session::inputs::find_global(&req.session_id, client_id)
-    });
+    let existing = match req.client_input_id.as_deref() {
+        Some(client_id) => find_session_input_async(&req.session_id, client_id).await,
+        None => None,
+    };
     if let Some(existing) = &existing {
         match existing.status.as_str() {
             "promoted" => {
@@ -18903,7 +21952,7 @@ async fn chat_steer(
             .admitted_user_for_session(&req.session_id)
             .await
             .and_then(|user| user.client_input_id);
-        let mut input = jeikcode_capabilities::session::SessionInput {
+        let input = jeikcode_capabilities::session::SessionInput {
             id: client_id.clone(),
             seq: 0,
             session_id: req.session_id.clone(),
@@ -18923,9 +21972,11 @@ async fn chat_steer(
             }),
             message_id: None,
             operation_id,
+            anchor_message_id: None,
+            turn_id: None,
         };
         if !existing_admitted {
-            let _ = jeikcode_capabilities::session::inputs::append_global(&mut input);
+            let _ = append_session_input_async(input).await;
         }
         Some(make_queue_item(client_id, "steering"))
     } else {
@@ -18956,10 +22007,7 @@ async fn chat_steer(
     };
     if tx.send(live_api::ChatSteerSignal::Submit(pending)).is_err() {
         if let Some(client_id) = req.client_input_id.as_deref() {
-            let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
-                &req.session_id,
-                client_id,
-            );
+            mark_input_rejected_async(&req.session_id, client_id).await;
             update_chat_queue_steer_state(&req.session_id, client_id, "queue", None).await;
         }
         return (
@@ -18978,10 +22026,7 @@ async fn chat_steer(
     match outcome {
         Ok(()) => {
             if let Some(client_id) = req.client_input_id.as_deref() {
-                let _ = jeikcode_capabilities::session::inputs::mark_submitted_global(
-                    &req.session_id,
-                    client_id,
-                );
+                mark_input_submitted_async(&req.session_id, client_id).await;
                 update_chat_queue_steer_state(&req.session_id, client_id, "steer", None).await;
             }
             // 服务端已将转向接收进运行中的回合：这是「会话仍在干活」的权威证据，
@@ -19002,10 +22047,7 @@ async fn chat_steer(
         }
         Err(error) => {
             if let Some(client_id) = req.client_input_id.as_deref() {
-                let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
-                    &req.session_id,
-                    client_id,
-                );
+                mark_input_rejected_async(&req.session_id, client_id).await;
                 update_chat_queue_steer_state(&req.session_id, client_id, "queue", None).await;
             }
             (
@@ -19021,39 +22063,55 @@ async fn chat_steer(
 
 /// GET /chat/active - Return list of session IDs currently generating
 async fn active_chat_sessions(State(state): State<AppState>) -> impl IntoResponse {
-    use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
-    use std::collections::HashSet;
-
-    let mut ids: HashSet<String> = state
-        .active_chats
-        .active_session_ids()
-        .await
-        .into_iter()
-        .collect();
-    if let Some(live_id) = crate::native_live::live_running_session_id() {
-        ids.insert(live_id);
-    }
-    // Registry `Starting` / handle-less rows are view subscriptions (GET /live
-    // `subscribe_or_empty`, InputAccepted before bind). They are not occupancy —
-    // including them made WebUI keep a stop square and sidebar spinner after the
-    // background turn had already finished, then rehydrate on every session switch.
-    for id in SessionRuntimeRegistry::global().live_turn_session_ids() {
-        ids.insert(id);
-    }
-    // `/loop` / `/goal` 在两次唤醒之间没有执行中的回合，但控制器还挂着：
-    // 对客户端而言这也是「正在干活」，否则按钮会在两轮之间闪回发送态。
-    for id in crate::controller_running_session_ids() {
-        ids.insert(id);
-    }
-    for id in crate::compaction_running_session_ids() {
-        ids.insert(id);
-    }
-    Json(ids.into_iter().collect::<Vec<_>>())
+    Json(collect_active_chat_ids(&state).await)
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct ChatRuntimeQuery {
     session_id: String,
+}
+
+struct SessionExternalRuntime {
+    live_running: bool,
+    registry_live: bool,
+    controller: ControllerState,
+    compaction_phase_started_at: Option<u64>,
+    compaction_owner: Option<String>,
+    execution_revision: u64,
+}
+
+impl SessionExternalRuntime {
+    fn is_running(&self) -> bool {
+        self.live_running
+            || self.registry_live
+            || self.controller.loop_active
+            || self.controller.goal_active
+            || self.compaction_phase_started_at.is_some()
+    }
+}
+
+fn collect_session_external_runtime(session_id: &str) -> SessionExternalRuntime {
+    use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
+
+    SessionExternalRuntime {
+        live_running: crate::native_live::live_running_session_id().as_deref() == Some(session_id),
+        registry_live: SessionRuntimeRegistry::global()
+            .live_turn_session_ids()
+            .iter()
+            .any(|id| id == session_id),
+        controller: crate::controller_state_for(session_id).unwrap_or_default(),
+        compaction_phase_started_at: compaction_started_at(session_id),
+        compaction_owner: compaction_owner(session_id),
+        execution_revision: execution_phase_revision(session_id),
+    }
+}
+
+async fn session_is_authoritatively_running(state: &AppState, session_id: &str) -> bool {
+    let (chat_active, _, _) = state
+        .active_chats
+        .runtime_status_for_session(session_id)
+        .await;
+    chat_active || collect_session_external_runtime(session_id).is_running()
 }
 
 /// GET /chat/runtime?session_id=… — the single server-side authority for
@@ -19082,45 +22140,31 @@ async fn chat_runtime(
         )
             .into_response();
     }
-    let (chat_active, chat_status, chat_started_at) = {
-        let guard = state.active_chats.inner.read().await;
-        if let Some(op_id) = guard.aliases.get(&session_id) {
-            if let Some(op) = guard.operations.get(op_id) {
-                (true, op.status.clone(), Some(op.started_at))
-            } else {
-                (true, None, None)
-            }
-        } else {
-            (false, None, None)
-        }
-    };
-    let live_running =
-        crate::native_live::live_running_session_id().as_deref() == Some(session_id.as_str());
-    let registry_live = SessionRuntimeRegistry::global()
-        .live_turn_session_ids()
-        .iter()
-        .any(|id| id == &session_id);
-    let controller = crate::controller_state_for(&session_id).unwrap_or_default();
+    let (chat_active, chat_status, chat_started_at) = state
+        .active_chats
+        .runtime_status_for_session(&session_id)
+        .await;
+    let ext = collect_session_external_runtime(&session_id);
+    let running = chat_active || ext.is_running();
+    let live_running = ext.live_running;
+    let registry_live = ext.registry_live;
+    let controller = ext.controller;
+    let compaction_phase_started_at = ext.compaction_phase_started_at;
+    let compaction_owner = ext.compaction_owner;
+    let execution_revision = ext.execution_revision;
     let meta = SessionRuntimeRegistry::global()
         .list_all()
         .into_iter()
         .find(|entry| entry.session_id == session_id);
-    let turn_id = state
-        .active_chats
-        .admitted_user_for_session(&session_id)
-        .await
-        .and_then(|user| user.client_input_id);
-    let compaction_phase_started_at = compaction_started_at(&session_id);
-    let compaction_owner = compaction_owner(&session_id);
-    let execution_revision = execution_phase_revision(&session_id);
-    let running = chat_active
-        || live_running
-        || registry_live
-        || controller.loop_active
-        || controller.goal_active
-        // 阶段登记本身就是“有人在跑”的证据：手动 `/live/compact` 在空闲 runtime
-        // 上执行时，上述四个信号都可能为假。
-        || compaction_phase_started_at.is_some();
+    let turn_id = if chat_active {
+        state
+            .active_chats
+            .admitted_user_for_session(&session_id)
+            .await
+            .and_then(|user| user.client_input_id)
+    } else {
+        None
+    };
     // `/chat` 操作自己的 status 与压缩登记表取并集：自动压缩过去只广播事件、
     // 不写操作状态，刷新后客户端就丢了 `Compacting…`；native live 更没有操作状态。
     let status =
@@ -19161,7 +22205,7 @@ async fn chat_runtime(
     .into_response()
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct RuntimeSessionRow {
     session_id: String,
     working_dir: String,
@@ -19357,34 +22401,7 @@ async fn get_notify_focus() -> impl IntoResponse {
 
 /// GET /runtime/sessions — live runners with activity (OpenCode-style registry view).
 async fn runtime_sessions() -> impl IntoResponse {
-    use jeikcode_coding::session_runtime_registry::{RuntimeActivity, SessionRuntimeRegistry};
-
-    fn activity_label(activity: RuntimeActivity) -> &'static str {
-        match activity {
-            RuntimeActivity::Starting => "starting",
-            RuntimeActivity::Ready => "ready",
-            RuntimeActivity::Running => "running",
-            RuntimeActivity::WaitingApproval => "waiting_approval",
-            RuntimeActivity::WaitingUserInput => "waiting_user_input",
-            RuntimeActivity::Reconfiguring => "reconfiguring",
-            RuntimeActivity::Stopping => "stopping",
-            RuntimeActivity::Stopped => "stopped",
-            RuntimeActivity::Failed => "failed",
-        }
-    }
-
-    let rows: Vec<RuntimeSessionRow> = SessionRuntimeRegistry::global()
-        .list_all()
-        .into_iter()
-        .map(|entry| RuntimeSessionRow {
-            session_id: entry.session_id,
-            working_dir: entry.working_dir.to_string_lossy().into_owned(),
-            activity: activity_label(entry.activity).to_string(),
-            last_terminal: entry.last_terminal,
-            terminal_seq: entry.terminal_seq,
-        })
-        .collect();
-    Json(rows)
+    Json(collect_runtime_session_rows())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -19423,7 +22440,7 @@ async fn chat_pending(
     let (permission, user_input) = state.active_chats.pending_interactive(&session_id).await;
     // Auto never parks on tool approval. A leftover pending_permission.json from
     // Build must not resurrect a ghost card after the user switched to Auto.
-    let auto_mode = live_api::live_session_approval_mode(Some(&session_id))
+    let auto_mode = live_api::live_session_approval_mode_async(Some(&session_id)).await
         == crate::approval_mode::ApprovalMode::Auto;
     let mut permission_json = if auto_mode {
         None
@@ -19953,6 +22970,7 @@ pub(crate) async fn reload_mcp_and_live_runtime(
 
 async fn mcp_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
     let runtime_reloaded = reload_mcp_and_live_runtime(&state, true, None).await;
+    crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged { working_dir: None });
     Json(serde_json::json!({
         "ok": runtime_reloaded,
         "status": "reloading",
@@ -20074,7 +23092,11 @@ async fn mcp_add(
             .into_response();
     }
 
-    let runtime_reloaded = reload_mcp_and_live_runtime(&state, true, Some(project_dir)).await;
+    let runtime_reloaded =
+        reload_mcp_and_live_runtime(&state, true, Some(project_dir.clone())).await;
+    crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged {
+        working_dir: Some(project_dir.to_string_lossy().to_string()),
+    });
 
     (
         StatusCode::OK,
@@ -20169,7 +23191,11 @@ async fn mcp_remove_internal(
             .into_response();
     }
 
-    let runtime_reloaded = reload_mcp_and_live_runtime(state, true, Some(project_dir)).await;
+    let runtime_reloaded =
+        reload_mcp_and_live_runtime(state, true, Some(project_dir.clone())).await;
+    crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged {
+        working_dir: Some(project_dir.to_string_lossy().to_string()),
+    });
 
     (
         StatusCode::OK,
@@ -20349,9 +23375,14 @@ async fn capabilities_toggle(
     let runtime_reloaded = reload_mcp_and_live_runtime(
         &state,
         matches!(req.kind, jeikcode_capabilities::control::CapKind::Mcp),
-        Some(working_dir),
+        Some(working_dir.clone()),
     )
     .await;
+    // 能力开关是项目级持久化设置：广播给所有实例，其他 WebUI/TUI 面板立即刷新，
+    // 而不是等下一次手动打开或整页刷新。
+    crate::publish_global(crate::GlobalWireEvent::CapabilitiesChanged {
+        working_dir: Some(working_dir.to_string_lossy().to_string()),
+    });
     (
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "runtime_reloaded": runtime_reloaded })),
@@ -20536,17 +23567,27 @@ static WEBUI: std::sync::Mutex<Option<WebuiHandle>> = std::sync::Mutex::new(None
 
 async fn try_terminate_stale_daemon_on_port(port: u16) -> bool {
     let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-    let Ok(stream) =
-        std::net::TcpStream::connect_timeout(&loopback, std::time::Duration::from_millis(30))
+    let Ok(Ok(stream)) = tokio::time::timeout(
+        Duration::from_millis(30),
+        tokio::net::TcpStream::connect(&loopback),
+    )
+    .await
     else {
         return false;
     };
     drop(stream);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(600))
-        .build();
-    let Ok(client) = client else { return false };
+    let spec = jeikcode_capabilities::http_pool::HttpClientSpec {
+        connect_timeout: Duration::from_millis(300),
+        request_timeout: Some(Duration::from_millis(600)),
+        pool_idle_timeout: Some(Duration::from_secs(15)),
+        skip_tls_verify: false,
+        force_tls12: false,
+        user_agent: None,
+    };
+    let Ok(client) = jeikcode_capabilities::http_pool::shared_http_client(&spec) else {
+        return false;
+    };
     let health_url = format!("http://127.0.0.1:{port}/health");
     if let Ok(resp) = client.get(&health_url).send().await {
         if resp.status().is_success() {
@@ -20878,6 +23919,7 @@ pub async fn ensure_webui(
     fixed_token: Option<&str>,
     session_id: Option<&str>,
 ) -> String {
+    crate::logging::init_process_file_logging("jeikcode-daemon.log", "jeikcode-daemon");
     // 1) 短临界区判定能否复用仍在运行的 server（std Mutex guard 不可跨 .await）。
     //    复用时连同其绑定地址一起取出：换绑需先 /webui stop。
     let reuse = {
@@ -22012,6 +25054,7 @@ pub struct ServerOpts {
 /// calling this; see `src/main.rs`.
 pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     use axum::routing::{patch, put};
+    crate::logging::init_process_file_logging("jeikcode-daemon.log", "jeikcode-daemon");
 
     let ServerOpts {
         host,
@@ -22041,6 +25084,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
                 "serve: --yolo enabled (auto-approve tools; request_user_input tool hidden; no modal stalls)"
             );
         }
+    } else {
+        // 非 --yolo 启动时，按系统设置恢复默认权限模式策略（记忆模式 vs 全局指定模式）。
+        live_api::init_agent_mode_from_desktop_settings();
+        crate::api_config::init_runtime_model_switch_from_desktop_settings();
     }
 
     // Step 1: Load config (R1.1, R1.5) — tolerate errors, fallback to default.
@@ -22190,7 +25237,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         // does the one-time-token → HttpOnly-cookie handoff (CWE-598); the
         // fallback serves SPA routes/assets and never carries a token.
         .route("/", axum::routing::get(serve_webui_index))
-        .fallback(webui::serve_webui);
+        .fallback(serve_webui_fallback);
 
     // 受保护路由：所有数据/API 端点。仅 webui 模式（enforce_token=true）强制 token 鉴权；
     // 独立 daemon/VSCode（enforce_token=false）中间件直接放行（见 auth_token.rs）。
@@ -22303,6 +25350,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/chat/pending", get(chat_pending))
         // Reattach to a turn started by another client (OpenAI API / another tab).
         .route("/chat/watch", get(chat_watch))
+        .route("/stream/ws", get(stream_ws_handler))
+        .route("/api/bootstrap", get(bootstrap_handler))
         // 跨实例增量推送（会话行/活动/待交互卡片）——所有实例共用的唯一全局信道。
         // 经 helper 挂载：与路由级测试共用同一份定义。
         .merge(with_global_events_route(Router::<AppState>::new()))
@@ -22470,6 +25519,27 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             "/provider-accounts/:id",
             put(api_provider::create_or_update_provider_account)
                 .delete(api_provider::delete_provider_account),
+        )
+        // Scheduled Tasks API（定时任务调度 CRUD + 隔离式 AI 设定对话区）
+        .route(
+            "/api/schedules",
+            get(api_schedule::list_schedules_api).post(api_schedule::create_schedule_api),
+        )
+        .route(
+            "/api/schedules/ai-dialog",
+            post(api_schedule::ai_schedule_dialog_api),
+        )
+        .route(
+            "/api/schedules/:id",
+            put(api_schedule::update_schedule_api).delete(api_schedule::delete_schedule_api),
+        )
+        .route(
+            "/api/schedules/:id/toggle",
+            post(api_schedule::toggle_schedule_api),
+        )
+        .route(
+            "/api/schedules/:id/run",
+            post(api_schedule::run_schedule_now_api),
         );
     let protected = api_update::register_update_routes(protected)
         .route_layer(axum::middleware::from_fn_with_state(
@@ -22495,6 +25565,22 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .layer(cors_layer())
         .layer(compression_layer());
     let _ = router_slot.set(app.clone());
+
+    // Warm the lightweight update badge cache before the first browser poll.
+    tokio::spawn(async move {
+        api_update::prewarm_update_check().await;
+    });
+    // Warm the session catalog in the blocking pool so first WebUI bootstrap
+    // does not pay the O(N) directory scan on the request path.
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(|| {
+            let _ = NativeSessionManager::scan_all();
+        })
+        .await;
+    });
+
+    // 启动 daemon 后台定时任务调度引擎（仅单点执行，防止多端重复触发）
+    api_schedule::start_schedule_engine(state.clone());
 
     // Spawn idle timeout watchdog task
     spawn_idle_timeout_task(
@@ -22703,8 +25789,12 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     )
     .await;
 
-    // Step 12: Start background Git platform polling engine
+    // Step 12: Start background Git platform polling engine and Tokio reactor watchdog
     let polling_task = git_adapter::polling::start_git_polling_engine(state.clone());
+    let watchdog_task = watchdog::spawn_reactor_watchdog(
+        state.active_chats.clone(),
+        state.active_connections.clone(),
+    );
 
     // Step 13: Serve with graceful shutdown (R10.1-R10.5).
     // Optional second listener for IPv6 when dual-stack was requested.
@@ -22735,9 +25825,11 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         let _ = handle.await;
     }
 
-    // Stop background Git platform polling engine
+    // Stop background Git platform polling engine and reactor watchdog
     polling_task.abort();
     let _ = polling_task.await;
+    watchdog_task.abort();
+    let _ = watchdog_task.await;
 
     // Reap project-scoped and session-scoped stdio MCP trees with this host.
     jeikcode_capabilities::mcp::shutdown_all_mcp_pools().await;
@@ -23453,6 +26545,8 @@ mod tests {
             Some("jeik"),
             None,
             None,
+            Some(crate::approval_mode::ApprovalMode::Plan),
+            false,
         )
         .unwrap();
 
@@ -23460,6 +26554,7 @@ mod tests {
         let loaded = manager.load_native_session(session_id).unwrap();
         assert!(loaded.snapshot.messages.is_empty());
         assert_eq!(loaded.meta.name, "jeik");
+        assert_eq!(loaded.meta.approval_mode.as_deref(), Some("bypass"));
         assert!(loaded.meta.user_renamed);
         assert!(matches!(
             event_rx.try_recv(),
@@ -23501,12 +26596,15 @@ mod tests {
             None,
             Some("帮我写一个快速排序算法"),
             None,
+            Some(crate::approval_mode::ApprovalMode::AcceptEdits),
+            false,
         )
         .unwrap();
 
         let manager = NativeSessionManager::for_project(&working_dir);
         let loaded = manager.load_native_session(session_id).unwrap();
         assert_eq!(loaded.meta.name, "帮我写一个快速排序算法");
+        assert_eq!(loaded.meta.approval_mode.as_deref(), Some("accept_edits"));
         assert!(!loaded.meta.user_renamed);
         assert!(!loaded.meta.ai_named);
         assert!(matches!(
@@ -23536,6 +26634,8 @@ mod tests {
             Some("default"),
             None,
             None,
+            None,
+            false,
         );
 
         assert!(result.is_err());
@@ -24053,6 +27153,7 @@ mod tests {
             approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
             extra_system_append: None,
             session_title: None,
+            is_scheduled: false,
         };
 
         let first = chat_stream(
@@ -24105,6 +27206,7 @@ mod tests {
                 approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
                 extra_system_append: None,
                 session_title: None,
+                is_scheduled: false,
             }),
         )
         .await
@@ -24275,15 +27377,14 @@ mod tests {
             .await;
 
         {
-            let index = registry.inner.read().await;
-            let watchers = index.standby_watchers.get(session_id).unwrap();
+            let watchers = registry.standby_watcher_keys(session_id).await;
             assert_eq!(
                 watchers.len(),
                 2,
                 "both local and remote standby watchers must be kept concurrently"
             );
-            assert!(watchers.contains_key("client-local"));
-            assert!(watchers.contains_key("client-remote"));
+            assert!(watchers.iter().any(|k| k == "client-local"));
+            assert!(watchers.iter().any(|k| k == "client-remote"));
         }
 
         // 3. 本机端 client-local 刷新页面，重新注册（相同的 client_id 必须原地覆盖，不堆积多余连接）
@@ -24293,8 +27394,7 @@ mod tests {
             .await;
 
         {
-            let index = registry.inner.read().await;
-            let watchers = index.standby_watchers.get(session_id).unwrap();
+            let watchers = registry.standby_watcher_keys(session_id).await;
             assert_eq!(
                 watchers.len(),
                 2,
@@ -24588,6 +27688,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_status_for_session_clears_on_mark_terminal_before_complete() {
+        let registry = ActiveChatRegistry::default();
+        let admission = registry.admit(Some("session-rt"), None).await.unwrap();
+        registry
+            .set_operation_status(&admission.operation_id, Some("running".to_string()))
+            .await;
+
+        let (active_before, status_before, started_before) =
+            registry.runtime_status_for_session("session-rt").await;
+        assert!(active_before);
+        assert_eq!(status_before.as_deref(), Some("running"));
+        assert!(started_before.is_some());
+
+        registry
+            .mark_terminal(
+                &admission.operation_id,
+                &ChatEvent::Done {
+                    tokens: 1,
+                    tool_calls: 0,
+                    session_id: "session-rt".to_string(),
+                    stop_reason: None,
+                    message: None,
+                    message_id: None,
+                },
+            )
+            .await;
+
+        let (active_after_terminal, status_after, started_after) =
+            registry.runtime_status_for_session("session-rt").await;
+        assert!(!active_after_terminal);
+        assert_eq!(status_after, None);
+        assert_eq!(started_after, None);
+
+        registry.complete(&admission.operation_id).await;
+        let (active_after_complete, _, _) = registry.runtime_status_for_session("session-rt").await;
+        assert!(!active_after_complete);
+    }
+
+    #[tokio::test]
     async fn chat_panic_cleanup_removes_operation_and_allows_resubmit() {
         let active_chats = ActiveChatRegistry::default();
         let admission = active_chats.admit(Some("session-1"), None).await.unwrap();
@@ -24802,6 +27941,7 @@ mod tests {
                 approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
                 extra_system_append: None,
                 session_title: None,
+                is_scheduled: false,
             },
             event_tx,
             admission.cancellation,
@@ -25238,6 +28378,7 @@ mod tests {
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: jeikcode_capabilities::session::SessionOrigin::Manual,
             presence: CatalogPresence::NativeOnly,
         };
 
@@ -25532,6 +28673,7 @@ mod tests {
                 approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
                 extra_system_append: None,
                 session_title: None,
+                is_scheduled: false,
             },
             event_tx,
             admission.cancellation,
@@ -25583,6 +28725,7 @@ mod tests {
             auto_resuming: false,
             server_message: None,
             message_id: None,
+            event_id: None,
         })
         .unwrap();
         // auto_resuming=false serializes as false (not omitted, since serde(default) only affects deserialization)
@@ -25691,6 +28834,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 1,
                 model_usage: vec![],
+                stop_reason: None,
             },
             TurnStat {
                 after_message: 5,
@@ -25704,6 +28848,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 1,
                 model_usage: vec![],
+                stop_reason: None,
             },
         ];
         stamp_turn_elapsed_on_last_assistants(&mut messages, &stats);
@@ -25778,6 +28923,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 1,
             model_usage: vec![],
+            stop_reason: None,
         }];
         stamp_turn_elapsed_on_last_assistants(&mut messages, &stats);
         // messages[1]（中间阶段 Assistant）保留自身单轮耗时，不被整体覆盖
@@ -25843,6 +28989,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 1,
             model_usage: vec![],
+            stop_reason: None,
         }];
         stamp_turn_elapsed_on_last_assistants(&mut messages, &stats_single_last);
         assert_eq!(
@@ -25892,15 +29039,7 @@ mod tests {
             role: "user".into(),
             id: Some(id.into()),
             content: id.into(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
-            created_at: None,
-            elapsed_ms: None,
+            ..Default::default()
         }
     }
 
@@ -26973,15 +30112,8 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
                 role: "user".into(),
                 id: None,
                 content: "DISPLAY ONLY Q".into(),
-                reasoning: None,
-                synthetic: false,
-                internal_origin: None,
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                is_error: false,
-                images: Vec::new(),
                 created_at: Some(1),
-                elapsed_ms: None,
+                ..Default::default()
             },
             DisplayRecord {
                 v: DISPLAY_VERSION,
@@ -26992,15 +30124,8 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
                 role: "assistant".into(),
                 id: None,
                 content: "DISPLAY ONLY A".into(),
-                reasoning: None,
-                synthetic: false,
-                internal_origin: None,
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                is_error: false,
-                images: Vec::new(),
                 created_at: Some(2),
-                elapsed_ms: None,
+                ..Default::default()
             },
         ];
         manager.write_display_backfill(id, &records, 0).unwrap();
@@ -27854,6 +30979,7 @@ mod rewind_consistency_tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: Vec::new(),
+            stop_reason: None,
         }
     }
 
@@ -28038,6 +31164,7 @@ mod v4_coverage_tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: Vec::new(),
+            stop_reason: None,
         }
     }
 
@@ -28064,6 +31191,7 @@ mod v4_coverage_tests {
                 images: Vec::new(),
                 created_at: Some(1),
                 elapsed_ms: None,
+                ..Default::default()
             }
         }
 
@@ -28207,6 +31335,7 @@ mod v4_coverage_tests {
                 images: Vec::new(),
                 created_at: Some(index as u64),
                 elapsed_ms: None,
+                ..Default::default()
             })
             .collect();
         manager.write_display_backfill("s1", &rows, 1000).unwrap();
@@ -28265,6 +31394,7 @@ mod v4_coverage_tests {
                 images: Vec::new(),
                 created_at: Some(index as u64),
                 elapsed_ms: None,
+                ..Default::default()
             })
             .collect();
         manager.write_display_backfill(id, &rows, 50).unwrap();
@@ -28282,6 +31412,64 @@ mod v4_coverage_tests {
         assert_eq!(view.turns.len(), 50);
         assert_eq!(view.messages[0].content, "row 90");
         assert_eq!(view.turns.last().unwrap().index, 98);
+    }
+
+    #[test]
+    fn v4_tail_view_snaps_past_mid_turn_steers_to_turn_root() {
+        use jeikcode_capabilities::session::{
+            DisplayRecord, PresentationFile, SessionMeta, StorageOwner,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = NativeSessionManager::with_root(dir.path());
+        let id = "tail-view-steer-root";
+        let make = |idx: u32, turn_id: u64, role: &str, content: &str| DisplayRecord {
+            v: jeikcode_capabilities::session::DISPLAY_VERSION,
+            session_id: id.into(),
+            turn_id,
+            index: idx,
+            seq: 0,
+            role: role.into(),
+            id: Some(format!("m-{idx}")),
+            content: content.into(),
+            created_at: Some((idx as u64 + 1) * 1_000),
+            ..Default::default()
+        };
+        let rows = vec![
+            make(0, 1, "user", "第1轮根提问"),
+            make(1, 1, "assistant", "第1轮回答"),
+            make(2, 2, "user", "第2轮根提问"),
+            make(3, 2, "assistant", "第2轮阶段回答"),
+            make(
+                4,
+                2,
+                "user",
+                "<user-query>\n中途 steer 1\n</user-query>\n\n[jeikcode-steer]",
+            ),
+            make(5, 2, "assistant", "steer1后回答"),
+            make(
+                6,
+                2,
+                "user",
+                "<user-query>\n中途 steer 2\n</user-query>\n\n[jeikcode-steer]",
+            ),
+            make(7, 2, "assistant", "第2轮最终回答"),
+        ];
+        manager.write_display_backfill(id, &rows, 2).unwrap();
+        let mut meta = SessionMeta::new(id, "/p", 1);
+        meta.owner = StorageOwner::Native;
+        let session = crate::legacy_convert::CatalogSessionView {
+            snapshot: jeikcode_kernel::message::SessionSnapshot::new(Vec::new()),
+            meta,
+            presentation: PresentationFile::default(),
+        };
+        // tail = 3 -> 原本落在 index 5 (assistant), 向前回退若停在 index 4 (steer 1) 会把第2轮拦腰切开；
+        // 必须一直回退到第2轮根提问 index 2，同时右侧大纲仍包含所有 steer 条目。
+        let view = read_display_tail_view(&manager, &session, 3, None, false, 0).unwrap();
+        assert_eq!(view.offset, 2);
+        assert_eq!(view.messages.len(), 6);
+        assert_eq!(view.messages[0].id.as_deref(), Some("m-2"));
+        assert_eq!(view.turns.len(), 4);
     }
 
     fn prompt(text: &str, id: &str) -> Message {
@@ -28407,6 +31595,8 @@ mod client_identity_tests {
             created_at: 1,
             message_id: Some("m-kernel-1".into()),
             operation_id: None,
+            anchor_message_id: None,
+            turn_id: None,
         }];
         let map = client_input_identity_map(inputs);
         let mut rows = vec![
@@ -28424,5 +31614,636 @@ mod client_identity_tests {
         annotate_client_input_ids_with(&mut rows, &map);
         assert_eq!(rows[0].client_input_id.as_deref(), Some("client-steer-1"));
         assert_eq!(rows[1].client_input_id, None);
+    }
+
+    #[tokio::test]
+    async fn token_path_fallback_redirects_to_query_token() {
+        let uri: axum::http::Uri = "/token=abc-123-xyz".parse().unwrap();
+        let resp = serve_webui_fallback(uri).await;
+        assert!(resp.status().is_redirection());
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/?token=abc-123-xyz")
+        );
+    }
+
+    #[test]
+    fn from_kernel_in_preserves_notice_meta_and_infers_legacy_diagnostics() {
+        use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus};
+        use jeikcode_kernel::message::{Message, MessageNoticeMeta, TURN_DIAGNOSTIC_ORIGIN};
+
+        let mut structured = Message::assistant("Round limit (300) reached", Vec::new());
+        structured.id = Some("warn-max-rounds:4".into());
+        structured.internal_origin = Some(TURN_DIAGNOSTIC_ORIGIN.into());
+        structured.notice = Some(MessageNoticeMeta {
+            kind: NoticeKind::Warning,
+            severity: NoticeSeverity::Warning,
+            status: NoticeStatus::Settled,
+            event_id: Some("warn-max-rounds:4".into()),
+            part_id: Some("warn-max-rounds:4:1:notice".into()),
+            anchor_message_id: Some("m-anchor-1".into()),
+            anchor_part_id: None,
+            revision: Some(1),
+        });
+        let projected = MessageInfo::from_kernel_in(&structured, None);
+        let n = projected
+            .notice
+            .expect("structured Message.notice must project");
+        assert_eq!(n.event_id.as_deref(), Some("warn-max-rounds:4"));
+        assert_eq!(n.notice_kind, Some(NoticeKind::Warning));
+        assert_eq!(n.severity, Some(NoticeSeverity::Warning));
+        assert_eq!(n.status, Some(NoticeStatus::Settled));
+        assert_eq!(n.anchor_message_id.as_deref(), Some("m-anchor-1"));
+
+        let mut legacy = Message::assistant("max rounds (230) reached", Vec::new());
+        legacy.internal_origin = Some(TURN_DIAGNOSTIC_ORIGIN.into());
+        let projected_legacy = MessageInfo::from_kernel_in(&legacy, None);
+        let ln = projected_legacy
+            .notice
+            .expect("legacy turn_diagnostic must not degrade to notice: None");
+        assert_eq!(ln.severity, Some(NoticeSeverity::Error));
+        assert_eq!(ln.status, Some(NoticeStatus::Settled));
+    }
+}
+
+#[cfg(test)]
+mod session_b95e_regression_tests {
+    use super::*;
+    use jeikcode_capabilities::session::{DisplayMeta, SessionInput, TurnRecord, TurnStat};
+    use jeikcode_kernel::message::Message;
+
+    fn test_turn(turn_id: u64, ts: i64, user: &str, assistant: &str) -> TurnRecord {
+        TurnRecord {
+            v: 1,
+            ts,
+            iso: String::new(),
+            session_id: "s-b95e".into(),
+            turn_id,
+            user: user.into(),
+            assistant: assistant.into(),
+            reasoning: String::new(),
+            tools: Vec::new(),
+            usage: Default::default(),
+        }
+    }
+
+    fn test_stat(
+        turn_id: u64,
+        after_message: usize,
+        position_valid: bool,
+        duration_ms: u64,
+    ) -> TurnStat {
+        TurnStat {
+            after_message,
+            position_valid,
+            turn_id,
+            round_count: 1,
+            tool_call_count: 0,
+            duration_ms,
+            total_tokens: 10,
+            errored: false,
+            used_tokens: 10,
+            ctx_window: 100,
+            model_usage: Vec::new(),
+            stop_reason: None,
+        }
+    }
+
+    fn test_msg_info(
+        role: &str,
+        id: Option<&str>,
+        content: &str,
+        created_at: Option<u64>,
+        turn_id: Option<u64>,
+        synthetic: bool,
+    ) -> MessageInfo {
+        message_info! {
+            turn_id,
+            seq: None,
+            role: role.into(),
+            id: id.map(str::to_string),
+            content: content.into(),
+            reasoning: None,
+            synthetic,
+            internal_origin: None,
+            tool_calls: None,
+            tool_result: None,
+            artifacts: None,
+            images: None,
+            created_at,
+            elapsed_ms: None,
+        }
+    }
+
+    #[test]
+    fn v4_coverage_ignores_sacred_pre_anchor_user_and_self_heals_missing_steers_once() {
+        let session_id = format!("b95e-heal-loop-{}", std::process::id());
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+
+        // 模拟 b95e4225：snap[7] 是 sacred_floor 保留下来的旧初代用户消息（位于 anchor 之前），
+        // anchor 之后是较新的第 5 轮提问与回答；turn_stats 里有 1 个历史错位（position_valid: false）
+        // 与 1 个锚点后新 TurnStat。
+        let mut sacred_u1 = Message::user("你好");
+        sacred_u1.id = Some("m-7f10b616".into());
+        sacred_u1.created_at_ms = 1_763_561_100_000;
+
+        let anchor = Message::synthetic_user("<!-- jeikcode:anchor v1 -->\ncompaction summary");
+
+        let mut u5 = Message::user("第5轮提问");
+        u5.id = Some("m-u5".into());
+        u5.created_at_ms = 1_763_566_000_000;
+
+        let mut a5 = Message::assistant("第5轮回答", Vec::new());
+        a5.id = Some("m-a5".into());
+        a5.created_at_ms = 1_763_566_034_000;
+
+        let snapshot = vec![sacred_u1, anchor, u5, a5];
+        let stats = vec![
+            test_stat(4, 1, false, 1_255_000),
+            test_stat(5, 4, true, 34_000),
+        ];
+
+        // 即使 sacred_u1 ("m-7f10b616") 不在 display_ids（旧覆盖缺陷），
+        // 只要锚点之后已完成轮次全在 display_ids，v4_display_covers_completed_user_turns 必须为 true。
+        let meta = DisplayMeta {
+            v: jeikcode_capabilities::session::DISPLAY_VERSION,
+            complete: true,
+            backfilled: true,
+            last_turn_id: 5,
+            completed_turns: vec![5],
+            ..DisplayMeta::default()
+        };
+        let mut display_ids: std::collections::HashSet<String> =
+            ["transcript-1-user", "m-u5", "m-a5"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        assert!(v4_display_covers_completed_user_turns(
+            &meta,
+            &display_ids,
+            &snapshot,
+            &stats,
+            5,
+        ));
+
+        // 存入一条压缩边界前（1_763_562_000_000 < 1_763_566_000_000）的历史 promoted steer。
+        let mut old_steer = SessionInput {
+            id: "cli-steer-4".into(),
+            seq: 1,
+            session_id: session_id.clone(),
+            delivery: "steer".into(),
+            status: "promoted".into(),
+            text: "中途插入的 steer".into(),
+            images: Vec::new(),
+            created_at: 1_763_562_000_000,
+            message_id: Some("m-steer-4".into()),
+            operation_id: Some("op-4".into()),
+            anchor_message_id: None,
+            turn_id: Some(4),
+        };
+        jeikcode_capabilities::session::inputs::append_global(&mut old_steer).unwrap();
+
+        // 首次读到被旧回填遗漏 steer 的 backfilled 日志时，应触发一次自愈。
+        assert!(display_needs_compacted_steer_heal(
+            &meta,
+            &display_ids,
+            &snapshot,
+            &session_id,
+        ));
+
+        // 自愈重建把 m-steer-4 写入 display.jsonl 后，后续读取不再重复自愈。
+        display_ids.insert("m-steer-4".into());
+        assert!(!display_needs_compacted_steer_heal(
+            &meta,
+            &display_ids,
+            &snapshot,
+            &session_id,
+        ));
+
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+    }
+
+    #[test]
+    fn append_pending_inputs_blocks_stale_promoted_steers_when_idle_and_anchors_active_ones() {
+        let session_id = format!("b95e-pending-anchor-{}", std::process::id());
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+
+        // 历史 Turn 4 promoted steer（1_000） + 更新的 Turn 5 prompt（2_000） + 当前活跃 op-6 steer（3_500）
+        let mut stale_steer = SessionInput {
+            id: "old-steer-1".into(),
+            seq: 1,
+            session_id: session_id.clone(),
+            delivery: "steer".into(),
+            status: "promoted".into(),
+            text: "压缩前的旧 steer".into(),
+            images: Vec::new(),
+            created_at: 1_000,
+            message_id: Some("m-old-steer".into()),
+            operation_id: Some("op-4".into()),
+            anchor_message_id: None,
+            turn_id: Some(4),
+        };
+        let mut newer_prompt = SessionInput {
+            id: "prompt-5".into(),
+            seq: 2,
+            session_id: session_id.clone(),
+            delivery: "prompt".into(),
+            status: "promoted".into(),
+            text: "第5轮新提问".into(),
+            images: Vec::new(),
+            created_at: 2_000,
+            message_id: Some("m-u5".into()),
+            operation_id: Some("op-5".into()),
+            anchor_message_id: None,
+            turn_id: Some(5),
+        };
+        let mut active_steer = SessionInput {
+            id: "active-steer-6".into(),
+            seq: 3,
+            session_id: session_id.clone(),
+            delivery: "steer".into(),
+            status: "promoted".into(),
+            text: "按因果锚点插回本轮中段的 steer".into(),
+            images: Vec::new(),
+            created_at: 3_500,
+            message_id: Some("m-steer-6".into()),
+            operation_id: Some("op-6".into()),
+            anchor_message_id: Some("m-asst-6-1".into()),
+            turn_id: Some(6),
+        };
+        jeikcode_capabilities::session::inputs::append_global(&mut stale_steer).unwrap();
+        jeikcode_capabilities::session::inputs::append_global(&mut newer_prompt).unwrap();
+
+        // 1. 会话空闲（operation_id == None）时，旧 steer 绝不能被拉到 Turn 5 尾巴末尾。
+        let mut idle_msgs = vec![
+            test_msg_info(
+                "user",
+                Some("m-u5"),
+                "第5轮新提问",
+                Some(2_000),
+                Some(5),
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-asst-5"),
+                "第5轮回答",
+                Some(2_010),
+                Some(5),
+                false,
+            ),
+        ];
+        let mut idle_turns = session_user_outline(&idle_msgs);
+        append_pending_inputs(
+            &mut idle_msgs,
+            &mut idle_turns,
+            &session_id,
+            None,
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert_eq!(idle_msgs.len(), 2);
+        assert!(idle_msgs
+            .iter()
+            .all(|m| m.id.as_deref() != Some("m-old-steer")));
+        assert!(idle_turns
+            .iter()
+            .all(|t| t.id.as_deref() != Some("m-old-steer")));
+
+        // 2. 在 Turn 6 运行期（operation_id == Some("op-6")），active_steer 必须精准插在
+        // m-asst-6-1 之后、m-asst-6-2（更新轮次的正在输出正文）之前，大纲同步保持按 index 递增。
+        jeikcode_capabilities::session::inputs::append_global(&mut active_steer).unwrap();
+        let mut live_msgs = vec![
+            test_msg_info(
+                "user",
+                Some("m-u6"),
+                "第6轮提问",
+                Some(3_000),
+                Some(6),
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-asst-6-1"),
+                "第一轮阶段思考",
+                Some(3_100),
+                Some(6),
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-asst-6-2"),
+                "折入 steer 后的下一轮回答",
+                Some(3_800),
+                Some(6),
+                false,
+            ),
+        ];
+        let mut live_turns = session_user_outline(&live_msgs);
+        append_pending_inputs(
+            &mut live_msgs,
+            &mut live_turns,
+            &session_id,
+            Some("op-6"),
+            std::path::Path::new("/project"),
+            0,
+        );
+        let ids: Vec<_> = live_msgs.iter().map(|m| m.id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                Some("m-u6"),
+                Some("m-asst-6-1"),
+                Some("m-steer-6"),
+                Some("m-asst-6-2"),
+            ]
+        );
+        assert!(live_turns.windows(2).all(|w| w[0].index < w[1].index));
+        assert_eq!(live_turns.len(), 2);
+        assert_eq!(live_turns[1].index, 2);
+
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+    }
+
+    #[test]
+    fn prefix_with_inputs_and_splice_preserve_turn4_steers_sacred_id_and_clocks() {
+        let turns = vec![
+            test_turn(1, 2_000, "你好", "你好，请说"),
+            test_turn(4, 5_000, "做个长重构", "重构完成"),
+            test_turn(5, 8_000, "第5轮", "收到"),
+        ];
+        let inputs = vec![
+            SessionInput {
+                id: "cli-u4".into(),
+                seq: 1,
+                session_id: "s".into(),
+                delivery: "prompt".into(),
+                status: "promoted".into(),
+                text: "做个长重构".into(),
+                images: Vec::new(),
+                created_at: 3_000,
+                message_id: Some("m-u4".into()),
+                operation_id: Some("op-4".into()),
+                anchor_message_id: None,
+                turn_id: Some(4),
+            },
+            SessionInput {
+                id: "cli-s1".into(),
+                seq: 2,
+                session_id: "s".into(),
+                delivery: "steer".into(),
+                status: "promoted".into(),
+                text: "顺便修下测试".into(),
+                images: Vec::new(),
+                created_at: 3_500,
+                message_id: Some("m-s1".into()),
+                operation_id: Some("op-4".into()),
+                anchor_message_id: None,
+                turn_id: Some(4),
+            },
+            SessionInput {
+                id: "cli-s2".into(),
+                seq: 3,
+                session_id: "s".into(),
+                delivery: "steer".into(),
+                status: "promoted".into(),
+                text: "再加一条断言".into(),
+                images: Vec::new(),
+                created_at: 4_000,
+                message_id: Some("m-s2".into()),
+                operation_id: Some("op-4".into()),
+                anchor_message_id: None,
+                turn_id: Some(4),
+            },
+        ];
+        let prefix = display_prefix_from_transcript_with_inputs(
+            &turns,
+            &inputs,
+            std::path::Path::new("."),
+            Some(7_000),
+            Some("第5轮"),
+        );
+
+        let mut sys = test_msg_info("system", None, "system prompt", Some(1_000), None, false);
+        sys.seq = None;
+        let sacred = test_msg_info("user", Some("m-7f10b616"), "你好", Some(1_500), None, false);
+        let anchor = test_msg_info(
+            "user",
+            None,
+            "<!-- jeikcode:anchor v1 -->\nsummary",
+            Some(5_100),
+            None,
+            true,
+        );
+        let tail_u5 = test_msg_info("user", Some("m-u5"), "第5轮", Some(7_000), None, false);
+        let tail_a5 = test_msg_info(
+            "assistant",
+            Some("m-a5"),
+            "收到",
+            Some(8_000),
+            Some(5),
+            false,
+        );
+
+        let mut spliced =
+            splice_compacted_display(vec![sys, sacred, anchor, tail_u5, tail_a5], prefix);
+        propagate_contiguous_turn_ids(&mut spliced);
+
+        let ids: Vec<_> = spliced.iter().map(|m| m.id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                Some("m-7f10b616"),
+                Some("transcript-1-assistant"),
+                Some("m-u4"),
+                Some("m-s1"),
+                Some("m-s2"),
+                Some("transcript-4-assistant"),
+                None, // moved `system`
+                Some("m-u5"),
+                Some("m-a5"),
+            ]
+        );
+        // 幸存 sacred user 的时间戳与 id 被完整保留，搬移后的 system 不再携带会污染倒流检查的旧时间戳
+        assert_eq!(spliced[0].created_at, Some(1_500));
+        assert_eq!(spliced[6].role, "system");
+        assert_eq!(spliced[6].created_at, None);
+        assert!(is_steer_user_message(&spliced[3]));
+        assert!(is_steer_user_message(&spliced[4]));
+    }
+
+    #[test]
+    fn stamp_turn_elapsed_matches_by_turn_id_and_isolates_post_stop_steer() {
+        let mut messages = vec![
+            // Turn 1（已压缩，turn_stats 中已剪掉 turn_id=1 的统计）
+            test_msg_info("user", Some("m-u1"), "T1", Some(1_000), None, false),
+            test_msg_info(
+                "assistant",
+                Some("m-a1"),
+                "A1",
+                Some(11_000),
+                Some(1),
+                false,
+            ),
+            // Turn 4 + mid-turn steer
+            test_msg_info("user", Some("m-u4"), "T4", Some(20_000), None, false),
+            test_msg_info(
+                "user",
+                Some("m-s4"),
+                "<user-query>\nsteer4\n</user-query>\n\n[jeikcode-steer]",
+                Some(30_000),
+                None,
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-a4"),
+                "A4",
+                Some(120_000),
+                Some(4),
+                false,
+            ),
+            // Post-stop steer 开启了独立的 Turn 5
+            test_msg_info(
+                "user",
+                Some("m-s5"),
+                "<user-query>\npost-stop\n</user-query>\n\n[jeikcode-steer]",
+                Some(130_000),
+                None,
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-a5"),
+                "A5",
+                Some(164_000),
+                Some(5),
+                false,
+            ),
+        ];
+        propagate_contiguous_turn_ids(&mut messages);
+        assert_eq!(messages[0].turn_id, Some(1));
+        assert_eq!(messages[2].turn_id, Some(4));
+        assert_eq!(messages[3].turn_id, Some(4));
+        assert_eq!(messages[5].turn_id, Some(5));
+
+        let stats = vec![
+            test_stat(4, 5, false, 95_000),
+            test_stat(5, 7, true, 34_000),
+        ];
+        stamp_turn_elapsed_on_last_assistants(&mut messages, &stats);
+
+        // Turn 1 没有 TurnStat，不可错位读取 Turn 4 的 95s，回退到自身 ts 差 10s
+        assert_eq!(messages[1].elapsed_ms, Some(10_000));
+        // Turn 4 带 mid-turn steer：stat=95s vs span=100s => 100s
+        assert_eq!(messages[4].elapsed_ms, Some(100_000));
+        // Turn 5（post-stop steer 新开回合）：精确拿到 Turn 5 的 34s，绝不被合并进 Turn 4
+        assert_eq!(messages[6].elapsed_ms, Some(34_000));
+    }
+
+    #[test]
+    fn repair_display_clock_never_drags_real_midnight_messages_backward() {
+        let mut rows = vec![
+            test_msg_info(
+                "user",
+                Some("u9"),
+                "23:59提问",
+                Some(1_763_567_940_000),
+                Some(9),
+                false,
+            ),
+            test_msg_info(
+                "tool",
+                Some("t9"),
+                "tool out",
+                Some(1_763_999_999_000),
+                Some(9),
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("a9"),
+                "00:14回答",
+                Some(1_763_568_840_000),
+                Some(9),
+                false,
+            ),
+            // 极端情况下尾部出现时间戳回跳的行，也不得把 00:14 真实对话拉回 22:05
+            test_msg_info(
+                "user",
+                Some("stale"),
+                "旧异常行",
+                Some(1_763_561_131_000),
+                Some(4),
+                false,
+            ),
+        ];
+        repair_display_clock(&mut rows);
+
+        assert_eq!(rows[0].created_at, Some(1_763_567_940_000));
+        // tool 行（大于后继 assistant 00:14）仍被正确拉平到 00:14
+        assert_eq!(rows[1].created_at, Some(1_763_568_840_000));
+        // 真实跨零点 assistant 00:14 原样保留
+        assert_eq!(rows[2].created_at, Some(1_763_568_840_000));
+    }
+
+    #[tokio::test]
+    async fn active_chat_registry_shards_isolate_concurrent_sessions_and_track_count() {
+        let registry = ActiveChatRegistry::default();
+        assert_eq!(registry.active_operation_count(), 0);
+        let mut admissions = Vec::new();
+        for i in 0..30 {
+            let sid = format!("shard-sess-{i}");
+            let adm = registry
+                .admit(Some(&sid), Some(&format!("req-{i}")))
+                .await
+                .unwrap();
+            admissions.push((sid, adm.operation_id));
+        }
+        assert_eq!(registry.active_operation_count(), 30);
+
+        for (idx, (_, op_id)) in admissions.iter().enumerate() {
+            if idx % 2 == 0 {
+                assert!(registry.complete(op_id).await);
+            }
+        }
+        assert_eq!(registry.active_operation_count(), 15);
+    }
+
+    #[test]
+    fn queue_claim_shards_assign_session_locks_deterministically() {
+        let a1 = queue_claim_lock_for_session("sess-alpha") as *const _;
+        let a2 = queue_claim_lock_for_session("  sess-alpha  ") as *const _;
+        assert_eq!(a1, a2);
+
+        let distinct: std::collections::HashSet<usize> = (0..64)
+            .map(|i| queue_claim_lock_for_session(&format!("sess-{i}")) as *const _ as usize)
+            .collect();
+        assert!(distinct.len() > 8, "locks should distribute across shards");
+    }
+
+    #[test]
+    fn global_wire_frames_pre_serialize_once_with_arc_str() {
+        let mut rx1 = global_wire_frames().subscribe();
+        let mut rx2 = global_wire_frames().subscribe();
+        let unique_id = format!("zero-copy-{}", uuid::Uuid::new_v4());
+        publish_global(GlobalWireEvent::SessionSeen {
+            session_id: unique_id.clone(),
+        });
+
+        let recv_matching = |rx: &mut tokio::sync::broadcast::Receiver<SerializedGlobalFrame>| loop {
+            match rx.try_recv() {
+                Ok(frame) if frame.event_json.contains(&unique_id) => return frame,
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(e) => panic!("expected matching serialized global frame, got {e:?}"),
+            }
+        };
+        let f1 = recv_matching(&mut rx1);
+        let f2 = recv_matching(&mut rx2);
+        assert!(Arc::ptr_eq(&f1.event_json, &f2.event_json));
+        assert!(Arc::ptr_eq(&f1.ws_frame, &f2.ws_frame));
     }
 }

@@ -198,6 +198,7 @@ async fn error_turn_does_not_poison_next_prompt_on_same_session() {
     let stub = MockProvider::new(vec![
         vec![StreamEvent::Error(ProviderError {
             retryable: false,
+            resumable: false,
             message: "scripted mid-stream failure".into(),
             http_status: None,
             code: None,
