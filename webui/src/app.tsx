@@ -76,6 +76,7 @@ import { useT, useSettings, SettingsSection } from './settings';
 import { setStreamEpoch } from './lib/streamCursor';
 import { sessionMessagesToMarkdownLines } from './lib/historyMessages';
 import { onSoftRefresh, requestSoftRefresh } from './lib/appRefresh';
+import { hasEffectiveUpdate } from './lib/updateRouting';
 import {
   buildRestoreCandidates,
   forgetRememberedSession,
@@ -950,6 +951,23 @@ export function App() {
       }
     } catch {}
 
+    // 若页面由桌面壳 ?desktop=1 打开，写入 sessionStorage 以便后续 URL 参数变更后仍识别桌面窗口身份
+    try {
+      if (new URLSearchParams(window.location.search).get('desktop') === '1') {
+        sessionStorage.setItem('jeikcode_desktop', '1');
+      }
+    } catch {}
+
+    // 检查是否刚完成存量老壳“第 1 跳”内核热更，需立刻强制全量检查并提示第 2 跳外壳更新
+    let hasPendingLegacyShellCheck = false;
+    try {
+      if (sessionStorage.getItem('jeikcode_pending_legacy_shell_check') === '1') {
+        hasPendingLegacyShellCheck = true;
+        sessionStorage.removeItem('jeikcode_pending_legacy_shell_check');
+        localStorage.removeItem(UPDATE_COOLDOWN_KEY);
+      }
+    } catch {}
+
     // 自动静默检测版本更新：使用 `?summary=1` + 5 分钟跨标签页共享冷却窗口
     const fetchLatestUpdate = () => {
       if (cancelled || updateDeadRef.current) return;
@@ -1000,7 +1018,28 @@ export function App() {
         .catch(() => {});
     };
 
-    // 1.5 秒后自动静默检测版本与配置覆盖（错峰延迟）
+    // 1.5 秒后自动静默检测版本与配置覆盖（错峰延迟）；若是第 1 跳重启后的老壳则立即全量检查
+    if (hasPendingLegacyShellCheck && !updateDeadRef.current) {
+      const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
+      checkUpdate(savedChannel, { refresh: true })
+        .then((res) => {
+          if (cancelled) return;
+          setUpdateInfo(res);
+          try {
+            const chKey = savedChannel || 'default';
+            localStorage.setItem(
+              UPDATE_COOLDOWN_KEY,
+              JSON.stringify({ at: Date.now(), channel: chKey, info: res }),
+            );
+            updateChannel?.postMessage({ info: res });
+          } catch {}
+          if (res.desktop_host?.legacy_shell && res.desktop_host?.shell_has_update) {
+            setShowUpdateDialog(true);
+          }
+        })
+        .catch(() => {});
+    }
+
     const updateTimer = setTimeout(() => {
       fetchLatestUpdate();
       fetchConfigUpgrade();
@@ -1042,7 +1081,7 @@ export function App() {
       const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
       const res = await checkUpdate(savedChannel);
       setUpdateInfo(res);
-      if (res.has_update) {
+      if (hasEffectiveUpdate(res)) {
         setShowUpdateDialog(true);
       } else {
         showToast(t('update.latest', { version: res.current_version }), 'info');
@@ -1761,9 +1800,9 @@ export function App() {
             {!updateDead && (
               <button
                 type="button"
-                class={`top-nav-btn top-nav-desktop-action top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
+                class={`top-nav-btn top-nav-desktop-action top-nav-update-btn ${hasEffectiveUpdate(updateInfo) ? 'has-update' : ''}`}
                 onClick={openUpdateDialogWithFreshCheck}
-                title={updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}
+                title={hasEffectiveUpdate(updateInfo) ? t('update.hasUpdate', { version: !updateInfo?.has_update && updateInfo?.desktop_host?.latest_shell_version ? `v${updateInfo.desktop_host.latest_shell_version}` : (updateInfo?.latest_version ?? '') }) : t('update.modalTitle')}
                 aria-label={t('update.modalTitle')}
               >
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1873,7 +1912,7 @@ export function App() {
             <div class="top-nav-more-wrap" ref={topNavMoreRef}>
               <button
                 type="button"
-                class={'top-nav-btn top-nav-more-btn' + (!updateDead && updateInfo?.has_update ? ' has-update-dot' : '')}
+                class={'top-nav-btn top-nav-more-btn' + (!updateDead && hasEffectiveUpdate(updateInfo) ? ' has-update-dot' : '')}
                 onClick={() => setTopNavMoreOpen((o) => !o)}
                 title={t('sidebar.itemMenu')}
                 aria-label={t('sidebar.itemMenu')}
@@ -1921,8 +1960,8 @@ export function App() {
                         <line x1="12" y1="19" x2="12" y2="5" />
                         <polyline points="5 12 12 5 19 12" />
                       </svg>
-                      <span>{updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}</span>
-                      {updateInfo?.has_update && <span class="update-more-badge">NEW</span>}
+                      <span>{hasEffectiveUpdate(updateInfo) ? t('update.hasUpdate', { version: !updateInfo?.has_update && updateInfo?.desktop_host?.latest_shell_version ? `v${updateInfo.desktop_host.latest_shell_version}` : (updateInfo?.latest_version ?? '') }) : t('update.modalTitle')}</span>
+                      {hasEffectiveUpdate(updateInfo) && <span class="update-more-badge">NEW</span>}
                     </button>
                   )}
 

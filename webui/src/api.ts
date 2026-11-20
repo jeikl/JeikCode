@@ -3825,6 +3825,25 @@ export interface UpdateVersionEntry {
   released_at?: string | null;
 }
 
+export interface DesktopHostUpdateInfo {
+  shell_version?: string | null;
+  legacy_shell: boolean;
+  bundle_type: string;
+  native_updater_supported: boolean;
+  signed_updater_ready: boolean;
+  binary_writable: boolean;
+  min_shell_version?: string | null;
+  latest_shell_version?: string | null;
+  shell_changed: boolean;
+  shell_has_update: boolean;
+  shell_update_required: boolean;
+  updater_json_url?: string | null;
+  installer_url?: string | null;
+  installer_sha256?: string | null;
+  installer_size?: number | null;
+  proxy_url?: string | null;
+}
+
 export interface UpdateCheckResponse {
   current_version: string;
   latest_version: string;
@@ -3836,6 +3855,7 @@ export interface UpdateCheckResponse {
   channel?: 'stable' | 'beta';
   /** Channel history, newest first. */
   versions?: UpdateVersionEntry[];
+  desktop_host?: DesktopHostUpdateInfo | null;
 }
 
 export interface UpdateStatus {
@@ -3947,15 +3967,38 @@ export async function executeUpdate(payload?: {
   version?: string;
   download_url?: string;
   force?: boolean;
+  mode?: 'binary' | 'desktop_installer';
 }): Promise<{ success: boolean; message: string }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...authHeaders(),
+  };
+  if (payload?.mode === 'desktop_installer') {
+    headers['X-JeikCode-Desktop-Window'] = '1';
+  }
   const resp = await apiFetch('/api/update/execute', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers,
     body: payload ? JSON.stringify(payload) : undefined,
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function installPreparedDesktopUpdate(): Promise<{ success: boolean; message: string }> {
+  const resp = await apiFetch('/api/update/desktop/install', {
+    method: 'POST',
+    headers: {
+      ...authHeaders(),
+      'X-JeikCode-Desktop-Window': '1',
+    },
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).message || (err as any).error || `HTTP ${resp.status}`);
   }
   return resp.json();
 }

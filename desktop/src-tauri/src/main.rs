@@ -18,6 +18,7 @@ use tauri::{Listener, Manager};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_updater::UpdaterExt;
 
 static DESKTOP_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
@@ -954,8 +955,11 @@ fn main() {
     }
 
     let child = Mutex::new(None);
+    let webui_origin_slot = Arc::new(Mutex::new(None));
     let start_minimized = std::env::args().any(|arg| arg == "--minimized");
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -970,8 +974,15 @@ fn main() {
                 .build(),
         )
         .manage(ChildSlot(child))
+        .manage(WebuiOriginSlot(Arc::clone(&webui_origin_slot)))
+        .manage(PendingDesktopUpdate(tokio::sync::Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![
+            desktop_shell_info,
+            start_desktop_shell_update,
+            install_desktop_shell_update,
+        ])
         .setup(move |app| {
-            let webui_origin = Arc::new(Mutex::new(None));
+            let webui_origin = Arc::clone(&webui_origin_slot);
             let nav_origin = Arc::clone(&webui_origin);
             let nav_app_handle = app.handle().clone();
             let new_win_app_handle = app.handle().clone();
@@ -1270,6 +1281,332 @@ fn setup_system_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>>
 
 struct ChildSlot(Mutex<Option<std::process::Child>>);
 
+struct WebuiOriginSlot(Arc<Mutex<Option<WebuiOrigin>>>);
+
+struct PendingDesktopUpdate(tokio::sync::Mutex<Option<(tauri_plugin_updater::Update, Vec<u8>)>>);
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopShellInfo {
+    shell_version: String,
+    bundle_type: String,
+    updater_supported: bool,
+    signed_updater_ready: bool,
+}
+
+fn detect_bundle_type() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "nsis"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "app"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("APPIMAGE").is_some() {
+            "appimage"
+        } else {
+            "deb"
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        "unknown"
+    }
+}
+
+fn configured_updater_pubkey(app: &tauri::AppHandle) -> Option<String> {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|v| v.get("pubkey"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn authorized_webview_url(url: &tauri::Url, origin: Option<&WebuiOrigin>) -> bool {
+    is_shell_internal_url(url) || origin.is_some_and(|o| is_launched_webui(url, o))
+}
+
+fn ensure_authorized_webview(
+    webview: &tauri::Webview,
+    app: &tauri::AppHandle,
+) -> Result<(), String> {
+    let url = webview
+        .url()
+        .map_err(|e| format!("无法获取当前窗口地址: {e}"))?;
+    let slot = app.state::<WebuiOriginSlot>();
+    let guard = slot.0.lock().unwrap_or_else(|e| e.into_inner());
+    if authorized_webview_url(&url, guard.as_ref()) {
+        Ok(())
+    } else {
+        Err("仅允许当前托管的本地 WebUI 窗口调用桌面更新命令".to_string())
+    }
+}
+
+fn compare_shell_versions(latest: &str, current: &str) -> bool {
+    let parse = |v: &str| -> (Vec<u64>, Option<Vec<String>>) {
+        let clean = v.trim().trim_start_matches('v').trim_start_matches('V');
+        if let Some((main_part, pre_part)) = clean.split_once('-') {
+            let nums: Vec<u64> = main_part
+                .split('.')
+                .filter_map(|s| s.parse::<u64>().ok())
+                .collect();
+            let pre = pre_part
+                .split('.')
+                .map(|s| s.to_ascii_lowercase())
+                .collect();
+            (nums, Some(pre))
+        } else {
+            let nums: Vec<u64> = clean
+                .split('.')
+                .filter_map(|s| s.parse::<u64>().ok())
+                .collect();
+            (nums, None)
+        }
+    };
+    let (l_nums, l_pre) = parse(latest);
+    let (c_nums, c_pre) = parse(current);
+    for i in 0..l_nums.len().max(c_nums.len()) {
+        let l = l_nums.get(i).copied().unwrap_or(0);
+        let c = c_nums.get(i).copied().unwrap_or(0);
+        if l != c {
+            return l > c;
+        }
+    }
+    match (l_pre, c_pre) {
+        (None, Some(_)) => true,
+        (Some(_), None) => false,
+        (None, None) => false,
+        (Some(lp), Some(cp)) => {
+            for i in 0..lp.len().max(cp.len()) {
+                match (lp.get(i), cp.get(i)) {
+                    (None, Some(_)) => return false,
+                    (Some(_), None) => return true,
+                    (Some(a), Some(b)) if a != b => {
+                        return match (a.parse::<u64>(), b.parse::<u64>()) {
+                            (Ok(na), Ok(nb)) => na > nb,
+                            (Ok(_), Err(_)) => false,
+                            (Err(_), Ok(_)) => true,
+                            (Err(_), Err(_)) => a > b,
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+    }
+}
+
+fn resolve_proxy_url(explicit: Option<String>) -> Option<url::Url> {
+    let candidate = explicit
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            for key in [
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "HTTP_PROXY",
+                "http_proxy",
+            ] {
+                if let Ok(val) = std::env::var(key) {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+            None
+        })?;
+    let normalized = if candidate.contains("://") {
+        candidate
+    } else {
+        format!("http://{candidate}")
+    };
+    url::Url::parse(&normalized).ok()
+}
+
+fn emit_desktop_update_event(app: &tauri::AppHandle, payload: serde_json::Value) {
+    if let Some(window) = app.get_webview_window("main") {
+        let json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        let _ = window.eval(format!(
+            "window.dispatchEvent(new CustomEvent('jeikcode:desktop:update_progress', {{ detail: {json} }}));"
+        ));
+    }
+}
+
+#[tauri::command]
+fn desktop_shell_info(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<DesktopShellInfo, String> {
+    ensure_authorized_webview(&webview, &app)?;
+    let bundle = detect_bundle_type();
+    Ok(DesktopShellInfo {
+        shell_version: env!("CARGO_PKG_VERSION").to_string(),
+        bundle_type: bundle.to_string(),
+        updater_supported: bundle != "deb" && bundle != "unknown",
+        signed_updater_ready: configured_updater_pubkey(&app).is_some(),
+    })
+}
+
+#[tauri::command]
+async fn start_desktop_shell_update(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    endpoint: String,
+    proxy: Option<String>,
+) -> Result<String, String> {
+    ensure_authorized_webview(&webview, &app)?;
+    let Some(pubkey) = configured_updater_pubkey(&app) else {
+        return Err("updater_unsigned".to_string());
+    };
+    let url = url::Url::parse(endpoint.trim())
+        .map_err(|e| format!("无效的桌面更新清单地址 '{}': {e}", endpoint))?;
+
+    let mut builder = webview
+        .updater_builder()
+        .pubkey(pubkey)
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?;
+    if let Some(proxy_url) = resolve_proxy_url(proxy) {
+        builder = builder.proxy(proxy_url);
+    }
+
+    let app_for_exit = app.clone();
+    builder = builder
+        .version_comparator(|current, release| {
+            compare_shell_versions(&release.version.to_string(), &current.to_string())
+        })
+        .on_before_exit(move || {
+            // 安装器接管前优雅停掉托管的 jeikcode 子进程并释放端口，避免阻塞或误触发崩溃自愈
+            terminate_managed_child(&app_for_exit);
+            app_for_exit.cleanup_before_exit();
+        });
+
+    let updater = builder
+        .build()
+        .map_err(|e| format!("构建桌面更新器失败: {e}"))?;
+    let Some(update) = updater
+        .check()
+        .await
+        .map_err(|e| format!("检查桌面端更新失败: {e}"))?
+    else {
+        return Err("already_latest".to_string());
+    };
+
+    let target_version = update.version.clone();
+    emit_desktop_update_event(
+        &app,
+        serde_json::json!({
+            "status": "downloading",
+            "progress": 0,
+            "bytes": 0,
+            "total": 0,
+            "version": target_version,
+        }),
+    );
+
+    let app_progress = app.clone();
+    let app_finish = app.clone();
+    let mut downloaded: u64 = 0;
+    let mut last_pct: i32 = -1;
+    let bytes = update
+        .download(
+            move |chunk_len, content_len| {
+                downloaded = downloaded.saturating_add(chunk_len as u64);
+                let total = content_len.unwrap_or(0);
+                let pct = if total > 0 {
+                    ((downloaded * 100) / total).min(100) as i32
+                } else {
+                    0
+                };
+                if pct != last_pct {
+                    last_pct = pct;
+                    emit_desktop_update_event(
+                        &app_progress,
+                        serde_json::json!({
+                            "status": "downloading",
+                            "progress": pct,
+                            "bytes": downloaded,
+                            "total": total,
+                        }),
+                    );
+                }
+            },
+            move || {
+                emit_desktop_update_event(
+                    &app_finish,
+                    serde_json::json!({
+                        "status": "installing",
+                        "progress": 100,
+                    }),
+                );
+            },
+        )
+        .await
+        .map_err(|e| {
+            let msg = format!("下载或校验桌面端安装包失败: {e}");
+            emit_desktop_update_event(
+                &app,
+                serde_json::json!({
+                    "status": "error",
+                    "progress": 0,
+                    "error": msg,
+                }),
+            );
+            msg
+        })?;
+
+    let pending = app.state::<PendingDesktopUpdate>();
+    *pending.0.lock().await = Some((update, bytes));
+
+    emit_desktop_update_event(
+        &app,
+        serde_json::json!({
+            "status": "ready",
+            "progress": 100,
+            "version": target_version,
+        }),
+    );
+
+    Ok(target_version)
+}
+
+#[tauri::command]
+async fn install_desktop_shell_update(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<(), String> {
+    ensure_authorized_webview(&webview, &app)?;
+    let pending = app.state::<PendingDesktopUpdate>();
+    let taken = pending.0.lock().await.take();
+    let Some((update, bytes)) = taken else {
+        return Err("没有已就绪的桌面端更新包".to_string());
+    };
+
+    // 先标记关停并退出托管子进程，确保安装器覆盖文件时不锁句柄、不触发 supervise_webui 重拉
+    terminate_managed_child(&app);
+
+    update
+        .install(&bytes)
+        .map_err(|e| format!("安装桌面端更新失败: {e}"))?;
+
+    #[cfg(not(windows))]
+    app.restart();
+
+    #[cfg(windows)]
+    Ok(())
+}
+
 struct WebuiLaunch {
     bin: PathBuf,
     host: String,
@@ -1277,6 +1614,7 @@ struct WebuiLaunch {
     token: String,
     home: PathBuf,
     bundled: Option<PathBuf>,
+    signed_updater_ready: bool,
 }
 
 fn start_webui(
@@ -1302,6 +1640,7 @@ fn start_webui(
         token,
         home,
         bundled,
+        signed_updater_ready: configured_updater_pubkey(app).is_some(),
     };
     let (url, child, eof_rx) = spawn_desktop_server(&launch, false, Duration::from_secs(90))?;
     let probe_port = url
@@ -1433,6 +1772,17 @@ fn spawn_desktop_server(
     cmd.env("JEIKCODE_DESKTOP", "1");
     cmd.env("JEIKCODE_DESKTOP_MANAGED", "1");
     cmd.env("JEIKCODE_DESKTOP_PID", std::process::id().to_string());
+    cmd.env("JEIKCODE_DESKTOP_VERSION", env!("CARGO_PKG_VERSION"));
+    cmd.env("JEIKCODE_DESKTOP_BUNDLE", detect_bundle_type());
+    cmd.env("JEIKCODE_DESKTOP_UPDATER", "1");
+    cmd.env(
+        "JEIKCODE_DESKTOP_UPDATER_SIGNED",
+        if launch.signed_updater_ready {
+            "1"
+        } else {
+            "0"
+        },
+    );
     if exact_port {
         // 与 jeikcode-updater 的同名变量一致：只绑定这个端口，不顺延，也不关闭别的进程。
         cmd.env("JEIKCODE_RESTART_EXACT_PORT", "1");
@@ -2205,5 +2555,33 @@ mod tests {
             )),
             r#""D:\EngSofeware\JeikCode Desktop\jeikcode-desktop.exe" --minimized"#
         );
+    }
+
+    #[test]
+    fn compare_shell_versions_handles_prerelease_ordinals() {
+        use super::compare_shell_versions;
+        assert!(compare_shell_versions("7.5.2-beta.10", "7.5.2-beta.2"));
+        assert!(!compare_shell_versions("7.5.2-beta.2", "7.5.2-beta.10"));
+        assert!(compare_shell_versions("7.5.2", "7.5.2-beta.10"));
+        assert!(!compare_shell_versions("7.5.2-beta.10", "7.5.2"));
+        assert!(!compare_shell_versions("7.5.2", "7.5.2"));
+    }
+
+    #[test]
+    fn authorized_webview_url_restricts_to_shell_or_launched_origin() {
+        use super::authorized_webview_url;
+        let launched = origin("127.0.0.1", 13457);
+        assert!(authorized_webview_url(
+            &parse_url("http://127.0.0.1:13457/?token=abc&desktop=1"),
+            Some(&launched)
+        ));
+        assert!(authorized_webview_url(
+            &parse_url("http://tauri.localhost/"),
+            Some(&launched)
+        ));
+        assert!(!authorized_webview_url(
+            &parse_url("http://localhost:3000/"),
+            Some(&launched)
+        ));
     }
 }

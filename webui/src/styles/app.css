@@ -976,6 +976,45 @@ body {
   color: #d97706;
 }
 
+.update-shell-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  background: rgba(128, 128, 128, 0.06);
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+}
+.update-shell-meta-val {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-weight: 600;
+}
+.update-shell-meta-arrow {
+  color: #2563eb;
+}
+.update-mode-notice {
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  border: 1px solid rgba(128, 128, 128, 0.24);
+  background: rgba(128, 128, 128, 0.08);
+  color: var(--app-secondary-foreground);
+}
+.update-mode-notice.info {
+  border-color: rgba(37, 99, 235, 0.35);
+  background: rgba(37, 99, 235, 0.08);
+  color: #3b82f6;
+}
+.update-mode-notice.warning {
+  border-color: rgba(217, 119, 6, 0.35);
+  background: rgba(217, 119, 6, 0.1);
+  color: #d97706;
+}
+
 .update-version-card {
   display: flex;
   align-items: center;
