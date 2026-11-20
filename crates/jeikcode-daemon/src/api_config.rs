@@ -1770,6 +1770,9 @@ pub struct DesktopSettingsPayload {
     /// 开机自启（静默到托盘，不闪窗口）。
     #[serde(default)]
     pub autostart: bool,
+    /// 隐藏任务栏图标。
+    #[serde(default)]
+    pub hide_taskbar_icon: bool,
     /// 唤起/隐藏桌面窗口的全局快捷键；空串 = 禁用。
     #[serde(default = "default_toggle_shortcut")]
     pub toggle_shortcut: String,
@@ -1783,6 +1786,7 @@ impl Default for DesktopSettingsPayload {
             agent_global_mode: default_agent_global_mode(),
             runtime_model_switch: false,
             autostart: false,
+            hide_taskbar_icon: false,
             toggle_shortcut: default_toggle_shortcut(),
         }
     }
@@ -1800,6 +1804,8 @@ pub struct DesktopSettingsUpdate {
     pub runtime_model_switch: Option<bool>,
     #[serde(default)]
     pub autostart: Option<bool>,
+    #[serde(default)]
+    pub hide_taskbar_icon: Option<bool>,
     #[serde(default)]
     pub toggle_shortcut: Option<String>,
 }
@@ -1894,6 +1900,10 @@ fn desktop_settings_from_object(
             .get("autostart")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        hide_taskbar_icon: root
+            .get("hide_taskbar_icon")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         toggle_shortcut: root
             .get("toggle_shortcut")
             .and_then(serde_json::Value::as_str)
@@ -1945,6 +1955,9 @@ pub(crate) fn merge_desktop_settings_at(
     if let Some(enabled) = update.autostart {
         current.autostart = enabled;
     }
+    if let Some(enabled) = update.hide_taskbar_icon {
+        current.hide_taskbar_icon = enabled;
+    }
     if let Some(shortcut) = &update.toggle_shortcut {
         current.toggle_shortcut = shortcut.clone();
     }
@@ -1968,6 +1981,10 @@ pub(crate) fn merge_desktop_settings_at(
     root.insert(
         "autostart".to_string(),
         serde_json::Value::Bool(normalized.autostart),
+    );
+    root.insert(
+        "hide_taskbar_icon".to_string(),
+        serde_json::Value::Bool(normalized.hide_taskbar_icon),
     );
     root.insert(
         "toggle_shortcut".to_string(),
@@ -2683,6 +2700,37 @@ mod tests {
         assert_eq!(cleared.toggle_shortcut, "");
         let reloaded = super::load_desktop_settings_payload_at(&path);
         assert_eq!(reloaded.toggle_shortcut, "");
+    }
+
+    #[test]
+    fn desktop_settings_hide_taskbar_icon_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("desktop-settings.json");
+        assert!(!super::load_desktop_settings_payload_at(&path).hide_taskbar_icon);
+        let saved = super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                hide_taskbar_icon: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(saved.hide_taskbar_icon);
+        super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                close_action: Some("tray".into()),
+                ..Default::default()
+            },
+        );
+        assert!(super::load_desktop_settings_payload_at(&path).hide_taskbar_icon);
+        super::merge_desktop_settings_at(
+            &path,
+            &super::DesktopSettingsUpdate {
+                hide_taskbar_icon: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(!super::load_desktop_settings_payload_at(&path).hide_taskbar_icon);
     }
 
     #[test]

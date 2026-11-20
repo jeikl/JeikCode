@@ -37,6 +37,7 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
   const [agentGlobalMode, setAgentGlobalMode] = useState<ApprovalMode>('build');
   const [runtimeModelSwitch, setRuntimeModelSwitch] = useState(false);
   const [autostart, setAutostart] = useState(false);
+  const [hideTaskbarIcon, setHideTaskbarIcon] = useState(false);
   const [toggleShortcut, setToggleShortcut] = useState('Ctrl+Alt+J');
   const [desktopLoaded, setDesktopLoaded] = useState(false);
   const [aboutLoaded, setAboutLoaded] = useState(false);
@@ -68,6 +69,7 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
           if (res.agent_global_mode) setAgentGlobalMode(res.agent_global_mode);
           if (typeof res.runtime_model_switch === 'boolean') setRuntimeModelSwitch(res.runtime_model_switch);
           if (typeof res.autostart === 'boolean') setAutostart(res.autostart);
+          if (typeof res.hide_taskbar_icon === 'boolean') setHideTaskbarIcon(res.hide_taskbar_icon);
           if (typeof res.toggle_shortcut === 'string') setToggleShortcut(res.toggle_shortcut);
           setDesktopLoaded(true);
         }
@@ -114,6 +116,7 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
         agent_global_mode: agentGlobalMode,
         runtime_model_switch: runtimeModelSwitch,
         autostart,
+        hide_taskbar_icon: hideTaskbarIcon,
         toggle_shortcut: toggleShortcut,
       });
       invalidateBootstrapCache();
@@ -150,6 +153,7 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
         setRuntimeModelSwitch(settings.runtime_model_switch);
       }
       if (typeof settings.autostart === 'boolean') setAutostart(settings.autostart);
+      if (typeof settings.hide_taskbar_icon === 'boolean') setHideTaskbarIcon(settings.hide_taskbar_icon);
       if (typeof settings.toggle_shortcut === 'string') {
         setToggleShortcut(settings.toggle_shortcut);
       }
@@ -245,6 +249,17 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
                       <span class="system-settings-inline-hint">
                         {t('settings.autostartHint')}
                       </span>
+                    </span>
+                  </label>
+
+                  <label class="system-settings-radio-label system-settings-switch-row">
+                    <input
+                      type="checkbox"
+                      checked={hideTaskbarIcon}
+                      onChange={(e) => setHideTaskbarIcon((e.target as HTMLInputElement).checked)}
+                    />
+                    <span class="system-settings-switch-copy">
+                      <span class="system-settings-switch-label">{t('settings.hideTaskbarIconLabel')}</span>
                     </span>
                   </label>
 

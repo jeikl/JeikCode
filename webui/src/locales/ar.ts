@@ -775,6 +775,7 @@ export const ar: Record<keyof typeof en, string> = {
   'settings.startupTitle': 'بدء التشغيل والنافذة',
   'settings.startupDesc': 'يبدأ بهدوء في شريط النظام عند تسجيل الدخول دون وميض للنافذة؛ انقر الشريط أو استخدم الاختصار لفتح لوحة الويب المحمّلة مسبقًا فورًا.',
   'settings.autostartLabel': 'التشغيل عند تسجيل الدخول (بهدوء في شريط النظام)',
+  'settings.hideTaskbarIconLabel': 'إخفاء أيقونة شريط المهام',
   'settings.autostartHint': 'يعمل في الخلفية بعد تسجيل الدخول دون فتح النافذة الرئيسية.',
   'settings.shortcutTitle': 'اختصار الإظهار / الإخفاء',
   'settings.shortcutDesc': 'الافتراضي Ctrl+Alt+J. انقر ثم اضغط مجموعة المفاتيح؛ Backspace يمسح وEsc يلغي.',

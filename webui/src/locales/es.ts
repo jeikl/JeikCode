@@ -775,6 +775,7 @@ export const es: Record<keyof typeof en, string> = {
   'settings.startupTitle': 'Inicio y ventana',
   'settings.startupDesc': 'Se inicia silenciosamente en la bandeja al iniciar sesión, sin destello; haz clic en la bandeja o usa el atajo para abrir en caliente el panel web ya cargado.',
   'settings.autostartLabel': 'Iniciar al iniciar sesión (silencioso en la bandeja)',
+  'settings.hideTaskbarIconLabel': 'Ocultar icono de la barra de tareas',
   'settings.autostartHint': 'Se ejecuta en segundo plano tras el inicio de sesión sin abrir la ventana principal.',
   'settings.shortcutTitle': 'Atajo para mostrar / ocultar',
   'settings.shortcutDesc': 'Predeterminado Ctrl+Alt+J. Haz clic y pulsa una combinación; Retroceso borra, Esc cancela.',

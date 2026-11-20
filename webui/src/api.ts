@@ -2254,6 +2254,7 @@ export interface DesktopSettings {
   agent_global_mode?: ApprovalMode;
   runtime_model_switch?: boolean;
   autostart?: boolean;
+  hide_taskbar_icon?: boolean;
   toggle_shortcut?: string;
 }
 
@@ -2268,6 +2269,7 @@ export async function getDesktopSettings(): Promise<DesktopSettings> {
       agent_global_mode: 'build',
       runtime_model_switch: false,
       autostart: false,
+      hide_taskbar_icon: false,
       toggle_shortcut: 'Ctrl+Alt+J',
     };
   }

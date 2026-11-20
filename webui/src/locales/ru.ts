@@ -775,6 +775,7 @@ export const ru: Record<keyof typeof en, string> = {
   'settings.startupTitle': 'Запуск и окно',
   'settings.startupDesc': 'При входе тихо запускается в трее без мигания окна; щёлкните трей или нажмите сочетание, чтобы сразу открыть уже загруженную веб-панель.',
   'settings.autostartLabel': 'Запускать при входе (тихо в трей)',
+  'settings.hideTaskbarIconLabel': 'Скрыть значок на панели задач',
   'settings.autostartHint': 'Работает в фоне после входа, не открывая главное окно.',
   'settings.shortcutTitle': 'Сочетание показать / скрыть',
   'settings.shortcutDesc': 'По умолчанию Ctrl+Alt+J. Нажмите поле и введите сочетание; Backspace очищает, Esc отменяет.',
