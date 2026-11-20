@@ -123,10 +123,9 @@ impl TranscriptHook {
     }
 
     /// Build the record from the buffer + harvest tool results from `convo` by id, then
-    /// append it. Returns the buffer to None. A turn with NO assistant text and NO tools
-    /// (a rejected prompt, or a turn that failed before any model output) is dropped —
-    /// nothing meaningful happened to record.
-    fn flush(&self, convo: &Conversation) {
+    /// append it off-reactor via `spawn_blocking`. Returns the buffer to None. A turn with
+    /// NO assistant text and NO tools is dropped — nothing meaningful happened to record.
+    async fn flush_async(&self, convo: &Conversation) {
         let buffer = { self.lock().take() };
         let Some(b) = buffer else { return };
         if b.assistant.is_empty() && b.tools.is_empty() {
@@ -134,82 +133,83 @@ impl TranscriptHook {
         }
 
         // Pair each call's result by tool_call_id from the live conversation.
-        let mut results: HashMap<&str, (&str, bool)> = HashMap::new();
+        let mut results: HashMap<String, (String, bool)> = HashMap::new();
         for m in &convo.messages {
             if m.role == Role::Tool {
                 if let Some(id) = &m.tool_call_id {
-                    results.insert(id.as_str(), (m.text.as_str(), m.is_error));
+                    results.insert(id.clone(), (m.text.clone(), m.is_error));
                 }
             }
         }
-        // Observability timings live in the per-session sidecar; joining here
-        // keeps the raw turn log self-contained for later recall/debugging
-        // without ever feeding these numbers back to the model.
-        let timings = self
-            .mgr
-            .read_tool_metrics(&self.session_id)
-            .unwrap_or_default();
-        let tools: Vec<ToolRecord> = b
-            .tools
-            .iter()
-            .map(|t| {
-                let (result, is_error) = results
-                    .get(t.id.as_str())
-                    .map(|(r, e)| (r.to_string(), *e))
-                    .unwrap_or_default();
-                let timing = timings.get(&t.id);
-                ToolRecord {
-                    name: t.name.clone(),
-                    args: t.args.clone(),
-                    result,
-                    is_error,
-                    started_at: timing.map(|m| m.started_at),
-                    duration_ms: timing.and_then(|m| m.duration_ms),
-                    switch_ms: timing.map(|m| m.switch_ms),
-                }
-            })
-            .collect();
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let persistence_status = self.persistence_status.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let timings = mgr.read_tool_metrics(&session_id).unwrap_or_default();
+            let tools: Vec<ToolRecord> = b
+                .tools
+                .iter()
+                .map(|t| {
+                    let (result, is_error) = results
+                        .get(t.id.as_str())
+                        .map(|(r, e)| (r.clone(), *e))
+                        .unwrap_or_default();
+                    let timing = timings.get(&t.id);
+                    ToolRecord {
+                        name: t.name.clone(),
+                        args: t.args.clone(),
+                        result,
+                        is_error,
+                        started_at: timing.map(|m| m.started_at),
+                        duration_ms: timing.and_then(|m| m.duration_ms),
+                        switch_ms: timing.map(|m| m.switch_ms),
+                    }
+                })
+                .collect();
 
-        let ts = now_ms();
-        let record = TurnRecord {
-            v: RECORD_VERSION,
-            ts,
-            iso: chrono::DateTime::from_timestamp_millis(ts)
-                .map(|d| d.to_rfc3339())
-                .unwrap_or_default(),
-            session_id: self.session_id.clone(),
-            turn_id: b.turn_id,
-            user: b.user,
-            assistant: b.assistant,
-            reasoning: b.reasoning,
-            tools,
-            usage: b.usage,
-        };
-        // The transcript is auxiliary to the committed native aggregate, so its
-        // failure must not fail the turn. It must still be visible to the driver:
-        // silently dropping ENOSPC here made missing history look successful.
-        if let Err(error) = self.append(&record) {
-            let guidance = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                "check file permissions, read-only attributes, security software, and whether another JeikCode process is using the file"
-            } else {
-                "check available disk space and file permissions"
+            let ts = now_ms();
+            let record = TurnRecord {
+                v: RECORD_VERSION,
+                ts,
+                iso: chrono::DateTime::from_timestamp_millis(ts)
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_default(),
+                session_id: session_id.clone(),
+                turn_id: b.turn_id,
+                user: b.user,
+                assistant: b.assistant,
+                reasoning: b.reasoning,
+                tools,
+                usage: b.usage,
             };
-            let warning = format!("session transcript was not saved; {guidance}: {error}");
-            eprintln!("[TranscriptHook] {warning}");
-            if let Some(status) = &self.persistence_status {
-                status.report_auxiliary_warning(warning);
+            if let Err(error) = Self::append_record(&mgr, &session_id, &record) {
+                let guidance = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    "check file permissions, read-only attributes, security software, and whether another JeikCode process is using the file"
+                } else {
+                    "check available disk space and file permissions"
+                };
+                let warning = format!("session transcript was not saved; {guidance}: {error}");
+                eprintln!("[TranscriptHook] {warning}");
+                if let Some(status) = &persistence_status {
+                    status.report_auxiliary_warning(warning);
+                }
             }
-        }
+        })
+        .await;
     }
 
-    fn append(&self, record: &TurnRecord) -> SessionResult<()> {
+    fn append_record(
+        mgr: &SessionManager,
+        session_id: &str,
+        record: &TurnRecord,
+    ) -> SessionResult<()> {
         let mut line =
             serde_json::to_vec(record).map_err(|e| super::SessionStoreError::Corrupt {
                 kind: "transcript record",
                 message: e.to_string(),
             })?;
         line.push(b'\n');
-        self.mgr.append_jsonl_line(&self.session_id, &line)
+        mgr.append_jsonl_line(session_id, &line)
     }
 }
 
@@ -259,13 +259,13 @@ impl LifecycleHooks for TranscriptHook {
     /// terminal — normal stop AND error/cancel/timeout/fuse — so an errored turn that
     /// produced partial output is still recorded.
     async fn turn_complete(&self, convo: &Conversation, _reason: &StopReason, _ctx: &TurnCtx) {
-        self.flush(convo);
+        self.flush_async(convo).await;
     }
 
     /// Defensive flush at session end for any buffer a terminal somehow missed (with
     /// `turn_complete` firing on all paths this is normally a no-op).
     async fn session_end(&self, convo: &Conversation) {
-        self.flush(convo);
+        self.flush_async(convo).await;
     }
 }
 

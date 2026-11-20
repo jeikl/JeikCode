@@ -46,6 +46,7 @@ mod runtime_host;
 mod shell_open;
 mod sidebar_projects;
 mod steer_prompt;
+mod watchdog;
 /// File-sink diagnostic trace (`ctrace!` macro), enabled via `JEIKCODE_TUIX_LOG`.
 /// Moved here from the retired `jeikcode-core` (daemon is its only consumer;
 /// `jeikcode_tuix::trace` keeps its own copy targeting the same append file).
@@ -3612,6 +3613,20 @@ pub(crate) fn jeikcode_home_test_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+/// Offload blocking work onto Tokio's blocking pool while propagating any
+/// thread-local [`jeikcode_config::test_util::IsolatedHome`] override across threads.
+pub(crate) fn spawn_blocking_isolated<F, R>(f: F) -> tokio::task::JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let test_home = jeikcode_config::test_util::overridden_home();
+    tokio::task::spawn_blocking(move || {
+        let _test_home = test_home.map(jeikcode_config::test_util::IsolatedHome::at);
+        f()
+    })
+}
+
 type ProjectStateStore = Arc<RwLock<ProjectState>>;
 
 pub(crate) static DAEMON_PROJECT: std::sync::Mutex<Option<ProjectStateStore>> =
@@ -3629,6 +3644,64 @@ struct AdmittedUser {
     /// 按身份认领自己的乐观气泡，而不是退化到文本比对。
     client_input_id: Option<String>,
     images: Vec<ImageData>,
+}
+
+/// One admitted `/chat` operation. Aliases include both the persisted session id
+/// and the browser-generated request id so either client protocol can stop it.
+const ACTIVE_CHAT_SHARDS: usize = 64;
+
+fn active_chat_shard_idx(key: &str) -> usize {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash as usize) % ACTIVE_CHAT_SHARDS
+}
+
+#[derive(Default)]
+struct SharedChatWireCache {
+    /// Bounded cache of pre-serialized live watch/WS frames keyed by `(seq, op_id)`
+    /// so concurrent tabs watching the same turn share `Arc<str>` payloads zero-copy.
+    entries: std::collections::VecDeque<(u64, Option<String>, Arc<str>, Arc<str>)>,
+}
+
+fn get_or_build_chat_watch_frame(
+    cache: &std::sync::Mutex<SharedChatWireCache>,
+    event: &ChatEvent,
+    session_id: &str,
+    session_id_json: &str,
+    seq: u64,
+    operation_id: Option<&str>,
+) -> (Arc<str>, Arc<str>) {
+    {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, watch_json, ws_frame)) = guard
+            .entries
+            .iter()
+            .rev()
+            .find(|(s, op, _, _)| *s == seq && op.as_deref() == operation_id)
+        {
+            return (Arc::clone(watch_json), Arc::clone(ws_frame));
+        }
+    }
+    let ev_json = chat_watch_frame_json(event, session_id, Some(seq), false, operation_id);
+    let ws_frame = wrap_chat_ws_frame(session_id_json, &ev_json);
+    let watch_arc: Arc<str> = Arc::from(ev_json);
+    let ws_arc: Arc<str> = Arc::from(ws_frame);
+    {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.entries.len() >= 64 {
+            guard.entries.pop_front();
+        }
+        guard.entries.push_back((
+            seq,
+            operation_id.map(str::to_string),
+            Arc::clone(&watch_arc),
+            Arc::clone(&ws_arc),
+        ));
+    }
+    (watch_arc, ws_arc)
 }
 
 /// One admitted `/chat` operation. Aliases include both the persisted session id
@@ -3657,6 +3730,8 @@ struct ActiveChatOperation {
     /// reattach to a turn started by OpenAI/API clients without owning the
     /// primary SSE response.
     event_bus: tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
+    /// Shared per-turn JSON/WS frame cache for zero-copy multi-watcher fan-out.
+    wire_cache: Arc<std::sync::Mutex<SharedChatWireCache>>,
     /// The user message admitted for this turn, recorded right when it is
     /// pushed to the conversation. `tokio::broadcast` does not replay history,
     /// so a `/chat/watch` observer that attaches *after* the turn started would
@@ -3686,41 +3761,48 @@ struct ActiveChatOperation {
 }
 
 #[derive(Default)]
-struct ActiveChatIndex {
-    operations: HashMap<String, ActiveChatOperation>,
-    aliases: HashMap<String, String>,
+struct SessionChatShard {
     /// `/chat/watch` observers that arrived while the session had NO active
     /// turn. Keyed by session id -> client id -> sender.
     standby_watchers: HashMap<String, HashMap<String, mpsc::UnboundedSender<(u64, ChatEvent)>>>,
-    /// Session-scoped event state. Survives the operation: the turn's frames live
-    /// in the operation, but "how far did this session get" and "what was its
-    /// terminal frame" must outlive the turn.
-    ///
-    /// The resume cursor (`after_seq`) is session-scoped while the frames were
-    /// turn-scoped — that mismatch is exactly why a subscriber attaching after the
-    /// turn ended could never learn the turn was over, and the WebUI stayed stuck
-    /// in "running" (red stop button, clock still ticking, checklist frozen).
+    /// Session-scoped event cursor surviving operation teardown.
     session_seq: HashMap<String, u64>,
-    /// 会话级终态帧记录。
-    ///
-    /// 断点续传游标是会话级的，帧却只活在回合里 —— 回合一结束，断链重连 / 刷新 /
-    /// 切回的订阅者就再也拿不到终态帧，前端会一直停在「运行中」（红色停止按钮 + 计时器
-    /// 一直叠加 + 清单定格），只能靠切一次会话顺带修好。终态帧是整个回合最重要的一帧，
-    /// 它必须活得比 operation 久，所以记在会话上而不是记在 operation 里。
-    ///
-    /// 键是会话的 alias；值是（序号, 帧本身）。
+    /// Session-scoped last terminal frame `(seq, ChatEvent)` retained for late watchers.
     session_terminal: HashMap<String, (u64, ChatEvent)>,
 }
 
-/// Atomic admission and identity-aware cleanup for background `/chat` turns.
+struct ActiveChatShards {
+    aliases: Vec<RwLock<HashMap<String, String>>>,
+    operations: Vec<RwLock<HashMap<String, ActiveChatOperation>>>,
+    sessions: Vec<RwLock<SessionChatShard>>,
+    active_count: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for ActiveChatShards {
+    fn default() -> Self {
+        Self {
+            aliases: (0..ACTIVE_CHAT_SHARDS)
+                .map(|_| RwLock::new(HashMap::new()))
+                .collect(),
+            operations: (0..ACTIVE_CHAT_SHARDS)
+                .map(|_| RwLock::new(HashMap::new()))
+                .collect(),
+            sessions: (0..ACTIVE_CHAT_SHARDS)
+                .map(|_| RwLock::new(SessionChatShard::default()))
+                .collect(),
+            active_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+/// 64-way hash-sharded atomic admission and identity-aware registry for background `/chat` turns.
 ///
-/// The old `HashMap<alias, CancellationToken>` overwrote an existing entry when
-/// two requests targeted the same session, then let the older task remove the
-/// replacement entry during cleanup. Keeping operations and aliases in one lock
-/// makes single-flight admission and compare-by-operation cleanup indivisible.
+/// Strict lock hierarchy across shards prevents deadlocks when an operation binds multiple
+/// aliases (`session_id`, `request_id`, `occupancy`):
+/// `aliases (ascending shard index) -> operations (ascending) -> sessions (ascending)`.
 #[derive(Clone, Default)]
 struct ActiveChatRegistry {
-    inner: Arc<RwLock<ActiveChatIndex>>,
+    shards: Arc<ActiveChatShards>,
 }
 
 struct ActiveChatAdmission {
@@ -3742,6 +3824,13 @@ enum ActiveChatAdmissionError {
 }
 
 impl ActiveChatRegistry {
+    /// Lock-free O(1) count of currently admitted active chat turns (consumed by reactor watchdog).
+    pub(crate) fn active_operation_count(&self) -> usize {
+        self.shards
+            .active_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn admit(
         &self,
         session_id: Option<&str>,
@@ -3763,35 +3852,6 @@ impl ActiveChatRegistry {
         request_id: Option<String>,
         occupancy: Option<String>,
     ) -> Result<ActiveChatAdmission, ActiveChatAdmissionError> {
-        let mut index = self.inner.write().await;
-        if session_id
-            .as_deref()
-            .is_some_and(|alias| index.aliases.contains_key(alias))
-            || occupancy
-                .as_deref()
-                .is_some_and(|alias| index.aliases.contains_key(alias))
-        {
-            return Err(ActiveChatAdmissionError::SessionBusy);
-        }
-        if request_id
-            .as_deref()
-            .is_some_and(|alias| index.aliases.contains_key(alias))
-        {
-            return Err(ActiveChatAdmissionError::RequestBusy);
-        }
-
-        let operation_id = uuid::Uuid::new_v4().to_string();
-        let cancellation = CancellationToken::new();
-        let stop_gate = Arc::new(Mutex::new(false));
-        // 会话级游标起点：接着上一回合的序号继续走（严格单调递增）。
-        let seq_base = session_id
-            .as_deref()
-            .and_then(|sid| index.session_seq.get(sid).copied())
-            .unwrap_or(0);
-        // Capacity: expanded to 4096 to prevent Lagged event drops during heavy tool outputs / streaming.
-        let (event_bus, _) = tokio::sync::broadcast::channel(4096);
-        // Clone for waking standby watchers (the original moves into the operation).
-        let bus_for_drain = event_bus.clone();
         let mut aliases = Vec::with_capacity(3);
         for alias in [
             session_id.as_deref(),
@@ -3805,41 +3865,112 @@ impl ActiveChatRegistry {
                 aliases.push(alias.to_string());
             }
         }
-        for alias in &aliases {
-            index.aliases.insert(alias.clone(), operation_id.clone());
+        let mut alias_shard_ids: Vec<usize> =
+            aliases.iter().map(|a| active_chat_shard_idx(a)).collect();
+        alias_shard_ids.sort_unstable();
+        alias_shard_ids.dedup();
+
+        // Acquire write locks on only the involved alias shards in ascending shard order.
+        let mut alias_guards: Vec<(
+            usize,
+            tokio::sync::RwLockWriteGuard<'_, HashMap<String, String>>,
+        )> = Vec::with_capacity(alias_shard_ids.len());
+        for shard_id in alias_shard_ids {
+            alias_guards.push((shard_id, self.shards.aliases[shard_id].write().await));
         }
+        let shard_contains_alias = |guards: &[(
+            usize,
+            tokio::sync::RwLockWriteGuard<'_, HashMap<String, String>>,
+        )],
+                                    alias: &str|
+         -> bool {
+            let target = active_chat_shard_idx(alias);
+            guards
+                .iter()
+                .find(|(id, _)| *id == target)
+                .is_some_and(|(_, map)| map.contains_key(alias))
+        };
+
+        if session_id
+            .as_deref()
+            .is_some_and(|alias| shard_contains_alias(&alias_guards, alias))
+            || occupancy
+                .as_deref()
+                .is_some_and(|alias| shard_contains_alias(&alias_guards, alias))
+        {
+            return Err(ActiveChatAdmissionError::SessionBusy);
+        }
+        if request_id
+            .as_deref()
+            .is_some_and(|alias| shard_contains_alias(&alias_guards, alias))
+        {
+            return Err(ActiveChatAdmissionError::RequestBusy);
+        }
+
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let cancellation = CancellationToken::new();
+        let stop_gate = Arc::new(Mutex::new(false));
+        let seq_base = if let Some(sid) = session_id.as_deref() {
+            let sess_shard = active_chat_shard_idx(sid);
+            self.shards.sessions[sess_shard]
+                .read()
+                .await
+                .session_seq
+                .get(sid)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let (event_bus, _) = tokio::sync::broadcast::channel(4096);
+        let bus_for_drain = event_bus.clone();
         let started_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        index.operations.insert(
-            operation_id.clone(),
-            ActiveChatOperation {
-                started_at,
-                status: None,
-                session_id: session_id.clone(),
-                request_id,
-                aliases,
-                cancellation: cancellation.clone(),
-                stop_gate,
-                finished: Arc::new(Notify::new()),
-                stopped: false,
-                terminal_reached: false,
-                event_bus,
-                admitted_user: None,
-                replay: Arc::new(std::sync::Mutex::new(ReplayLog::new(seq_base))),
-                seq_base,
-                steer_tx: None,
-                runtime_handle: None,
-                steer_client_ids: std::collections::VecDeque::new(),
-                steer_timestamps: std::collections::VecDeque::new(),
-            },
-        );
+        let op_shard = active_chat_shard_idx(&operation_id);
+        {
+            let mut ops = self.shards.operations[op_shard].write().await;
+            ops.insert(
+                operation_id.clone(),
+                ActiveChatOperation {
+                    started_at,
+                    status: None,
+                    session_id: session_id.clone(),
+                    request_id,
+                    aliases: aliases.clone(),
+                    cancellation: cancellation.clone(),
+                    stop_gate,
+                    finished: Arc::new(Notify::new()),
+                    stopped: false,
+                    terminal_reached: false,
+                    event_bus,
+                    wire_cache: Arc::new(std::sync::Mutex::new(SharedChatWireCache::default())),
+                    admitted_user: None,
+                    replay: Arc::new(std::sync::Mutex::new(ReplayLog::new(seq_base))),
+                    seq_base,
+                    steer_tx: None,
+                    runtime_handle: None,
+                    steer_client_ids: std::collections::VecDeque::new(),
+                    steer_timestamps: std::collections::VecDeque::new(),
+                },
+            );
+            self.shards
+                .active_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
-        // Wake any `/chat/watch` observers parked waiting for this session to
-        // start a turn (event-driven push instead of client polling).
+        for alias in aliases {
+            let target = active_chat_shard_idx(&alias);
+            if let Some((_, map)) = alias_guards.iter_mut().find(|(id, _)| *id == target) {
+                map.insert(alias, operation_id.clone());
+            }
+        }
+
         if let Some(sid) = session_id.as_deref() {
-            let drained = Self::drain_standby_locked(&mut index, sid, &bus_for_drain);
+            let sess_shard = active_chat_shard_idx(sid);
+            let mut sess_guard = self.shards.sessions[sess_shard].write().await;
+            let drained = Self::drain_standby_locked(&mut sess_guard, sid, &bus_for_drain);
             if drained > 0 {
                 tracing::debug!(
                     session_id = %sid,
@@ -3849,8 +3980,9 @@ impl ActiveChatRegistry {
             }
         }
 
-        // 跨实例增量：新轮次开始 → 所有实例即时点亮该会话的活动状态。
-        if let Some(sid) = session_id.clone() {
+        drop(alias_guards);
+
+        if let Some(sid) = session_id {
             publish_global(GlobalWireEvent::Activity {
                 session_id: sid,
                 running: true,
@@ -3870,18 +4002,19 @@ impl ActiveChatRegistry {
         &self,
         operation_id: &str,
     ) -> Option<tokio::sync::broadcast::Sender<(u64, ChatEvent)>> {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .map(|op| op.event_bus.clone())
     }
 
     /// Set the human/client-visible operation status (e.g. "compacting").
     pub async fn set_operation_status(&self, operation_id: &str, status: Option<String>) {
-        let mut index = self.inner.write().await;
-        if let Some(op) = index.operations.get_mut(operation_id) {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        if let Some(op) = ops.get_mut(operation_id) {
             op.status = status;
         }
     }
@@ -3894,24 +4027,37 @@ impl ActiveChatRegistry {
         tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
         Arc<std::sync::Mutex<ReplayLog>>,
     )> {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .map(|op| (op.event_bus.clone(), op.replay.clone()))
+    }
+
+    /// Shared per-turn serialized wire cache for concurrent watchers of `session_id`.
+    async fn wire_cache_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<std::sync::Mutex<SharedChatWireCache>>> {
+        let operation_id = self.operation_for_session(session_id).await?;
+        let op_shard = active_chat_shard_idx(&operation_id);
+        self.shards.operations[op_shard]
+            .read()
+            .await
+            .get(&operation_id)
+            .map(|op| op.wire_cache.clone())
     }
 
     /// Broadcast an event to any live subscriber or parked standby watcher of `session_id`.
     /// Used for out-of-turn differential mutations (rewrite, delete, truncate) so all
     /// open tabs stay synchronized without polling or full-transcript reloads.
     pub async fn broadcast_to_session(&self, session_id: &str, event: ChatEvent) {
-        let index = self.inner.read().await;
         let mut seq = 0u64;
-        if let Some(operation_id) = index.aliases.get(session_id) {
-            if let Some(operation) = index.operations.get(operation_id) {
-                // 会话变更（删/改/截断）改写了权威转录：本回合的旧帧立即作废，
-                // 否则带旧游标或全量重连会把变更前发出的帧补回来（已删内容复活）。
+        if let Some(operation_id) = self.operation_for_session(session_id).await {
+            let op_shard = active_chat_shard_idx(&operation_id);
+            let ops = self.shards.operations[op_shard].read().await;
+            if let Some(operation) = ops.get(&operation_id) {
                 let mut log = operation
                     .replay
                     .lock()
@@ -3923,7 +4069,9 @@ impl ActiveChatRegistry {
                 let _ = operation.event_bus.send((seq, event.clone()));
             }
         }
-        if let Some(watchers) = index.standby_watchers.get(session_id) {
+        let sess_shard = active_chat_shard_idx(session_id);
+        let sessions = self.shards.sessions[sess_shard].read().await;
+        if let Some(watchers) = sessions.standby_watchers.get(session_id) {
             for tx in watchers.values() {
                 let _ = tx.send((seq, event.clone()));
             }
@@ -3940,20 +4088,19 @@ impl ActiveChatRegistry {
         Vec<(u64, ChatEvent)>,
         tokio::sync::broadcast::Receiver<(u64, ChatEvent)>,
     )> {
-        let index = self.inner.read().await;
-        let operation_id = index.aliases.get(session_id)?.clone();
-        let operation = index.operations.get(&operation_id)?;
-        // A terminal turn is NOT a reason to bail out: the terminal frame may still
-        // be queued for the fan-out. Handing back the snapshot plus the bus lets a
-        // watcher that attaches now either read the terminal from the snapshot or
-        // receive it live — instead of parking, which means keepalives only and a
-        // client that waits forever.
+        let alias_shard = active_chat_shard_idx(session_id);
+        let operation_id = self.shards.aliases[alias_shard]
+            .read()
+            .await
+            .get(session_id)?
+            .clone();
+        let op_shard = active_chat_shard_idx(&operation_id);
+        let ops = self.shards.operations[op_shard].read().await;
+        let operation = ops.get(&operation_id)?;
         let guard = operation
             .replay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // 游标就是缓冲序号（从 1 开始）：缓冲是追加式的（连续同身份合并只改最后一条的内容，
-        // 不改它的位置），所以同一个事件的 seq 永远稳定 —— 断点续传靠的就是这一点。
         let mut snapshot: Vec<(u64, ChatEvent)> = guard.events.clone();
         let rx = operation.event_bus.subscribe();
         drop(guard);
@@ -3962,7 +4109,6 @@ impl ActiveChatRegistry {
                 .iter()
                 .any(|(_, e)| matches!(e, ChatEvent::User { .. }))
             {
-                // 本轮提问的回声：不占游标（seq 0），因为它是幂等的用户气泡。
                 snapshot.insert(
                     0,
                     (
@@ -3996,11 +4142,12 @@ impl ActiveChatRegistry {
         &self,
         session_id: &str,
     ) -> (Option<ChatEvent>, Option<ChatEvent>) {
-        let index = self.inner.read().await;
-        let Some(operation_id) = index.aliases.get(session_id) else {
+        let Some(operation_id) = self.operation_for_session(session_id).await else {
             return (None, None);
         };
-        let Some(operation) = index.operations.get(operation_id) else {
+        let op_shard = active_chat_shard_idx(&operation_id);
+        let ops = self.shards.operations[op_shard].read().await;
+        let Some(operation) = ops.get(&operation_id) else {
             return (None, None);
         };
         if operation.terminal_reached || operation.stopped {
@@ -4014,13 +4161,13 @@ impl ActiveChatRegistry {
     }
 
     /// True when the turn replay already closed `call_id` (result/output/terminal).
-    /// Stale `pending_permission.json` must not restore a card in that case.
     async fn replay_resolves_call(&self, session_id: &str, call_id: &str) -> bool {
-        let index = self.inner.read().await;
-        let Some(operation_id) = index.aliases.get(session_id) else {
+        let Some(operation_id) = self.operation_for_session(session_id).await else {
             return false;
         };
-        let Some(operation) = index.operations.get(operation_id) else {
+        let op_shard = active_chat_shard_idx(&operation_id);
+        let ops = self.shards.operations[op_shard].read().await;
+        let Some(operation) = ops.get(&operation_id) else {
             return false;
         };
         let guard = operation
@@ -4031,11 +4178,7 @@ impl ActiveChatRegistry {
     }
 
     /// Subscribe to a session's turn **if one is already running**, otherwise
-    /// park the caller as a standby watcher so `admit` can wake it the instant an
-    /// API/native turn starts for this session. This is the event-driven path
-    /// that lets the WebUI observe an API turn without polling: the watch
-    /// connection stays open (SSE keepalive) while idle and is converted to a
-    /// live broadcast subscriber the moment a turn is admitted.
+    /// park the caller as a standby watcher so `admit` can wake it cleanly.
     async fn subscribe_or_standby(
         &self,
         session_id: &str,
@@ -4043,35 +4186,30 @@ impl ActiveChatRegistry {
         standby_tx: &mpsc::UnboundedSender<(u64, ChatEvent)>,
         replay_terminal: bool,
     ) -> WatchOutcome {
-        let mut index = self.inner.write().await;
-        if let Some(operation_id) = index.aliases.get(session_id).cloned() {
-            if let Some(operation) = index.operations.get(&operation_id) {
-                if !operation.terminal_reached && !operation.stopped {
-                    return WatchOutcome::Live(operation.event_bus.subscribe());
-                }
+        let alias_shard = active_chat_shard_idx(session_id);
+        let mut alias_map = self.shards.aliases[alias_shard].write().await;
+        if let Some(operation_id) = alias_map.get(session_id).cloned() {
+            let op_shard = active_chat_shard_idx(&operation_id);
+            let live_rx = {
+                let ops = self.shards.operations[op_shard].read().await;
+                ops.get(&operation_id)
+                    .filter(|op| !op.terminal_reached && !op.stopped)
+                    .map(|op| op.event_bus.subscribe())
+            };
+            if let Some(rx) = live_rx {
+                return WatchOutcome::Live(rx);
             }
-            index.aliases.remove(session_id);
+            alias_map.remove(session_id);
         }
-        // The session's turn is over (or never started). Hand the watcher the
-        // terminal frame recorded on the session — parking here would mean
-        // keepalives only and a client that waits forever for a finished turn.
-        //
-        // The lookup is by session id and deliberately independent of the alias:
-        // the alias is gone once the operation is cleaned up, and a watcher
-        // attaching after the turn ended is exactly the case that must not hang.
-        //
-        // Only the reattach path asks for it: the idle standby watcher must stay
-        // silent, or it would re-deliver the same terminal on every re-arm and
-        // spin.
+
+        let sess_shard = active_chat_shard_idx(session_id);
+        let mut sess = self.shards.sessions[sess_shard].write().await;
         if replay_terminal {
-            if let Some((seq, terminal)) = index.session_terminal.get(session_id) {
+            if let Some((seq, terminal)) = sess.session_terminal.get(session_id) {
                 let _ = standby_tx.send((*seq, terminal.clone()));
             }
         }
-        // Multi-client standby pool: prune dead senders, and update or register this client_id.
-        // A single tab refreshing reuses its client_id and replaces its own dead sender without piling up;
-        // multiple independent remote clients with distinct client_ids stay concurrently subscribed.
-        let entry = index
+        let entry = sess
             .standby_watchers
             .entry(session_id.to_string())
             .or_default();
@@ -4082,7 +4220,6 @@ impl ActiveChatRegistry {
         } else {
             cid.to_string()
         };
-        // Hard capacity cap per session (max 16 concurrent standby tabs/devices) to prevent unbounded memory growth.
         if entry.len() >= 16 && !entry.contains_key(&key) {
             if let Some(oldest_key) = entry.keys().next().cloned() {
                 entry.remove(&oldest_key);
@@ -4092,9 +4229,21 @@ impl ActiveChatRegistry {
         WatchOutcome::Standby
     }
 
+    #[cfg(test)]
+    async fn standby_watcher_keys(&self, session_id: &str) -> Vec<String> {
+        let sess_shard = active_chat_shard_idx(session_id);
+        let sess = self.shards.sessions[sess_shard].read().await;
+        let mut keys: Vec<String> = sess
+            .standby_watchers
+            .get(session_id)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        keys.sort();
+        keys
+    }
+
     /// Record the user message admitted for this turn so a *late* `/chat/watch`
-    /// subscriber (one that attaches after the broadcast, and therefore missed
-    /// the live `ChatEvent::User`) can replay it. The bus itself never replays.
+    /// subscriber can replay it.
     async fn record_user_message(
         &self,
         operation_id: &str,
@@ -4103,7 +4252,12 @@ impl ActiveChatRegistry {
         created_at: Option<u64>,
         images: Vec<ImageData>,
     ) {
-        if let Some(op) = self.inner.write().await.operations.get_mut(operation_id) {
+        let op_shard = active_chat_shard_idx(operation_id);
+        if let Some(op) = self.shards.operations[op_shard]
+            .write()
+            .await
+            .get_mut(operation_id)
+        {
             let created = created_at.or((op.started_at > 0).then_some(op.started_at));
             let client_input_id = op.request_id.clone();
             op.admitted_user = Some(AdmittedUser {
@@ -4118,16 +4272,20 @@ impl ActiveChatRegistry {
 
     /// Resolve a session alias to its currently-admitted operation id.
     async fn operation_for_session(&self, session_id: &str) -> Option<String> {
-        self.inner.read().await.aliases.get(session_id).cloned()
-    }
-
-    /// The user message admitted for `operation_id`, if the turn has already
-    /// recorded one (i.e. the turn started before this watcher subscribed).
-    async fn admitted_user_message(&self, operation_id: &str) -> Option<AdmittedUser> {
-        self.inner
+        let alias_shard = active_chat_shard_idx(session_id);
+        self.shards.aliases[alias_shard]
             .read()
             .await
-            .operations
+            .get(session_id)
+            .cloned()
+    }
+
+    /// The user message admitted for `operation_id`, if the turn has recorded one.
+    async fn admitted_user_message(&self, operation_id: &str) -> Option<AdmittedUser> {
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
+            .read()
+            .await
             .get(operation_id)
             .and_then(|op| op.admitted_user.clone())
     }
@@ -4146,9 +4304,10 @@ impl ActiveChatRegistry {
         let Some(operation_id) = self.operation_for_session(session_id).await else {
             return;
         };
+        let op_shard = active_chat_shard_idx(&operation_id);
         let (admitted, started_at) = {
-            let index = self.inner.read().await;
-            let op = index.operations.get(&operation_id);
+            let ops = self.shards.operations[op_shard].read().await;
+            let op = ops.get(&operation_id);
             (
                 op.and_then(|o| o.admitted_user.clone()),
                 op.map(|o| o.started_at).unwrap_or(0),
@@ -4179,19 +4338,19 @@ impl ActiveChatRegistry {
     }
 
     /// Drain (wake) all standby watchers parked for `session_id`, converting
-    /// each to a live broadcast subscriber on `bus`. Called from `admit` while
-    /// still holding the write lock so no watcher can be added between the
-    /// alias insert and the drain.
+    /// each to a live broadcast subscriber on `bus`.
     fn drain_standby_locked(
-        index: &mut ActiveChatIndex,
+        shard: &mut SessionChatShard,
         session_id: &str,
         bus: &tokio::sync::broadcast::Sender<(u64, ChatEvent)>,
     ) -> usize {
-        if let Some(mut watchers) = index.standby_watchers.remove(session_id) {
+        if let Some(mut watchers) = shard.standby_watchers.remove(session_id) {
             watchers.retain(|_, tx| !tx.is_closed());
             let n = watchers.len();
+            let sid_log = session_id.to_string();
             for (_cid, tx) in watchers {
                 let mut rx = bus.subscribe();
+                let sid = sid_log.clone();
                 tokio::spawn(async move {
                     loop {
                         match rx.recv().await {
@@ -4209,7 +4368,23 @@ impl ActiveChatRegistry {
                                     break;
                                 }
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!(
+                                    session_id = %sid,
+                                    skipped,
+                                    "standby chat watcher lagged; disconnecting for resync"
+                                );
+                                let _ = tx.send((
+                                    0,
+                                    ChatEvent::Error {
+                                        message: format!(
+                                            "chat stream lagged by {skipped} events; reconnect"
+                                        ),
+                                        message_id: None,
+                                    },
+                                ));
+                                break;
+                            }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
@@ -4224,73 +4399,63 @@ impl ActiveChatRegistry {
     /// Bind the runtime's canonical session id after a first-turn session has
     /// been allocated (or a requested id has been resolved to its canonical id).
     async fn bind_session(&self, operation_id: &str, session_id: &str) -> anyhow::Result<()> {
-        let mut index = self.inner.write().await;
-        if let Some(owner) = index.aliases.get(session_id) {
+        let alias_shard = active_chat_shard_idx(session_id);
+        let mut alias_map = self.shards.aliases[alias_shard].write().await;
+        if let Some(owner) = alias_map.get(session_id) {
             if owner != operation_id {
                 anyhow::bail!("chat session {session_id} became active while this turn started");
             }
         }
-        let operation = index
-            .operations
-            .get_mut(operation_id)
-            .ok_or_else(|| anyhow::anyhow!("chat operation is no longer active"))?;
-        operation.session_id = Some(session_id.to_string());
-        if !operation.aliases.iter().any(|alias| alias == session_id) {
-            operation.aliases.push(session_id.to_string());
+        let op_shard = active_chat_shard_idx(operation_id);
+        {
+            let mut ops = self.shards.operations[op_shard].write().await;
+            let operation = ops
+                .get_mut(operation_id)
+                .ok_or_else(|| anyhow::anyhow!("chat operation is no longer active"))?;
+            operation.session_id = Some(session_id.to_string());
+            if !operation.aliases.iter().any(|alias| alias == session_id) {
+                operation.aliases.push(session_id.to_string());
+            }
         }
-        index
-            .aliases
-            .insert(session_id.to_string(), operation_id.to_string());
+        alias_map.insert(session_id.to_string(), operation_id.to_string());
         Ok(())
     }
 
     /// Mark and cooperatively cancel an operation addressed by either alias.
     async fn stop_alias(&self, alias: &str) -> bool {
-        let operation_id = {
-            let index = self.inner.read().await;
-            let Some(operation_id) = index.aliases.get(alias).cloned() else {
-                return false;
-            };
-            operation_id
+        let Some(operation_id) = self.operation_for_session(alias).await else {
+            return false;
         };
         self.stop_operation(&operation_id).await
     }
 
-    /// Stop the occupant of `alias` (same path as WebUI `/chat/stop`) and wait
-    /// until it leaves the registry. `true` means the alias is idle (already
-    /// gone, or the cancelled turn finished). `false` means the timeout fired
-    /// while the previous turn was still persisting.
-    ///
-    /// `timeout = None` waits for the release to be real instead of timing out.
-    /// Send-now callers need that verdict: a hard cap there misreported
-    /// "still busy" for turns that were already releasing, which pushed the
-    /// user's message back into the queue. `Some(limit)` keeps the bounded
-    /// behaviour of the session-deletion paths.
+    /// Stop the occupant of `alias` and wait until it leaves the registry.
     async fn stop_and_wait(&self, alias: String, timeout: Option<Duration>) -> bool {
-        let operation_id = {
-            let index = self.inner.read().await;
-            let Some(operation_id) = index.aliases.get(&alias).cloned() else {
-                return true;
-            };
-            if !index.operations.contains_key(operation_id.as_str()) {
-                return true;
-            }
-            operation_id
+        let Some(operation_id) = self.operation_for_session(&alias).await else {
+            return true;
         };
+        let op_shard = active_chat_shard_idx(&operation_id);
+        if !self.shards.operations[op_shard]
+            .read()
+            .await
+            .contains_key(operation_id.as_str())
+        {
+            return true;
+        }
         self.stop_alias_owned(alias).await;
         let await_release = async {
             loop {
                 let finished = {
-                    let index = self.inner.read().await;
-                    match index.operations.get(&operation_id) {
+                    let ops = self.shards.operations[op_shard].read().await;
+                    match ops.get(&operation_id) {
                         None => return,
                         Some(operation) => operation.finished.clone(),
                     }
                 };
                 let notified = finished.notified();
                 {
-                    let index = self.inner.read().await;
-                    if !index.operations.contains_key(&operation_id) {
+                    let ops = self.shards.operations[op_shard].read().await;
+                    if !ops.contains_key(&operation_id) {
                         return;
                     }
                 }
@@ -4299,8 +4464,6 @@ impl ActiveChatRegistry {
         };
         match timeout {
             Some(limit) => tokio::time::timeout(limit, await_release).await.is_ok(),
-            // Unterminated wait: the operation always leaves the registry (the
-            // chat task completes even on panic), so this resolves, not hangs.
             None => {
                 await_release.await;
                 true
@@ -4309,20 +4472,17 @@ impl ActiveChatRegistry {
     }
 
     async fn stop_alias_owned(&self, alias: String) -> bool {
-        let operation_id = {
-            let index = self.inner.read().await;
-            let Some(operation_id) = index.aliases.get(&alias).cloned() else {
-                return false;
-            };
-            operation_id
+        let Some(operation_id) = self.operation_for_session(&alias).await else {
+            return false;
         };
         self.stop_operation(&operation_id).await
     }
 
     async fn stop_operation(&self, operation_id: &str) -> bool {
+        let op_shard = active_chat_shard_idx(operation_id);
         let (cancellation, stop_gate, op_session_id) = {
-            let index = self.inner.read().await;
-            let Some(operation) = index.operations.get(operation_id) else {
+            let ops = self.shards.operations[op_shard].read().await;
+            let Some(operation) = ops.get(operation_id) else {
                 return false;
             };
             (
@@ -4332,22 +4492,19 @@ impl ActiveChatRegistry {
             )
         };
 
-        // This is the stop/approval linearization point. If an approval already
-        // holds the gate, its runtime consumption wins and this stop follows it.
-        // Otherwise mark stopped before the cancellation token becomes visible,
-        // so a later approval cannot cross the runtime boundary.
         {
             let mut stopped = stop_gate.lock().await;
             *stopped = true;
         }
         {
-            let mut index = self.inner.write().await;
-            if let Some(operation) = index.operations.get_mut(operation_id) {
+            let mut ops = self.shards.operations[op_shard].write().await;
+            if let Some(operation) = ops.get_mut(operation_id) {
                 operation.stopped = true;
             }
         }
         cancellation.cancel();
         if let Some(ref sid) = op_session_id {
+            jeikcode_capabilities::tools::task::cancel_subagents_for_session(sid);
             jeikcode_capabilities::tools::bash_runtime::cancel_foreground_live_bash_for_session(
                 sid,
             );
@@ -4358,19 +4515,14 @@ impl ActiveChatRegistry {
     }
 
     async fn stop_gate(&self, operation_id: &str) -> Option<Arc<Mutex<bool>>> {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .map(|operation| operation.stop_gate.clone())
     }
 
-    /// Compat latest-wins: if the session is busy, cancel the running turn
-    /// (bash/tools included), wait for snapshot persist + `complete`, then admit.
-    /// Retries until this caller occupies the aliases or `timeout` elapses.
-    ///
-    /// Takes `self` by value (cheap Arc clone) so axum handlers stay `Send`.
     async fn admit_or_preempt(
         self,
         session_id: Option<String>,
@@ -4393,10 +4545,6 @@ impl ActiveChatRegistry {
                     if remaining.is_zero() {
                         return Err(ActiveChatAdmissionError::SessionBusy);
                     }
-                    // The occupant may be keyed by UUID, by the compat `user`
-                    // alias, or both. A first turn often occupies only the user
-                    // key until `bind_session` lands — stopping only the UUID
-                    // would spin until timeout.
                     let mut keys = Vec::new();
                     if let Some(sid) = session_id.clone() {
                         keys.push(sid);
@@ -4429,19 +4577,19 @@ impl ActiveChatRegistry {
     }
 
     async fn was_stopped(&self, operation_id: &str) -> bool {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .is_some_and(|operation| operation.stopped)
     }
 
     async fn session_id(&self, operation_id: &str) -> Option<String> {
-        self.inner
+        let op_shard = active_chat_shard_idx(operation_id);
+        self.shards.operations[op_shard]
             .read()
             .await
-            .operations
             .get(operation_id)
             .and_then(|operation| operation.session_id.clone())
     }
@@ -4452,8 +4600,9 @@ impl ActiveChatRegistry {
         operation_id: &str,
         tx: mpsc::UnboundedSender<live_api::ChatSteerSignal>,
     ) {
-        let mut index = self.inner.write().await;
-        if let Some(operation) = index.operations.get_mut(operation_id) {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        if let Some(operation) = ops.get_mut(operation_id) {
             operation.steer_tx = Some(tx);
         }
     }
@@ -4462,9 +4611,14 @@ impl ActiveChatRegistry {
         &self,
         alias: &str,
     ) -> Option<mpsc::UnboundedSender<live_api::ChatSteerSignal>> {
-        let index = self.inner.read().await;
-        let operation_id = index.aliases.get(alias)?;
-        index.operations.get(operation_id)?.steer_tx.clone()
+        let operation_id = self.operation_for_session(alias).await?;
+        let op_shard = active_chat_shard_idx(&operation_id);
+        self.shards.operations[op_shard]
+            .read()
+            .await
+            .get(&operation_id)?
+            .steer_tx
+            .clone()
     }
 
     /// 绑定当前 `/chat` 回合的运行时句柄，确保 `/live/provider` 能命中纯 WebUI 对话流。
@@ -4473,8 +4627,9 @@ impl ActiveChatRegistry {
         operation_id: &str,
         handle: jeikcode_coding::CodingRuntimeHandle,
     ) {
-        let mut index = self.inner.write().await;
-        if let Some(operation) = index.operations.get_mut(operation_id) {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        if let Some(operation) = ops.get_mut(operation_id) {
             operation.runtime_handle = Some(handle);
         }
     }
@@ -4483,9 +4638,14 @@ impl ActiveChatRegistry {
         &self,
         alias: &str,
     ) -> Option<jeikcode_coding::CodingRuntimeHandle> {
-        let index = self.inner.read().await;
-        let operation_id = index.aliases.get(alias)?;
-        index.operations.get(operation_id)?.runtime_handle.clone()
+        let operation_id = self.operation_for_session(alias).await?;
+        let op_shard = active_chat_shard_idx(&operation_id);
+        self.shards.operations[op_shard]
+            .read()
+            .await
+            .get(&operation_id)?
+            .runtime_handle
+            .clone()
     }
 
     /// Record a `/chat/steer` submit's client correlation id and timestamp (FIFO)
@@ -4496,9 +4656,10 @@ impl ActiveChatRegistry {
         client_input_id: Option<String>,
         created_at: Option<u64>,
     ) {
-        let mut index = self.inner.write().await;
-        if let Some(operation_id) = index.aliases.get(alias).cloned() {
-            if let Some(operation) = index.operations.get_mut(&operation_id) {
+        if let Some(operation_id) = self.operation_for_session(alias).await {
+            let op_shard = active_chat_shard_idx(&operation_id);
+            let mut ops = self.shards.operations[op_shard].write().await;
+            if let Some(operation) = ops.get_mut(&operation_id) {
                 operation.steer_client_ids.push_back(client_input_id);
                 operation.steer_timestamps.push_back(created_at);
             }
@@ -4508,11 +4669,12 @@ impl ActiveChatRegistry {
     /// Remove a cancelled steer's correlation id and timestamp so a later steer
     /// fold never pops the cancelled steer's stale metadata.
     async fn cancel_steer_metadata(&self, alias: &str, client_input_id: Option<&str>) {
-        let mut index = self.inner.write().await;
-        let Some(operation_id) = index.aliases.get(alias).cloned() else {
+        let Some(operation_id) = self.operation_for_session(alias).await else {
             return;
         };
-        let Some(operation) = index.operations.get_mut(&operation_id) else {
+        let op_shard = active_chat_shard_idx(&operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        let Some(operation) = ops.get_mut(&operation_id) else {
             return;
         };
         if let Some(cid) = client_input_id.map(str::trim).filter(|s| !s.is_empty()) {
@@ -4530,17 +4692,16 @@ impl ActiveChatRegistry {
         }
     }
 
-    /// Drain up to `count` recorded steer client ids and timestamps for the operation,
-    /// matching by the kernel's preserved `SteeredInput.message_id` when present so an
-    /// out-of-band or cancelled steer cannot shift the FIFO alignment.
+    /// Drain up to `count` recorded steer client ids and timestamps for the operation.
     async fn take_steer_metadata_for_inputs(
         &self,
         operation_id: &str,
         count: usize,
         inputs: &[jeikcode_kernel::event::SteeredInput],
     ) -> (Vec<Option<String>>, Vec<Option<u64>>) {
-        let mut index = self.inner.write().await;
-        let Some(operation) = index.operations.get_mut(operation_id) else {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        let Some(operation) = ops.get_mut(operation_id) else {
             return (Vec::new(), Vec::new());
         };
         let mut ids = Vec::with_capacity(count);
@@ -4585,35 +4746,69 @@ impl ActiveChatRegistry {
     /// Remove only the exact operation that finished. A late cleanup from an
     /// older generation can never erase a replacement operation's aliases.
     async fn complete(&self, operation_id: &str) -> bool {
-        let mut index = self.inner.write().await;
-        let Some(operation) = index.operations.remove(operation_id) else {
-            return false;
-        };
-        // 会话级游标推进：把本回合已发出的帧数累加进去，下一回合从更高的序号开始。
-        // 严格单调递增，且与上下文/压缩无关。
-        let next_base = operation
-            .replay
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .high_water();
-        for alias in &operation.aliases {
-            index.session_seq.insert(alias.clone(), next_base);
-        }
-        for alias in operation.aliases {
-            if index
-                .aliases
-                .get(&alias)
-                .is_some_and(|owner| owner == operation_id)
-            {
-                index.aliases.remove(&alias);
+        let op_shard = active_chat_shard_idx(operation_id);
+        let operation = loop {
+            let expected_aliases = {
+                let ops = self.shards.operations[op_shard].read().await;
+                let Some(op) = ops.get(operation_id) else {
+                    return false;
+                };
+                op.aliases.clone()
+            };
+            let mut alias_shard_ids: Vec<usize> = expected_aliases
+                .iter()
+                .map(|a| active_chat_shard_idx(a))
+                .collect();
+            alias_shard_ids.sort_unstable();
+            alias_shard_ids.dedup();
+
+            // Strict lock order: aliases (asc) -> operations -> sessions.
+            let mut alias_guards: Vec<(
+                usize,
+                tokio::sync::RwLockWriteGuard<'_, HashMap<String, String>>,
+            )> = Vec::with_capacity(alias_shard_ids.len());
+            for shard_id in alias_shard_ids {
+                alias_guards.push((shard_id, self.shards.aliases[shard_id].write().await));
             }
-        }
+
+            let mut ops = self.shards.operations[op_shard].write().await;
+            let Some(op_ref) = ops.get(operation_id) else {
+                return false;
+            };
+            if op_ref.aliases != expected_aliases {
+                // `bind_session` added another alias while we gathered alias shards; retry.
+                continue;
+            }
+            let operation = ops.remove(operation_id).expect("verified key");
+            self.shards
+                .active_count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
+            let next_base = operation
+                .replay
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .high_water();
+            for alias in &operation.aliases {
+                let sess_shard = active_chat_shard_idx(alias);
+                self.shards.sessions[sess_shard]
+                    .write()
+                    .await
+                    .session_seq
+                    .insert(alias.clone(), next_base);
+
+                let a_shard = active_chat_shard_idx(alias);
+                if let Some((_, map)) = alias_guards.iter_mut().find(|(id, _)| *id == a_shard) {
+                    if map.get(alias).is_some_and(|owner| owner == operation_id) {
+                        map.remove(alias);
+                    }
+                }
+            }
+            break operation;
+        };
+
         operation.finished.notify_waiters();
-        // 跨实例增量：操作结束 → 活动状态回落（不触发任何整表重拉）。
         if let Some(sid) = operation.session_id.clone() {
-            // 只结束属于本次 operation 的阶段：手动压缩归 `manual:<op>`，
-            // `/chat` 自动压缩归 `turn` 前缀。绝不能无条件清掉 live 或别的 owner
-            // 正在执行的压缩（旧实现正是这样让刷新误杀另一条链路）。
             let manual_owner = manual_compaction_owner(operation_id);
             finish_compaction_phase(&sid, &manual_owner, false);
             finish_compaction_phase_prefix(&sid, COMPACTION_OWNER_TURN, false);
@@ -4627,26 +4822,13 @@ impl ActiveChatRegistry {
         true
     }
 
-    /// Mark that a terminal event (Done, Stopped, or Error) has been emitted, and
-    /// record that terminal frame **on the session** in the same critical section
-    /// that raises the flag.
-    ///
-    /// The flag used to become visible before the terminal frame existed anywhere:
-    /// the frame was still queued for the fan-out task, so a watcher attaching in
-    /// that window saw "already terminal" with nothing to replay — and it parked,
-    /// and parking means keepalives only, never a terminal. The WebUI then stayed
-    /// in "running" forever (red stop button, clock still ticking, checklist
-    /// frozen) until the user happened to switch sessions.
-    ///
-    /// Recording the frame here makes "this turn is over" and "here is its
-    /// terminal frame" a single fact, so a late watcher can always be told.
+    /// Record terminal state and frame atomically per operation/session shards.
     async fn mark_terminal(&self, operation_id: &str, terminal: &ChatEvent) {
-        let mut index = self.inner.write().await;
-        let Some(op) = index.operations.get_mut(operation_id) else {
+        let op_shard = active_chat_shard_idx(operation_id);
+        let mut ops = self.shards.operations[op_shard].write().await;
+        let Some(op) = ops.get_mut(operation_id) else {
             return;
         };
-        // The terminal frame takes the next slot in the turn's replay log, so its
-        // cursor is the same number the replay snapshot hands out.
         let seq = op
             .replay
             .lock()
@@ -4656,32 +4838,39 @@ impl ActiveChatRegistry {
         op.terminal_reached = true;
         let aliases = op.aliases.clone();
         for alias in aliases {
-            index
+            let sess_shard = active_chat_shard_idx(&alias);
+            self.shards.sessions[sess_shard]
+                .write()
+                .await
                 .session_terminal
                 .insert(alias, (seq, terminal.clone()));
         }
     }
 
-    /// Evict all in-memory tracking state (sequences, cached terminal frames, standby watchers, aliases)
-    /// when a session is deleted, preventing resource leakage across session lifecycles.
+    /// Evict all in-memory tracking state when a session is deleted.
     pub(crate) async fn clear_session(&self, session_id: &str) {
-        let mut index = self.inner.write().await;
-        index.session_seq.remove(session_id);
-        index.session_terminal.remove(session_id);
-        index.standby_watchers.remove(session_id);
-        index.aliases.remove(session_id);
+        let alias_shard = active_chat_shard_idx(session_id);
+        let sess_shard = active_chat_shard_idx(session_id);
+        let mut alias_map = self.shards.aliases[alias_shard].write().await;
+        let mut sess = self.shards.sessions[sess_shard].write().await;
+        alias_map.remove(session_id);
+        sess.session_seq.remove(session_id);
+        sess.session_terminal.remove(session_id);
+        sess.standby_watchers.remove(session_id);
     }
 
     async fn active_session_ids(&self) -> Vec<String> {
-        let mut sessions: Vec<String> = self
-            .inner
-            .read()
-            .await
-            .operations
-            .values()
-            .filter(|operation| !operation.terminal_reached)
-            .filter_map(|operation| operation.session_id.clone())
-            .collect();
+        let mut sessions: Vec<String> = Vec::new();
+        for shard in &self.shards.operations {
+            let ops = shard.read().await;
+            for operation in ops.values() {
+                if !operation.terminal_reached {
+                    if let Some(ref sid) = operation.session_id {
+                        sessions.push(sid.clone());
+                    }
+                }
+            }
+        }
         sessions.sort();
         sessions.dedup();
         sessions
@@ -4692,11 +4881,12 @@ impl ActiveChatRegistry {
         &self,
         session_id: &str,
     ) -> (bool, Option<String>, Option<u64>) {
-        let guard = self.inner.read().await;
-        let Some(op_id) = guard.aliases.get(session_id) else {
+        let Some(op_id) = self.operation_for_session(session_id).await else {
             return (false, None, None);
         };
-        let Some(op) = guard.operations.get(op_id) else {
+        let op_shard = active_chat_shard_idx(&op_id);
+        let ops = self.shards.operations[op_shard].read().await;
+        let Some(op) = ops.get(&op_id) else {
             return (false, None, None);
         };
         if op.terminal_reached {
@@ -4706,19 +4896,18 @@ impl ActiveChatRegistry {
     }
 
     async fn has_active_operations(&self) -> bool {
-        !self.inner.read().await.operations.is_empty()
+        self.active_operation_count() > 0
     }
 
     #[cfg(test)]
     async fn cancel_all(&self) {
-        let cancellations: Vec<(CancellationToken, Arc<Mutex<bool>>)> = self
-            .inner
-            .read()
-            .await
-            .operations
-            .values()
-            .map(|operation| (operation.cancellation.clone(), operation.stop_gate.clone()))
-            .collect();
+        let mut cancellations: Vec<(CancellationToken, Arc<Mutex<bool>>)> = Vec::new();
+        for shard in &self.shards.operations {
+            let ops = shard.read().await;
+            for operation in ops.values() {
+                cancellations.push((operation.cancellation.clone(), operation.stop_gate.clone()));
+            }
+        }
         for (cancellation, stop_gate) in cancellations {
             *stop_gate.lock().await = true;
             cancellation.cancel();
@@ -5131,9 +5320,28 @@ pub(crate) fn publish_session_upsert(working_dir: &std::path::Path, session_id: 
 
 const GLOBAL_EVENTS_CAP: usize = 256;
 
+/// Pre-serialized global event payloads shared (`Arc<str>`) across all SSE `/events`
+/// and WebSocket `/stream/ws` subscribers so each broadcast is serialized once.
+#[derive(Clone, Debug)]
+pub(crate) struct SerializedGlobalFrame {
+    pub(crate) event_json: Arc<str>,
+    pub(crate) ws_frame: Arc<str>,
+}
+
 /// Process-wide invalidation bus shared by every connected client instance.
 pub(crate) fn global_events() -> &'static tokio::sync::broadcast::Sender<GlobalWireEvent> {
     static BUS: std::sync::OnceLock<tokio::sync::broadcast::Sender<GlobalWireEvent>> =
+        std::sync::OnceLock::new();
+    BUS.get_or_init(|| {
+        let (tx, _) = tokio::sync::broadcast::channel(GLOBAL_EVENTS_CAP);
+        tx
+    })
+}
+
+/// Zero-copy pre-serialized invalidation bus consumed by `/events` and `/stream/ws`.
+pub(crate) fn global_wire_frames() -> &'static tokio::sync::broadcast::Sender<SerializedGlobalFrame>
+{
+    static BUS: std::sync::OnceLock<tokio::sync::broadcast::Sender<SerializedGlobalFrame>> =
         std::sync::OnceLock::new();
     BUS.get_or_init(|| {
         let (tx, _) = tokio::sync::broadcast::channel(GLOBAL_EVENTS_CAP);
@@ -5162,6 +5370,14 @@ pub(crate) fn publish_model_config(
 /// Broadcast an invalidation signal. No subscribers / lagged receivers are fine:
 /// the next invalidation (or a client's cold start) reconciles the state.
 pub(crate) fn publish_global(event: GlobalWireEvent) {
+    if let Ok(ev_json) = serde_json::to_string(&event) {
+        let ws_frame: Arc<str> = Arc::from(format!(r#"{{"channel":"global","event":{ev_json}}}"#));
+        let event_json: Arc<str> = Arc::from(ev_json);
+        let _ = global_wire_frames().send(SerializedGlobalFrame {
+            event_json,
+            ws_frame,
+        });
+    }
     let _ = global_events().send(event);
 }
 
@@ -5789,28 +6005,35 @@ async fn global_events_stream() -> axum::response::Response {
     use futures::StreamExt as _;
     use std::convert::Infallible;
 
-    let mut rx = global_events().subscribe();
-    let (tx, out_rx) = mpsc::unbounded_channel::<String>();
-    let _ = tx.send(serde_json::json!({ "type": "sync" }).to_string());
+    let mut rx = global_wire_frames().subscribe();
+    let (tx, out_rx) = mpsc::channel::<Arc<str>>(256);
+    let _ = tx.try_send(Arc::<str>::from(r#"{"type":"sync"}"#));
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(event) => match serde_json::to_string(&event) {
-                    Ok(json) => {
-                        if tx.send(json).is_err() {
-                            break;
-                        }
+                Ok(frame) => match tx.try_send(Arc::clone(&frame.event_json)) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!("closing lagging /events SSE subscriber (send queue full)");
+                        break;
                     }
-                    Err(_) => continue,
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                 },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "/events SSE lagged; requesting client resync");
+                    match tx.try_send(Arc::<str>::from(r#"{"type":"sync"}"#)) {
+                        Ok(()) => continue,
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+                        | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
 
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx)
-        .map(|json| Ok::<Event, Infallible>(Event::default().data(json)));
+    let stream = tokio_stream::wrappers::ReceiverStream::new(out_rx)
+        .map(|json| Ok::<Event, Infallible>(Event::default().data(json.as_ref())));
     let mut resp = Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
         .into_response();
@@ -6148,10 +6371,15 @@ pub(crate) fn fanout_chat_events_for_session(
                     if let Some(sid) = sid {
                         // The admitted prompt is now a real message: retire its
                         // pending input row by the same id.
-                        let _ = jeikcode_capabilities::session::inputs::mark_promoted_global(
-                            &sid,
-                            &[(client_input_id.clone(), message_id.clone())],
-                        );
+                        let sid_mark = sid.clone();
+                        let pair = (client_input_id.clone(), message_id.clone());
+                        let _ = spawn_blocking_isolated(move || {
+                            let _ = jeikcode_capabilities::session::inputs::mark_promoted_global(
+                                &sid_mark,
+                                &[pair],
+                            );
+                        })
+                        .await;
                         publish_global(GlobalWireEvent::Activity {
                             session_id: sid,
                             running: true,
@@ -6177,12 +6405,17 @@ pub(crate) fn fanout_chat_events_for_session(
                             .cloned()
                             .zip(inputs.iter().map(|input| input.message_id.clone()))
                             .collect();
-                        let _ =
-                            jeikcode_capabilities::session::inputs::mark_promoted_with_anchor_global(
-                                &sid,
-                                &pairs,
-                                anchor_message_id.as_deref(),
+                        let sid_mark = sid.clone();
+                        let pairs_mark = pairs.clone();
+                        let anchor_mark = anchor_message_id.clone();
+                        let _ = spawn_blocking_isolated(move || {
+                            let _ = jeikcode_capabilities::session::inputs::mark_promoted_with_anchor_global(
+                                &sid_mark,
+                                &pairs_mark,
+                                anchor_mark.as_deref(),
                             );
+                        })
+                        .await;
                         retire_folded_steers_from_queue(&sid, &pairs).await;
                         publish_global(GlobalWireEvent::SteerFolded {
                             session_id: sid,
@@ -6282,7 +6515,12 @@ pub(crate) fn fanout_chat_events_for_session(
                 publish_global(activity);
             }
             if let (Some(wd), Some(sid)) = (current_wd.as_deref(), deferred_upsert_sid.as_deref()) {
-                publish_session_upsert(wd, sid);
+                let wd_owned = wd.to_path_buf();
+                let sid_owned = sid.to_string();
+                let _ = spawn_blocking_isolated(move || {
+                    publish_session_upsert(&wd_owned, &sid_owned);
+                })
+                .await;
             }
         }
     });
@@ -8147,7 +8385,7 @@ where
     let permit = SESSION_CATALOG_IO.acquire().await.map_err(|error| {
         std::io::Error::other(format!("session catalog coordinator closed: {error}"))
     })?;
-    tokio::task::spawn_blocking(move || {
+    spawn_blocking_isolated(move || {
         let _permit = permit;
         operation()
     })
@@ -9925,10 +10163,33 @@ impl DisplayLogCache {
     }
 }
 
+const DISPLAY_CACHE_SHARDS: usize = 16;
+
+fn display_cache_shard_idx(key: &str) -> usize {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash as usize) % DISPLAY_CACHE_SHARDS
+}
+
+#[cfg(test)]
 fn display_log_cache() -> &'static std::sync::Mutex<DisplayLogCache> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<DisplayLogCache>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(DisplayLogCache::default()))
+}
+
+fn display_log_cache_shard(id: &str) -> &'static std::sync::Mutex<DisplayLogCache> {
+    static SHARDS: std::sync::OnceLock<Vec<std::sync::Mutex<DisplayLogCache>>> =
+        std::sync::OnceLock::new();
+    let shards = SHARDS.get_or_init(|| {
+        (0..DISPLAY_CACHE_SHARDS)
+            .map(|_| std::sync::Mutex::new(DisplayLogCache::default()))
+            .collect()
+    });
+    &shards[display_cache_shard_idx(id)]
 }
 
 /// Read a complete display log with an mtime+length guarded cache. The log is
@@ -9941,7 +10202,7 @@ fn read_display_cached(
     jeikcode_capabilities::session::DisplayMeta,
     Arc<Vec<jeikcode_capabilities::session::DisplayRecord>>,
 )> {
-    read_display_with_cache(manager, id, display_log_cache())
+    read_display_with_cache(manager, id, display_log_cache_shard(id))
 }
 
 fn read_display_with_cache(
@@ -10004,14 +10265,21 @@ struct DisplayTranscriptCache {
     turns: Arc<Vec<jeikcode_capabilities::session::TurnRecord>>,
 }
 
-fn display_transcript_cache() -> &'static std::sync::Mutex<Option<DisplayTranscriptCache>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<DisplayTranscriptCache>>> =
+fn display_transcript_cache_shard(
+    key: &str,
+) -> &'static std::sync::Mutex<Option<DisplayTranscriptCache>> {
+    static SHARDS: std::sync::OnceLock<Vec<std::sync::Mutex<Option<DisplayTranscriptCache>>>> =
         std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+    let shards = SHARDS.get_or_init(|| {
+        (0..DISPLAY_CACHE_SHARDS)
+            .map(|_| std::sync::Mutex::new(None))
+            .collect()
+    });
+    &shards[display_cache_shard_idx(key)]
 }
 
 /// Read the append-only transcript for display reconstruction, with a
-/// fingerprint-guarded single-entry cache. `None` means the transcript cannot
+/// fingerprint-guarded per-shard cache. `None` means the transcript cannot
 /// be read (no file / corrupt); callers then keep the snapshot-only projection.
 fn load_display_transcript(
     project_hash: &str,
@@ -10024,8 +10292,9 @@ fn load_display_transcript(
     let mtime = metadata.as_ref().and_then(|m| m.modified().ok());
     let len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
     let key = format!("{project_hash}/{id}");
+    let cache_shard = display_transcript_cache_shard(&key);
 
-    let mut guard = display_transcript_cache().lock().ok()?;
+    let mut guard = cache_shard.lock().ok()?;
     if let Some(cache) = guard.as_ref() {
         if cache.key == key && cache.mtime == mtime && cache.len == len {
             return Some(cache.turns.clone());
@@ -11975,6 +12244,9 @@ async fn delete_session(
                     pool.retire_session_id(&id_for_cleanup).await;
 
                     // Cascade terminate all background services owned by this session
+                    jeikcode_capabilities::tools::task::cancel_subagents_for_session(
+                        &id_for_cleanup,
+                    );
                     jeikcode_capabilities::tools::bash_runtime::kill_by_session_id(&id_for_cleanup);
 
                     // Delete all ephemeral log files matching jeikcode-back-{session_id}-*.log
@@ -12333,11 +12605,17 @@ async fn get_session_inputs(
     Path((_hash, id)): Path<(String, String)>,
     Query(query): Query<SessionInputsQuery>,
 ) -> impl IntoResponse {
-    let cursor = jeikcode_capabilities::session::inputs::cursor_global(&id);
-    let inputs: Vec<_> = jeikcode_capabilities::session::inputs::list_global(&id)
-        .into_iter()
-        .filter(|input| input.seq > query.after_seq)
-        .collect();
+    let after_seq = query.after_seq;
+    let (cursor, inputs) = spawn_blocking_isolated(move || {
+        let cursor = jeikcode_capabilities::session::inputs::cursor_global(&id);
+        let inputs: Vec<_> = jeikcode_capabilities::session::inputs::list_global(&id)
+            .into_iter()
+            .filter(|input| input.seq > after_seq)
+            .collect();
+        (cursor, inputs)
+    })
+    .await
+    .unwrap_or_default();
     Json(serde_json::json!({
         "success": true,
         "cursor": cursor,
@@ -16755,7 +17033,13 @@ pub(crate) struct AdmittedChatTurn {
 /// Persist the admitted prompt before any model request. This is the exact
 /// behavior of a WebUI send: the prompt gets an identity, an input-log row and
 /// a display admission row even if the client disconnects before the first frame.
-fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_id: &str) {
+fn persist_admitted_user_fields(
+    message: &str,
+    images: &[ImageInput],
+    working_dir: Option<&std::path::Path>,
+    session_id: &str,
+    client_input_id: &str,
+) {
     let created_at = u64::try_from(jeikcode_capabilities::session::now_ms()).unwrap_or(0);
     let mut input = jeikcode_capabilities::session::SessionInput {
         id: client_input_id.to_string(),
@@ -16763,9 +17047,8 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
         session_id: session_id.to_string(),
         delivery: "prompt".into(),
         status: "admitted".into(),
-        text: request.message.clone(),
-        images: request
-            .images
+        text: message.to_string(),
+        images: images
             .iter()
             .map(|image| jeikcode_kernel::message::ImageContent {
                 media_type: image.media_type.clone(),
@@ -16787,7 +17070,7 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
         );
     }
 
-    let bucket = if let Some(dir) = request.working_dir.as_deref() {
+    let bucket = if let Some(dir) = working_dir {
         NativeSessionManager::project_hash(dir)
     } else if let Ok(Some(resolved)) = resolve_session_by_id(session_id) {
         resolved.project_hash
@@ -16799,8 +17082,7 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
     }
     let manager =
         NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(&bucket));
-    let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = request
-        .images
+    let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = images
         .iter()
         .map(|image| jeikcode_capabilities::session::DisplayImage {
             media_type: image.media_type.clone(),
@@ -16811,7 +17093,7 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
     if let Err(error) = manager.append_display_user(
         session_id,
         client_input_id,
-        &request.message,
+        message,
         &display_images,
         Some(created_at),
     ) {
@@ -16821,6 +17103,28 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
             error = %error,
             "chat admission: display admission append failed"
         );
+    }
+}
+
+async fn persist_admitted_user_async(
+    message: String,
+    images: Vec<ImageInput>,
+    working_dir: Option<std::path::PathBuf>,
+    session_id: String,
+    client_input_id: String,
+) {
+    if let Err(error) = spawn_blocking_isolated(move || {
+        persist_admitted_user_fields(
+            &message,
+            &images,
+            working_dir.as_deref(),
+            &session_id,
+            &client_input_id,
+        );
+    })
+    .await
+    {
+        tracing::warn!(%error, "chat admission: persist_admitted_user task panicked");
     }
 }
 
@@ -16881,7 +17185,14 @@ pub(crate) async fn admit_chat_turn(
         }
     }?;
 
-    persist_admitted_user(&request, &session_id, &client_input_id);
+    persist_admitted_user_async(
+        request.message.clone(),
+        request.images.clone(),
+        request.working_dir.clone(),
+        session_id.clone(),
+        client_input_id.clone(),
+    )
+    .await;
 
     let (client_tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
     let event_bus = state
@@ -18377,7 +18688,7 @@ async fn prepare_chat_watch(
     // deltas after reconnect. Idle standby watchers skip this so a leftover
     // alias cannot replay a finished turn into the composer.
     if !q.standby {
-        if let Some((snapshot, mut bus_rx)) = state
+        if let Some((snapshot, bus_rx)) = state
             .active_chats
             .subscribe_live_with_replay(&session_id)
             .await
@@ -18488,28 +18799,7 @@ async fn prepare_chat_watch(
                 replay_head.truncate(cut + 1);
             }
             if terminal_at.is_none() && !snapshot_had_terminal {
-                tokio::spawn(async move {
-                    loop {
-                        match bus_rx.recv().await {
-                            Ok((seq, event)) => {
-                                let terminal = matches!(
-                                    event,
-                                    ChatEvent::Done { .. }
-                                        | ChatEvent::Error { .. }
-                                        | ChatEvent::Stopped
-                                );
-                                if tx.send((seq, event)).is_err() {
-                                    break;
-                                }
-                                if terminal {
-                                    break;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                });
+                spawn_chat_watch_bus_pump(session_id.clone(), bus_rx, tx);
             } else {
                 // 快照已终态且游标已越过终态帧：客户端拿不到 Done/Error，
                 // 补充权威 `state` 帧让重连立即收敛，随后关闭传输。
@@ -18527,7 +18817,7 @@ async fn prepare_chat_watch(
                 .subscribe_or_standby(&session_id, q.client_id.as_deref(), &tx, true)
                 .await
             {
-                WatchOutcome::Live(mut bus_rx) => {
+                WatchOutcome::Live(bus_rx) => {
                     // Race: turn admitted between the two lookups — no replay buffer
                     // snapshot, fall back to live-only + admitted user message.
                     tracing::debug!(
@@ -18538,30 +18828,7 @@ async fn prepare_chat_watch(
                         .active_chats
                         .replay_admitted_user(&session_id, &tx)
                         .await;
-                    tokio::spawn(async move {
-                        loop {
-                            match bus_rx.recv().await {
-                                Ok((seq, event)) => {
-                                    let terminal = matches!(
-                                        event,
-                                        ChatEvent::Done { .. }
-                                            | ChatEvent::Error { .. }
-                                            | ChatEvent::Stopped
-                                    );
-                                    if tx.send((seq, event)).is_err() {
-                                        break;
-                                    }
-                                    if terminal {
-                                        break;
-                                    }
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                    });
+                    spawn_chat_watch_bus_pump(session_id.clone(), bus_rx, tx);
                 }
                 WatchOutcome::Standby => {
                     // 非 standby 主动重连进待机且没有可重放的终态事件（例如服务重启后
@@ -18584,7 +18851,7 @@ async fn prepare_chat_watch(
             .subscribe_or_standby(&session_id, q.client_id.as_deref(), &tx, false)
             .await
         {
-            WatchOutcome::Live(mut bus_rx) => {
+            WatchOutcome::Live(bus_rx) => {
                 tracing::debug!(
                     session_id = %session_id,
                     "chat_watch: STANDBY-ONLY attached live (admitted user + live)"
@@ -18597,28 +18864,7 @@ async fn prepare_chat_watch(
                     .active_chats
                     .replay_admitted_user(&session_id, &tx)
                     .await;
-                tokio::spawn(async move {
-                    loop {
-                        match bus_rx.recv().await {
-                            Ok((seq, event)) => {
-                                let terminal = matches!(
-                                    event,
-                                    ChatEvent::Done { .. }
-                                        | ChatEvent::Error { .. }
-                                        | ChatEvent::Stopped
-                                );
-                                if tx.send((seq, event)).is_err() {
-                                    break;
-                                }
-                                if terminal {
-                                    break;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                });
+                spawn_chat_watch_bus_pump(session_id.clone(), bus_rx, tx);
             }
             WatchOutcome::Standby => {
                 tracing::debug!(
@@ -18662,6 +18908,47 @@ async fn prepare_chat_watch(
     })
 }
 
+fn spawn_chat_watch_bus_pump(
+    session_id: String,
+    mut bus_rx: tokio::sync::broadcast::Receiver<(u64, ChatEvent)>,
+    tx: mpsc::UnboundedSender<(u64, ChatEvent)>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match bus_rx.recv().await {
+                Ok((seq, event)) => {
+                    let terminal = matches!(
+                        event,
+                        ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                    );
+                    if tx.send((seq, event)).is_err() {
+                        break;
+                    }
+                    if terminal {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        skipped,
+                        "chat_watch stream lagged; disconnecting client for resync"
+                    );
+                    let _ = tx.send((
+                        0,
+                        ChatEvent::Error {
+                            message: format!("chat stream lagged by {skipped} events; reconnect"),
+                            message_id: None,
+                        },
+                    ));
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 /// GET /chat/watch?session_id=… — reattach to a turn owned by another client (SSE fallback).
 async fn chat_watch(
     State(state): State<AppState>,
@@ -18676,21 +18963,56 @@ async fn chat_watch(
     active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let live_session_id = prepared.session_id.clone();
     let live_operation_id = prepared.operation_id.clone();
+    let chats = state.active_chats.clone();
+    let sid_json = serde_json::to_string(&live_session_id).unwrap_or_else(|_| "\"\"".to_string());
 
     let head_stream = futures::stream::iter(prepared.head_json).map(|json| {
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json))
     });
 
-    let live_stream = UnboundedReceiverStream::new(prepared.rx).map(move |(seq, event)| {
-        Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
-            chat_watch_frame_json(
-                &event,
-                &live_session_id,
-                Some(seq),
-                false,
-                live_operation_id.as_deref(),
-            ),
-        ))
+    let (sse_tx, sse_rx) = mpsc::channel::<Arc<str>>(1024);
+    let mut raw_rx = prepared.rx;
+    tokio::spawn(async move {
+        let mut cached_wire: Option<Arc<std::sync::Mutex<SharedChatWireCache>>> = None;
+        while let Some((seq, event)) = raw_rx.recv().await {
+            if cached_wire.is_none() {
+                cached_wire = chats.wire_cache_for_session(&live_session_id).await;
+            }
+            let watch_json: Arc<str> = if let Some(ref cache) = cached_wire {
+                get_or_build_chat_watch_frame(
+                    cache,
+                    &event,
+                    &live_session_id,
+                    &sid_json,
+                    seq,
+                    live_operation_id.as_deref(),
+                )
+                .0
+            } else {
+                Arc::from(chat_watch_frame_json(
+                    &event,
+                    &live_session_id,
+                    Some(seq),
+                    false,
+                    live_operation_id.as_deref(),
+                ))
+            };
+            match sse_tx.try_send(watch_json) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        session_id = %live_session_id,
+                        "closing lagging /chat/watch SSE subscriber (queue full)"
+                    );
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+            }
+        }
+    });
+
+    let live_stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(|json| {
+        Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json.as_ref()))
     });
     let stream = head_stream.chain(live_stream);
     let conn_guard = SseConnectionGuard(active_conns);
@@ -18749,6 +19071,31 @@ async fn stream_ws_handler(
     ws.on_upgrade(move |socket| handle_stream_ws_socket(socket, state))
 }
 
+const STREAM_WS_OUTBOUND_CAP: usize = 1024;
+
+fn try_push_ws_frame(
+    tx: &mpsc::Sender<axum::extract::ws::Message>,
+    socket_cancel: &CancellationToken,
+    msg: axum::extract::ws::Message,
+    context: &str,
+) -> bool {
+    match tx.try_send(msg) {
+        Ok(()) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                context,
+                "closing lagging /stream/ws client (outbound queue full)"
+            );
+            socket_cancel.cancel();
+            false
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            socket_cancel.cancel();
+            false
+        }
+    }
+}
+
 async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: AppState) {
     use axum::extract::ws::Message as WsMessage;
     use futures::{SinkExt, StreamExt};
@@ -18758,17 +19105,21 @@ async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: Ap
     let _conn_guard = SseConnectionGuard(active_conns);
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<WsMessage>();
+    let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(STREAM_WS_OUTBOUND_CAP);
+    let socket_cancel = CancellationToken::new();
 
+    let writer_cancel = socket_cancel.clone();
     let writer_task = tokio::spawn(async move {
         let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                _ = writer_cancel.cancelled() => break,
                 maybe_msg = out_rx.recv() => {
                     match maybe_msg {
                         Some(msg) => {
                             if ws_sender.send(msg).await.is_err() {
+                                writer_cancel.cancel();
                                 break;
                             }
                         }
@@ -18777,6 +19128,7 @@ async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: Ap
                 }
                 _ = ping_interval.tick() => {
                     if ws_sender.send(WsMessage::Ping(Vec::new())).await.is_err() {
+                        writer_cancel.cancel();
                         break;
                     }
                 }
@@ -18784,25 +19136,46 @@ async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: Ap
         }
     });
 
-    // 启动全局增量事件转发（首帧与 /events 一致推送 sync）
+    // 启动全局增量事件转发（首帧与 /events 一致推送 sync，共享 Arc<str> 序列化载荷）
     let global_out = out_tx.clone();
+    let global_cancel = socket_cancel.clone();
     let global_task = tokio::spawn(async move {
-        let _ = global_out.send(WsMessage::Text(
-            r#"{"channel":"global","event":{"type":"sync"}}"#.to_string(),
-        ));
-        let mut rx = global_events().subscribe();
+        if !try_push_ws_frame(
+            &global_out,
+            &global_cancel,
+            WsMessage::Text(r#"{"channel":"global","event":{"type":"sync"}}"#.to_string()),
+            "global-sync",
+        ) {
+            return;
+        }
+        let mut rx = global_wire_frames().subscribe();
         loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    if let Ok(ev_json) = serde_json::to_string(&event) {
-                        let frame = format!(r#"{{"channel":"global","event":{ev_json}}}"#);
-                        if global_out.send(WsMessage::Text(frame)).is_err() {
+            tokio::select! {
+                _ = global_cancel.cancelled() => break,
+                res = rx.recv() => match res {
+                    Ok(frame) => {
+                        if !try_push_ws_frame(
+                            &global_out,
+                            &global_cancel,
+                            WsMessage::Text(frame.ws_frame.as_ref().to_string()),
+                            "global-event",
+                        ) {
                             break;
                         }
                     }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "/stream/ws global bus lagged; requesting client resync");
+                        if !try_push_ws_frame(
+                            &global_out,
+                            &global_cancel,
+                            WsMessage::Text(r#"{"channel":"global","event":{"type":"sync"}}"#.to_string()),
+                            "global-resync",
+                        ) {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -18810,7 +19183,14 @@ async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: Ap
     let mut watch_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut watch_gen_counter: u64 = 0;
 
-    while let Some(Ok(msg)) = ws_receiver.next().await {
+    loop {
+        let next = tokio::select! {
+            _ = socket_cancel.cancelled() => break,
+            frame = ws_receiver.next() => frame,
+        };
+        let Some(Ok(msg)) = next else {
+            break;
+        };
         match msg {
             WsMessage::Text(text) => {
                 let Ok(cmd) = serde_json::from_str::<StreamWsClientCmd>(&text) else {
@@ -18818,7 +19198,14 @@ async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: Ap
                 };
                 match cmd {
                     StreamWsClientCmd::Ping => {
-                        let _ = out_tx.send(WsMessage::Text(r#"{"channel":"pong"}"#.to_string()));
+                        if !try_push_ws_frame(
+                            &out_tx,
+                            &socket_cancel,
+                            WsMessage::Text(r#"{"channel":"pong"}"#.to_string()),
+                            "pong",
+                        ) {
+                            break;
+                        }
                     }
                     StreamWsClientCmd::Unwatch { session_id } => {
                         let sid = session_id.trim();
@@ -18852,31 +19239,68 @@ async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: Ap
                                     .unwrap_or_else(|_| "\"\"".to_string());
                                 for head in &prepared.head_json {
                                     let frame = wrap_chat_ws_frame(&sid_json, head);
-                                    if out_tx.send(WsMessage::Text(frame)).is_err() {
+                                    if !try_push_ws_frame(
+                                        &out_tx,
+                                        &socket_cancel,
+                                        WsMessage::Text(frame),
+                                        "chat-head",
+                                    ) {
                                         break;
                                     }
                                 }
                                 let pump_out = out_tx.clone();
+                                let pump_cancel = socket_cancel.clone();
                                 let live_sid = prepared.session_id.clone();
                                 let live_op_id = prepared.operation_id.clone();
+                                let chats = state.active_chats.clone();
                                 let handle = tokio::spawn(async move {
+                                    let mut cached_wire: Option<
+                                        Arc<std::sync::Mutex<SharedChatWireCache>>,
+                                    > = chats.wire_cache_for_session(&live_sid).await;
                                     while let Some((seq, event)) = prepared.rx.recv().await {
-                                        let ev_json = chat_watch_frame_json(
-                                            &event,
-                                            &live_sid,
-                                            Some(seq),
-                                            false,
-                                            live_op_id.as_deref(),
-                                        );
-                                        let frame = wrap_chat_ws_frame(&sid_json, &ev_json);
-                                        if pump_out.send(WsMessage::Text(frame)).is_err() {
+                                        if cached_wire.is_none() {
+                                            cached_wire =
+                                                chats.wire_cache_for_session(&live_sid).await;
+                                        }
+                                        let ws_frame: Arc<str> =
+                                            if let Some(ref cache) = cached_wire {
+                                                get_or_build_chat_watch_frame(
+                                                    cache,
+                                                    &event,
+                                                    &live_sid,
+                                                    &sid_json,
+                                                    seq,
+                                                    live_op_id.as_deref(),
+                                                )
+                                                .1
+                                            } else {
+                                                let ev_json = chat_watch_frame_json(
+                                                    &event,
+                                                    &live_sid,
+                                                    Some(seq),
+                                                    false,
+                                                    live_op_id.as_deref(),
+                                                );
+                                                Arc::from(wrap_chat_ws_frame(&sid_json, &ev_json))
+                                            };
+                                        if !try_push_ws_frame(
+                                            &pump_out,
+                                            &pump_cancel,
+                                            WsMessage::Text(ws_frame.as_ref().to_string()),
+                                            "chat-live",
+                                        ) {
                                             return;
                                         }
                                     }
                                     let ended = format!(
                                         r#"{{"channel":"chat","session_id":{sid_json},"ended":true}}"#
                                     );
-                                    let _ = pump_out.send(WsMessage::Text(ended));
+                                    let _ = try_push_ws_frame(
+                                        &pump_out,
+                                        &pump_cancel,
+                                        WsMessage::Text(ended),
+                                        "chat-ended",
+                                    );
                                 });
                                 watch_tasks.insert(sid, handle);
                             }
@@ -18886,7 +19310,14 @@ async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: Ap
                                 let ended = format!(
                                     r#"{{"channel":"chat","session_id":{sid_json},"ended":true,"error":"invalid_session"}}"#
                                 );
-                                let _ = out_tx.send(WsMessage::Text(ended));
+                                if !try_push_ws_frame(
+                                    &out_tx,
+                                    &socket_cancel,
+                                    WsMessage::Text(ended),
+                                    "chat-invalid",
+                                ) {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -18897,6 +19328,7 @@ async fn handle_stream_ws_socket(socket: axum::extract::ws::WebSocket, state: Ap
         }
     }
 
+    socket_cancel.cancel();
     for (_, handle) in watch_tasks {
         handle.abort();
     }
@@ -19043,8 +19475,24 @@ static SESSION_QUEUE_CLAIMS: tokio::sync::OnceCell<
     tokio::sync::RwLock<HashMap<String, Vec<String>>>,
 > = tokio::sync::OnceCell::const_new();
 
-/// Serializes claim/release/update so two tabs cannot both "win" the same card.
-static QUEUE_CLAIM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Serializes claim/release/update per session across 64 hash-sharded mutexes so
+/// concurrent tabs on one session serialize without blocking unrelated sessions.
+const QUEUE_CLAIM_SHARDS: usize = 64;
+
+fn queue_claim_lock_for_session(session_id: &str) -> &'static tokio::sync::Mutex<()> {
+    static SHARDS: std::sync::OnceLock<Vec<tokio::sync::Mutex<()>>> = std::sync::OnceLock::new();
+    let shards = SHARDS.get_or_init(|| {
+        (0..QUEUE_CLAIM_SHARDS)
+            .map(|_| tokio::sync::Mutex::new(()))
+            .collect()
+    });
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in session_id.trim().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    &shards[(hash as usize) % QUEUE_CLAIM_SHARDS]
+}
 
 const MAX_QUEUE_CLAIMS: usize = 512;
 
@@ -19057,7 +19505,7 @@ fn decode_queue_file(content: &str) -> Option<(Vec<QueuedMessageItem>, u64)> {
         .ok()
 }
 
-/// Must be called while holding `QUEUE_CLAIM_LOCK`, so the first read cannot
+/// Must be called while holding [`queue_claim_lock_for_session`], so the first read cannot
 /// race a claim or whole-list update for this session.
 async fn ensure_session_queue_loaded(session_id: &str) {
     let map = get_session_queues_map().await;
@@ -19272,7 +19720,7 @@ async fn retire_folded_steers_from_queue(
     if retired_ids.is_empty() {
         return;
     }
-    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let _claim_guard = queue_claim_lock_for_session(sid).lock().await;
     ensure_session_queue_loaded(sid).await;
     let mut claims = load_queue_claims(sid).await;
     let mut claims_changed = false;
@@ -19376,7 +19824,7 @@ async fn update_chat_queue_steer_state(
     if sid.is_empty() || cid.is_empty() {
         return;
     }
-    let guard = QUEUE_CLAIM_LOCK.lock().await;
+    let guard = queue_claim_lock_for_session(sid).lock().await;
     ensure_session_queue_loaded(sid).await;
     let claims = load_effective_queue_claims(sid).await;
     if claims.iter().any(|claimed| claimed == cid) {
@@ -19402,14 +19850,18 @@ async fn update_chat_queue_steer_state(
 }
 
 async fn reconcile_stale_steer_queue(session_id: &str) {
-    let guard = QUEUE_CLAIM_LOCK.lock().await;
+    let guard = queue_claim_lock_for_session(session_id).lock().await;
     ensure_session_queue_loaded(session_id).await;
     let claims = load_effective_queue_claims(session_id).await;
-    let status_by_id: HashMap<String, String> =
-        jeikcode_capabilities::session::inputs::list_global(session_id)
+    let sid_owned = session_id.to_string();
+    let status_by_id: HashMap<String, String> = spawn_blocking_isolated(move || {
+        jeikcode_capabilities::session::inputs::list_global(&sid_owned)
             .into_iter()
             .map(|row| (row.id, row.status))
-            .collect();
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
     let map = get_session_queues_map().await;
     let mut downgraded = Vec::new();
     let changed = {
@@ -19440,8 +19892,15 @@ async fn reconcile_stale_steer_queue(session_id: &str) {
         persist_session_queue(session_id).await;
     }
     drop(guard);
-    for id in downgraded {
-        let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(session_id, &id);
+    if !downgraded.is_empty() {
+        let sid_owned = session_id.to_string();
+        let _ = spawn_blocking_isolated(move || {
+            for id in downgraded {
+                let _ =
+                    jeikcode_capabilities::session::inputs::mark_rejected_global(&sid_owned, &id);
+            }
+        })
+        .await;
     }
     if changed {
         publish_global(GlobalWireEvent::QueueUpdated {
@@ -19476,7 +19935,7 @@ async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
     if sid.is_empty() {
         return Json(serde_json::json!({ "revision": 0, "items": [] }));
     }
-    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let _claim_guard = queue_claim_lock_for_session(sid).lock().await;
     ensure_session_queue_loaded(sid).await;
     let claims = load_effective_queue_claims(sid).await;
     let map = get_session_queues_map().await;
@@ -19537,7 +19996,7 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
     if !sid.is_empty() {
         // Serialize with claim/release: a stale whole-list write must not
         // resurrect a card another tab already claimed.
-        let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+        let _claim_guard = queue_claim_lock_for_session(&sid).lock().await;
         ensure_session_queue_loaded(&sid).await;
         // CAS: a stale tab's whole-list write is rejected instead of overwriting
         // a newer queue. The caller re-pulls and merges.
@@ -19612,7 +20071,7 @@ async fn claim_chat_queue(Json(req): Json<ChatQueueClaimRequest>) -> impl IntoRe
         )
             .into_response();
     }
-    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let _claim_guard = queue_claim_lock_for_session(&sid).lock().await;
     ensure_session_queue_loaded(&sid).await;
     let mut claims = load_queue_claims(&sid).await;
     let map = get_session_queues_map().await;
@@ -19651,7 +20110,7 @@ async fn release_chat_queue(Json(req): Json<ChatQueueReleaseRequest>) -> impl In
         )
             .into_response();
     }
-    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let _claim_guard = queue_claim_lock_for_session(&sid).lock().await;
     let mut claims = load_queue_claims(&sid).await;
     claims.retain(|claimed| claimed != &cid);
     save_queue_claims(&sid, &claims).await;
@@ -21122,6 +21581,46 @@ fn steer_queue_item(req: &ChatSteerRequest, client_id: String, kind: &str) -> Qu
     }
 }
 
+async fn find_session_input_async(
+    session_id: &str,
+    client_input_id: &str,
+) -> Option<jeikcode_capabilities::session::SessionInput> {
+    let sid = session_id.to_string();
+    let cid = client_input_id.to_string();
+    spawn_blocking_isolated(move || jeikcode_capabilities::session::inputs::find_global(&sid, &cid))
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn append_session_input_async(
+    mut input: jeikcode_capabilities::session::SessionInput,
+) -> bool {
+    spawn_blocking_isolated(move || {
+        jeikcode_capabilities::session::inputs::append_global(&mut input).is_ok()
+    })
+    .await
+    .unwrap_or(false)
+}
+
+async fn mark_input_rejected_async(session_id: &str, client_input_id: &str) {
+    let sid = session_id.to_string();
+    let cid = client_input_id.to_string();
+    let _ = spawn_blocking_isolated(move || {
+        let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(&sid, &cid);
+    })
+    .await;
+}
+
+async fn mark_input_submitted_async(session_id: &str, client_input_id: &str) {
+    let sid = session_id.to_string();
+    let cid = client_input_id.to_string();
+    let _ = spawn_blocking_isolated(move || {
+        let _ = jeikcode_capabilities::session::inputs::mark_submitted_global(&sid, &cid);
+    })
+    .await;
+}
+
 /// POST /chat/steer/admit — durably reserve the steer intent + queue card
 /// before the client tries to submit it. This is the only client write needed;
 /// a refresh can then render the server-owned `steering` card and replay
@@ -21159,9 +21658,7 @@ async fn admit_chat_steer(
         .steer_sender(&req.session_id)
         .await
         .is_some();
-    if let Some(existing) =
-        jeikcode_capabilities::session::inputs::find_global(&req.session_id, &client_id)
-    {
+    if let Some(existing) = find_session_input_async(&req.session_id, &client_id).await {
         match existing.status.as_str() {
             "promoted" => {
                 retire_folded_steers_from_queue(
@@ -21179,10 +21676,7 @@ async fn admit_chat_steer(
             }
             "submitted" => {
                 if !active_turn {
-                    let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
-                        &req.session_id,
-                        &client_id,
-                    );
+                    mark_input_rejected_async(&req.session_id, &client_id).await;
                     update_chat_queue_steer_state(
                         &req.session_id,
                         &client_id,
@@ -21225,10 +21719,7 @@ async fn admit_chat_steer(
             }
             "admitted" => {
                 if !active_turn {
-                    let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
-                        &req.session_id,
-                        &client_id,
-                    );
+                    mark_input_rejected_async(&req.session_id, &client_id).await;
                     update_chat_queue_steer_state(
                         &req.session_id,
                         &client_id,
@@ -21277,7 +21768,7 @@ async fn admit_chat_steer(
         .admitted_user_for_session(&req.session_id)
         .await
         .and_then(|user| user.client_input_id);
-    let mut input = jeikcode_capabilities::session::SessionInput {
+    let input = jeikcode_capabilities::session::SessionInput {
         id: client_id.clone(),
         seq: 0,
         session_id: req.session_id.clone(),
@@ -21300,7 +21791,7 @@ async fn admit_chat_steer(
         anchor_message_id: None,
         turn_id: None,
     };
-    if jeikcode_capabilities::session::inputs::append_global(&mut input).is_err() {
+    if !append_session_input_async(input).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ChatSteerResponse {
@@ -21397,9 +21888,10 @@ async fn chat_steer(
     };
     // Idempotent admission state machine: submitted/promoted requests are already
     // owned by the kernel and must never be appended or submitted a second time.
-    let existing = req.client_input_id.as_deref().and_then(|client_id| {
-        jeikcode_capabilities::session::inputs::find_global(&req.session_id, client_id)
-    });
+    let existing = match req.client_input_id.as_deref() {
+        Some(client_id) => find_session_input_async(&req.session_id, client_id).await,
+        None => None,
+    };
     if let Some(existing) = &existing {
         match existing.status.as_str() {
             "promoted" => {
@@ -21467,7 +21959,7 @@ async fn chat_steer(
             .admitted_user_for_session(&req.session_id)
             .await
             .and_then(|user| user.client_input_id);
-        let mut input = jeikcode_capabilities::session::SessionInput {
+        let input = jeikcode_capabilities::session::SessionInput {
             id: client_id.clone(),
             seq: 0,
             session_id: req.session_id.clone(),
@@ -21491,7 +21983,7 @@ async fn chat_steer(
             turn_id: None,
         };
         if !existing_admitted {
-            let _ = jeikcode_capabilities::session::inputs::append_global(&mut input);
+            let _ = append_session_input_async(input).await;
         }
         Some(make_queue_item(client_id, "steering"))
     } else {
@@ -21522,10 +22014,7 @@ async fn chat_steer(
     };
     if tx.send(live_api::ChatSteerSignal::Submit(pending)).is_err() {
         if let Some(client_id) = req.client_input_id.as_deref() {
-            let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
-                &req.session_id,
-                client_id,
-            );
+            mark_input_rejected_async(&req.session_id, client_id).await;
             update_chat_queue_steer_state(&req.session_id, client_id, "queue", None).await;
         }
         return (
@@ -21544,10 +22033,7 @@ async fn chat_steer(
     match outcome {
         Ok(()) => {
             if let Some(client_id) = req.client_input_id.as_deref() {
-                let _ = jeikcode_capabilities::session::inputs::mark_submitted_global(
-                    &req.session_id,
-                    client_id,
-                );
+                mark_input_submitted_async(&req.session_id, client_id).await;
                 update_chat_queue_steer_state(&req.session_id, client_id, "steer", None).await;
             }
             // 服务端已将转向接收进运行中的回合：这是「会话仍在干活」的权威证据，
@@ -21568,10 +22054,7 @@ async fn chat_steer(
         }
         Err(error) => {
             if let Some(client_id) = req.client_input_id.as_deref() {
-                let _ = jeikcode_capabilities::session::inputs::mark_rejected_global(
-                    &req.session_id,
-                    client_id,
-                );
+                mark_input_rejected_async(&req.session_id, client_id).await;
                 update_chat_queue_steer_state(&req.session_id, client_id, "queue", None).await;
             }
             (
@@ -21964,7 +22447,7 @@ async fn chat_pending(
     let (permission, user_input) = state.active_chats.pending_interactive(&session_id).await;
     // Auto never parks on tool approval. A leftover pending_permission.json from
     // Build must not resurrect a ghost card after the user switched to Auto.
-    let auto_mode = live_api::live_session_approval_mode(Some(&session_id))
+    let auto_mode = live_api::live_session_approval_mode_async(Some(&session_id)).await
         == crate::approval_mode::ApprovalMode::Auto;
     let mut permission_json = if auto_mode {
         None
@@ -23091,17 +23574,27 @@ static WEBUI: std::sync::Mutex<Option<WebuiHandle>> = std::sync::Mutex::new(None
 
 async fn try_terminate_stale_daemon_on_port(port: u16) -> bool {
     let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-    let Ok(stream) =
-        std::net::TcpStream::connect_timeout(&loopback, std::time::Duration::from_millis(30))
+    let Ok(Ok(stream)) = tokio::time::timeout(
+        Duration::from_millis(30),
+        tokio::net::TcpStream::connect(&loopback),
+    )
+    .await
     else {
         return false;
     };
     drop(stream);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(600))
-        .build();
-    let Ok(client) = client else { return false };
+    let spec = jeikcode_capabilities::http_pool::HttpClientSpec {
+        connect_timeout: Duration::from_millis(300),
+        request_timeout: Some(Duration::from_millis(600)),
+        pool_idle_timeout: Some(Duration::from_secs(15)),
+        skip_tls_verify: false,
+        force_tls12: false,
+        user_agent: None,
+    };
+    let Ok(client) = jeikcode_capabilities::http_pool::shared_http_client(&spec) else {
+        return false;
+    };
     let health_url = format!("http://127.0.0.1:{port}/health");
     if let Ok(resp) = client.get(&health_url).send().await {
         if resp.status().is_success() {
@@ -25303,8 +25796,12 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     )
     .await;
 
-    // Step 12: Start background Git platform polling engine
+    // Step 12: Start background Git platform polling engine and Tokio reactor watchdog
     let polling_task = git_adapter::polling::start_git_polling_engine(state.clone());
+    let watchdog_task = watchdog::spawn_reactor_watchdog(
+        state.active_chats.clone(),
+        state.active_connections.clone(),
+    );
 
     // Step 13: Serve with graceful shutdown (R10.1-R10.5).
     // Optional second listener for IPv6 when dual-stack was requested.
@@ -25335,9 +25832,11 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         let _ = handle.await;
     }
 
-    // Stop background Git platform polling engine
+    // Stop background Git platform polling engine and reactor watchdog
     polling_task.abort();
     let _ = polling_task.await;
+    watchdog_task.abort();
+    let _ = watchdog_task.await;
 
     // Reap project-scoped and session-scoped stdio MCP trees with this host.
     jeikcode_capabilities::mcp::shutdown_all_mcp_pools().await;
@@ -26885,15 +27384,14 @@ mod tests {
             .await;
 
         {
-            let index = registry.inner.read().await;
-            let watchers = index.standby_watchers.get(session_id).unwrap();
+            let watchers = registry.standby_watcher_keys(session_id).await;
             assert_eq!(
                 watchers.len(),
                 2,
                 "both local and remote standby watchers must be kept concurrently"
             );
-            assert!(watchers.contains_key("client-local"));
-            assert!(watchers.contains_key("client-remote"));
+            assert!(watchers.iter().any(|k| k == "client-local"));
+            assert!(watchers.iter().any(|k| k == "client-remote"));
         }
 
         // 3. 本机端 client-local 刷新页面，重新注册（相同的 client_id 必须原地覆盖，不堆积多余连接）
@@ -26903,8 +27401,7 @@ mod tests {
             .await;
 
         {
-            let index = registry.inner.read().await;
-            let watchers = index.standby_watchers.get(session_id).unwrap();
+            let watchers = registry.standby_watcher_keys(session_id).await;
             assert_eq!(
                 watchers.len(),
                 2,
@@ -31697,5 +32194,63 @@ mod session_b95e_regression_tests {
         assert_eq!(rows[1].created_at, Some(1_763_568_840_000));
         // 真实跨零点 assistant 00:14 原样保留
         assert_eq!(rows[2].created_at, Some(1_763_568_840_000));
+    }
+
+    #[tokio::test]
+    async fn active_chat_registry_shards_isolate_concurrent_sessions_and_track_count() {
+        let registry = ActiveChatRegistry::default();
+        assert_eq!(registry.active_operation_count(), 0);
+        let mut admissions = Vec::new();
+        for i in 0..30 {
+            let sid = format!("shard-sess-{i}");
+            let adm = registry
+                .admit(Some(&sid), Some(&format!("req-{i}")))
+                .await
+                .unwrap();
+            admissions.push((sid, adm.operation_id));
+        }
+        assert_eq!(registry.active_operation_count(), 30);
+
+        for (idx, (_, op_id)) in admissions.iter().enumerate() {
+            if idx % 2 == 0 {
+                assert!(registry.complete(op_id).await);
+            }
+        }
+        assert_eq!(registry.active_operation_count(), 15);
+    }
+
+    #[test]
+    fn queue_claim_shards_assign_session_locks_deterministically() {
+        let a1 = queue_claim_lock_for_session("sess-alpha") as *const _;
+        let a2 = queue_claim_lock_for_session("  sess-alpha  ") as *const _;
+        assert_eq!(a1, a2);
+
+        let distinct: std::collections::HashSet<usize> = (0..64)
+            .map(|i| queue_claim_lock_for_session(&format!("sess-{i}")) as *const _ as usize)
+            .collect();
+        assert!(distinct.len() > 8, "locks should distribute across shards");
+    }
+
+    #[test]
+    fn global_wire_frames_pre_serialize_once_with_arc_str() {
+        let mut rx1 = global_wire_frames().subscribe();
+        let mut rx2 = global_wire_frames().subscribe();
+        let unique_id = format!("zero-copy-{}", uuid::Uuid::new_v4());
+        publish_global(GlobalWireEvent::SessionSeen {
+            session_id: unique_id.clone(),
+        });
+
+        let recv_matching = |rx: &mut tokio::sync::broadcast::Receiver<SerializedGlobalFrame>| loop {
+            match rx.try_recv() {
+                Ok(frame) if frame.event_json.contains(&unique_id) => return frame,
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(e) => panic!("expected matching serialized global frame, got {e:?}"),
+            }
+        };
+        let f1 = recv_matching(&mut rx1);
+        let f2 = recv_matching(&mut rx2);
+        assert!(Arc::ptr_eq(&f1.event_json, &f2.event_json));
+        assert!(Arc::ptr_eq(&f1.ws_frame, &f2.ws_frame));
     }
 }

@@ -55,6 +55,7 @@ const INTENT_TOP_FILES: usize = 5;
 static SESSION_SENT_SPANS: std::sync::LazyLock<RwLock<HashMap<String, Vec<(usize, usize)>>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+#[derive(Clone)]
 pub struct CodeExploreTool {
     index: Arc<CodeIndex>,
     thesaurus: Arc<RwLock<DynamicThesaurus>>,
@@ -520,6 +521,19 @@ impl Tool for CodeExploreTool {
     }
 
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
+        let this = self.clone();
+        let args = args.to_string();
+        let working_dir = ctx.working_dir.clone();
+        match tokio::task::spawn_blocking(move || this.execute_blocking(&args, &working_dir)).await
+        {
+            Ok(res) => res,
+            Err(join_err) => err(format!("code_explore blocking worker failed: {join_err}")),
+        }
+    }
+}
+
+impl CodeExploreTool {
+    fn execute_blocking(&self, args: &str, working_dir: &Path) -> ToolResult {
         let a: Args = match serde_json::from_str(args) {
             Ok(a) => a,
             Err(e) => return err(format!("Invalid arguments for code_explore: {e}")),
@@ -538,7 +552,7 @@ impl Tool for CodeExploreTool {
             }
         };
 
-        let root = canonical(&ctx.working_dir);
+        let root = canonical(working_dir);
         let max_files = a
             .max_files
             .unwrap_or(DEFAULT_MAX_FILES)

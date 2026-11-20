@@ -209,13 +209,11 @@ struct InflightTool {
 }
 
 struct TraceState {
+    seeded: bool,
     next_seq: u64,
     prev_wire_non_sys: Vec<Message>,
     known_bundles: HashSet<String>,
     bundle_writes_since_prune: u64,
-    current_turn_id: u64,
-    current_round: u32,
-    pending_compact_trigger: Option<CompactTrigger>,
 }
 
 struct TraceShared {
@@ -226,6 +224,9 @@ struct TraceShared {
     state: Mutex<TraceState>,
     origin: Instant,
     last_activity_rel_ms: AtomicU64,
+    current_turn_id: AtomicU64,
+    current_round: std::sync::atomic::AtomicU32,
+    pending_compact_trigger: Mutex<Option<CompactTrigger>>,
     inflight_tools: Mutex<HashMap<String, InflightTool>>,
     io_lock: Mutex<()>,
 }
@@ -431,23 +432,23 @@ impl SessionTraceHook {
     ) -> Self {
         let session_id = session_id.into();
         let bundles_dir = default_bundles_dir_for(&mgr);
-        let (next_seq, prev_wire_non_sys) = seed_state_from_existing_trace(&mgr, &session_id);
         let shared = Arc::new(TraceShared {
             mgr,
             session_id,
             bundles_dir,
             attribution: RwLock::new((provider.into(), model.into())),
             state: Mutex::new(TraceState {
-                next_seq,
-                prev_wire_non_sys,
+                seeded: false,
+                next_seq: 0,
+                prev_wire_non_sys: Vec::new(),
                 known_bundles: HashSet::new(),
                 bundle_writes_since_prune: 0,
-                current_turn_id: 0,
-                current_round: 0,
-                pending_compact_trigger: None,
             }),
             origin: Instant::now(),
             last_activity_rel_ms: AtomicU64::new(0),
+            current_turn_id: AtomicU64::new(0),
+            current_round: std::sync::atomic::AtomicU32::new(0),
+            pending_compact_trigger: Mutex::new(None),
             inflight_tools: Mutex::new(HashMap::new()),
             io_lock: Mutex::new(()),
         });
@@ -467,21 +468,18 @@ impl SessionTraceHook {
                     .map(|g| g.clone())
                     .unwrap_or_default(),
             ),
-            state: Mutex::new({
-                let (next_seq, prev_wire_non_sys) =
-                    seed_state_from_existing_trace(&self.shared.mgr, &self.shared.session_id);
-                TraceState {
-                    next_seq,
-                    prev_wire_non_sys,
-                    known_bundles: HashSet::new(),
-                    bundle_writes_since_prune: 0,
-                    current_turn_id: 0,
-                    current_round: 0,
-                    pending_compact_trigger: None,
-                }
+            state: Mutex::new(TraceState {
+                seeded: false,
+                next_seq: 0,
+                prev_wire_non_sys: Vec::new(),
+                known_bundles: HashSet::new(),
+                bundle_writes_since_prune: 0,
             }),
             origin: self.shared.origin,
             last_activity_rel_ms: AtomicU64::new(0),
+            current_turn_id: AtomicU64::new(0),
+            current_round: std::sync::atomic::AtomicU32::new(0),
+            pending_compact_trigger: Mutex::new(None),
             inflight_tools: Mutex::new(HashMap::new()),
             io_lock: Mutex::new(()),
         });
@@ -592,17 +590,22 @@ impl TraceShared {
                 *writes_since_prune = 0;
                 let bundles_dir = self.bundles_dir.clone();
                 let root = self.mgr.root().to_path_buf();
-                let _ = std::thread::Builder::new()
-                    .name("jeikcode-eval-prune".into())
-                    .spawn(move || {
-                        prune_eval_storage(
-                            &bundles_dir,
-                            Some(&root),
-                            MAX_EVAL_BUNDLES_COUNT,
-                            MAX_EVAL_BUNDLES_BYTES,
-                            MAX_EVAL_ARTIFACT_AGE_SECS,
-                        );
-                    });
+                let prune_job = move || {
+                    prune_eval_storage(
+                        &bundles_dir,
+                        Some(&root),
+                        MAX_EVAL_BUNDLES_COUNT,
+                        MAX_EVAL_BUNDLES_BYTES,
+                        MAX_EVAL_ARTIFACT_AGE_SECS,
+                    );
+                };
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let _ = handle.spawn_blocking(prune_job);
+                } else {
+                    let _ = std::thread::Builder::new()
+                        .name("jeikcode-eval-prune".into())
+                        .spawn(prune_job);
+                }
             }
         }
         known.insert(context_hash.to_string());
@@ -694,94 +697,103 @@ impl LifecycleHooks for SessionTraceHook {
         options: &ChatOptions,
         ctx: &TurnCtx,
     ) {
+        self.shared
+            .current_turn_id
+            .store(ctx.turn_id, Ordering::Relaxed);
+        self.shared
+            .current_round
+            .store(ctx.round, Ordering::Relaxed);
+
         let sys_end = messages
             .iter()
             .position(|m| m.role != Role::System)
             .unwrap_or(messages.len());
-        let system_messages = &messages[..sys_end];
-        let non_sys = &messages[sys_end..];
+        let system_messages = messages[..sys_end].to_vec();
+        let non_sys = messages[sys_end..].to_vec();
+        let tools = tools.to_vec();
+        let options = options.clone();
+        let ctx = ctx.clone();
+        let shared = Arc::clone(&self.shared);
 
-        let Ok((context_hash, encoded_bundle)) =
-            compute_context_hash_and_bytes(system_messages, tools)
-        else {
-            return;
-        };
-        let (provider, model) = self.shared.current_attribution();
+        let _ = tokio::task::spawn_blocking(move || {
+            let Ok((context_hash, encoded_bundle)) =
+                compute_context_hash_and_bytes(&system_messages, &tools)
+            else {
+                return;
+            };
+            let (provider, model) = shared.current_attribution();
 
-        // 在持锁状态完成公共前缀计算与序号分配，保证跨轮顺序严格单调。
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.current_turn_id = ctx.turn_id;
-        state.current_round = ctx.round;
+            let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !state.seeded {
+                let (next_seq, prev_wire_non_sys) =
+                    seed_state_from_existing_trace(&shared.mgr, &shared.session_id);
+                state.next_seq = next_seq;
+                state.prev_wire_non_sys = prev_wire_non_sys;
+                state.seeded = true;
+            }
 
-        let rotated = {
-            let path_len = self
-                .shared
-                .mgr
-                .trace_path(&self.shared.session_id)
-                .ok()
-                .and_then(|p| fs::metadata(p).ok())
-                .map(|m| m.len())
-                .unwrap_or(0);
-            if path_len >= MAX_TRACE_FILE_BYTES {
-                if let Ok(path) = self.shared.mgr.trace_path(&self.shared.session_id) {
-                    let mut old = path.as_os_str().to_owned();
-                    old.push(".old");
-                    let _ = fs::rename(&path, PathBuf::from(old));
-                    state.prev_wire_non_sys.clear();
-                    true
-                } else {
-                    false
+            {
+                let path_len = shared
+                    .mgr
+                    .trace_path(&shared.session_id)
+                    .ok()
+                    .and_then(|p| fs::metadata(p).ok())
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if path_len >= MAX_TRACE_FILE_BYTES {
+                    if let Ok(path) = shared.mgr.trace_path(&shared.session_id) {
+                        let mut old = path.as_os_str().to_owned();
+                        old.push(".old");
+                        let _ = fs::rename(&path, PathBuf::from(old));
+                        state.prev_wire_non_sys.clear();
+                    }
                 }
-            } else {
-                false
             }
-        };
-        let _ = rotated;
 
-        let prefix_keep = common_prefix_len(&state.prev_wire_non_sys, non_sys);
-        let messages_delta = non_sys[prefix_keep..].to_vec();
-        let seq = state.next_seq;
-        state.next_seq = state.next_seq.saturating_add(1);
+            let prefix_keep = common_prefix_len(&state.prev_wire_non_sys, &non_sys);
+            let messages_delta = non_sys[prefix_keep..].to_vec();
+            let seq = state.next_seq;
+            state.next_seq = state.next_seq.saturating_add(1);
 
-        let mut known = std::mem::take(&mut state.known_bundles);
-        let mut writes = state.bundle_writes_since_prune;
-        self.shared
-            .ensure_bundle_written(&context_hash, &encoded_bundle, &mut known, &mut writes);
-        state.known_bundles = known;
-        state.bundle_writes_since_prune = writes;
+            let mut known = std::mem::take(&mut state.known_bundles);
+            let mut writes = state.bundle_writes_since_prune;
+            shared.ensure_bundle_written(&context_hash, &encoded_bundle, &mut known, &mut writes);
+            state.known_bundles = known;
+            state.bundle_writes_since_prune = writes;
+            let total_non_system_messages = non_sys.len();
+            state.prev_wire_non_sys = non_sys;
+            drop(state);
 
-        state.prev_wire_non_sys = non_sys.to_vec();
-        drop(state);
-
-        let record = TraceRecord::RoundRequest {
-            v: EVAL_TRACE_VERSION,
-            seq,
-            ts_ms: now_ms().max(0) as u64,
-            turn_id: ctx.turn_id,
-            round: ctx.round,
-            request_id: ctx.request_id,
-            cache_epoch: ctx.cache_epoch,
-            provider,
-            model,
-            context_hash,
-            options: options.clone(),
-            total_non_system_messages: non_sys.len(),
-            prefix_keep,
-            messages_delta,
-        };
-        if self.shared.append_trace_record(&record) {
-            // 若恰在并发极限处发生旋转，把本地基线清空以保下轮全量写入。
-            if let Ok(mut s) = self.shared.state.lock() {
-                s.prev_wire_non_sys.clear();
+            let record = TraceRecord::RoundRequest {
+                v: EVAL_TRACE_VERSION,
+                seq,
+                ts_ms: now_ms().max(0) as u64,
+                turn_id: ctx.turn_id,
+                round: ctx.round,
+                request_id: ctx.request_id,
+                cache_epoch: ctx.cache_epoch,
+                provider,
+                model,
+                context_hash,
+                options,
+                total_non_system_messages,
+                prefix_keep,
+                messages_delta,
+            };
+            if shared.append_trace_record(&record) {
+                if let Ok(mut s) = shared.state.lock() {
+                    s.prev_wire_non_sys.clear();
+                }
             }
-        }
+        })
+        .await;
     }
 
     async fn on_model_response(&self, response: &mut Message) {
         // 切勿在此处重置活动时间戳：工具参数流式输出与模型整轮汇总发生在 `on_text_delta`
         // 之后、工具真正 `before()` 之前；若在此刷新，落盘的 `switch_ms` 会被压成几毫秒，
         // 回合结束后回刷磁盘指标时就会覆盖实时投影到的真实切换延迟。
-        let Some(meta) = &response.meta else {
+        let Some(meta) = response.meta.clone() else {
             return;
         };
         let record = TraceRecord::RoundResponse {
@@ -793,16 +805,20 @@ impl LifecycleHooks for SessionTraceHook {
             ttft_ms: meta.ttft_ms,
             reasoning_elapsed_ms: meta.reasoning_elapsed_ms,
             elapsed_ms: meta.elapsed_ms,
-            tokens: meta.tokens.clone(),
+            tokens: meta.tokens,
             used_tokens: meta.used_tokens,
             ctx_window: meta.ctx_window,
             utilization: meta.utilization,
-            finish_reason: meta.finish_reason.clone(),
-            provider_model: meta.provider_model.clone(),
-            provider_response_id: meta.provider_response_id.clone(),
+            finish_reason: meta.finish_reason,
+            provider_model: meta.provider_model,
+            provider_response_id: meta.provider_response_id,
             assistant_message: response.clone(),
         };
-        self.shared.append_trace_record(&record);
+        let shared = Arc::clone(&self.shared);
+        let _ = tokio::task::spawn_blocking(move || {
+            shared.append_trace_record(&record);
+        })
+        .await;
     }
 
     async fn pre_compaction(
@@ -811,8 +827,8 @@ impl LifecycleHooks for SessionTraceHook {
         trigger: &CompactTrigger,
         _ctx: Option<&TurnCtx>,
     ) {
-        if let Ok(mut state) = self.shared.state.lock() {
-            state.pending_compact_trigger = Some(trigger.clone());
+        if let Ok(mut slot) = self.shared.pending_compact_trigger.lock() {
+            *slot = Some(trigger.clone());
         }
     }
 
@@ -824,10 +840,10 @@ impl LifecycleHooks for SessionTraceHook {
     ) {
         let trigger = self
             .shared
-            .state
+            .pending_compact_trigger
             .lock()
             .ok()
-            .and_then(|mut s| s.pending_compact_trigger.take())
+            .and_then(|mut s| s.take())
             .unwrap_or(CompactTrigger::Auto { utilization: 0.0 });
         let record = TraceRecord::Compaction {
             v: EVAL_TRACE_VERSION,
@@ -842,7 +858,11 @@ impl LifecycleHooks for SessionTraceHook {
             bytes_after: report.bytes_after,
             notice_text: notice.text.clone(),
         };
-        self.shared.append_trace_record(&record);
+        let shared = Arc::clone(&self.shared);
+        let _ = tokio::task::spawn_blocking(move || {
+            shared.append_trace_record(&record);
+        })
+        .await;
     }
 
     async fn on_system_notice(&self, notice: &SystemNotice, _convo: &Conversation, ctx: &TurnCtx) {
@@ -859,7 +879,11 @@ impl LifecycleHooks for SessionTraceHook {
             revision: notice.revision,
             text: notice.text.clone(),
         };
-        self.shared.append_trace_record(&record);
+        let shared = Arc::clone(&self.shared);
+        let _ = tokio::task::spawn_blocking(move || {
+            shared.append_trace_record(&record);
+        })
+        .await;
     }
 
     async fn turn_complete(&self, _convo: &Conversation, reason: &StopReason, ctx: &TurnCtx) {
@@ -871,9 +895,10 @@ impl LifecycleHooks for SessionTraceHook {
             .map(|mut g| g.drain().collect())
             .unwrap_or_default();
         let now = now_ms().max(0) as u64;
+        let mut metrics = Vec::with_capacity(pending.len());
         for (call_id, info) in pending {
             let signals = crate::call_signals::take(&call_id);
-            let record = ToolMetricRecord {
+            metrics.push(ToolMetricRecord {
                 v: TOOL_METRIC_VERSION,
                 call_id,
                 name: info.name,
@@ -890,8 +915,7 @@ impl LifecycleHooks for SessionTraceHook {
                 truncated: signals.truncated.then_some(true),
                 turn_id: info.turn_id.or(Some(ctx.turn_id)),
                 round: info.round.or(Some(ctx.round)),
-            };
-            self.shared.persist_and_log_tool_metric(&record);
+            });
         }
 
         let record = TraceRecord::TurnComplete {
@@ -901,7 +925,14 @@ impl LifecycleHooks for SessionTraceHook {
             round: ctx.round,
             stop_reason: stop_reason_slug(*reason).to_string(),
         };
-        self.shared.append_trace_record(&record);
+        let shared = Arc::clone(&self.shared);
+        let _ = tokio::task::spawn_blocking(move || {
+            for metric in &metrics {
+                shared.persist_and_log_tool_metric(metric);
+            }
+            shared.append_trace_record(&record);
+        })
+        .await;
     }
 }
 
@@ -913,18 +944,8 @@ impl ToolMiddleware for SessionTraceStartMiddleware {
         tool: &Arc<dyn Tool>,
         _rt: &RequestCtx,
     ) -> BeforeOutcome {
-        let (turn_id, round) = self
-            .shared
-            .state
-            .lock()
-            .ok()
-            .map(|s| {
-                (
-                    Some(s.current_turn_id).filter(|v| *v > 0),
-                    Some(s.current_round).filter(|v| *v > 0),
-                )
-            })
-            .unwrap_or((None, None));
+        let turn_id = Some(self.shared.current_turn_id.load(Ordering::Relaxed)).filter(|v| *v > 0);
+        let round = Some(self.shared.current_round.load(Ordering::Relaxed)).filter(|v| *v > 0);
         let started_at_ms = now_ms().max(0) as u64;
         let switch_ms = self.shared.take_switch_ms();
         let target_hint = sanitize_target_hint(tool.name(), &call.arguments);
@@ -957,10 +978,11 @@ impl ToolMiddleware for SessionTraceStartMiddleware {
         running.target_hint = target_hint;
         running.turn_id = turn_id;
         running.round = round;
-        let _ = self
-            .shared
-            .mgr
-            .append_tool_metric(&self.shared.session_id, &running);
+        let shared = Arc::clone(&self.shared);
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = shared.mgr.append_tool_metric(&shared.session_id, &running);
+        })
+        .await;
 
         BeforeOutcome::Proceed
     }
@@ -1008,7 +1030,11 @@ impl ToolMiddleware for SessionTraceEndMiddleware {
             turn_id: info.turn_id,
             round: info.round,
         };
-        self.shared.persist_and_log_tool_metric(&record);
+        let shared = Arc::clone(&self.shared);
+        let _ = tokio::task::spawn_blocking(move || {
+            shared.persist_and_log_tool_metric(&record);
+        })
+        .await;
         AfterOutcome::Proceed
     }
 }

@@ -167,10 +167,18 @@ impl Tool for WebSearchTool {
 
 impl WebSearchTool {
     fn client() -> Result<reqwest::Client, String> {
-        crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
-            .timeout(Duration::from_secs(web_request_secs()))
-            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)")
-            .build()
+        let timeout = Duration::from_secs(web_request_secs());
+        let spec = crate::http_pool::HttpClientSpec {
+            connect_timeout: timeout.min(Duration::from_secs(30)),
+            request_timeout: Some(timeout),
+            pool_idle_timeout: Some(Duration::from_secs(15)),
+            skip_tls_verify: false,
+            force_tls12: false,
+            user_agent: Some(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)".to_string(),
+            ),
+        };
+        crate::http_pool::shared_http_client(&spec)
             .map_err(|e| format!("failed to build HTTP client: {e}"))
     }
 

@@ -215,24 +215,43 @@ impl Tool for RecallTool {
                 }
             }
         };
-        let sessions_dir = match &self.sessions_dir {
-            Some(d) => d.clone(),
-            None => SessionManager::for_project(&ctx.working_dir)
-                .root()
-                .to_path_buf(),
-        };
-        let content = match self.search_dir(
-            &sessions_dir,
-            &a.query,
-            a.after.as_deref(),
-            a.before.as_deref(),
-            a.limit.unwrap_or(DEFAULT_LIMIT),
-        ) {
-            Ok(content) => content,
-            Err(error) => {
+        let pinned_dir = self.sessions_dir.clone();
+        let working_dir = ctx.working_dir.clone();
+        let index = Arc::clone(&self.index);
+        let search_res = tokio::task::spawn_blocking(move || {
+            let sessions_dir = match pinned_dir {
+                Some(d) => d,
+                None => SessionManager::for_project(&working_dir)
+                    .root()
+                    .to_path_buf(),
+            };
+            let tool = RecallTool {
+                index,
+                sessions_dir: Some(sessions_dir.clone()),
+            };
+            tool.search_dir(
+                &sessions_dir,
+                &a.query,
+                a.after.as_deref(),
+                a.before.as_deref(),
+                a.limit.unwrap_or(DEFAULT_LIMIT),
+            )
+        })
+        .await;
+        let content = match search_res {
+            Ok(Ok(content)) => content,
+            Ok(Err(error)) => {
                 return ToolResult {
                     call_id: String::new(),
                     content: format!("failed to read session transcripts: {error}"),
+                    is_error: true,
+                    images: vec![],
+                }
+            }
+            Err(join_err) => {
+                return ToolResult {
+                    call_id: String::new(),
+                    content: format!("recall worker failed: {join_err}"),
                     is_error: true,
                     images: vec![],
                 }

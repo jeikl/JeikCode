@@ -152,25 +152,14 @@ impl AnthropicProvider {
 
     pub fn new(cfg: AnthropicConfig) -> Result<Self, ProviderError> {
         let policy = Self::resolve_policy(&cfg);
-        let mut builder = crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
-            .connect_timeout(cfg.connect_timeout)
-            // Reap idle keep-alives before the server does (see POOL_IDLE_TIMEOUT).
-            .pool_idle_timeout(retry::POOL_IDLE_TIMEOUT)
-            // Product UA for gateway attribution (parity with core's build_http_client).
-            .user_agent(
-                cfg.user_agent
-                    .as_deref()
-                    .unwrap_or(super::DEFAULT_USER_AGENT),
-            );
-        if cfg.skip_tls_verify {
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-        let client = builder.build().map_err(|e| ProviderError {
-            retryable: false,
-            message: format!("http client build failed: {e}"),
-            ..Default::default()
-        })?;
         let url = messages_endpoint_url(&cfg.base_url);
+        let client = super::openai_compat::shared_provider_http_client(
+            cfg.connect_timeout,
+            cfg.skip_tls_verify,
+            cfg.user_agent.clone(),
+            jeikcode_config::tls::should_cap_url(&url),
+            false,
+        )?;
         Ok(Self {
             cfg,
             policy,

@@ -70,8 +70,16 @@ impl Tool for WriteFileTool {
         let path = resolve_path(&a.path, &ctx.working_dir);
         let disp = crate::pathnorm::to_display(&path);
 
+        // Acquire the normalized path write lock shared with `EditFileTool` so
+        // concurrent subagents or scheduled tasks editing/writing the same file serialize cleanly.
+        let lock_key = super::edit::lock_key_for_write_path(path.clone()).await;
+        let _lock = match super::edit::acquire_edit_lock(&lock_key, &ctx.cancel).await {
+            Ok(guard) => guard,
+            Err(e) => return err(e),
+        };
+
         // State machine check: if file exists, enforce read confirmation in current turn
-        if path.exists()
+        if tokio::fs::try_exists(&path).await.unwrap_or(false)
             && crate::tools::write_state::check_write_permitted(&path)
                 == crate::tools::write_state::WritePermission::RefusedUnread
         {
@@ -557,5 +565,53 @@ mod tests {
             "Turn 3 blind write must be intercepted again: {}",
             r3.content
         );
+    }
+
+    #[tokio::test]
+    async fn write_and_edit_share_normalized_per_file_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let existing = d.path().join("shared.txt");
+        std::fs::write(&existing, "initial\n").unwrap();
+
+        let key_via_dot =
+            crate::tools::edit::lock_key_for_write_path(d.path().join(".").join("shared.txt"))
+                .await;
+        let key_direct = crate::tools::edit::lock_key_for_write_path(existing.clone()).await;
+        assert_eq!(key_via_dot, key_direct);
+
+        let brand_new = d.path().join("nested").join("new_file.txt");
+        let brand_new_dot = d
+            .path()
+            .join(".")
+            .join("nested")
+            .join("..")
+            .join("nested")
+            .join("new_file.txt");
+        let new_k1 = crate::tools::edit::lock_key_for_write_path(brand_new).await;
+        let new_k2 = crate::tools::edit::lock_key_for_write_path(brand_new_dot).await;
+        assert_eq!(new_k1, new_k2);
+
+        let cancel = CancellationToken::new();
+        let guard = crate::tools::edit::acquire_edit_lock(&key_direct, &cancel)
+            .await
+            .expect("first lock acquisition must succeed");
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(60),
+            crate::tools::edit::acquire_edit_lock(&key_via_dot, &cancel),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "concurrent write/edit on normalized identical path must wait while guard is held"
+        );
+        drop(guard);
+        let acquired = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::tools::edit::acquire_edit_lock(&key_via_dot, &cancel),
+        )
+        .await
+        .expect("lock must become available once previous holder drops")
+        .expect("lock reacquisition should succeed");
+        drop(acquired);
     }
 }

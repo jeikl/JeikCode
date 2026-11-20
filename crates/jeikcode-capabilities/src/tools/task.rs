@@ -16,8 +16,116 @@ use jeikcode_kernel::tool::{
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
+#[cfg(feature = "session")]
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+#[cfg(feature = "session")]
+use tokio_util::sync::CancellationToken;
+
+const DEFAULT_GLOBAL_SUBAGENT_CONCURRENCY: usize = 64;
+const DEFAULT_SESSION_SUBAGENT_CONCURRENCY: usize = 3;
+
+static GLOBAL_SUBAGENT_SEMAPHORE: LazyLock<Arc<tokio::sync::Semaphore>> = LazyLock::new(|| {
+    let cap = std::env::var("JEIKCODE_MAX_GLOBAL_SUBAGENTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_GLOBAL_SUBAGENT_CONCURRENCY);
+    Arc::new(tokio::sync::Semaphore::new(cap))
+});
+
+#[cfg(feature = "session")]
+struct ActiveSubagentEntry {
+    reg_id: u64,
+    cancel: CancellationToken,
+    child_session_id: Option<String>,
+}
+
+#[cfg(feature = "session")]
+static ACTIVE_SUBAGENTS: LazyLock<Mutex<HashMap<String, Vec<ActiveSubagentEntry>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "session")]
+static SUBAGENT_REG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[cfg(feature = "session")]
+struct SubagentActiveGuard {
+    parent_session_id: String,
+    reg_id: u64,
+}
+
+#[cfg(feature = "session")]
+impl SubagentActiveGuard {
+    fn register(
+        parent_session_id: String,
+        cancel: CancellationToken,
+        child_session_id: Option<String>,
+    ) -> Self {
+        let reg_id = SUBAGENT_REG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut map = ACTIVE_SUBAGENTS.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(parent_session_id.clone())
+            .or_default()
+            .push(ActiveSubagentEntry {
+                reg_id,
+                cancel,
+                child_session_id,
+            });
+        Self {
+            parent_session_id,
+            reg_id,
+        }
+    }
+}
+
+#[cfg(feature = "session")]
+impl Drop for SubagentActiveGuard {
+    fn drop(&mut self) {
+        let mut map = ACTIVE_SUBAGENTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entries) = map.get_mut(&self.parent_session_id) {
+            entries.retain(|entry| entry.reg_id != self.reg_id);
+            if entries.is_empty() {
+                map.remove(&self.parent_session_id);
+            }
+        }
+    }
+}
+
+/// Cascade-cancel all running subagent children (and their child bash trees)
+/// registered under `parent_session_id`. Safe to call on session stop or delete.
+pub fn cancel_subagents_for_session(parent_session_id: &str) -> usize {
+    #[cfg(not(feature = "session"))]
+    {
+        let _ = parent_session_id;
+        0
+    }
+    #[cfg(feature = "session")]
+    {
+        if parent_session_id.trim().is_empty() {
+            return 0;
+        }
+        let snapshot: Vec<(CancellationToken, Option<String>)> = {
+            let map = ACTIVE_SUBAGENTS.lock().unwrap_or_else(|e| e.into_inner());
+            map.get(parent_session_id)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .map(|e| (e.cancel.clone(), e.child_session_id.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let count = snapshot.len();
+        for (token, child_sid) in snapshot {
+            token.cancel();
+            if let Some(csid) = child_sid {
+                let _ = cancel_subagents_for_session(&csid);
+                let _ = crate::tools::bash_runtime::kill_by_session_id(&csid);
+            }
+        }
+        count
+    }
+}
 
 /// Sentinel prefix on a `ctx.progress` line that marks it as EPHEMERAL live activity
 /// (current action of a running subtask) rather than a committed ↻/✓/✗ scrollback line.
@@ -394,9 +502,10 @@ pub struct TaskTool {
     make_capable_provider: Box<dyn Fn() -> Arc<dyn LlmProvider> + Send + Sync>,
     make_explore_tools: Box<dyn Fn() -> MountedTools + Send + Sync>,
     make_worker_tools: Box<dyn Fn() -> MountedTools + Send + Sync>,
-    /// `Some(n)` bounds how many children run at once; `None` = unbounded
-    /// (config `[subagent] max_concurrent = 0`).
+    /// `Some(n)` bounds how many children run at once across all `task` calls in this
+    /// session; `None` = follow session default (3 when session-bound, else global pool cap).
     max_concurrent: Option<usize>,
+    session_sem: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     max_rounds: Option<u32>,
     tool_loop_policy: Option<ToolLoopPolicy>,
     inherited_worker_middlewares: Vec<Arc<dyn ToolMiddleware>>,
@@ -417,14 +526,31 @@ impl TaskTool {
             make_capable_provider: Box::new(make_capable_provider),
             make_explore_tools: Box::new(make_explore_tools),
             make_worker_tools: Box::new(make_worker_tools),
-            // Unbounded by default: the shipped config is `max_concurrent = 0`.
             max_concurrent: None,
+            session_sem: Mutex::new(None),
             max_rounds: Some(super::DEFAULT_CHILD_MAX_ROUNDS),
             tool_loop_policy: Some(ToolLoopPolicy::default()),
             inherited_worker_middlewares: Vec::new(),
             #[cfg(feature = "session")]
             parent_session: None,
         }
+    }
+
+    /// Resolve the persistent per-session semaphore (lazy-initialized once).
+    fn resolve_session_semaphore(
+        &self,
+        has_parent_session: bool,
+    ) -> Option<Arc<tokio::sync::Semaphore>> {
+        let mut guard = self.session_sem.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(sem) = guard.as_ref() {
+            return Some(Arc::clone(sem));
+        }
+        let cap = self
+            .max_concurrent
+            .or_else(|| has_parent_session.then_some(DEFAULT_SESSION_SUBAGENT_CONCURRENCY))?;
+        let sem = Arc::new(tokio::sync::Semaphore::new(cap));
+        *guard = Some(Arc::clone(&sem));
+        Some(sem)
     }
 
     /// 绑定延迟初始化的父会话槽位，供宿主在会话准备完成后填充 `SessionManager` 与父会话 ID。
@@ -450,12 +576,13 @@ impl TaskTool {
         self
     }
 
-    /// Bound how many children run at once. `0` removes the bound entirely —
-    /// every dispatched subtask starts immediately, and liveness is left to the
-    /// provider idle clocks, the per-child round cap, and explicit cancel.
-    /// Any other value is used as-is (no floor, so `1` means strictly serial).
+    /// Bound how many children run at once. `0` clears explicit overrides so session-bound
+    /// instances use the default fair session cap and standalone instances use global cap.
     pub fn with_max_concurrent(mut self, n: usize) -> Self {
         self.max_concurrent = (n != 0).then_some(n);
+        *self.session_sem.lock().unwrap_or_else(|e| e.into_inner()) = self
+            .max_concurrent
+            .map(|c| Arc::new(tokio::sync::Semaphore::new(c)));
         self
     }
 
@@ -577,11 +704,17 @@ impl Tool for TaskTool {
         }
 
         let offline_active = jeikcode_config::config::offline::is_offline_active();
-        // `None` = unbounded: skip the semaphore entirely instead of handing out
-        // an effectively-infinite permit count.
-        let sem = self
-            .max_concurrent
-            .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+        #[cfg(feature = "session")]
+        let parent_session_info = self
+            .parent_session
+            .as_ref()
+            .and_then(|slot| slot.get().cloned());
+        #[cfg(not(feature = "session"))]
+        let has_parent_session = false;
+        #[cfg(feature = "session")]
+        let has_parent_session = parent_session_info.is_some();
+
+        let sem = self.resolve_session_semaphore(has_parent_session);
         let max_rounds = self.max_rounds;
         let tool_loop_policy = self.tool_loop_policy;
         let inherited_worker_middlewares = self.inherited_worker_middlewares.clone();
@@ -599,11 +732,6 @@ impl Tool for TaskTool {
         }
         #[cfg(feature = "session")]
         let parent_call_id = ctx.progress.call_id().map(str::to_string);
-        #[cfg(feature = "session")]
-        let parent_session_info = self
-            .parent_session
-            .as_ref()
-            .and_then(|slot| slot.get().cloned());
 
         for (idx, t) in parsed.tasks.into_iter().enumerate() {
             let is_worker = t.is_worker();
@@ -675,7 +803,6 @@ impl Tool for TaskTool {
                 meta.user_renamed = true;
                 meta.parent_session_id = Some(parent_sid.clone());
                 meta.parent_call_id = parent_call_id.clone();
-                let _ = mgr.write_meta(&meta);
                 let provider_label = if is_hard {
                     "subagent-capable"
                 } else {
@@ -688,7 +815,14 @@ impl Tool for TaskTool {
                     &model,
                 ));
                 let snap_hook = Arc::new(SnapshotHook::new(mgr.clone(), &child_id, &wd_str));
-                (child_id, trace_hook, snap_hook)
+                (
+                    parent_sid.clone(),
+                    child_id,
+                    mgr.clone(),
+                    meta,
+                    trace_hook,
+                    snap_hook,
+                )
             });
             // Advertise the selected model while this child is still queued.
             // Marker-prefixed means retained UIs update the fixed panel without
@@ -700,8 +834,8 @@ impl Tool for TaskTool {
             ));
 
             set.spawn(async move {
-                // Unbounded mode carries no permit guard at all.
-                let _permit = match &sem {
+                // Two-tier fair concurrency: per-session semaphore first, then global pool semaphore.
+                let _session_permit = match &sem {
                     Some(sem) => Some(
                         sem.clone()
                             .acquire_owned()
@@ -710,6 +844,31 @@ impl Tool for TaskTool {
                     ),
                     None => None,
                 };
+                let _global_permit = GLOBAL_SUBAGENT_SEMAPHORE
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("global subagent semaphore not closed");
+                #[cfg(feature = "session")]
+                let _active_guard =
+                    child_session_setup
+                        .as_ref()
+                        .map(|(parent_sid, child_id, ..)| {
+                            SubagentActiveGuard::register(
+                                parent_sid.clone(),
+                                child_cancel.clone(),
+                                Some(child_id.clone()),
+                            )
+                        });
+                #[cfg(feature = "session")]
+                if let Some((_, _, mgr, meta, _, _)) = child_session_setup.as_ref() {
+                    let mgr = mgr.clone();
+                    let meta = meta.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = mgr.write_meta(&meta);
+                    })
+                    .await;
+                }
                 // ↻ started — include a compact preview of WHAT this subtask is, so a live
                 // fan-out shows each child's job, not just its number.
                 progress.emit(subtask_progress_line(
@@ -733,7 +892,9 @@ impl Tool for TaskTool {
                     .cancel_token(child_cancel)
                     .hook(progress_hook.clone());
                 #[cfg(feature = "session")]
-                if let Some((ref child_id, ref trace_hook, ref snap_hook)) = child_session_setup {
+                if let Some((_, ref child_id, _, _, ref trace_hook, ref snap_hook)) =
+                    child_session_setup
+                {
                     builder = builder
                         .session_id(child_id)
                         .hook(snap_hook.clone())
@@ -753,7 +914,7 @@ impl Tool for TaskTool {
                     builder = builder.middleware(mw);
                 }
                 #[cfg(feature = "session")]
-                if let Some((_, ref trace_hook, _)) = child_session_setup {
+                if let Some((_, _, _, _, ref trace_hook, _)) = child_session_setup {
                     builder = builder.middleware(Arc::new(trace_hook.end_middleware()));
                 }
                 let child = builder.build();
@@ -3582,5 +3743,31 @@ mod session_persistence_tests {
         assert!(!child_trace.is_empty(), "child session must persist trace");
         let child_eval = evaluate_session_metrics(&mgr, child_id).unwrap();
         assert_eq!(child_eval.round_count, 1);
+    }
+
+    #[test]
+    fn cancel_subagents_for_session_cascades_recursively_to_children() {
+        let parent_token = CancellationToken::new();
+        let child_token = CancellationToken::new();
+        let unrelated_token = CancellationToken::new();
+
+        let _g1 = SubagentActiveGuard::register(
+            "sess-parent-test".to_string(),
+            parent_token.clone(),
+            Some("sess-child-test".to_string()),
+        );
+        let _g2 =
+            SubagentActiveGuard::register("sess-child-test".to_string(), child_token.clone(), None);
+        let _g3 = SubagentActiveGuard::register(
+            "sess-other-test".to_string(),
+            unrelated_token.clone(),
+            None,
+        );
+
+        let cancelled = cancel_subagents_for_session("sess-parent-test");
+        assert_eq!(cancelled, 1);
+        assert!(parent_token.is_cancelled());
+        assert!(child_token.is_cancelled());
+        assert!(!unrelated_token.is_cancelled());
     }
 }

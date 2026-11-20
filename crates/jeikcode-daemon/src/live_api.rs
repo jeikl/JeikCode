@@ -201,6 +201,53 @@ fn live_session_approval_mode_in_dir(working_dir: &Path, session_id: &str) -> Ap
     live_current_approval_mode()
 }
 
+/// Asynchronous version of [`live_session_approval_mode`] for async request handlers:
+/// checks memory cache first and offloads disk backfill (`resolve_session_by_id` +
+/// `read_meta`) onto `spawn_blocking`.
+pub(crate) async fn live_session_approval_mode_async(session_id: Option<&str>) -> ApprovalMode {
+    if live_global_mode_enabled() {
+        return live_current_approval_mode();
+    }
+    let Some(sid) = session_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        return live_current_approval_mode();
+    };
+    if let Some(mode) = cached_session_approval_mode(&sid) {
+        return mode;
+    }
+    if session_approval_mode_known_absent(&sid) {
+        return live_current_approval_mode();
+    }
+    crate::spawn_blocking_isolated(move || live_session_approval_mode(Some(&sid)))
+        .await
+        .unwrap_or_else(|_| live_current_approval_mode())
+}
+
+/// Asynchronous version of [`live_session_approval_mode_in_dir`] for async handlers:
+/// avoids reading session metadata synchronously on Tokio worker threads.
+async fn live_session_approval_mode_in_dir_async(
+    working_dir: std::path::PathBuf,
+    session_id: String,
+) -> ApprovalMode {
+    if live_global_mode_enabled() {
+        return live_current_approval_mode();
+    }
+    if let Some(mode) = cached_session_approval_mode(&session_id) {
+        return mode;
+    }
+    if session_approval_mode_known_absent(&session_id) {
+        return live_current_approval_mode();
+    }
+    crate::spawn_blocking_isolated(move || {
+        live_session_approval_mode_in_dir(&working_dir, &session_id)
+    })
+    .await
+    .unwrap_or_else(|_| live_current_approval_mode())
+}
+
 fn cached_session_approval_mode(sid: &str) -> Option<ApprovalMode> {
     let guard = SESSION_APPROVAL_MODES
         .lock()
@@ -1320,12 +1367,13 @@ pub(crate) async fn run_chat_turn_v2(
     // model conversation below (`user_images = Vec::new()`), so a reloading client refills
     // the thumbnail from the sidecar. The /chat path previously skipped this, so the image
     // was lost after refresh for anyone loading the session fresh from disk. Mirrors /live.
-    stash_vl_display_images(
+    stash_vl_display_images_async(
         &runtime_cfg.working_dir,
         &session_id,
         &user_text,
         &user_images,
-    );
+    )
+    .await;
     let naming_session_id = session_id.clone();
     let naming_project_bucket =
         jeikcode_capabilities::session::SessionManager::project_hash(&runtime_cfg.working_dir);
@@ -2745,15 +2793,18 @@ pub(crate) async fn live_stream(
 
     if let Some(session_id) = sid.clone() {
         if crate::native_live::should_use_registry_for_session(&session_id) {
-            return live_stream_from_registry(wd, session_id).into_response();
+            return live_stream_from_registry(wd, session_id)
+                .await
+                .into_response();
         }
     }
 
+    let mode = live_session_approval_mode_async(sid.as_deref()).await;
     let join = match crate::native_live::ensure_headless_runtime(
         wd.clone(),
         state.telemetry.clone(),
         live_current_provider(),
-        native_runtime_mode(live_session_approval_mode(sid.as_deref())),
+        native_runtime_mode(mode),
         sid,
     )
     .await
@@ -2762,7 +2813,9 @@ pub(crate) async fn live_stream(
         Err(error) => {
             // Embedded TUI bound to another session — fall back to registry view.
             if let Some(session_id) = parse_session_id_from_embedded_mismatch(&error) {
-                return live_stream_from_registry(wd, session_id).into_response();
+                return live_stream_from_registry(wd, session_id)
+                    .await
+                    .into_response();
             }
             return (
                 StatusCode::NOT_FOUND,
@@ -2771,7 +2824,7 @@ pub(crate) async fn live_stream(
                 .into_response();
         }
     };
-    live_stream_from_hub_join(join).into_response()
+    live_stream_from_hub_join(join).await.into_response()
 }
 
 fn parse_session_id_from_embedded_mismatch(error: &str) -> Option<String> {
@@ -2833,54 +2886,68 @@ fn project_registry_event(
     })
 }
 
-fn live_stream_from_registry(
+async fn live_stream_from_registry(
     working_dir: std::path::PathBuf,
     session_id: String,
 ) -> axum::response::Response {
-    let mut snapshot =
-        match crate::native_live::registry_session_snapshot(&working_dir, &session_id) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": error })),
-                )
-                    .into_response();
-            }
-        };
-    // `/live` is another resume entrypoint: a `/chat` crash checkpoint must be
-    // overlaid here too, before the snapshot becomes the runtime prefix.
-    if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&session_id) {
-        let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
-    }
-    let session_name = {
-        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&working_dir);
-        match crate::legacy_convert::load_catalog_session_view_in_project(&bucket, &session_id) {
+    let sid_clone = session_id.clone();
+    let wd_clone = working_dir.clone();
+    let prep = crate::spawn_blocking_isolated(move || {
+        let mut snapshot =
+            match crate::native_live::registry_session_snapshot(&wd_clone, &sid_clone) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Err((StatusCode::NOT_FOUND, error)),
+            };
+        // `/live` is another resume entrypoint: a `/chat` crash checkpoint must be
+        // overlaid here too, before the snapshot becomes the runtime prefix.
+        if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&sid_clone) {
+            let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
+        }
+        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&wd_clone);
+        let session_name = match crate::legacy_convert::load_catalog_session_view_in_project(
+            &bucket, &sid_clone,
+        ) {
             Ok(Some(session)) => session.meta.name,
             Ok(None) => String::new(),
-            Err(error) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": error.to_string() })),
-                )
-                    .into_response();
-            }
+            Err(error) => return Err((StatusCode::NOT_FOUND, error.to_string())),
+        };
+        let snapshot_count = snapshot.messages.len();
+        let (snapshot_offset, snapshot_tail) = snapshot_tail(&snapshot.messages);
+        let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot_tail
+            .iter()
+            .map(crate::MessageInfo::from_kernel)
+            .collect();
+        crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
+        crate::attach_display_images(&mut snapshot_messages, &wd_clone, &sid_clone);
+        Ok((
+            snapshot_messages,
+            snapshot_count,
+            snapshot_offset,
+            session_name,
+        ))
+    })
+    .await;
+
+    let (snapshot_messages, snapshot_count, snapshot_offset, session_name) = match prep {
+        Ok(Ok(data)) => data,
+        Ok(Err((status, error))) => {
+            return (status, Json(serde_json::json!({ "error": error }))).into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("snapshot task panicked: {error}") })),
+            )
+                .into_response();
         }
     };
+
     let project_hash = crate::hash_path(&working_dir);
     let provider = live_current_provider();
-    let (tx, out_rx) = mpsc::unbounded_channel::<LiveWireEvent>();
+    let (tx, out_rx) = mpsc::channel::<LiveWireEvent>(1024);
     // Snapshot + replay head is emitted ahead of the live bus and tagged
     // `replay: true`; only those frames may be de-duplicated client-side.
     let mut head: Vec<LiveWireEvent> = Vec::new();
-    let snapshot_count = snapshot.messages.len();
-    let (snapshot_offset, snapshot_tail) = snapshot_tail(&snapshot.messages);
-    let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot_tail
-        .iter()
-        .map(crate::MessageInfo::from_kernel)
-        .collect();
-    crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
-    crate::attach_display_images(&mut snapshot_messages, &working_dir, &session_id);
     head.push(LiveWireEvent::Snapshot {
         messages: snapshot_messages,
         message_count: snapshot_count,
@@ -2915,18 +2982,27 @@ fn live_stream_from_registry(
         }
     }
 
+    let sid_log = session_id.clone();
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(sequenced) => {
                     if let Some(w) = project_registry_event(&mut projector, sequenced) {
-                        if tx.send(w).is_err() {
-                            break;
+                        match tx.try_send(w) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    session_id = %sid_log,
+                                    "closing lagging registry /live stream subscriber"
+                                );
+                                break;
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    let _ = tx.send(LiveWireEvent::Error {
+                    let _ = tx.try_send(LiveWireEvent::Error {
                         message: format!(
                             "registry live stream lagged by {skipped} events; reconnect"
                         ),
@@ -2943,7 +3019,7 @@ fn live_stream_from_registry(
         log_live_frame_size(&wire, frame.len());
         Ok::<_, std::convert::Infallible>(Event::default().data(frame))
     });
-    let live_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|wire| {
+    let live_stream = tokio_stream::wrappers::ReceiverStream::new(out_rx).map(|wire| {
         Ok::<_, std::convert::Infallible>(Event::default().data(live_wire_frame_json(&wire, false)))
     });
     let stream = head_stream.chain(live_stream);
@@ -2965,53 +3041,65 @@ fn live_stream_from_registry(
     resp
 }
 
-fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::response::Response {
+async fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response::Response {
     let snapshot_wd = join.binding.working_dir.clone();
-    let mut snapshot = (*join.snapshot).clone();
-    // `/live` is another resume entrypoint: overlay any per-token checkpoint from
-    // a crashed `/chat` turn before handing the snapshot to the runtime.
-    if let Some(partial) =
-        jeikcode_capabilities::session::partial::load_global(&join.binding.session_id)
-    {
-        let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
-    }
-    let session_name = {
-        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&snapshot_wd);
-        match crate::legacy_convert::load_catalog_session_view_in_project(
-            &bucket,
-            &join.binding.session_id,
+    let sid_clone = join.binding.session_id.clone();
+    let wd_clone = snapshot_wd.clone();
+    let snapshot_arc = std::sync::Arc::clone(&join.snapshot);
+    let prep = crate::spawn_blocking_isolated(move || {
+        let mut snapshot = (*snapshot_arc).clone();
+        // `/live` is another resume entrypoint: overlay any per-token checkpoint from
+        // a crashed `/chat` turn before handing the snapshot to the runtime.
+        if let Some(partial) = jeikcode_capabilities::session::partial::load_global(&sid_clone) {
+            let _ = crate::overlay_partial_stream(&mut snapshot.messages, &partial);
+        }
+        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&wd_clone);
+        let session_name = match crate::legacy_convert::load_catalog_session_view_in_project(
+            &bucket, &sid_clone,
         ) {
             Ok(Some(session)) => session.meta.name,
             Ok(None) => String::new(),
-            Err(error) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": error.to_string() })),
-                )
-                    .into_response();
-            }
+            Err(error) => return Err((StatusCode::NOT_FOUND, error.to_string())),
+        };
+        let snapshot_count = snapshot.messages.len();
+        let (snapshot_offset, snapshot_tail) = snapshot_tail(&snapshot.messages);
+        let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot_tail
+            .iter()
+            .map(crate::MessageInfo::from_kernel)
+            .collect();
+        crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
+        // Re-attach display-only images (VL-preprocessed originals) so a refresh — which
+        // rebuilds from the kernel snapshot (image stripped) — shows the thumbnail, not the
+        // "missing image" placeholder. Same sidecar the HTTP session-load path reads.
+        crate::attach_display_images(&mut snapshot_messages, &wd_clone, &sid_clone);
+        Ok((
+            snapshot_messages,
+            snapshot_count,
+            snapshot_offset,
+            session_name,
+        ))
+    })
+    .await;
+
+    let (snapshot_messages, snapshot_count, snapshot_offset, session_name) = match prep {
+        Ok(Ok(data)) => data,
+        Ok(Err((status, error))) => {
+            return (status, Json(serde_json::json!({ "error": error }))).into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("snapshot task panicked: {error}") })),
+            )
+                .into_response();
         }
     };
+
     let project_hash = crate::hash_path(&snapshot_wd);
-    let (tx, out_rx) = mpsc::unbounded_channel::<LiveWireEvent>();
+    let (tx, out_rx) = mpsc::channel::<LiveWireEvent>(1024);
     // Snapshot + replay head is emitted ahead of the live bus and tagged
     // `replay: true`; only those frames may be de-duplicated client-side.
     let mut head: Vec<LiveWireEvent> = Vec::new();
-    let snapshot_count = snapshot.messages.len();
-    let (snapshot_offset, snapshot_tail) = snapshot_tail(&snapshot.messages);
-    let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot_tail
-        .iter()
-        .map(crate::MessageInfo::from_kernel)
-        .collect();
-    crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
-    // Re-attach display-only images (VL-preprocessed originals) so a refresh — which
-    // rebuilds from the kernel snapshot (image stripped) — shows the thumbnail, not the
-    // "missing image" placeholder. Same sidecar the HTTP session-load path reads.
-    crate::attach_display_images(
-        &mut snapshot_messages,
-        &snapshot_wd,
-        &join.binding.session_id,
-    );
     head.push(LiveWireEvent::Snapshot {
         messages: snapshot_messages,
         message_count: snapshot_count,
@@ -3045,6 +3133,7 @@ fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::respo
         }
     }
     let binding_id = join.binding.id;
+    let sid_log = join.binding.session_id.clone();
     let mut rx = join.receiver;
     tokio::spawn(async move {
         loop {
@@ -3055,14 +3144,22 @@ fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::respo
                         observation.generation,
                         observation.event,
                     ) {
-                        if tx.send(w).is_err() {
-                            break;
+                        match tx.try_send(w) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    session_id = %sid_log,
+                                    "closing lagging hub /live stream subscriber"
+                                );
+                                break;
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                 }
                 Ok(_) => break,
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    let _ = tx.send(LiveWireEvent::Error {
+                    let _ = tx.try_send(LiveWireEvent::Error {
                         message: format!("live stream lagged by {skipped} events; reconnect"),
                     });
                     break;
@@ -3077,7 +3174,7 @@ fn live_stream_from_hub_join(mut join: crate::live_hub::LiveJoin) -> axum::respo
         log_live_frame_size(&wire, frame.len());
         Ok::<_, std::convert::Infallible>(Event::default().data(frame))
     });
-    let live_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|wire| {
+    let live_stream = tokio_stream::wrappers::ReceiverStream::new(out_rx).map(|wire| {
         Ok::<_, std::convert::Infallible>(Event::default().data(live_wire_frame_json(&wire, false)))
     });
     let stream = head_stream.chain(live_stream);
@@ -3235,6 +3332,7 @@ fn text_carries_vl_caption(text: &str) -> bool {
 /// conversation, leaving the persisted snapshot image-less — AND at least one image exists.
 /// Both the `/live` and `/chat` VL-strip paths call this; the `/chat` path previously
 /// skipped it, so reloading clients (other users) saw only the "missing image" placeholder.
+#[cfg(test)]
 fn stash_vl_display_images(
     working_dir: &std::path::Path,
     session_id: &str,
@@ -3260,6 +3358,36 @@ fn stash_vl_display_images(
         })
         .collect();
     crate::append_display_images(working_dir, session_id, display);
+}
+
+/// Async wrapper around [`stash_vl_display_images`] that offloads sidecar directory
+/// creation and JSONL writes to `tokio::task::spawn_blocking`.
+async fn stash_vl_display_images_async(
+    working_dir: &std::path::Path,
+    session_id: &str,
+    runtime_text: &str,
+    original_images: &[ImageContent],
+) {
+    if !text_carries_vl_caption(runtime_text) || original_images.is_empty() {
+        return;
+    }
+    let wd = working_dir.to_path_buf();
+    let sid = session_id.to_string();
+    let display: Vec<crate::ImageData> = original_images
+        .iter()
+        .map(|image| crate::ImageData {
+            media_type: image.media_type.clone(),
+            data: image.data.clone(),
+            missing: false,
+        })
+        .collect();
+    let _ = crate::spawn_blocking_isolated(move || {
+        let _ = std::fs::create_dir_all(
+            jeikcode_capabilities::session::SessionManager::for_project(&wd).root(),
+        );
+        crate::append_display_images(&wd, &sid, display);
+    })
+    .await;
 }
 
 /// 对 live 输入做视觉预处理：主模型不支持视觉时，用 VL 模型把图片转文字拼进 caption
@@ -3322,19 +3450,27 @@ pub(crate) async fn live_message(
                 crate::native_live::session_draft_working_dir(&session_id)
             {
                 draft_dir
-            } else if let Ok(Some(resolved)) = crate::resolve_session_by_id(&session_id) {
-                PathBuf::from(resolved.meta.working_dir)
             } else {
-                live_current_working_dir(&working_dir)
+                let sid_lookup = session_id.clone();
+                if let Ok(Ok(Some(resolved))) = crate::spawn_blocking_isolated(move || {
+                    crate::resolve_session_by_id(&sid_lookup)
+                })
+                .await
+                {
+                    PathBuf::from(resolved.meta.working_dir)
+                } else {
+                    live_current_working_dir(&working_dir)
+                }
             };
             let registry =
                 jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
             if registry.handle(&session_id).is_none() {
+                let mode = live_session_approval_mode_async(Some(&session_id)).await;
                 if let Err(error) = crate::native_live::ensure_registry_runner(
                     wd.clone(),
                     state.telemetry.clone(),
                     bootstrap_provider.clone(),
-                    native_runtime_mode(live_session_approval_mode(Some(&session_id))),
+                    native_runtime_mode(mode),
                     session_id.clone(),
                 )
                 .await
@@ -3438,7 +3574,8 @@ pub(crate) async fn live_message(
                     state.telemetry.clone(),
                 )
                 .await;
-                stash_vl_display_images(&wd, &session_id, &runtime_text, &original_images);
+                stash_vl_display_images_async(&wd, &session_id, &runtime_text, &original_images)
+                    .await;
                 let (runtime_input, echo_input) =
                     split_live_inputs(req.message, original_images, runtime_text);
                 return match crate::native_live::submit_via_registry(
@@ -3476,11 +3613,12 @@ pub(crate) async fn live_message(
         }
     }
 
+    let mode = live_session_approval_mode_async(sid.as_deref()).await;
     let join = match crate::native_live::ensure_headless_runtime(
         live_current_working_dir(&working_dir),
         state.telemetry.clone(),
         bootstrap_provider,
-        native_runtime_mode(live_session_approval_mode(sid.as_deref())),
+        native_runtime_mode(mode),
         sid,
     )
     .await
@@ -3564,12 +3702,13 @@ pub(crate) async fn live_message(
     // VL preprocessing produced a caption ⇒ the runtime strips the image from the
     // conversation (it must never re-enter model context — see estimate_tokens). Stash the
     // originals in the display-only sidecar so a page refresh re-attaches the thumbnail.
-    stash_vl_display_images(
+    stash_vl_display_images_async(
         &join.binding.working_dir,
         &join.binding.session_id,
         &runtime_text,
         &original_images,
-    );
+    )
+    .await;
     let (runtime_input, echo_input) = split_live_inputs(req.message, original_images, runtime_text);
     match crate::native_live::submit_confirmed_with_echo(
         runtime_input,
@@ -3656,6 +3795,7 @@ pub(crate) async fn live_stop(
         crate::native_live::cancel_confirmed().await.is_ok()
     };
     if let Some(ref sid) = session_id {
+        jeikcode_capabilities::tools::task::cancel_subagents_for_session(sid);
         jeikcode_capabilities::tools::bash_runtime::cancel_foreground_live_bash_for_session(sid);
     }
     Json(serde_json::json!({ "accepted": accepted }))
@@ -3764,7 +3904,14 @@ async fn try_queue_active_runtime_switch(
             if let Ok((requested_at, provider_name, model)) =
                 queue_runtime_model_switch(handle, &runtime_config).await
             {
-                log_model_switch_queued(working_dir, sid, &provider_name, &model, requested_at);
+                log_model_switch_queued_async(
+                    working_dir.to_path_buf(),
+                    sid.to_string(),
+                    provider_name,
+                    model,
+                    requested_at,
+                )
+                .await;
                 if record_registry_fp {
                     jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
                         .set_provider_fingerprint(
@@ -3777,6 +3924,19 @@ async fn try_queue_active_runtime_switch(
         }
     }
     model_config_ok(session_id, requested_provider, true)
+}
+
+async fn log_model_switch_queued_async(
+    working_dir: std::path::PathBuf,
+    session_id: String,
+    provider: String,
+    model: String,
+    requested_at: u64,
+) {
+    let _ = crate::spawn_blocking_isolated(move || {
+        log_model_switch_queued(&working_dir, &session_id, &provider, &model, requested_at);
+    })
+    .await;
 }
 
 fn log_model_switch_queued(
@@ -4080,9 +4240,10 @@ pub(crate) struct ApprovalModeResp {
 pub(crate) async fn approval_mode_get(
     axum::extract::Query(query): axum::extract::Query<ApprovalModeQuery>,
 ) -> impl IntoResponse {
+    let mode = live_session_approval_mode_async(query.session_id.as_deref()).await;
     Json(ApprovalModeResp {
         ok: true,
-        mode: live_session_approval_mode(query.session_id.as_deref()),
+        mode,
         global: live_global_mode_enabled(),
     })
 }
@@ -4128,11 +4289,12 @@ pub(crate) async fn approval_mode_set(
     State(state): State<AppState>,
     Json(req): Json<LiveModeReq>,
 ) -> impl IntoResponse {
-    let session_id = req.session_id.as_deref();
+    let session_id = req.session_id.clone();
     let ok = apply_mode_request(&state, &req).await;
+    let mode = live_session_approval_mode_async(session_id.as_deref()).await;
     Json(ApprovalModeResp {
         ok,
-        mode: live_session_approval_mode(session_id),
+        mode,
         global: live_global_mode_enabled(),
     })
 }
@@ -4164,8 +4326,15 @@ async fn apply_mode_request(state: &AppState, req: &LiveModeReq) -> bool {
     if req.global.is_some() || (now_global && req.mode != was_global_mode) {
         let policy = if now_global { "global" } else { "memory" };
         let persisted_mode = req.mode;
-        let saved = crate::api_config::persist_agent_mode_policy(policy, persisted_mode);
-        crate::publish_global(crate::GlobalWireEvent::DesktopSettingsChanged { settings: saved });
+        if let Ok(saved) = crate::spawn_blocking_isolated(move || {
+            crate::api_config::persist_agent_mode_policy(policy, persisted_mode)
+        })
+        .await
+        {
+            crate::publish_global(crate::GlobalWireEvent::DesktopSettingsChanged {
+                settings: saved,
+            });
+        }
     }
 
     let global_mode_changed = now_global && req.mode != was_global_mode;
@@ -4181,29 +4350,37 @@ async fn apply_mode_request(state: &AppState, req: &LiveModeReq) -> bool {
     }
 
     if req.mode == ApprovalMode::Auto {
-        clear_pending_permissions_on_auto(state, scope);
+        clear_pending_permissions_on_auto(state, scope).await;
     }
     ok
 }
 
-fn clear_pending_permissions_on_auto(state: &AppState, scope: Option<&str>) {
+async fn clear_pending_permissions_on_auto(state: &AppState, scope: Option<&str>) {
     match scope {
         Some(sid) => {
+            let sid_trimmed = sid.trim().to_string();
             state
                 .pending_permissions
-                .deliver_all_for_session(sid.trim(), PermissionDecision::AllowOnce);
-            jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
-                sid.trim(),
-            );
+                .deliver_all_for_session(&sid_trimmed, PermissionDecision::AllowOnce);
+            let _ = crate::spawn_blocking_isolated(move || {
+                jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                    &sid_trimmed,
+                );
+            })
+            .await;
         }
         None => {
             state
                 .pending_permissions
                 .deliver_all(PermissionDecision::AllowOnce);
             if let Ok(binding) = crate::native_live::binding() {
-                jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
-                    &binding.session_id,
-                );
+                let sid = binding.session_id.clone();
+                let _ = crate::spawn_blocking_isolated(move || {
+                    jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                        &sid,
+                    );
+                })
+                .await;
             }
         }
     }
@@ -4236,7 +4413,7 @@ pub(crate) async fn apply_persisted_agent_mode_policy(
         live_set_global_mode_enabled(true, Some(target_mode));
         let _ = apply_live_mode_scoped(None, target_mode).await;
         if target_mode == ApprovalMode::Auto {
-            clear_pending_permissions_on_auto(state, None);
+            clear_pending_permissions_on_auto(state, None).await;
         }
     } else {
         live_set_global_mode_enabled(false, None);
@@ -4259,12 +4436,20 @@ async fn reapply_per_session_modes() {
     let registry = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
     for entry in registry.list_all() {
         if let Some(handle) = registry.handle(&entry.session_id) {
-            let mode = live_session_approval_mode_in_dir(&entry.working_dir, &entry.session_id);
+            let mode = live_session_approval_mode_in_dir_async(
+                entry.working_dir.clone(),
+                entry.session_id.clone(),
+            )
+            .await;
             let _ = handle.set_mode(native_runtime_mode(mode)).await;
         }
     }
     if let Ok(binding) = crate::native_live::binding() {
-        let mode = live_session_approval_mode_in_dir(&binding.working_dir, &binding.session_id);
+        let mode = live_session_approval_mode_in_dir_async(
+            binding.working_dir.clone(),
+            binding.session_id.clone(),
+        )
+        .await;
         let _ = crate::native_live::set_mode(native_runtime_mode(mode)).await;
     }
 }
@@ -4281,11 +4466,12 @@ pub(crate) async fn live_mode(
     State(state): State<AppState>,
     Json(req): Json<LiveModeReq>,
 ) -> impl IntoResponse {
-    let session_id = req.session_id.as_deref();
+    let session_id = req.session_id.clone();
     let ok = apply_mode_request(&state, &req).await;
+    let mode = live_session_approval_mode_async(session_id.as_deref()).await;
     Json(ApprovalModeResp {
         ok,
-        mode: live_session_approval_mode(session_id),
+        mode,
         global: live_global_mode_enabled(),
     })
 }

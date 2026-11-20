@@ -109,6 +109,11 @@ pub mod pathnorm;
 #[cfg(any(feature = "provider", feature = "web", feature = "mcp"))]
 pub(crate) mod proxy;
 
+/// Process-wide shared asynchronous `reqwest::Client` connection pool with ALPN
+/// HTTP/2 negotiation, trusted roots caching (#514), and cooldown-gated rebuilds.
+#[cfg(any(feature = "provider", feature = "web", feature = "mcp"))]
+pub mod http_pool;
+
 /// Ungated path helpers (leading-`~` expansion, home dir, Windows POSIX `/tmp`
 /// and `/c/Users` mapping) shared by the `tools` and `codeintel` families so
 /// model-supplied paths resolve identically across both — see [`pathutil`].

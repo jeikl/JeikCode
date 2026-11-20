@@ -1403,13 +1403,15 @@ async fn fetch_upstream_model_ids(
     skip_tls_verify: bool,
 ) -> Result<Vec<String>, String> {
     let url = models_endpoint(protocol, base_url);
-    let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .connect_timeout(std::time::Duration::from_secs(5));
-    if skip_tls_verify {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    let client = builder.build().map_err(|e| e.to_string())?;
+    let spec = jeikcode_capabilities::http_pool::HttpClientSpec {
+        connect_timeout: std::time::Duration::from_secs(5),
+        request_timeout: Some(std::time::Duration::from_secs(8)),
+        pool_idle_timeout: Some(std::time::Duration::from_secs(15)),
+        skip_tls_verify,
+        force_tls12: false,
+        user_agent: None,
+    };
+    let client = jeikcode_capabilities::http_pool::shared_http_client(&spec)?;
     let mut req = client.get(&url);
     let protocol = protocol.to_ascii_lowercase();
     if protocol == "anthropic" || protocol == "claude" {

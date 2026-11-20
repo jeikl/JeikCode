@@ -14,7 +14,7 @@
 //! later compaction cannot remove them. A content-addressed blob store can be
 //! layered under the same field without changing the read model.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus, StopReason, SystemNotice};
@@ -623,7 +623,7 @@ impl DisplayHook {
 
     /// Append the conversation slice for one settled turn. Returns `false` when
     /// there is no valid prompt-anchored slice (rolled back / empty / turn_id 0).
-    fn write_slice(
+    async fn write_slice_async(
         &self,
         convo: &Conversation,
         turn_id: u64,
@@ -640,19 +640,37 @@ impl DisplayHook {
         ) else {
             return false;
         };
-        if let Err(error) = self.mgr.append_display_turn_with_prompt_id(
-            &self.session_id,
-            turn_id,
-            &records,
-            anchor.and_then(|a| a.id.as_deref()),
-        ) {
-            eprintln!("[DisplayHook] append display transcript failed: {error}");
-            return false;
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let prompt_id = anchor.and_then(|a| a.id.clone());
+        match tokio::task::spawn_blocking(move || {
+            mgr.append_display_turn_with_prompt_id(
+                &session_id,
+                turn_id,
+                &records,
+                prompt_id.as_deref(),
+            )
+        })
+        .await
+        {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                eprintln!("[DisplayHook] append display transcript failed: {error}");
+                false
+            }
+            Err(error) => {
+                eprintln!("[DisplayHook] append display worker failed: {error}");
+                false
+            }
         }
-        true
     }
 
-    fn flush_checkpoint_records(&self, convo: &Conversation, turn_id: u64, slice_key: &str) {
+    async fn flush_checkpoint_records_async(
+        &self,
+        convo: &Conversation,
+        turn_id: u64,
+        slice_key: &str,
+    ) {
         if turn_id == 0 {
             return;
         }
@@ -674,27 +692,34 @@ impl DisplayHook {
             skip_diagnostics,
             prompt_flushed,
         ) {
-            match self
-                .mgr
-                .append_display_slice(&self.session_id, turn_id, slice_key, &records)
+            let mgr = Arc::clone(&self.mgr);
+            let session_id = self.session_id.clone();
+            let slice_key = slice_key.to_string();
+            match tokio::task::spawn_blocking(move || {
+                mgr.append_display_slice(&session_id, turn_id, &slice_key, &records)
+            })
+            .await
             {
-                Ok(true) => {
+                Ok(Ok(true)) => {
                     let mut guard = self
                         .state
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     guard.prompt_flushed_to_ledger = true;
                 }
-                Ok(false) => {}
-                Err(error) => {
+                Ok(Ok(false)) => {}
+                Ok(Err(error)) => {
                     eprintln!("[DisplayHook] checkpoint flush slice failed: {error}");
+                }
+                Err(error) => {
+                    eprintln!("[DisplayHook] checkpoint flush worker failed: {error}");
                 }
             }
         }
     }
 
-    fn flush_dirty_notices(&self, turn_id: u64, promote_active_to_settled: bool) {
-        let pending: Vec<SystemNotice> = {
+    async fn flush_dirty_notices_async(&self, turn_id: u64, promote_active_to_settled: bool) {
+        let pending: Vec<(SystemNotice, DisplayRecord)> = {
             let guard = self
                 .state
                 .lock()
@@ -713,32 +738,37 @@ impl DisplayHook {
                     if promote_active_to_settled && n.status == NoticeStatus::Active {
                         n.status = NoticeStatus::Settled;
                     }
-                    n
+                    let record = DisplayRecord::from_system_notice(&self.session_id, turn_id, &n);
+                    (n, record)
                 })
                 .collect()
         };
         if pending.is_empty() {
             return;
         }
-        let mut flushed_pairs = Vec::with_capacity(pending.len());
-        for notice in pending {
-            let record = DisplayRecord::from_system_notice(&self.session_id, turn_id, &notice);
-            if let Err(error) = self
-                .mgr
-                .upsert_display_notice_record(&self.session_id, record)
-            {
-                tracing::warn!(
-                    target: "jeikcode_capabilities::session::display",
-                    session_id = %self.session_id,
-                    turn_id,
-                    error = %error,
-                    "flush dirty display notice failed"
-                );
-                eprintln!("[DisplayHook] upsert display notice failed: {error}");
-            } else {
-                flushed_pairs.push((notice.event_id, notice.revision, notice.status));
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let flushed_pairs = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::with_capacity(pending.len());
+            for (notice, record) in pending {
+                if let Err(error) = mgr.upsert_display_notice_record(&session_id, record) {
+                    tracing::warn!(
+                        target: "jeikcode_capabilities::session::display",
+                        session_id = %session_id,
+                        turn_id,
+                        error = %error,
+                        "flush dirty display notice failed"
+                    );
+                    eprintln!("[DisplayHook] upsert display notice failed: {error}");
+                } else {
+                    out.push((notice.event_id, notice.revision, notice.status));
+                }
             }
-        }
+            out
+        })
+        .await
+        .unwrap_or_default();
+
         let mut guard = self
             .state
             .lock()
@@ -762,7 +792,7 @@ impl DisplayHook {
     /// that was folded into this turn before the cancel. Otherwise a refresh
     /// (or another browser) makes it look like those questions never existed —
     /// the "ghost question" bug.
-    fn write_cancelled_user(
+    async fn write_cancelled_user_async(
         &self,
         convo: &Conversation,
         turn_id: u64,
@@ -781,9 +811,6 @@ impl DisplayHook {
         });
         let mut records: Vec<DisplayRecord> = Vec::new();
         if let Some(start) = anchor_pos {
-            // PRESERVE mode (or a rolled-back slice that still carries the
-            // prompt): keep the anchor and every real user row after it, so a
-            // mid-turn steer survives a cancelled/failed turn.
             for (index, message) in convo.messages[start..].iter().enumerate() {
                 if message.role != Role::User || message.synthetic {
                     continue;
@@ -801,8 +828,6 @@ impl DisplayHook {
             }
         }
         if records.is_empty() {
-            // The convo was rolled back before the prompt: keep the question
-            // itself from the anchor so it is never a ghost.
             records.push(DisplayRecord {
                 v: DISPLAY_VERSION,
                 session_id: self.session_id.clone(),
@@ -817,67 +842,63 @@ impl DisplayHook {
                 ..DisplayRecord::default()
             });
         }
-        // CANCEL = UNDO rolls the kernel context back, but the user already saw
-        // the partial assistant stream. Persist that partial as a read-only
-        // display row so a cold start / another browser still renders the text,
-        // reasoning and tool calls that were on screen before the stop.
-        if records
-            .iter()
-            .any(|record| record.role.eq_ignore_ascii_case("user"))
-        {
-            if let Some(partial) = super::partial::load_global(&self.session_id) {
-                let has_partial = !partial.text.trim().is_empty()
-                    || !partial.reasoning.trim().is_empty()
-                    || !partial.tool_calls.is_empty();
-                if has_partial {
-                    let calls: Vec<jeikcode_kernel::tool::ToolCall> = partial
-                        .tool_calls
-                        .iter()
-                        .filter_map(|call| {
-                            Some(jeikcode_kernel::tool::ToolCall {
-                                id: call.id.clone()?,
-                                name: call.name.clone()?,
-                                arguments: call.arguments.clone(),
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let working_dir = self.working_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            if records
+                .iter()
+                .any(|record| record.role.eq_ignore_ascii_case("user"))
+            {
+                if let Some(partial) = super::partial::load_global(&session_id) {
+                    let has_partial = !partial.text.trim().is_empty()
+                        || !partial.reasoning.trim().is_empty()
+                        || !partial.tool_calls.is_empty();
+                    if has_partial {
+                        let calls: Vec<jeikcode_kernel::tool::ToolCall> = partial
+                            .tool_calls
+                            .iter()
+                            .filter_map(|call| {
+                                Some(jeikcode_kernel::tool::ToolCall {
+                                    id: call.id.clone()?,
+                                    name: call.name.clone()?,
+                                    arguments: call.arguments.clone(),
+                                })
                             })
-                        })
-                        .collect();
-                    let mut message = Message::assistant(partial.text.clone(), calls);
-                    message.reasoning =
-                        (!partial.reasoning.trim().is_empty()).then(|| partial.reasoning.clone());
-                    message.id = partial.message_id.clone();
-                    let mut record = DisplayRecord::from_message(
-                        &self.session_id,
-                        &self.working_dir,
-                        turn_id,
-                        u32::try_from(records.len()).unwrap_or(u32::MAX),
-                        &message,
-                    );
-                    // It no longer exists in the rolled-back model context.
-                    record.internal_origin = Some("transcript_archive".into());
-                    record.created_at = (partial.updated_at > 0).then_some(partial.updated_at);
-                    records.push(record);
+                            .collect();
+                        let mut message = Message::assistant(partial.text.clone(), calls);
+                        message.reasoning = (!partial.reasoning.trim().is_empty())
+                            .then(|| partial.reasoning.clone());
+                        message.id = partial.message_id.clone();
+                        let mut record = DisplayRecord::from_message(
+                            &session_id,
+                            &working_dir,
+                            turn_id,
+                            u32::try_from(records.len()).unwrap_or(u32::MAX),
+                            &message,
+                        );
+                        record.internal_origin = Some("transcript_archive".into());
+                        record.created_at = (partial.updated_at > 0).then_some(partial.updated_at);
+                        records.push(record);
+                    }
                 }
             }
-        }
-        match self
-            .mgr
-            .append_display_turn(&self.session_id, turn_id, &records)
-        {
-            Ok(()) => true,
-            Err(error) => {
-                eprintln!("[DisplayHook] append cancelled turn failed: {error}");
-                false
+            match mgr.append_display_turn(&session_id, turn_id, &records) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("[DisplayHook] append cancelled turn failed: {error}");
+                    false
+                }
             }
-        }
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 
 #[async_trait]
 impl LifecycleHooks for DisplayHook {
     async fn turn_start(&self, convo: &mut Conversation) {
-        // The kernel pushes the prompt BEFORE run_turn→turn_start. Prefer the
-        // latest real user message; for a synthetic continuation there is none,
-        // so fall back to the last message (the synthetic prompt).
         let message = convo
             .messages
             .iter()
@@ -910,8 +931,9 @@ impl LifecycleHooks for DisplayHook {
             guard.next_slice_seq = guard.next_slice_seq.saturating_add(1);
             format!("t{}:c{}", ctx.turn_id, guard.next_slice_seq)
         };
-        self.flush_checkpoint_records(convo, ctx.turn_id, &slice_key);
-        self.flush_dirty_notices(ctx.turn_id, false);
+        self.flush_checkpoint_records_async(convo, ctx.turn_id, &slice_key)
+            .await;
+        self.flush_dirty_notices_async(ctx.turn_id, false).await;
     }
 
     async fn on_system_notice(&self, notice: &SystemNotice, convo: &Conversation, ctx: &TurnCtx) {
@@ -955,9 +977,10 @@ impl LifecycleHooks for DisplayHook {
         };
         if should_flush_slice {
             if let Some(slice_key) = flush_notice_key {
-                self.flush_checkpoint_records(convo, ctx.turn_id, &slice_key);
+                self.flush_checkpoint_records_async(convo, ctx.turn_id, &slice_key)
+                    .await;
             }
-            self.flush_dirty_notices(ctx.turn_id, false);
+            self.flush_dirty_notices_async(ctx.turn_id, false).await;
         }
     }
 
@@ -978,8 +1001,9 @@ impl LifecycleHooks for DisplayHook {
             guard.next_slice_seq = guard.next_slice_seq.saturating_add(1);
             format!("t{}:precompact:{}", turn_id, guard.next_slice_seq)
         };
-        self.flush_checkpoint_records(convo, turn_id, &slice_key);
-        self.flush_dirty_notices(turn_id, false);
+        self.flush_checkpoint_records_async(convo, turn_id, &slice_key)
+            .await;
+        self.flush_dirty_notices_async(turn_id, false).await;
     }
 
     async fn post_compaction(
@@ -990,19 +1014,21 @@ impl LifecycleHooks for DisplayHook {
     ) {
         let turn_id = ctx.map(|c| c.turn_id).unwrap_or(0);
         let record = DisplayRecord::from_system_notice(&self.session_id, turn_id, notice);
-        if let Err(error) = self
-            .mgr
-            .upsert_display_notice_record(&self.session_id, record)
-        {
-            tracing::warn!(
-                target: "jeikcode_capabilities::session::display",
-                session_id = %self.session_id,
-                turn_id,
-                error = %error,
-                "post_compaction display notice failed"
-            );
-            eprintln!("[DisplayHook] post_compaction notice failed: {error}");
-        }
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(error) = mgr.upsert_display_notice_record(&session_id, record) {
+                tracing::warn!(
+                    target: "jeikcode_capabilities::session::display",
+                    session_id = %session_id,
+                    turn_id,
+                    error = %error,
+                    "post_compaction display notice failed"
+                );
+                eprintln!("[DisplayHook] post_compaction notice failed: {error}");
+            }
+        })
+        .await;
     }
 
     async fn turn_complete(&self, convo: &Conversation, reason: &StopReason, ctx: &TurnCtx) {
@@ -1024,55 +1050,73 @@ impl LifecycleHooks for DisplayHook {
         );
         let skip_diagnostics = !state.notices.is_empty();
         if matches!(reason, StopReason::Cancelled) {
-            // PRESERVE mode keeps the partial conversation → write it normally.
-            // Default CANCEL = UNDO rolled it back → persist the question alone so
-            // refresh / another browser still sees what was asked.
-            if !self.write_slice(
-                convo,
-                ctx.turn_id,
-                state.anchor.as_ref(),
-                skip_diagnostics,
-                state.prompt_flushed_to_ledger,
-            ) {
-                self.write_cancelled_user(convo, ctx.turn_id, state.anchor.as_ref());
+            if !self
+                .write_slice_async(
+                    convo,
+                    ctx.turn_id,
+                    state.anchor.as_ref(),
+                    skip_diagnostics,
+                    state.prompt_flushed_to_ledger,
+                )
+                .await
+            {
+                let _ = self
+                    .write_cancelled_user_async(convo, ctx.turn_id, state.anchor.as_ref())
+                    .await;
             }
         } else {
-            self.write_slice(
+            self.write_slice_async(
                 convo,
                 ctx.turn_id,
                 state.anchor.as_ref(),
                 skip_diagnostics,
                 state.prompt_flushed_to_ledger,
-            );
+            )
+            .await;
         }
         // 收口并刷入本轮全部未落盘/仍处于活跃态的通知，保证终态之后不留 active 卡。
-        for item in state.notices {
-            if !item.notice.persist {
-                continue;
-            }
-            let mut notice = item.notice;
-            let need_write = item.dirty || notice.status == NoticeStatus::Active;
-            if !need_write {
-                continue;
-            }
-            if notice.status == NoticeStatus::Active {
-                notice.status = NoticeStatus::Settled;
-                notice.revision = notice.revision.saturating_add(1);
-            }
-            let record = DisplayRecord::from_system_notice(&self.session_id, ctx.turn_id, &notice);
-            if let Err(error) = self
-                .mgr
-                .upsert_display_notice_record(&self.session_id, record)
-            {
-                tracing::warn!(
-                    target: "jeikcode_capabilities::session::display",
-                    session_id = %self.session_id,
-                    turn_id = ctx.turn_id,
-                    error = %error,
-                    "final flush display notice failed"
-                );
-                eprintln!("[DisplayHook] final flush notice failed: {error}");
-            }
+        let pending_notices: Vec<DisplayRecord> = state
+            .notices
+            .into_iter()
+            .filter_map(|item| {
+                if !item.notice.persist {
+                    return None;
+                }
+                let mut notice = item.notice;
+                let need_write = item.dirty || notice.status == NoticeStatus::Active;
+                if !need_write {
+                    return None;
+                }
+                if notice.status == NoticeStatus::Active {
+                    notice.status = NoticeStatus::Settled;
+                    notice.revision = notice.revision.saturating_add(1);
+                }
+                Some(DisplayRecord::from_system_notice(
+                    &self.session_id,
+                    ctx.turn_id,
+                    &notice,
+                ))
+            })
+            .collect();
+        if !pending_notices.is_empty() {
+            let mgr = Arc::clone(&self.mgr);
+            let session_id = self.session_id.clone();
+            let turn_id = ctx.turn_id;
+            let _ = tokio::task::spawn_blocking(move || {
+                for record in pending_notices {
+                    if let Err(error) = mgr.upsert_display_notice_record(&session_id, record) {
+                        tracing::warn!(
+                            target: "jeikcode_capabilities::session::display",
+                            session_id = %session_id,
+                            turn_id,
+                            error = %error,
+                            "final flush display notice failed"
+                        );
+                        eprintln!("[DisplayHook] final flush notice failed: {error}");
+                    }
+                }
+            })
+            .await;
         }
     }
 }

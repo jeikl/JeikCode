@@ -208,9 +208,12 @@ impl OpenAiCompatProvider {
         let user_agent = cfg.user_agent.clone();
         let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
         let initial_tls12 = jeikcode_config::tls::should_cap_url(&url);
-        let client = std::sync::Arc::new(SwappableClient::new(initial_tls12, move |tls12| {
-            build_http_client(connect_timeout, skip_tls_verify, user_agent.clone(), tls12)
-        })?);
+        let client = std::sync::Arc::new(SwappableClient::new_shared(
+            connect_timeout,
+            skip_tls_verify,
+            user_agent,
+            initial_tls12,
+        )?);
         Ok(Self {
             cfg,
             policy,
@@ -222,163 +225,50 @@ impl OpenAiCompatProvider {
     }
 }
 
-/// Build a fresh streaming HTTP client from the process's current proxy env.
-/// Extracted so [`SwappableClient`] can rebuild an identical client with an EMPTY
-/// connection pool when a pooled connection goes stale.
+/// Build a fresh uncached streaming HTTP client via the shared `#514` builder.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_http_client(
     connect_timeout: std::time::Duration,
     skip_tls_verify: bool,
     user_agent: Option<String>,
     force_tls12: bool,
 ) -> Result<reqwest::Client, ProviderError> {
-    // First attempt: webpki base + OS native store + SSL_CERT_FILE (add_trusted_roots).
-    match build_http_client_inner(
+    let spec = crate::http_pool::HttpClientSpec::provider(
         connect_timeout,
         skip_tls_verify,
-        user_agent.clone(),
+        user_agent,
         force_tls12,
-        true,
-    ) {
-        Ok(client) => Ok(client),
-        Err(first) => {
-            // BACKSTOP (issue #514): even with the per-cert probe in `add_trusted_roots`,
-            // a poisoned SSL_CERT_FILE (or any other trust-root surprise) rejected by
-            // rustls at `.build()` aborts the ENTIRE client — leaving every provider dead
-            // on startup with an opaque "builder error". Rather than a total outage, retry
-            // ONCE with the INFALLIBLE webpki base only. Public-CA endpoints (the gateway,
-            // model APIs) still work; only a corporate MITM root would be lost, and a
-            // request-time TLS error is far better than a client that never builds.
-            tracing::warn!(
-                "http client build failed with the OS/SSL_CERT_FILE trust roots ({}); \
-                 retrying with the webpki base only — a custom/corporate root may be ignored (issue #514)",
-                first.message
-            );
-            build_http_client_inner(
-                connect_timeout,
-                skip_tls_verify,
-                user_agent,
-                force_tls12,
-                false,
-            )
-        }
-    }
-}
-
-/// Build a client with a single trust-root policy. `trust_os_roots=false` uses only
-/// the infallible webpki base (the backstop path); `true` layers the OS native store
-/// and `SSL_CERT_FILE` on top via [`add_trusted_roots`].
-fn build_http_client_inner(
-    connect_timeout: std::time::Duration,
-    skip_tls_verify: bool,
-    user_agent: Option<String>,
-    force_tls12: bool,
-    trust_os_roots: bool,
-) -> Result<reqwest::Client, ProviderError> {
-    let mut builder = crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
-        .connect_timeout(connect_timeout)
-        // Drop idle keep-alive connections before the gateway LB does, so
-        // we don't reuse a server-closed socket (the "error sending
-        // request" / ConnectionReset class). See POOL_IDLE_TIMEOUT.
-        .pool_idle_timeout(retry::POOL_IDLE_TIMEOUT)
-        // Product UA so the gateway can attribute/slice traffic by version
-        // (parity with core's `build_http_client`). Driver injects the real
-        // `jeikcode/<version>`; bare fallback when unset.
-        .user_agent(user_agent.as_deref().unwrap_or(super::DEFAULT_USER_AGENT));
-    if force_tls12 {
-        builder = builder.max_tls_version(reqwest::tls::Version::TLS_1_2);
-    }
-    // TLS trust (issue #514): webpki base roots are always present so `.build()`
-    // never hard-fails on certs; layer the OS native store (corporate MITM CAs)
-    // and SSL_CERT_FILE on top, additively and best-effort. This is the DEFAULT
-    // v2 provider path. Mirrors `core::provider::add_trusted_roots` — kept
-    // crate-local because capabilities does not depend on core.
-    // Skip the rustls root-layering on Windows: the native-tls (SChannel) default backend
-    // trusts the Windows system store natively, and re-feeding certs through native-tls's
-    // parser risks rejecting one rustls accepted. Runtime `cfg!` keeps the fn referenced
-    // (no dead_code) while compiling the call out on Windows.
-    if trust_os_roots && !cfg!(target_os = "windows") {
-        builder = add_trusted_roots(builder);
-    }
-    if skip_tls_verify {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    builder.build().map_err(|e| ProviderError {
+    );
+    crate::http_pool::build_http_client_uncached(&spec).map_err(|message| ProviderError {
         retryable: false,
-        // reqwest's builder-error `Display` is a bare "builder error" — the real
-        // reason (bad cert, invalid header, …) lives in its `source()` chain, so
-        // walk it (shared `retry::err_chain`) or the message is useless (issue #514).
-        message: format!("http client build failed: {}", retry::err_chain(&e)),
+        message,
         ..Default::default()
     })
 }
 
-/// Add the OS native root store and `SSL_CERT_FILE` (if set) to the builder's
-/// trusted roots, ON TOP of the built-in webpki roots. Best-effort: unparseable
-/// certs, an unreadable/malformed `SSL_CERT_FILE`, or native-store load errors
-/// are warned and skipped — NEVER fatal (the webpki base guarantees a working
-/// client). Mirrors `core::provider::add_trusted_roots`; codex-style graceful
-/// `load_native_certs`. See issue #514.
-fn add_trusted_roots(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    // 1) OS native roots (corporate MITM CAs live here).
-    let native = rustls_native_certs::load_native_certs();
-    if !native.errors.is_empty() {
-        tracing::warn!(
-            "loaded OS native roots with {} error(s); using the {} that parsed (issue #514)",
-            native.errors.len(),
-            native.certs.len()
-        );
-    }
-    // `reqwest::Certificate::from_der` does NOT validate under rustls — it just stores
-    // the bytes and defers validation to `rustls::RootCertStore::add` INSIDE `.build()`,
-    // which aborts the WHOLE client on the first cert rustls rejects (a legacy OS root
-    // without X509v3 extensions is enough). Pre-filter each cert through the same rustls
-    // parser so one bad OS root can't take every provider down. reqwest's own native
-    // loader is likewise tolerant; ours must be too. See issue #514.
-    let mut rejected = 0usize;
-    for der in native.certs {
-        if rustls::RootCertStore::empty().add(der.clone()).is_err() {
-            rejected += 1;
-            continue;
-        }
-        if let Ok(cert) = reqwest::Certificate::from_der(der.as_ref()) {
-            builder = builder.add_root_certificate(cert);
-        }
-    }
-    if rejected > 0 {
-        tracing::warn!(
-            "skipped {rejected} OS root cert(s) rustls rejected; they would have aborted the whole client build (issue #514)"
-        );
-    }
-
-    // 2) SSL_CERT_FILE override/extra (empty string = unset). Loaded explicitly
-    //    for cross-platform certainty. reqwest's `Certificate` is validated only
-    //    at `.build()`; unlike the native loop above we do NOT pre-probe these
-    //    (no DER in hand from `from_pem_bundle`), so a MALFORMED SSL_CERT_FILE
-    //    still poisons `.build()` — but the `build_http_client` BACKSTOP catches
-    //    that and rebuilds on the webpki base (never a panic; the file is then
-    //    ignored with a warning rather than killing the client). See #514.
-    let Some(path) = std::env::var_os("SSL_CERT_FILE").filter(|p| !p.is_empty()) else {
-        return builder;
+pub(crate) fn shared_provider_http_client(
+    connect_timeout: std::time::Duration,
+    skip_tls_verify: bool,
+    user_agent: Option<String>,
+    force_tls12: bool,
+    force_rebuild: bool,
+) -> Result<reqwest::Client, ProviderError> {
+    let spec = crate::http_pool::HttpClientSpec::provider(
+        connect_timeout,
+        skip_tls_verify,
+        user_agent,
+        force_tls12,
+    );
+    let res = if force_rebuild {
+        crate::http_pool::rebuild_shared_http_client(&spec)
+    } else {
+        crate::http_pool::shared_http_client(&spec)
     };
-    let Ok(pem) = std::fs::read(&path) else {
-        tracing::warn!("SSL_CERT_FILE={path:?} could not be read; ignoring (issue #514)");
-        return builder;
-    };
-    match reqwest::Certificate::from_pem_bundle(&pem) {
-        Ok(certs) => {
-            let count = certs.len();
-            for c in certs {
-                builder = builder.add_root_certificate(c);
-            }
-            tracing::info!("Loaded {count} TLS root(s) from SSL_CERT_FILE={path:?} (issue #514)");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "SSL_CERT_FILE={path:?} is not a valid PEM bundle: {e}; ignoring (issue #514)"
-            );
-        }
-    }
-    builder
+    res.map_err(|message| ProviderError {
+        retryable: false,
+        message,
+        ..Default::default()
+    })
 }
 
 /// An HTTP client held behind a rebuild seam. `get()` hands out the current client
@@ -390,18 +280,47 @@ fn add_trusted_roots(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuil
 pub(crate) struct SwappableClient {
     current: std::sync::RwLock<reqwest::Client>,
     #[allow(clippy::type_complexity)]
-    build: Box<dyn Fn(bool) -> Result<reqwest::Client, ProviderError> + Send + Sync>,
+    build: Box<dyn Fn(bool, bool) -> Result<reqwest::Client, ProviderError> + Send + Sync>,
 }
 
 impl SwappableClient {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(
         force_tls12: bool,
         build: impl Fn(bool) -> Result<reqwest::Client, ProviderError> + Send + Sync + 'static,
     ) -> Result<Self, ProviderError> {
-        let initial = build(force_tls12)?;
+        let wrapped = move |tls12: bool, _force_rebuild: bool| build(tls12);
+        let initial = wrapped(force_tls12, false)?;
         Ok(Self {
             current: std::sync::RwLock::new(initial),
-            build: Box::new(build),
+            build: Box::new(wrapped),
+        })
+    }
+
+    pub(crate) fn new_shared(
+        connect_timeout: std::time::Duration,
+        skip_tls_verify: bool,
+        user_agent: Option<String>,
+        initial_tls12: bool,
+    ) -> Result<Self, ProviderError> {
+        let initial = shared_provider_http_client(
+            connect_timeout,
+            skip_tls_verify,
+            user_agent.clone(),
+            initial_tls12,
+            false,
+        )?;
+        Ok(Self {
+            current: std::sync::RwLock::new(initial),
+            build: Box::new(move |tls12: bool, force_rebuild: bool| {
+                shared_provider_http_client(
+                    connect_timeout,
+                    skip_tls_verify,
+                    user_agent.clone(),
+                    tls12,
+                    force_rebuild,
+                )
+            }),
         })
     }
 
@@ -416,10 +335,10 @@ impl SwappableClient {
             .clone()
     }
 
-    /// Rebuild with a fresh (empty) pool and swap it in. On failure the old
-    /// client remains valid, but the caller receives the build error explicitly.
+    /// Rebuild with a fresh (empty) pool and swap it in (shared pool uses cooldown singleflight).
+    /// On failure the old client remains valid, and the caller receives the build error explicitly.
     pub(crate) fn rebuild(&self, force_tls12: bool) -> Result<reqwest::Client, ProviderError> {
-        let fresh = (self.build)(force_tls12)?;
+        let fresh = (self.build)(force_tls12, true)?;
         *self.current.write().unwrap_or_else(|p| p.into_inner()) = fresh.clone();
         Ok(fresh)
     }

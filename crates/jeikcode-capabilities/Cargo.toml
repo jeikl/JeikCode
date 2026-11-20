@@ -43,7 +43,7 @@ tokio-util = "0.7"
 # ("zero valid certificates …") on a bad SSL_CERT_FILE or empty store, which
 # cascades into panics at every `.build()` site. This is the DEFAULT v2 provider
 # path; the whole-workspace feature must stay `rustls-tls`. See issue #514.
-reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false, optional = true }
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls", "http2"], default-features = false, optional = true }
 # OS native root store loader for corporate MITM-proxy CAs. Best-effort. #514.
 rustls-native-certs = { version = "0.8", optional = true }
 # rustls (parser only, no crypto provider) to PRE-VALIDATE each OS root before we

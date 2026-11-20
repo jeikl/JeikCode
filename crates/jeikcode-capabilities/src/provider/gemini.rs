@@ -9,7 +9,7 @@
 //!   - `usageMetadata` (incl. `thoughtsTokenCount` + cache) → [`StreamEvent::Usage`]
 //!   - tools as `functionDeclarations` / `functionCall` / `functionResponse`
 
-use super::openai_compat::{build_http_client, SwappableClient};
+use super::openai_compat::SwappableClient;
 use super::reasoning::ReasoningPolicy;
 use super::retry::{self, RetryPolicy};
 use async_trait::async_trait;
@@ -100,9 +100,12 @@ impl GeminiProvider {
         let user_agent = cfg.user_agent.clone();
         let url = stream_endpoint_url(&cfg.base_url, &cfg.model);
         let initial_tls12 = jeikcode_config::tls::should_cap_url(&url);
-        let client = std::sync::Arc::new(SwappableClient::new(initial_tls12, move |tls12| {
-            build_http_client(connect_timeout, skip_tls_verify, user_agent.clone(), tls12)
-        })?);
+        let client = std::sync::Arc::new(SwappableClient::new_shared(
+            connect_timeout,
+            skip_tls_verify,
+            user_agent,
+            initial_tls12,
+        )?);
         Ok(Self {
             cfg,
             policy,

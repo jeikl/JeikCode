@@ -44,6 +44,18 @@ fn schedule_store_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Acquire [`schedule_store_lock`] and execute blocking `schedules/*.json` I/O on the blocking pool.
+async fn with_schedule_store<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let _lock = schedule_store_lock().lock().await;
+    crate::spawn_blocking_isolated(f)
+        .await
+        .expect("schedule store blocking task panicked")
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ScheduleTaskView {
     #[serde(flatten)]
@@ -592,11 +604,11 @@ async fn dispatch_schedule_task_inner(
     fired_slot: Option<String>,
     is_manual: bool,
 ) -> Result<ScheduleTaskView, (StatusCode, String)> {
-    let mut task = {
-        let _lock = schedule_store_lock().lock().await;
-        schedule::load(task_id)
-            .map_err(|e| (StatusCode::NOT_FOUND, format!("Task not found: {e}")))?
-    };
+    let tid = task_id.to_string();
+    let task = with_schedule_store(move || {
+        schedule::load(&tid).map_err(|e| (StatusCode::NOT_FOUND, format!("Task not found: {e}")))
+    })
+    .await?;
 
     if task.prompt.trim().is_empty() {
         return Err((
@@ -620,31 +632,39 @@ async fn dispatch_schedule_task_inner(
         if task.session_mode == "reuse" && task.overlap_policy == "queue" {
             // 若目标复用会话正在运行且配置为入队，将本次提问压入待发队列并更新时间戳标题
             state.push_to_session_queue(&session_id, &task.prompt).await;
-            let mgr = NativeSessionManager::for_project(&working_dir);
-            let now_ms = jeikcode_capabilities::session::now_ms();
-            let _ = mgr.update_meta(&session_id, |meta| {
-                meta.origin = jeikcode_capabilities::session::SessionOrigin::Scheduled;
-                meta.name = session_title.clone();
-                meta.user_renamed = true;
-                meta.updated_at = now_ms;
-            });
-            crate::publish_session_upsert(&working_dir, &session_id);
+            let wd_clone = working_dir.clone();
+            let sid_clone = session_id.clone();
+            let title_clone = session_title.clone();
+            let _ = crate::spawn_blocking_isolated(move || {
+                let mgr = NativeSessionManager::for_project(&wd_clone);
+                let now_ms = jeikcode_capabilities::session::now_ms();
+                let _ = mgr.update_meta(&sid_clone, |meta| {
+                    meta.origin = jeikcode_capabilities::session::SessionOrigin::Scheduled;
+                    meta.name = title_clone;
+                    meta.user_renamed = true;
+                    meta.updated_at = now_ms;
+                });
+                crate::publish_session_upsert(&wd_clone, &sid_clone);
+            })
+            .await;
 
-            let updated_task = {
-                let _lock = schedule_store_lock().lock().await;
-                let mut fresh = schedule::load(task_id).unwrap_or(task);
+            let tid = task_id.to_string();
+            let sid_for_store = session_id.clone();
+            let updated_task = with_schedule_store(move || {
+                let mut fresh = schedule::load(&tid).unwrap_or(task);
                 if let Some(slot) = fired_slot {
                     fresh.last_fired_slot = Some(slot);
                 }
                 fresh.last_run_at = Some(now_epoch_secs());
-                fresh.last_session_id = Some(session_id.clone());
+                fresh.last_session_id = Some(sid_for_store);
                 fresh.last_status = Some("queued".to_string());
                 if fresh.one_shot {
                     fresh.enabled = false;
                 }
                 let _ = schedule::save(&fresh);
                 fresh
-            };
+            })
+            .await;
             running_schedule_ids().lock().await.remove(task_id);
             publish_global(GlobalWireEvent::SchedulesUpdated);
             return Ok(ScheduleTaskView::from_task(updated_task));
@@ -696,16 +716,17 @@ async fn dispatch_schedule_task_inner(
     } = admitted;
 
     // 先落盘触发记录与 one_shot 自动关闭状态并广播
-    task = {
-        let _lock = schedule_store_lock().lock().await;
-        let mut fresh = schedule::load(task_id).unwrap_or(task);
+    let tid = task_id.to_string();
+    let sid_for_store = admitted_session_id.clone();
+    let task = with_schedule_store(move || {
+        let mut fresh = schedule::load(&tid).unwrap_or(task);
         if let Some(slot) = fired_slot {
             fresh.last_fired_slot = Some(slot);
         }
         fresh.last_run_at = Some(now_epoch_secs());
-        fresh.last_session_id = Some(admitted_session_id.clone());
+        fresh.last_session_id = Some(sid_for_store.clone());
         if fresh.session_mode == "reuse" {
-            fresh.reuse_session_id = Some(admitted_session_id.clone());
+            fresh.reuse_session_id = Some(sid_for_store);
         }
         fresh.last_status = Some("running".to_string());
         if fresh.one_shot {
@@ -717,8 +738,9 @@ async fn dispatch_schedule_task_inner(
                 format!("Save task failed: {e}"),
             )
         })?;
-        fresh
-    };
+        Ok::<_, (StatusCode, String)>(fresh)
+    })
+    .await?;
     publish_global(GlobalWireEvent::SchedulesUpdated);
 
     let cleanup_chats = state.active_chats.clone();
@@ -794,13 +816,14 @@ async fn dispatch_schedule_task_inner(
             }
         }
 
-        {
-            let _lock = schedule_store_lock().lock().await;
-            if let Ok(mut fresh) = schedule::load(&tid_for_spawn) {
+        let tid_store = tid_for_spawn.clone();
+        with_schedule_store(move || {
+            if let Ok(mut fresh) = schedule::load(&tid_store) {
                 fresh.last_status = Some(final_status);
                 let _ = schedule::save(&fresh);
             }
-        }
+        })
+        .await;
         running_schedule_ids().lock().await.remove(&tid_for_spawn);
         publish_global(GlobalWireEvent::SchedulesUpdated);
     });
@@ -817,10 +840,7 @@ pub fn start_schedule_engine(state: AppState) {
         loop {
             interval.tick().await;
             let now = Local::now();
-            let tasks = {
-                let _lock = schedule_store_lock().lock().await;
-                schedule::list()
-            };
+            let tasks = with_schedule_store(schedule::list).await;
             for task in tasks {
                 if let Some(slot) = is_task_due_at(&task, now) {
                     let st = state.clone();
@@ -835,14 +855,17 @@ pub fn start_schedule_engine(state: AppState) {
                                     error = %msg,
                                     "[schedule] background trigger failed"
                                 );
-                                let _lock = schedule_store_lock().lock().await;
-                                if let Ok(mut fresh) = schedule::load(&tid) {
-                                    fresh.last_status = Some("error".to_string());
-                                    if fresh.one_shot {
-                                        fresh.enabled = false;
+                                let tid_err = tid.clone();
+                                with_schedule_store(move || {
+                                    if let Ok(mut fresh) = schedule::load(&tid_err) {
+                                        fresh.last_status = Some("error".to_string());
+                                        if fresh.one_shot {
+                                            fresh.enabled = false;
+                                        }
+                                        let _ = schedule::save(&fresh);
                                     }
-                                    let _ = schedule::save(&fresh);
-                                }
+                                })
+                                .await;
                                 publish_global(GlobalWireEvent::SchedulesUpdated);
                             }
                         }
@@ -859,10 +882,7 @@ pub fn start_schedule_engine(state: AppState) {
 
 /// GET /api/schedules — 获取所有定时任务（附带按本地时区计算的 next_run_at）
 pub async fn list_schedules_api() -> impl IntoResponse {
-    let tasks = {
-        let _lock = schedule_store_lock().lock().await;
-        schedule::list()
-    };
+    let tasks = with_schedule_store(schedule::list).await;
     let views: Vec<ScheduleTaskView> = tasks.into_iter().map(ScheduleTaskView::from_task).collect();
     Json(views)
 }
@@ -912,15 +932,13 @@ pub async fn create_schedule_api(
         last_status: None,
     };
 
-    {
-        let _lock = schedule_store_lock().lock().await;
-        if let Err(e) = schedule::save(&task) {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to save scheduled task: {e}"),
-            )
-            .into_response();
-        }
+    let task_to_save = task.clone();
+    if let Err(e) = with_schedule_store(move || schedule::save(&task_to_save)).await {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to save scheduled task: {e}"),
+        )
+        .into_response();
     }
 
     publish_global(GlobalWireEvent::SchedulesUpdated);
@@ -945,12 +963,9 @@ pub async fn update_schedule_api(
         Err(err) => return json_error(StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let updated = {
-        let _lock = schedule_store_lock().lock().await;
-        let mut task = match schedule::load(&id) {
-            Ok(t) => t,
-            Err(_) => return json_error(StatusCode::NOT_FOUND, "Task not found").into_response(),
-        };
+    let updated = match with_schedule_store(move || {
+        let mut task = schedule::load(&id)
+            .map_err(|_| (StatusCode::NOT_FOUND, "Task not found".to_string()))?;
         task.title = title;
         task.prompt = prompt;
         if !req.cwd.trim().is_empty() {
@@ -983,14 +998,18 @@ pub async fn update_schedule_api(
         // 编辑规则后重置 slot 标记以便新规则即时生效
         task.last_fired_slot = None;
 
-        if let Err(e) = schedule::save(&task) {
-            return json_error(
+        schedule::save(&task).map_err(|e| {
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to save scheduled task: {e}"),
             )
-            .into_response();
-        }
-        task
+        })?;
+        Ok::<_, (StatusCode, String)>(task)
+    })
+    .await
+    {
+        Ok(t) => t,
+        Err((status, msg)) => return json_error(status, msg).into_response(),
     };
 
     publish_global(GlobalWireEvent::SchedulesUpdated);
@@ -999,15 +1018,12 @@ pub async fn update_schedule_api(
 
 /// DELETE /api/schedules/:id — 物理删除定时任务
 pub async fn delete_schedule_api(Path(id): Path<String>) -> impl IntoResponse {
-    {
-        let _lock = schedule_store_lock().lock().await;
-        if let Err(e) = schedule::remove(&id) {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to delete scheduled task: {e}"),
-            )
-            .into_response();
-        }
+    if let Err(e) = with_schedule_store(move || schedule::remove(&id)).await {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to delete scheduled task: {e}"),
+        )
+        .into_response();
     }
     publish_global(GlobalWireEvent::SchedulesUpdated);
     Json(json!({ "success": true })).into_response()
@@ -1019,24 +1035,25 @@ pub async fn toggle_schedule_api(
     body: Option<Json<ToggleScheduleRequest>>,
 ) -> impl IntoResponse {
     let req_enabled = body.and_then(|b| b.0.enabled);
-    let updated = {
-        let _lock = schedule_store_lock().lock().await;
-        let mut task = match schedule::load(&id) {
-            Ok(t) => t,
-            Err(_) => return json_error(StatusCode::NOT_FOUND, "Task not found").into_response(),
-        };
+    let updated = match with_schedule_store(move || {
+        let mut task = schedule::load(&id)
+            .map_err(|_| (StatusCode::NOT_FOUND, "Task not found".to_string()))?;
         task.enabled = req_enabled.unwrap_or(!task.enabled);
         if task.enabled {
             task.last_fired_slot = None;
         }
-        if let Err(e) = schedule::save(&task) {
-            return json_error(
+        schedule::save(&task).map_err(|e| {
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to save scheduled task: {e}"),
             )
-            .into_response();
-        }
-        task
+        })?;
+        Ok::<_, (StatusCode, String)>(task)
+    })
+    .await
+    {
+        Ok(t) => t,
+        Err((status, msg)) => return json_error(status, msg).into_response(),
     };
 
     publish_global(GlobalWireEvent::SchedulesUpdated);
@@ -1191,8 +1208,7 @@ async fn execute_set_schedule_tool(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_cwd.to_string());
 
-    let saved = {
-        let _lock = schedule_store_lock().lock().await;
+    let saved = with_schedule_store(move || {
         if let Some(tid) = args
             .task_id
             .as_deref()
@@ -1216,7 +1232,7 @@ async fn execute_set_schedule_tool(
             }
             existing.last_fired_slot = None;
             schedule::save(&existing).map_err(|e| format!("Failed to persist task: {e}"))?;
-            existing
+            Ok::<_, String>(existing)
         } else {
             let task = ScheduleTask {
                 id: generate_task_id(&title),
@@ -1240,9 +1256,10 @@ async fn execute_set_schedule_tool(
                 last_status: None,
             };
             schedule::save(&task).map_err(|e| format!("Failed to persist task: {e}"))?;
-            task
+            Ok(task)
         }
-    };
+    })
+    .await?;
 
     publish_global(GlobalWireEvent::SchedulesUpdated);
     Ok(ScheduleTaskView::from_task(saved))
