@@ -1833,6 +1833,13 @@ mod tests {
         });
         let mut cfg =
             OpenAiCompatConfig::new("unused", format!("{}/v1", server.uri()), "test-model");
+        // Localhost wiremock may close a keep-alive connection between the first
+        // 401 and the recovery retry. The provider layer intentionally makes a
+        // single OPEN attempt (the kernel owns retry scheduling), so give this
+        // harness a transport retry budget; a 401 itself is never retried unless
+        // the signer recovers it.
+        cfg.retry.max_attempts = 3;
+        cfg.retry.base_delay = Duration::from_millis(10);
         cfg.request_signer = Some(signer.clone());
         let provider = OpenAiCompatProvider::new(cfg).unwrap();
 
@@ -1875,6 +1882,11 @@ mod tests {
         });
         let mut cfg =
             OpenAiCompatConfig::new("unused", format!("{}/v1", server.uri()), "test-model");
+        // See the recovery test above: tolerate a stale localhost keep-alive
+        // connection so the assertion exercises the second-401 branch, not a
+        // transport error. A 401 is never retried by the transport layer.
+        cfg.retry.max_attempts = 3;
+        cfg.retry.base_delay = Duration::from_millis(10);
         cfg.request_signer = Some(signer.clone());
         let provider = OpenAiCompatProvider::new(cfg).unwrap();
 
