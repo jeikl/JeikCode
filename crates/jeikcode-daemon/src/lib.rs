@@ -8253,14 +8253,7 @@ fn catalog_scan_in_root(
     root: &std::path::Path,
 ) -> std::io::Result<jeikcode_capabilities::session::CatalogScan> {
     let scan = jeikcode_capabilities::session::SessionManager::scan_catalog(root);
-    for diagnostic in &scan.diagnostics {
-        tracing::warn!(
-            path = %diagnostic.path.display(),
-            kind = ?diagnostic.kind,
-            message = %diagnostic.message,
-            "session catalog entry was skipped"
-        );
-    }
+    crate::legacy_convert::report_catalog_diagnostics(&scan.diagnostics);
     Ok(scan)
 }
 

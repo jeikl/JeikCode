@@ -1545,8 +1545,45 @@ fn validate_project_bucket(project_bucket: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn report_catalog_diagnostics(diagnostics: &[jeikcode_capabilities::session::CatalogDiagnostic]) {
+const MAX_CATALOG_DIAGNOSTIC_KEYS: usize = 2048;
+
+fn catalog_diagnostic_dedup_key(
+    diagnostic: &jeikcode_capabilities::session::CatalogDiagnostic,
+) -> (std::path::PathBuf, String) {
+    (
+        diagnostic.path.clone(),
+        format!("{:?}:{}", diagnostic.kind, diagnostic.message),
+    )
+}
+
+fn should_emit_catalog_diagnostic(
+    seen: &mut std::collections::HashSet<(std::path::PathBuf, String)>,
+    diagnostic: &jeikcode_capabilities::session::CatalogDiagnostic,
+) -> bool {
+    let key = catalog_diagnostic_dedup_key(diagnostic);
+    if seen.contains(&key) {
+        return false;
+    }
+    if seen.len() >= MAX_CATALOG_DIAGNOSTIC_KEYS {
+        seen.clear();
+    }
+    seen.insert(key);
+    true
+}
+
+pub(crate) fn report_catalog_diagnostics(
+    diagnostics: &[jeikcode_capabilities::session::CatalogDiagnostic],
+) {
+    static SEEN: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashSet<(std::path::PathBuf, String)>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut guard = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for diagnostic in diagnostics {
+        if !should_emit_catalog_diagnostic(&mut guard, diagnostic) {
+            continue;
+        }
         tracing::warn!(
             path = %diagnostic.path.display(),
             kind = ?diagnostic.kind,
@@ -1584,6 +1621,11 @@ fn catalog_diagnostic_session_id(path: &std::path::Path) -> Option<&str> {
         ".display.meta.json",
         ".toolmetrics.jsonl",
         ".model-switches.jsonl",
+        ".trace.jsonl",
+        ".trace.jsonl.old",
+        ".images.json",
+        ".bashkw.json",
+        ".pending_permission.json",
         ".rewind.txn.json",
         ".rewind.json",
         ".snapshot",
@@ -4025,5 +4067,24 @@ mod tests {
             DisplayAnchor::AfterTurn { turn_id: 7 }
         );
         assert_eq!(presentation.entries[0].text, "local note");
+    }
+
+    #[test]
+    fn catalog_diagnostics_deduplicates_repeated_warnings() {
+        use jeikcode_capabilities::session::{CatalogDiagnostic, CatalogDiagnosticKind};
+
+        let mut seen = std::collections::HashSet::new();
+        let diag = CatalogDiagnostic {
+            project_bucket: Some("0123456789abcdef".into()),
+            path: std::path::PathBuf::from("/tmp/orphan.snapshot"),
+            kind: CatalogDiagnosticKind::Corrupt,
+            message: "native session \"orphan\" has sidecars but no metadata".into(),
+        };
+        assert!(should_emit_catalog_diagnostic(&mut seen, &diag));
+        assert!(!should_emit_catalog_diagnostic(&mut seen, &diag));
+
+        let mut other = diag.clone();
+        other.message = "different failure".into();
+        assert!(should_emit_catalog_diagnostic(&mut seen, &other));
     }
 }

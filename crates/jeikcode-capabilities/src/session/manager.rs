@@ -3614,11 +3614,15 @@ struct CachedCatalog {
     checked_at: std::time::Instant,
 }
 
+const CATALOG_DISK_VERSION: u32 = 2;
+
 /// On-disk snapshot of the same scan. It is only reused when the cheap
-/// `catalog_signature` still matches, so rewind/delete/edit cannot silently
-/// serve a stale catalog after a restart.
+/// `catalog_signature` still matches and the schema version matches, so
+/// catalog scanner upgrades or rewind/delete/edit never serve stale diagnostics.
 #[derive(Serialize, Deserialize)]
 struct DiskCatalog {
+    #[serde(default)]
+    version: u32,
     sig: u64,
     scan: CatalogScan,
 }
@@ -3627,16 +3631,21 @@ fn catalog_index_path(sessions_root: &Path) -> PathBuf {
     sessions_root.join(".catalog-index.json")
 }
 
+fn is_catalog_index_entry(name: &str) -> bool {
+    name == ".catalog-index.json" || name.starts_with(".catalog-index.")
+}
+
 fn load_disk_catalog(sessions_root: &Path, sig: u64) -> Option<CatalogScan> {
     let bytes = fs::read(catalog_index_path(sessions_root)).ok()?;
     let disk: DiskCatalog = serde_json::from_slice(&bytes).ok()?;
-    (disk.sig == sig).then_some(disk.scan)
+    (disk.version == CATALOG_DISK_VERSION && disk.sig == sig).then_some(disk.scan)
 }
 
 fn save_disk_catalog(sessions_root: &Path, sig: u64, scan: &CatalogScan) {
     let path = catalog_index_path(sessions_root);
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     let Ok(bytes) = serde_json::to_vec(&DiskCatalog {
+        version: CATALOG_DISK_VERSION,
         sig,
         scan: scan.clone(),
     }) else {
@@ -3805,6 +3814,9 @@ fn session_auxiliary_artifact(name: &str) -> bool {
         ".display.meta.json",
         ".toolmetrics.jsonl",
         ".model-switches.jsonl",
+        ".trace.jsonl",
+        ".trace.jsonl.old",
+        ".images.json",
         ".bashkw.json",
         ".pending_permission.json",
     ];
@@ -3845,6 +3857,7 @@ fn scan_catalog_root(sessions_root: &Path) -> CatalogScan {
         };
         let bucket_path = bucket_entry.path();
         let bucket = match bucket_entry.file_name().into_string() {
+            Ok(bucket) if is_catalog_index_entry(&bucket) => continue,
             Ok(bucket) if valid_project_bucket(&bucket) => bucket,
             Ok(bucket) => {
                 scan.diagnostics.push(CatalogDiagnostic {
@@ -6941,6 +6954,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let bucket = root.path().join("0123456789abcdef");
         std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(root.path().join(".catalog-index.json"), b"{}").unwrap();
+        std::fs::write(root.path().join(".catalog-index.tmp-1234"), b"{}").unwrap();
         let id = "bae75c33-b339-49cd-9e0a-f8dd3ea881a6";
         for name in [
             format!("{id}.display.jsonl"),
@@ -6948,6 +6963,9 @@ mod tests {
             format!("{id}.display.meta.json"),
             format!("{id}.toolmetrics.jsonl"),
             format!("{id}.model-switches.jsonl"),
+            format!("{id}.trace.jsonl"),
+            format!("{id}.trace.jsonl.old"),
+            format!("{id}.images.json"),
             format!("{id}.bashkw.json"),
             format!("{id}.pending_permission.json"),
         ] {
@@ -6959,7 +6977,42 @@ mod tests {
         assert!(scan.entries.is_empty());
         assert!(
             scan.diagnostics.is_empty(),
-            "session-owned auxiliaries must never become catalog sources: {:?}",
+            "session-owned auxiliaries and catalog index files must never become catalog sources: {:?}",
+            scan.diagnostics
+        );
+    }
+
+    #[test]
+    fn catalog_disk_cache_version_bump_invalidates_stale_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        let bucket = root.path().join("0123456789abcdef");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let trace = bucket.join("bae75c33-b339-49cd-9e0a-f8dd3ea881a6.trace.jsonl");
+        std::fs::write(&trace, b"{}").unwrap();
+
+        let sig = catalog_signature(root.path());
+        let stale_legacy_cache = serde_json::json!({
+            "sig": sig,
+            "scan": {
+                "entries": [],
+                "diagnostics": [{
+                    "project_bucket": null,
+                    "path": root.path().join(".catalog-index.json"),
+                    "kind": "InvalidId",
+                    "message": "stale false positive"
+                }]
+            }
+        });
+        std::fs::write(
+            catalog_index_path(root.path()),
+            serde_json::to_vec(&stale_legacy_cache).unwrap(),
+        )
+        .unwrap();
+
+        let scan = SessionManager::scan_catalog(root.path());
+        assert!(
+            scan.diagnostics.is_empty(),
+            "unversioned legacy disk catalog cache must not replay stale diagnostics: {:?}",
             scan.diagnostics
         );
     }
