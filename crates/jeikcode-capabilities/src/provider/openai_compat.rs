@@ -1807,7 +1807,11 @@ mod tests {
         }
     }
 
+    // These tests build/rebuild the shared HTTP client, which reads
+    // `SSL_CERT_FILE`. Serialize with the cert-env tests below so a concurrent
+    // env swap cannot make the rebuild fail with a status-less transport error.
     #[tokio::test]
+    #[serial_test::serial(ssl_cert_file_env)]
     async fn refreshable_signer_recovers_one_401_and_resigns_retry() {
         let server = MockServer::start().await;
         let responses = std::sync::Arc::new(AtomicUsize::new(0));
@@ -1867,6 +1871,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(ssl_cert_file_env)]
     async fn refreshable_signer_stops_after_second_401() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1895,7 +1900,11 @@ mod tests {
             .await
             .err()
             .expect("a second 401 must terminate recovery");
-        assert_eq!(error.http_status, Some(401));
+        assert_eq!(
+            error.http_status,
+            Some(401),
+            "second 401 must surface the auth-expired status, got: {error:?}"
+        );
         assert_eq!(error.code.as_deref(), Some("authentication_expired"));
         assert!(error.message.contains("/provider"));
         assert_eq!(signer.recoveries.load(Ordering::SeqCst), 1);
