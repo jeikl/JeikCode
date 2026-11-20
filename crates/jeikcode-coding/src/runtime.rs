@@ -2099,6 +2099,26 @@ impl CodingRuntime {
                     },
                     event = tagged_events.recv(), if raw_open => match event {
                         Some(tagged) => {
+                            // A queued provider switch must be projected before ANY
+                            // later event (raw or kernel) that may carry the next
+                            // round's content. The kernel branch below drains too;
+                            // raw/tagged events could otherwise win the select and
+                            // emit `TextDelta(round-2)` before `ModelSwitched`.
+                            while let Ok(swap_event) = swap_events.try_recv() {
+                                let envelope = SequencedRuntimeEvent {
+                                    generation: task_handle.status().generation,
+                                    sequence,
+                                    event: swap_event,
+                                };
+                                sequence = sequence.wrapping_add(1);
+                                if event_tx.send(envelope).is_err() {
+                                    receiver_dropped = true;
+                                    break;
+                                }
+                            }
+                            if receiver_dropped {
+                                break;
+                            }
                             let envelope = SequencedRuntimeEvent {
                                 generation: tagged.generation,
                                 sequence,
