@@ -271,6 +271,52 @@ impl DisplayRecord {
 /// any realistic UI; the high-water mark still orders new appends.
 const MAX_COMPLETED_TURNS: usize = 8192;
 const MAX_FLUSHED_RECORD_IDS: usize = 65_536;
+/// 与 `MAX_FLUSHED_RECORD_IDS`、`MAX_COMPLETED_TURNS` 的理论体积上限对齐，避免长会话在元数据落盘时触发 64 KiB 截断导致账本与 meta 撕裂。
+const MAX_DISPLAY_META_BYTES: usize = 16 * 1024 * 1024;
+
+/// 预校验并序列化 `.display.meta.json`，确保在追加 `.display.jsonl` 之前就能发现体积超限。
+fn serialize_display_meta(meta: &DisplayMeta) -> SessionResult<Vec<u8>> {
+    let bytes = serde_json::to_vec_pretty(meta).map_err(|error| SessionStoreError::Corrupt {
+        kind: "display meta",
+        message: error.to_string(),
+    })?;
+    super::manager::ensure_size("display meta", bytes.len(), MAX_DISPLAY_META_BYTES)?;
+    Ok(bytes)
+}
+
+fn read_display_meta_file(path: &std::path::Path) -> SessionResult<Option<DisplayMeta>> {
+    crate::session::manager::read_json_optional_bounded::<DisplayMeta>(
+        path,
+        "display meta",
+        MAX_DISPLAY_META_BYTES,
+    )
+}
+
+/// 将新落盘记录中的 `id` 与用户侧 `admitted_prompt_ids` 同步更新到元数据。
+fn record_flushed_rows_in_meta<'a>(
+    meta: &mut DisplayMeta,
+    records: impl IntoIterator<Item = &'a DisplayRecord>,
+    record_admitted_prompts: bool,
+) {
+    for record in records {
+        if let Some(rec_id) = record.id.as_deref() {
+            SessionManager::push_bounded_ids(
+                &mut meta.flushed_record_ids,
+                rec_id,
+                MAX_FLUSHED_RECORD_IDS,
+            );
+        }
+        if record_admitted_prompts && record.role.eq_ignore_ascii_case("user") {
+            if let Some(rec_id) = record.id.as_deref() {
+                SessionManager::push_bounded_ids(
+                    &mut meta.admitted_prompt_ids,
+                    rec_id,
+                    MAX_COMPLETED_TURNS,
+                );
+            }
+        }
+    }
+}
 
 /// The prompting user row of a turn slice — the durable idempotency identity.
 fn display_turn_prompt_id(records: &[DisplayRecord]) -> Option<String> {
@@ -1061,11 +1107,7 @@ impl SessionManager {
     }
 
     fn read_display_index(&self, id: &str) -> SessionResult<Option<Vec<DisplayIndexRow>>> {
-        let Some(meta) = crate::session::manager::read_json_optional::<DisplayMeta>(
-            &self.display_meta_path(id)?,
-            "display meta",
-        )?
-        else {
+        let Some(meta) = read_display_meta_file(&self.display_meta_path(id)?)? else {
             return Ok(None);
         };
         if !meta.complete || meta.v != DISPLAY_VERSION {
@@ -1165,9 +1207,7 @@ impl SessionManager {
     /// 并把未带锚点的旧通知挂到所属 turn 末尾。
     fn ensure_v5_display_unlocked(&self, id: &str) -> SessionResult<()> {
         let meta_path = self.display_meta_path(id)?;
-        let Some(meta) =
-            crate::session::manager::read_json_optional::<DisplayMeta>(&meta_path, "display meta")?
-        else {
+        let Some(meta) = read_display_meta_file(&meta_path)? else {
             return Ok(());
         };
         if meta.v != 4 || !meta.complete {
@@ -1201,10 +1241,7 @@ impl SessionManager {
         self.with_display_lock(id, || {
             self.ensure_v5_display_unlocked(id)?;
             let meta_path = self.display_meta_path(id)?;
-            let mut meta = match crate::session::manager::read_json_optional::<DisplayMeta>(
-                &meta_path,
-                "display meta",
-            )? {
+            let mut meta = match read_display_meta_file(&meta_path)? {
                 Some(meta) => meta,
                 None => {
                     if turn_id != 1 {
@@ -1243,47 +1280,35 @@ impl SessionManager {
                 })
                 .collect();
             let mut next_seq = meta.last_seq;
+            let mut log_bytes = Vec::new();
             if !append_records.is_empty() {
-                let mut bytes = Vec::with_capacity(append_records.len() * 512);
+                log_bytes.reserve(append_records.len() * 512);
                 for record in &append_records {
                     next_seq = next_seq.saturating_add(1);
                     let mut rec = (*record).clone();
                     rec.v = DISPLAY_VERSION;
                     rec.seq = next_seq;
-                    serde_json::to_writer(&mut bytes, &rec).map_err(|error| {
+                    serde_json::to_writer(&mut log_bytes, &rec).map_err(|error| {
                         SessionStoreError::Corrupt {
                             kind: "display record",
                             message: error.to_string(),
                         }
                     })?;
-                    bytes.push(b'\n');
+                    log_bytes.push(b'\n');
                 }
-                let path = self.display_path(id)?;
-                self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
-                for record in &append_records {
-                    if let Some(rec_id) = record.id.as_deref() {
-                        Self::push_bounded_ids(
-                            &mut meta.flushed_record_ids,
-                            rec_id,
-                            MAX_FLUSHED_RECORD_IDS,
-                        );
-                    }
-                    if record.role.eq_ignore_ascii_case("user") {
-                        if let Some(rec_id) = record.id.as_deref() {
-                            Self::push_bounded_ids(
-                                &mut meta.admitted_prompt_ids,
-                                rec_id,
-                                MAX_COMPLETED_TURNS,
-                            );
-                        }
-                    }
-                }
+                record_flushed_rows_in_meta(&mut meta, append_records.iter().copied(), true);
             }
             Self::push_bounded_ids(&mut meta.flushed_slice_keys, slice_key, MAX_COMPLETED_TURNS);
             meta.last_turn_id = meta.last_turn_id.max(turn_id);
             meta.last_seq = next_seq;
             meta.updated_at = u64::try_from(super::now_ms()).unwrap_or(0);
-            self.write_display_meta(id, &meta)?;
+            // 先校验并序列化 metadata，防止追加日志后再因 meta 超限失败造成 last_seq 撕裂。
+            let meta_bytes = serialize_display_meta(&meta)?;
+            if !log_bytes.is_empty() {
+                let path = self.display_path(id)?;
+                self.append_jsonl_line_at(id, &path, "display transcript", &log_bytes)?;
+            }
+            self.write_display_meta_bytes(id, &meta_bytes)?;
             if let Ok(path) = self.display_index_path(id) {
                 let _ = std::fs::remove_file(path);
             }
@@ -1303,10 +1328,7 @@ impl SessionManager {
         }
         self.ensure_v5_display_unlocked(id)?;
         let meta_path = self.display_meta_path(id)?;
-        let mut meta = match crate::session::manager::read_json_optional::<DisplayMeta>(
-            &meta_path,
-            "display meta",
-        )? {
+        let mut meta = match read_display_meta_file(&meta_path)? {
             Some(meta) => meta,
             None => {
                 if turn_id != 1 {
@@ -1381,38 +1403,33 @@ impl SessionManager {
             })
             .collect();
         let mut next_seq = meta.last_seq;
+        let mut log_bytes = Vec::new();
         if !append_records.is_empty() {
-            let mut bytes = Vec::with_capacity(append_records.len() * 512);
+            log_bytes.reserve(append_records.len() * 512);
             for record in &append_records {
                 next_seq = next_seq.saturating_add(1);
                 let mut record = (*record).clone();
                 record.v = DISPLAY_VERSION;
                 record.seq = next_seq;
-                serde_json::to_writer(&mut bytes, &record).map_err(|error| {
+                serde_json::to_writer(&mut log_bytes, &record).map_err(|error| {
                     SessionStoreError::Corrupt {
                         kind: "display record",
                         message: error.to_string(),
                     }
                 })?;
-                bytes.push(b'\n');
+                log_bytes.push(b'\n');
             }
-            let path = self.display_path(id)?;
-            self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
-            for record in &append_records {
-                if let Some(rec_id) = record.id.as_deref() {
-                    Self::push_bounded_ids(
-                        &mut meta.flushed_record_ids,
-                        rec_id,
-                        MAX_FLUSHED_RECORD_IDS,
-                    );
-                }
-            }
+            record_flushed_rows_in_meta(&mut meta, append_records.iter().copied(), false);
         }
         meta.last_turn_id = meta.last_turn_id.max(turn_id);
         meta.last_seq = next_seq;
         if !meta.completed_turns.contains(&turn_id) {
             meta.completed_turns.push(turn_id);
         }
+        // 回合终态收口后，清理该 turn 的瞬态切片去重键，避免长会话元数据持续膨胀。
+        let settled_slice_prefix = format!("t{turn_id}:");
+        meta.flushed_slice_keys
+            .retain(|key| !key.starts_with(&settled_slice_prefix));
         for record in records {
             if !record.role.eq_ignore_ascii_case("user") {
                 continue;
@@ -1436,7 +1453,12 @@ impl SessionManager {
             meta.completed_turns.drain(..drop);
         }
         meta.updated_at = u64::try_from(super::now_ms()).unwrap_or(0);
-        self.write_display_meta(id, &meta)?;
+        let meta_bytes = serialize_display_meta(&meta)?;
+        if !log_bytes.is_empty() {
+            let path = self.display_path(id)?;
+            self.append_jsonl_line_at(id, &path, "display transcript", &log_bytes)?;
+        }
+        self.write_display_meta_bytes(id, &meta_bytes)?;
         // The append changed last_seq; the old index is stale. The next tail read
         // rebuilds it once from the (now complete) log.
         if !append_records.is_empty() {
@@ -1473,10 +1495,7 @@ impl SessionManager {
         self.with_display_lock(id, || {
             self.ensure_v5_display_unlocked(id)?;
             let meta_path = self.display_meta_path(id)?;
-            let mut meta = match crate::session::manager::read_json_optional::<DisplayMeta>(
-                &meta_path,
-                "display meta",
-            )? {
+            let mut meta = match read_display_meta_file(&meta_path)? {
                 Some(meta) => meta,
                 None => DisplayMeta {
                     complete: true,
@@ -1514,8 +1533,6 @@ impl SessionManager {
                 }
             })?;
             bytes.push(b'\n');
-            let path = self.display_path(id)?;
-            self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
             meta.last_turn_id = next_turn_id;
             meta.last_seq = next_seq;
             Self::push_bounded_ids(
@@ -1529,7 +1546,10 @@ impl SessionManager {
                 MAX_FLUSHED_RECORD_IDS,
             );
             meta.updated_at = u64::try_from(super::now_ms()).unwrap_or(0);
-            self.write_display_meta(id, &meta)?;
+            let meta_bytes = serialize_display_meta(&meta)?;
+            let path = self.display_path(id)?;
+            self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
+            self.write_display_meta_bytes(id, &meta_bytes)?;
             if let Ok(idx_path) = self.display_index_path(id) {
                 let _ = std::fs::remove_file(idx_path);
             }
@@ -1616,10 +1636,7 @@ impl SessionManager {
         self.with_display_lock(id, || {
             self.ensure_v5_display_unlocked(id)?;
             let meta_path = self.display_meta_path(id)?;
-            let mut meta = match crate::session::manager::read_json_optional::<DisplayMeta>(
-                &meta_path,
-                "display meta",
-            )? {
+            let mut meta = match read_display_meta_file(&meta_path)? {
                 Some(meta) => meta,
                 // 若 `.display.meta.json` 尚未建立（即便 turn_id > 1），按完备初始元数据落盘，
                 // 避免首张通知被静默丢弃并退化为仅靠快照兜底。
@@ -1752,8 +1769,6 @@ impl SessionManager {
                 }
             })?;
             bytes.push(b'\n');
-            let path = self.display_path(id)?;
-            self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
             meta.last_seq = next_seq;
             Self::push_bounded_ids(
                 &mut meta.flushed_record_ids,
@@ -1761,7 +1776,10 @@ impl SessionManager {
                 MAX_FLUSHED_RECORD_IDS,
             );
             meta.updated_at = u64::try_from(super::now_ms()).unwrap_or(0);
-            self.write_display_meta(id, &meta)?;
+            let meta_bytes = serialize_display_meta(&meta)?;
+            let path = self.display_path(id)?;
+            self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
+            self.write_display_meta_bytes(id, &meta_bytes)?;
             if let Ok(idx_path) = self.display_index_path(id) {
                 let _ = std::fs::remove_file(idx_path);
             }
@@ -2018,14 +2036,14 @@ impl SessionManager {
         self.write_display_meta(id, &incomplete)
     }
 
-    fn write_display_meta(&self, id: &str, meta: &DisplayMeta) -> SessionResult<()> {
+    fn write_display_meta_bytes(&self, id: &str, bytes: &[u8]) -> SessionResult<()> {
         let path = self.display_meta_path(id)?;
-        let bytes =
-            serde_json::to_vec_pretty(meta).map_err(|error| SessionStoreError::Corrupt {
-                kind: "display meta",
-                message: error.to_string(),
-            })?;
-        self.write_bytes_atomic(&path, &bytes, "display meta", 64 * 1024)
+        self.write_bytes_atomic(&path, bytes, "display meta", MAX_DISPLAY_META_BYTES)
+    }
+
+    fn write_display_meta(&self, id: &str, meta: &DisplayMeta) -> SessionResult<()> {
+        let bytes = serialize_display_meta(meta)?;
+        self.write_display_meta_bytes(id, &bytes)
     }
 
     /// Read a complete display log. `None` means it is absent or incomplete; the
@@ -2035,9 +2053,7 @@ impl SessionManager {
         id: &str,
     ) -> SessionResult<Option<(DisplayMeta, Vec<DisplayRecord>)>> {
         let meta_path = self.display_meta_path(id)?;
-        let Some(meta) =
-            crate::session::manager::read_json_optional::<DisplayMeta>(&meta_path, "display meta")?
-        else {
+        let Some(meta) = read_display_meta_file(&meta_path)? else {
             return Ok(None);
         };
         // An old/future display projection must be rebuilt from the canonical
@@ -2945,5 +2961,61 @@ mod tests {
         let migrated_notice = &rows[2];
         assert_eq!(migrated_notice.notice_kind, Some(NoticeKind::Compaction));
         assert_eq!(migrated_notice.status, Some(NoticeStatus::Settled));
+    }
+
+    #[test]
+    fn large_display_meta_past_64kib_does_not_tear_log_and_prunes_settled_slice_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+
+        let mut records = Vec::with_capacity(2200);
+        for i in 0..2200u32 {
+            let mut rec = DisplayRecord {
+                v: DISPLAY_VERSION,
+                session_id: "s-large".into(),
+                turn_id: 1,
+                index: i,
+                seq: 0,
+                role: if i == 0 {
+                    "user".into()
+                } else {
+                    "assistant".into()
+                },
+                id: Some(format!("m-0000000000000000000000000000{i:04}")),
+                content: format!("row-{i}"),
+                ..DisplayRecord::default()
+            };
+            if i > 0 && i % 50 == 0 {
+                rec.role = "tool".into();
+                rec.tool_call_id = Some(format!("call-{i}"));
+            }
+            records.push(rec);
+        }
+
+        // 先通过检查点写入超过 64 KiB 阈值的记录并落盘。
+        for chunk_idx in 0..10u32 {
+            let end = ((chunk_idx + 1) * 220) as usize;
+            let key = format!("t1:c{}", chunk_idx + 1);
+            assert!(mgr
+                .append_display_slice("s-large", 1, &key, &records[..end])
+                .unwrap());
+        }
+        let meta_path = mgr.display_meta_path("s-large").unwrap();
+        assert!(
+            std::fs::metadata(&meta_path).unwrap().len() > 64 * 1024,
+            "metadata should grow past old 64 KiB cap without failing"
+        );
+
+        // 回合收口后：瞬态切片键应被清理，且日志与 meta 的 last_seq 保持一致可读。
+        mgr.append_display_turn("s-large", 1, &records).unwrap();
+        let (meta, read_rows) = mgr.read_display("s-large").unwrap().unwrap();
+        assert_eq!(read_rows.len(), 2200);
+        assert_eq!(meta.last_seq, 2200);
+        assert!(
+            meta.flushed_slice_keys
+                .iter()
+                .all(|key| !key.starts_with("t1:")),
+            "settled turn slice keys must be pruned"
+        );
     }
 }

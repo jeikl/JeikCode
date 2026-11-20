@@ -773,6 +773,12 @@ fn reindex_compacted_sidecars(
     presentation: &mut PresentationFile,
 ) {
     if before.messages.len() != after.messages.len() {
+        let after_pos_by_id: std::collections::HashMap<&str, usize> = after
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| message.id.as_deref().map(|id| (id, index)))
+            .collect();
         let prefix = before
             .messages
             .iter()
@@ -787,14 +793,33 @@ fn reindex_compacted_sidecars(
             .count();
         let old_end = before.messages.len().saturating_sub(suffix);
         let new_end = after.messages.len().saturating_sub(suffix);
+        // 优先按末尾消息 id 判断 turn 是否在压缩后存活及新边界位置：
+        // 轮中自动压缩时 `before`（上轮落盘快照）与 `after`（当轮新尾巴）末尾不同导致 `suffix=0`，
+        // 若盲用位置差会把上一个已完结 Turn 的 `after_message` 错移进当前轮。
+        let resolve_by_id = |stat: &TurnStat| -> Option<Option<usize>> {
+            let end_idx = stat.after_message.checked_sub(1)?;
+            let end_id = before.messages.get(end_idx)?.id.as_deref()?;
+            if after_pos_by_id.is_empty() {
+                return None;
+            }
+            Some(after_pos_by_id.get(end_id).map(|pos| pos + 1))
+        };
         let _ = meta.archive_turn_stats_where(|stat| {
-            stat.position_valid && stat.after_message > prefix && stat.after_message < old_end
+            if !stat.position_valid {
+                return false;
+            }
+            if let Some(resolved) = resolve_by_id(stat) {
+                return resolved.is_none();
+            }
+            stat.after_message > prefix && stat.after_message < old_end
         });
         for stat in &mut meta.turn_stats {
             if !stat.position_valid {
                 continue;
             }
-            if stat.after_message >= old_end {
+            if let Some(Some(new_after)) = resolve_by_id(stat) {
+                stat.after_message = new_after;
+            } else if stat.after_message >= old_end {
                 stat.after_message = new_end + stat.after_message.saturating_sub(old_end);
             }
         }
@@ -1575,6 +1600,72 @@ mod tests {
         assert_eq!(stats.len(), 2);
         assert_eq!((stats[0].turn_id, stats[0].after_message), (2, 1));
         assert_eq!((stats[1].turn_id, stats[1].after_message), (3, 3));
+    }
+
+    #[test]
+    fn mid_turn_compaction_with_newer_turn_tail_reindexes_prior_turn_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(SessionManager::with_root(dir.path()));
+        let id = "mid-turn-compact-id-reindex";
+        let with_id = |mut msg: Message, msg_id: &str| -> Message {
+            msg.id = Some(msg_id.to_string());
+            msg
+        };
+        let before = SessionSnapshot::new(vec![
+            with_id(Message::user("u1"), "m-u1"),
+            with_id(Message::assistant("a1", Vec::new()), "m-a1"),
+            with_id(Message::user("u2"), "m-u2"),
+            with_id(Message::assistant("a2", Vec::new()), "m-a2"),
+        ]);
+        let stat = |after_message, turn_id| TurnStat {
+            after_message,
+            position_valid: true,
+            turn_id,
+            round_count: 1,
+            tool_call_count: 0,
+            duration_ms: 100,
+            total_tokens: 1,
+            errored: false,
+            used_tokens: 1,
+            ctx_window: 10,
+            model_usage: Vec::new(),
+            stop_reason: None,
+        };
+        let mut meta = SessionMeta::new(id, "/p", 1);
+        meta.owner = StorageOwner::Native;
+        meta.turn_stats = vec![stat(2, 1), stat(4, 2)];
+        meta.turn_count = 2;
+        meta.message_count = 4;
+
+        let lease = manager.acquire_lease(id).unwrap();
+        manager
+            .commit_native_import(
+                &lease,
+                Some(&before),
+                Some(&PresentationFile::default()),
+                &meta,
+            )
+            .unwrap();
+        let hook = SnapshotHook::new(manager.clone(), id, "/p").with_lease(lease);
+        // 第 3 轮运行中触发自动压缩：保留 u1、插入摘要锚点，同时后面已带有第 3 轮的 2 条新消息。
+        let after = SessionSnapshot::new(vec![
+            with_id(Message::user("u1"), "m-u1"),
+            Message::synthetic_user("<!-- jeikcode:anchor v1 -->\nsummary"),
+            with_id(Message::user("u2"), "m-u2"),
+            with_id(Message::assistant("a2", Vec::new()), "m-a2"),
+            with_id(Message::user("u3"), "m-u3"),
+            with_id(Message::assistant("a3-mid", Vec::new()), "m-a3"),
+        ]);
+
+        CompactionCheckpoint::save(&hook, &after).unwrap();
+
+        let stats = manager.read_meta(id).unwrap().turn_stats;
+        assert_eq!(stats.len(), 1, "第 1 轮末尾 m-a1 已被摘要，必须归档");
+        assert_eq!(stats[0].turn_id, 2);
+        assert_eq!(
+            stats[0].after_message, 4,
+            "第 2 轮必须精确定位在 m-a2 之后(4)，绝不可错移到第 3 轮末尾(6)"
+        );
     }
 
     #[test]

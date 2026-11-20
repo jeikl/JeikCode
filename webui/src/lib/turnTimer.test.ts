@@ -241,5 +241,27 @@ test('composeSteerWireText attaches steer marker idempotently for send-immediate
   assert.equal(composeSteerWireText(wire), wire);
 });
 
+test('rootTurnUserTs stops penetrating across an intervening assistant with a different turnId', () => {
+  const tRoot = 1_000_000;
+  const tStop = 1_100_000;
+  const tSteerStart = 1_150_000;
+  const tSteerMid = 1_180_000;
+  const tEnd = 1_210_000;
+
+  // Even when user/steer rows themselves have turnId: undefined (e.g. legacy rows),
+  // an intervening assistant carrying turnId: 10 proves Turn 10 finished before Turn 11.
+  const msgs = [
+    { role: 'user', ts: tRoot, parts: [{ kind: 'text', text: '旧回合提问' }] },
+    { role: 'assistant', ts: tStop, turnId: 10, parts: [{ kind: 'text', text: '旧回合完成' }] },
+    { role: 'user', ts: tSteerStart, isSteer: true, parts: [{ kind: 'text', text: 'stop 后新回合 steer 1' }] },
+    { role: 'assistant', ts: 1_175_000, turnId: 11, parts: [{ kind: 'text', text: 'Turn 11 第一轮' }] },
+    { role: 'user', ts: tSteerMid, isSteer: true, parts: [{ kind: 'text', text: 'Turn 11 中途续追问' }] },
+    { role: 'assistant', ts: tEnd, turnId: 11, parts: [{ kind: 'text', text: 'Turn 11 完成' }] },
+  ];
+
+  // Must penetrate Turn 11's mid-turn steer back to tSteerStart, and stop at asst(turnId=10).
+  assert.equal(rootTurnUserTs(msgs, 5), tSteerStart);
+});
+
 
 

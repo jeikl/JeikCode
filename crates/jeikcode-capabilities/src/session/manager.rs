@@ -4744,7 +4744,7 @@ fn deserialize<T: for<'de> Deserialize<'de>>(bytes: &[u8], kind: &'static str) -
     })
 }
 
-fn ensure_size(kind: &'static str, actual: usize, limit: usize) -> SessionResult<()> {
+pub(super) fn ensure_size(kind: &'static str, actual: usize, limit: usize) -> SessionResult<()> {
     if actual > limit {
         Err(SessionStoreError::TooLarge {
             kind,
@@ -4924,13 +4924,14 @@ fn read_regular_file_bounded(
     Ok(bytes)
 }
 
-/// Read a small optional JSON sidecar. Missing file = `None`; malformed/oversized
+/// Read an optional bounded JSON sidecar. Missing file = `None`; malformed/oversized
 /// content is an explicit corruption error (never silently defaulted).
-pub(crate) fn read_json_optional<T: for<'de> Deserialize<'de>>(
+pub(crate) fn read_json_optional_bounded<T: for<'de> Deserialize<'de>>(
     path: &Path,
     kind: &'static str,
+    limit: usize,
 ) -> SessionResult<Option<T>> {
-    match read_regular_file_bounded(path, kind, 64 * 1024) {
+    match read_regular_file_bounded(path, kind, limit) {
         Ok(bytes) => {
             serde_json::from_slice(&bytes)
                 .map(Some)

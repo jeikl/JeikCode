@@ -37,10 +37,12 @@ function tauriCargoVersion(path) {
   return match[1];
 }
 
-function cargoLockVersion(path) {
+function cargoLockVersion(path, packageName = 'jeikcode') {
   const text = fs.readFileSync(path, 'utf8');
-  const match = text.match(/\[\[package\]\]\r?\nname = "jeikcode"\r?\nversion = "([^"]+)"/m);
-  if (!match) throw new Error('jeikcode package version not found in ' + path);
+  const escaped = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "${escaped}"\\r?\\nversion = "([^"]+)"`, 'm');
+  const match = text.match(regex);
+  if (!match) throw new Error(packageName + ' package version not found in ' + path);
   return match[1];
 }
 
@@ -51,8 +53,9 @@ const strictChecks = [
   ['desktop/package.json', packageVersion],
   ['desktop/src-tauri/Cargo.toml', tauriCargoVersion],
   ['desktop/src-tauri/tauri.conf.json', packageVersion],
+  ['desktop/src-tauri/Cargo.lock', (p) => cargoLockVersion(p, 'jeikcode-desktop')],
   ['packages/npm/package.json', packageVersion],
-  ['Cargo.lock', cargoLockVersion],
+  ['Cargo.lock', (p) => cargoLockVersion(p, 'jeikcode')],
 ];
 
 const optionalChecks = [

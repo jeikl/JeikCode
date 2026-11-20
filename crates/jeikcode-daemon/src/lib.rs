@@ -506,6 +506,12 @@ fn read_display_tail_view(
         index.iter().filter_map(|row| row.id.clone()).collect();
     if index.is_empty()
         || meta.v != jeikcode_capabilities::session::DISPLAY_VERSION
+        || display_needs_compacted_steer_heal(
+            &meta,
+            &display_ids,
+            &session.snapshot.messages,
+            &session.meta.id,
+        )
         || !v4_display_covers_completed_user_turns(
             &meta,
             &display_ids,
@@ -2389,6 +2395,63 @@ fn display_record_ids(
 ///
 /// A `backfilled` log is no longer exempt: its rows carry the canonical message
 /// ids, so the same check applies and a later dropped append is still caught.
+/// 判断快照中是否存在压缩锚点；若存在则说明锚点及其之前的消息均属于模型上下文摘要前历史，
+/// 不可再作为快照后各已完成回合的对齐起点。
+fn compaction_anchor_index(snapshot: &[jeikcode_kernel::message::Message]) -> Option<usize> {
+    use jeikcode_kernel::message::Role;
+
+    snapshot.iter().position(|message| {
+        message.role == Role::User
+            && message.synthetic
+            && jeikcode_capabilities::compaction::is_compaction_anchor_text(&message.text)
+    })
+}
+
+/// 若历史会话曾被旧回填逻辑写坏（`backfilled == true` 且快照存在压缩锚点，却漏掉了早期的
+/// `promoted` steer），允许用修复后的归并逻辑一次性自愈重建 `display.jsonl`；
+/// 自愈完成后所有历史 steer 已进入 `display_ids`，后续读取永不再重复触发。
+fn display_needs_compacted_steer_heal(
+    meta: &jeikcode_capabilities::session::DisplayMeta,
+    display_ids: &std::collections::HashSet<String>,
+    snapshot: &[jeikcode_kernel::message::Message],
+    session_id: &str,
+) -> bool {
+    use jeikcode_kernel::message::Role;
+
+    if !meta.backfilled {
+        return false;
+    }
+    let Some(anchor_idx) = compaction_anchor_index(snapshot) else {
+        return false;
+    };
+    let Some(boundary_ts) = snapshot[anchor_idx + 1..]
+        .iter()
+        .find(|message| message.role == Role::User && !message.synthetic)
+        .and_then(|message| (message.created_at_ms > 0).then_some(message.created_at_ms))
+    else {
+        return false;
+    };
+    jeikcode_capabilities::session::inputs::list_global(session_id)
+        .into_iter()
+        .any(|input| {
+            if input.delivery != "steer" || input.status != "promoted" {
+                return false;
+            }
+            if input.created_at == 0 || input.created_at >= boundary_ts {
+                return false;
+            }
+            if input.text.trim().is_empty() && input.images.is_empty() {
+                return false;
+            }
+            let primary_id = input
+                .message_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(input.id.as_str());
+            !display_ids.contains(primary_id) && !display_ids.contains(&input.id)
+        })
+}
+
 fn v4_display_covers_completed_user_turns(
     meta: &jeikcode_capabilities::session::DisplayMeta,
     display_ids: &std::collections::HashSet<String>,
@@ -2401,6 +2464,9 @@ fn v4_display_covers_completed_user_turns(
     if meta.last_turn_id < snapshot_last_turn {
         return false;
     }
+    // 压缩锚点及之前的模型上下文（含 sacred_floor 保留的初代提示）已从当前活动上下文裁剪，
+    // 绝不能与压缩后的 turn_stats 切片混检，否则会陷入“每次读取都被迫重写 display.jsonl”的死循环。
+    let post_anchor_start = compaction_anchor_index(snapshot).map_or(0, |idx| idx + 1);
     let completed: std::collections::HashSet<u64> = meta.completed_turns.iter().copied().collect();
     let mut previous = 0usize;
     for stat in turn_stats
@@ -2408,7 +2474,11 @@ fn v4_display_covers_completed_user_turns(
         .filter(|stat| stat.position_valid && stat.turn_id != 0)
     {
         let end = stat.after_message.min(snapshot.len());
-        let start = previous.min(end);
+        if end <= post_anchor_start {
+            previous = previous.max(end);
+            continue;
+        }
+        let start = previous.max(post_anchor_start).min(end);
         let turn = &snapshot[start..end];
         if let Some(prompt) = turn
             .iter()
@@ -2813,18 +2883,11 @@ fn append_pending_inputs(
             });
         }
     }
-    // A promoted steer is already a real persisted user message, but display.jsonl
-    // is only flushed at turn end. Project it into `messages` now so a refresh in
-    // the fold→settle window cannot lose BOTH the queue card (already retired) and
-    // the canvas bubble (not yet flushed).
+    // 只对仍属于当前活动回合（或最新未结算尾巴）的已折叠 steer 做补偿投影；
+    // 会话已空闲且存在更新的主提问/回合时，绝不能把压缩前的历史 promoted steer 拉到会话末尾。
     for input in &all_inputs {
-        if input.delivery != "steer" || input.status != "promoted" {
+        if !promoted_steer_belongs_to_unsettled_tail(input, operation_id, &all_inputs, messages) {
             continue;
-        }
-        if let (Some(current), Some(input_op)) = (operation_id, input.operation_id.as_deref()) {
-            if current != input_op {
-                continue;
-            }
         }
         let message_id = input
             .message_id
@@ -2854,10 +2917,9 @@ fn append_pending_inputs(
         if content.trim().is_empty() && images.is_empty() {
             continue;
         }
-        next_seq = next_seq.saturating_add(1);
-        messages.push(message_info! {
-            turn_id: None,
-            seq: Some(next_seq),
+        let user_info = message_info! {
+            turn_id: input.turn_id,
+            seq: None,
             role: "user".into(),
             id: Some(message_id.clone()),
             content,
@@ -2870,7 +2932,13 @@ fn append_pending_inputs(
             images: (!images.is_empty()).then_some(images),
             created_at: Some(input.created_at),
             elapsed_ms: None,
-        });
+        };
+        insert_steered_message_at_anchor(
+            messages,
+            user_info,
+            input.anchor_message_id.as_deref(),
+            &mut next_seq,
+        );
         existing.insert(message_id);
         existing.insert(input.id.clone());
     }
@@ -2882,6 +2950,92 @@ fn append_pending_inputs(
         working_dir,
         absolute_index_base,
     );
+}
+
+fn promoted_steer_belongs_to_unsettled_tail(
+    input: &jeikcode_capabilities::session::SessionInput,
+    operation_id: Option<&str>,
+    all_inputs: &[jeikcode_capabilities::session::SessionInput],
+    messages: &[MessageInfo],
+) -> bool {
+    if input.delivery != "steer" || input.status != "promoted" {
+        return false;
+    }
+    if let Some(current) = operation_id {
+        return input
+            .operation_id
+            .as_deref()
+            .is_none_or(|input_op| input_op == current);
+    }
+    // 会话已空闲时：若存在更新的 prompt 轮次或画布最新主提问时间晚于该 steer，
+    // 说明该 steer 属于历史已翻篇回合，严禁再补投影到会话尾部。
+    let has_newer_prompt = all_inputs.iter().any(|other| {
+        other.delivery == "prompt"
+            && other.created_at > input.created_at
+            && other.operation_id.as_deref() != input.operation_id.as_deref()
+    });
+    if has_newer_prompt {
+        return false;
+    }
+    let latest_visible_user_ts = messages
+        .iter()
+        .rev()
+        .find(|message| is_visible_user_turn_start(message))
+        .and_then(|message| message.created_at);
+    if let Some(latest_ts) = latest_visible_user_ts {
+        if input.created_at > 0 && latest_ts > input.created_at {
+            return false;
+        }
+    }
+    true
+}
+
+fn insert_steered_message_at_anchor(
+    messages: &mut Vec<MessageInfo>,
+    mut user_info: MessageInfo,
+    anchor_message_id: Option<&str>,
+    next_seq: &mut u64,
+) {
+    *next_seq = next_seq.saturating_add(1);
+    user_info.seq = Some(*next_seq);
+    if let Some(anchor_id) = anchor_message_id.map(str::trim).filter(|id| !id.is_empty()) {
+        if let Some(anchor_pos) = messages
+            .iter()
+            .rposition(|message| message.id.as_deref() == Some(anchor_id))
+        {
+            let mut insert_at = anchor_pos + 1;
+            while insert_at < messages.len() {
+                let row = &messages[insert_at];
+                if row.role.eq_ignore_ascii_case("tool") {
+                    insert_at += 1;
+                    continue;
+                }
+                if row.internal_origin.as_deref() == Some("turn_diagnostic")
+                    && row
+                        .notice
+                        .as_ref()
+                        .and_then(|notice| notice.anchor_message_id.as_deref())
+                        == Some(anchor_id)
+                {
+                    insert_at += 1;
+                    continue;
+                }
+                if row.internal_origin.as_deref() == Some("promoted_steer")
+                    && row.created_at.unwrap_or(0) <= user_info.created_at.unwrap_or(0)
+                {
+                    insert_at += 1;
+                    continue;
+                }
+                break;
+            }
+            if insert_at < messages.len() {
+                user_info.seq = None;
+            }
+            messages.insert(insert_at, user_info);
+            return;
+        }
+    }
+    messages.push(user_info);
 }
 
 /// Keep queued/folded steers in the right-rail outline before display flush.
@@ -2910,10 +3064,13 @@ fn append_folded_steer_outline(
         {
             continue;
         }
-        // `/chat` steers carry the owning operation's client id. A live-runtime
-        // steer has no ActiveChatRegistry operation; it is still included as
-        // long as it is promoted and not already in the persisted outline.
-        if let (Some(current), Some(input_op)) = (operation_id, input.operation_id.as_deref()) {
+        if input.status == "promoted" {
+            if !promoted_steer_belongs_to_unsettled_tail(input, operation_id, inputs, messages) {
+                continue;
+            }
+        } else if let (Some(current), Some(input_op)) =
+            (operation_id, input.operation_id.as_deref())
+        {
             if current != input_op {
                 continue;
             }
@@ -2949,19 +3106,28 @@ fn append_folded_steer_outline(
             message.id.as_deref() == Some(message_id)
                 || message.id.as_deref() == Some(input.id.as_str())
         });
-        turns.push(SessionTurnOutline {
+        let target_index = projected_index
+            .map(|position| absolute_index_base + position)
+            .unwrap_or(absolute_index_base + messages.len() + added);
+        let item = SessionTurnOutline {
             ordinal: turns.len(),
             id: Some(input.id.clone()),
             // Promoted rows now have a canvas index; pending rows remain jumped
             // by id until display.jsonl flushes.
-            index: projected_index
-                .map(|position| absolute_index_base + position)
-                .unwrap_or(absolute_index_base + messages.len() + added),
+            index: target_index,
             label,
             pending: projected_index.is_none(),
             seq: Some(input.seq),
-        });
+        };
+        if let Some(pos) = turns.iter().position(|turn| turn.index > target_index) {
+            turns.insert(pos, item);
+        } else {
+            turns.push(item);
+        }
         added = added.saturating_add(1);
+    }
+    for (ordinal, turn) in turns.iter_mut().enumerate() {
+        turn.ordinal = ordinal;
     }
 }
 
@@ -5212,6 +5378,8 @@ mod folded_steer_outline_tests {
             created_at: 1_700_000_000_000,
             message_id: Some("m-steer-1".into()),
             operation_id: Some("op-1".into()),
+            anchor_message_id: None,
+            turn_id: None,
         }];
         let mut turns = Vec::new();
         append_folded_steer_outline(
@@ -5254,6 +5422,8 @@ mod folded_steer_outline_tests {
             created_at: 1_700_000_000_000,
             message_id: Some("steer-1".into()),
             operation_id: Some("op-1".into()),
+            anchor_message_id: None,
+            turn_id: None,
         };
         jeikcode_capabilities::session::inputs::append_global(&mut input).unwrap();
 
@@ -5328,6 +5498,8 @@ mod folded_steer_outline_tests {
             created_at: 1_700_000_000_600,
             message_id: Some("steer-1".into()),
             operation_id: Some("op-1".into()),
+            anchor_message_id: None,
+            turn_id: None,
         };
         jeikcode_capabilities::session::inputs::append_global(&mut steer).unwrap();
 
@@ -5390,6 +5562,8 @@ mod folded_steer_outline_tests {
             created_at: 1_700_000_000_000,
             message_id: None,
             operation_id: Some("op-1".into()),
+            anchor_message_id: None,
+            turn_id: None,
         }];
         let mut turns = Vec::new();
         append_folded_steer_outline(
@@ -5417,6 +5591,8 @@ mod folded_steer_outline_tests {
                 created_at: 1_700_000_000_100,
                 message_id: None,
                 operation_id: Some("op-1".into()),
+                anchor_message_id: None,
+                turn_id: None,
             },
             jeikcode_capabilities::session::SessionInput {
                 id: "steer-live".into(),
@@ -5429,6 +5605,8 @@ mod folded_steer_outline_tests {
                 created_at: 1_700_000_000_200,
                 message_id: None,
                 operation_id: None,
+                anchor_message_id: None,
+                turn_id: None,
             },
         ];
         let mut turns = Vec::new();
@@ -5992,9 +6170,12 @@ pub(crate) fn fanout_chat_events_for_session(
                             .cloned()
                             .zip(inputs.iter().map(|input| input.message_id.clone()))
                             .collect();
-                        let _ = jeikcode_capabilities::session::inputs::mark_promoted_global(
-                            &sid, &pairs,
-                        );
+                        let _ =
+                            jeikcode_capabilities::session::inputs::mark_promoted_with_anchor_global(
+                                &sid,
+                                &pairs,
+                                anchor_message_id.as_deref(),
+                            );
                         retire_folded_steers_from_queue(&sid, &pairs).await;
                         publish_global(GlobalWireEvent::SteerFolded {
                             session_id: sid,
@@ -8892,10 +9073,17 @@ fn build_session_detail_response(
                     if matches!(meta.v, 4 | jeikcode_capabilities::session::DISPLAY_VERSION) {
                         // v4/v5 normal path: exact prompt-identity coverage; v4 rows
                         // are normalized in read_display and upgraded lazily below.
+                        let ids = display_record_ids(records);
                         meta.complete
+                            && !display_needs_compacted_steer_heal(
+                                meta,
+                                &ids,
+                                &session.snapshot.messages,
+                                &session.meta.id,
+                            )
                             && v4_display_covers_completed_user_turns(
                                 meta,
-                                &display_record_ids(records),
+                                &ids,
                                 &session.snapshot.messages,
                                 &session.meta.turn_stats,
                                 snapshot_last_turn,
@@ -9045,25 +9233,30 @@ fn build_session_detail_response(
                     // after a refresh. Presentation entries already merged into the
                     // list are display-only rows: the splice keeps any that are not
                     // covered by the rebuilt transcript.
-                    if let Some(anchor) = messages.iter().position(|message| {
-                        message.role.eq_ignore_ascii_case("user")
-                            && message.synthetic
-                            && jeikcode_capabilities::compaction::is_compaction_anchor_text(
-                                &message.content,
-                            )
-                    }) {
+                    if let Some(anchor) = messages.iter().position(is_compaction_anchor_message) {
                         if let Some(turns) = load_display_transcript(&hash, &session.meta.id) {
                             let boundary = messages[anchor + 1..].iter().find(|message| {
                                 message.role.eq_ignore_ascii_case("user") && !message.synthetic
                             });
-                            let prefix = display_prefix_from_transcript(
+                            let inputs = jeikcode_capabilities::session::inputs::list_global(
+                                &session.meta.id,
+                            );
+                            let prefix = display_prefix_from_transcript_with_inputs(
                                 &turns,
+                                &inputs,
+                                std::path::Path::new(&session.meta.working_dir),
                                 boundary.and_then(|message| message.created_at),
                                 boundary.map(|message| message.content.as_str()),
                             );
                             messages = splice_compacted_display(messages, prefix);
+                            propagate_contiguous_turn_ids(&mut messages);
+                            stamp_turn_elapsed_on_last_assistants(
+                                &mut messages,
+                                &session.meta.turn_stats,
+                            );
                         }
                     }
+                    repair_display_clock(&mut messages);
                     // One-time upgrade path for sessions created before the display
                     // log existed. Only settled sessions are materialized so a live
                     // turn is never frozen into the log half-way. If an existing log
@@ -9086,11 +9279,14 @@ fn build_session_detail_response(
                                 display_record_from_message_info(&session.meta.id, index, message)
                             })
                             .collect();
-                        let _ = display_manager.write_display_backfill(
-                            &session.meta.id,
-                            &records,
-                            snapshot_last_turn,
-                        );
+                        if display_manager
+                            .write_display_backfill(&session.meta.id, &records, snapshot_last_turn)
+                            .is_ok()
+                        {
+                            for (index, message) in messages.iter_mut().enumerate() {
+                                message.seq = Some((index + 1) as u64);
+                            }
+                        }
                     }
                     let mut turns = session_user_outline(&messages);
                     append_streaming_before_pending(
@@ -9308,8 +9504,9 @@ pub(crate) fn attach_display_images(
 }
 
 fn is_steer_user_message(msg: &MessageInfo) -> bool {
-    msg.role == "user"
-        && (msg.content.contains("[jeikcode-steer]")
+    msg.role.eq_ignore_ascii_case("user")
+        && (msg.internal_origin.as_deref() == Some("promoted_steer")
+            || msg.content.contains("[jeikcode-steer]")
             || (msg.content.contains("<user-query>") && msg.content.contains("</user-query>")))
 }
 
@@ -9321,16 +9518,94 @@ fn is_visible_assistant_reply(msg: &MessageInfo) -> bool {
     msg.role == "assistant" && msg.internal_origin.as_deref() != Some("turn_diagnostic")
 }
 
+fn is_compaction_anchor_message(msg: &MessageInfo) -> bool {
+    msg.role.eq_ignore_ascii_case("user")
+        && msg.synthetic
+        && jeikcode_capabilities::compaction::is_compaction_anchor_text(&msg.content)
+}
+
+/// 将压缩锚点之后连续回合中 Assistant 携带的真实 `turn_id` 传播到同一回合的
+/// `user` / `steer` / `tool` 行，确保前端（如 `turnTimer`）与后端耗时回填能通过稳定 ID
+/// 对齐，而不再依赖脆弱的位置序号或穿透到已结束的上一轮。
+pub(crate) fn propagate_contiguous_turn_ids(messages: &mut [MessageInfo]) {
+    let start = messages
+        .iter()
+        .rposition(is_compaction_anchor_message)
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+
+    // 反向传递：同一连续片段中紧跟在某 Assistant 之前的 kernel user / steer 行继承其 turn_id；
+    // 遇到非 steer 的根提问后清零，避免向前越界污染上一轮。
+    let mut next_turn_id: Option<u64> = None;
+    for msg in messages[start..].iter_mut().rev() {
+        if msg.role.eq_ignore_ascii_case("assistant")
+            && !msg.synthetic
+            && msg.internal_origin.as_deref() != Some("presentation")
+        {
+            if let Some(tid) = msg.turn_id.filter(|&tid| tid > 0) {
+                next_turn_id = Some(tid);
+            }
+            continue;
+        }
+        if msg.role.eq_ignore_ascii_case("user")
+            && !msg.synthetic
+            && msg.internal_origin.as_deref() != Some("presentation")
+        {
+            if msg.turn_id.is_none() {
+                msg.turn_id = next_turn_id;
+            }
+            if !is_steer_user_message(msg) {
+                next_turn_id = None;
+            }
+        }
+    }
+
+    // 正向传递：同一 Assistant 工具调用紧随其后的 `tool` 结果继承该 Assistant 的 turn_id。
+    let mut active_asst_turn_id: Option<u64> = None;
+    for msg in messages[start..].iter_mut() {
+        if msg.role.eq_ignore_ascii_case("user") && !msg.synthetic {
+            active_asst_turn_id = None;
+            continue;
+        }
+        if msg.role.eq_ignore_ascii_case("assistant")
+            && !msg.synthetic
+            && msg.internal_origin.as_deref() != Some("presentation")
+        {
+            active_asst_turn_id = msg.turn_id.filter(|&tid| tid > 0);
+            continue;
+        }
+        if msg.role.eq_ignore_ascii_case("tool")
+            && msg.internal_origin.as_deref() != Some("presentation")
+            && msg.turn_id.is_none()
+        {
+            msg.turn_id = active_asst_turn_id;
+        }
+    }
+}
+
 /// Stamp each user-turn's last assistant with the full agent-loop wall clock.
 ///
 /// Live WebUI measures user-bubble → final answer. Kernel `MessageMeta.elapsed_ms`
 /// is only the last LLM round, so a reload would otherwise shrink "用时 20min"
-/// down to the last reply. Prefer persisted [`TurnStat::duration_ms`], then the
-/// user/assistant `created_at` span.
+/// down to the last reply. Prefer persisted [`TurnStat::duration_ms`] matched by
+/// `turn_id` when available, falling back to positional alignment only for legacy
+/// rows without `turn_id`, then valid user/assistant `created_at` span (never
+/// crossing a compaction boundary or mismatched turn id).
 pub(crate) fn stamp_turn_elapsed_on_last_assistants(
     messages: &mut [MessageInfo],
     turn_stats: &[jeikcode_capabilities::session::TurnStat],
 ) {
+    use std::collections::{HashMap, HashSet};
+
+    let stat_by_turn_id: HashMap<u64, u64> = turn_stats
+        .iter()
+        .filter(|stat| stat.turn_id > 0 && stat.duration_ms > 0)
+        .fold(HashMap::new(), |mut map, stat| {
+            *map.entry(stat.turn_id).or_insert(0) += stat.duration_ms;
+            map
+        });
+    let has_turn_id_stats = turn_stats.iter().any(|stat| stat.turn_id > 0);
+
     let total_root_turns = messages
         .iter()
         .filter(|m| is_visible_user_turn_start(m))
@@ -9339,40 +9614,88 @@ pub(crate) fn stamp_turn_elapsed_on_last_assistants(
     let mut i = 0usize;
     let mut turn_i = 0usize;
     while i < messages.len() {
-        if !is_visible_user_turn_start(&messages[i]) {
+        let starts_by_root = is_visible_user_turn_start(&messages[i]);
+        if !starts_by_root {
             i += 1;
             continue;
         }
+        let root_turn_id = messages[i].turn_id.filter(|&tid| tid > 0);
         let user_ts = messages[i].created_at;
         let mut last_asst = None;
         let mut steer_count = 0usize;
+        let mut span_turn_ids: HashSet<u64> = root_turn_id.into_iter().collect();
+        let mut span_non_zero_asst_tid = None;
         let mut j = i + 1;
         while j < messages.len() && !is_visible_user_turn_start(&messages[j]) {
             if is_steer_user_message(&messages[j]) {
+                // 若持久化 turn_id 表明该 steer 已属于与当前已知轮次不同的新 turn，
+                // 说明上一轮已结束，在此切开回合边界，避免误吸下一轮的耗时与时间戳。
+                if let Some(steer_tid) = messages[j].turn_id.filter(|&tid| tid > 0) {
+                    let prior_tid = span_non_zero_asst_tid.or(root_turn_id);
+                    if prior_tid.is_some_and(|prev| prev != steer_tid) {
+                        break;
+                    }
+                    span_turn_ids.insert(steer_tid);
+                }
                 steer_count += 1;
             }
             if is_visible_assistant_reply(&messages[j]) {
+                if let Some(asst_tid) = messages[j].turn_id.filter(|&tid| tid > 0) {
+                    span_turn_ids.insert(asst_tid);
+                    span_non_zero_asst_tid = Some(asst_tid);
+                }
                 last_asst = Some(j);
             }
             j += 1;
         }
+
+        // 若因 post-stop steer 独立成新轮而在中间退出，确保后续该 steer 也能作为新轮起点处理。
+        let split_at_post_stop_steer = j < messages.len()
+            && is_steer_user_message(&messages[j])
+            && !is_visible_user_turn_start(&messages[j]);
+
         let consumed_extra = steer_count.min(extra_stats);
         extra_stats -= consumed_extra;
         let stats_for_turn = 1 + consumed_extra;
         if let Some(ai) = last_asst {
-            let from_ts = match (user_ts, messages[ai].created_at) {
-                (Some(user), Some(asst)) if asst > user => Some(asst - user),
-                _ => None,
-            };
-            let slice_end = (turn_i + stats_for_turn).min(turn_stats.len());
-            let from_stat = if turn_i < slice_end {
-                let sum: u64 = turn_stats[turn_i..slice_end]
-                    .iter()
-                    .map(|stat| stat.duration_ms)
-                    .sum();
-                (sum > 0).then_some(sum)
-            } else {
+            let last_asst_tid = messages[ai].turn_id.filter(|&tid| tid > 0);
+            let crosses_compaction = messages[i..j].iter().any(is_compaction_anchor_message);
+            let mismatched_single_turn_id = steer_count == 0
+                && root_turn_id.is_some()
+                && last_asst_tid.is_some()
+                && root_turn_id != last_asst_tid;
+            let from_ts = if crosses_compaction || mismatched_single_turn_id {
                 None
+            } else {
+                match (user_ts, messages[ai].created_at) {
+                    (Some(user), Some(asst)) if asst > user => Some(asst - user),
+                    _ => None,
+                }
+            };
+
+            let from_stat = if let (Some(asst_tid), true) = (last_asst_tid, has_turn_id_stats) {
+                // ID 模式：严格按 turn_id 查找持久化耗时，绝不在压缩裁掉旧TurnStat后错位借用后续轮次。
+                if steer_count == 0 {
+                    stat_by_turn_id.get(&asst_tid).copied().filter(|&ms| ms > 0)
+                } else {
+                    let sum: u64 = span_turn_ids
+                        .iter()
+                        .filter_map(|tid| stat_by_turn_id.get(tid))
+                        .sum();
+                    (sum > 0).then_some(sum)
+                }
+            } else {
+                // 兼容缺少 turn_id 的旧数据 / 测试用例：保留顺序回退。
+                let slice_end = (turn_i + stats_for_turn).min(turn_stats.len());
+                if turn_i < slice_end {
+                    let sum: u64 = turn_stats[turn_i..slice_end]
+                        .iter()
+                        .map(|stat| stat.duration_ms)
+                        .sum();
+                    (sum > 0).then_some(sum)
+                } else {
+                    None
+                }
             };
             let total = match (from_stat, from_ts) {
                 (Some(stat_ms), Some(ts_ms)) if steer_count > 0 => Some(stat_ms.max(ts_ms)),
@@ -9383,8 +9706,98 @@ pub(crate) fn stamp_turn_elapsed_on_last_assistants(
             }
         }
         turn_i += stats_for_turn;
-        i = j;
+        if split_at_post_stop_steer {
+            // 将独立成轮的 post-stop steer 视为新回合起点（一次只扫描这一新 steer 回合）
+            i = stamp_post_stop_steer_subturn(
+                messages,
+                j,
+                &stat_by_turn_id,
+                has_turn_id_stats,
+                &turn_stats,
+                &mut turn_i,
+            );
+        } else {
+            i = j;
+        }
     }
+}
+
+fn stamp_post_stop_steer_subturn(
+    messages: &mut [MessageInfo],
+    mut start: usize,
+    stat_by_turn_id: &std::collections::HashMap<u64, u64>,
+    has_turn_id_stats: bool,
+    turn_stats: &[jeikcode_capabilities::session::TurnStat],
+    turn_i: &mut usize,
+) -> usize {
+    use std::collections::HashSet;
+
+    while start < messages.len()
+        && is_steer_user_message(&messages[start])
+        && !is_visible_user_turn_start(&messages[start])
+    {
+        let root_tid = messages[start].turn_id.filter(|&tid| tid > 0);
+        let user_ts = messages[start].created_at;
+        let mut last_asst = None;
+        let mut steer_count = 0usize;
+        let mut span_turn_ids: HashSet<u64> = root_tid.into_iter().collect();
+        let mut j = start + 1;
+        while j < messages.len() && !is_visible_user_turn_start(&messages[j]) {
+            if is_steer_user_message(&messages[j]) {
+                if let Some(stid) = messages[j].turn_id.filter(|&tid| tid > 0) {
+                    if root_tid.is_some_and(|prev| prev != stid) {
+                        break;
+                    }
+                    span_turn_ids.insert(stid);
+                }
+                steer_count += 1;
+            }
+            if is_visible_assistant_reply(&messages[j]) {
+                if let Some(atid) = messages[j].turn_id.filter(|&tid| tid > 0) {
+                    span_turn_ids.insert(atid);
+                }
+                last_asst = Some(j);
+            }
+            j += 1;
+        }
+        if let Some(ai) = last_asst {
+            let asst_tid = messages[ai].turn_id.filter(|&tid| tid > 0);
+            let crosses_compaction = messages[start..j].iter().any(is_compaction_anchor_message);
+            let from_ts = if crosses_compaction {
+                None
+            } else {
+                match (user_ts, messages[ai].created_at) {
+                    (Some(user), Some(asst)) if asst > user => Some(asst - user),
+                    _ => None,
+                }
+            };
+            let from_stat = if let (Some(tid), true) = (asst_tid, has_turn_id_stats) {
+                let sum: u64 = span_turn_ids
+                    .iter()
+                    .filter_map(|id| stat_by_turn_id.get(id))
+                    .sum();
+                (sum > 0)
+                    .then_some(sum)
+                    .or_else(|| stat_by_turn_id.get(&tid).copied().filter(|&ms| ms > 0))
+            } else {
+                let s = turn_stats
+                    .get(*turn_i)
+                    .map(|stat| stat.duration_ms)
+                    .filter(|&ms| ms > 0);
+                *turn_i += 1;
+                s
+            };
+            let total = match (from_stat, from_ts) {
+                (Some(stat_ms), Some(ts_ms)) if steer_count > 0 => Some(stat_ms.max(ts_ms)),
+                (stat_ms, ts_ms) => stat_ms.or(ts_ms),
+            };
+            if let Some(total) = total {
+                messages[ai].elapsed_ms = Some(total);
+            }
+        }
+        start = j;
+    }
+    start
 }
 
 /// Pure matcher (see [`attach_display_images`]): replace each VL-marker user message's
@@ -9627,14 +10040,119 @@ fn normalized_display_text(text: &str) -> String {
 
 /// Rebuild display rows for every transcript turn before `boundary`. The raw
 /// transcript is never compacted; this is the authoritative pre-compaction
-/// display history. Timestamps are intentionally omitted for user rows because
-/// `TurnRecord.ts` is the turn's FLUSH time, not the prompt time.
+/// display history. Timestamps are intentionally omitted for user rows when no
+/// durable input timestamp exists because `TurnRecord.ts` is the turn's FLUSH
+/// time, not the prompt time.
+#[allow(dead_code)]
 fn display_prefix_from_transcript(
     turns: &[jeikcode_capabilities::session::TurnRecord],
     boundary_ts: Option<u64>,
     boundary_user: Option<&str>,
 ) -> Vec<MessageInfo> {
+    display_prefix_from_transcript_with_inputs(
+        turns,
+        &[],
+        std::path::Path::new("."),
+        boundary_ts,
+        boundary_user,
+    )
+}
+
+fn normalized_user_input_text(working_dir: &std::path::Path, text: &str) -> String {
+    let displayed = jeikcode_capabilities::session::user_text_for_display(working_dir, text);
+    let unwrapped = outline_label_unwrapped(&displayed);
+    normalized_display_text(unwrapped)
+}
+
+fn outline_label_unwrapped(text: &str) -> &str {
+    if let Some(start) = text.find("<user-query>") {
+        if let Some(end) = text.find("</user-query>") {
+            if start + "<user-query>".len() <= end {
+                return &text[start + "<user-query>".len()..end];
+            }
+        }
+    }
+    if let Some(idx) = text.find("[jeikcode-steer]") {
+        let before = text[..idx].trim();
+        if !before.is_empty() {
+            return before;
+        }
+    }
+    text
+}
+
+fn display_prefix_steer_row(
+    input: &jeikcode_capabilities::session::SessionInput,
+    working_dir: &std::path::Path,
+    turn_id: Option<u64>,
+    display_origin: &str,
+) -> Option<MessageInfo> {
+    let displayed = jeikcode_capabilities::session::user_text_for_display(working_dir, &input.text);
+    let images: Vec<ImageData> = input
+        .images
+        .iter()
+        .map(|image| ImageData {
+            media_type: image.media_type.clone(),
+            data: image.data.clone(),
+            missing: false,
+        })
+        .collect();
+    if displayed.trim().is_empty() && images.is_empty() {
+        return None;
+    }
+    let content = if displayed.contains("[jeikcode-steer]")
+        || (displayed.contains("<user-query>") && displayed.contains("</user-query>"))
+    {
+        displayed
+    } else {
+        format!(
+            "<user-query>\n{}\n</user-query>\n\n[jeikcode-steer]",
+            displayed.trim()
+        )
+    };
+    let primary_id = input
+        .message_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| input.id.clone());
+    Some(message_info! {
+        seq: None,
+        turn_id: turn_id.or(input.turn_id).filter(|&id| id > 0),
+        role: "user".into(),
+        id: Some(primary_id),
+        client_input_id: Some(input.id.clone()),
+        content,
+        reasoning: None,
+        synthetic: false,
+        internal_origin: Some(display_origin.into()),
+        display_text: Some(
+            jeikcode_capabilities::session::user_text_for_display(working_dir, &input.text),
+        ),
+        internal: Some(false),
+        editable: Some(false),
+        tool_calls: None,
+        tool_result: None,
+        artifacts: None,
+        images: (!images.is_empty()).then_some(images),
+        created_at: (input.created_at > 0).then_some(input.created_at),
+        elapsed_ms: None,
+    })
+}
+
+/// 在仅凭 transcript 重建压缩前展示历史的同时，按因果顺序与持久输入日志中的
+/// `prompt` / `promoted` `steer` 归并：恢复中途被压缩掉的 steer 气泡与真实时间戳，
+/// 避免这些历史 steer 丢失或被当成末尾 pending 投影到会话最后。
+fn display_prefix_from_transcript_with_inputs(
+    turns: &[jeikcode_capabilities::session::TurnRecord],
+    inputs: &[jeikcode_capabilities::session::SessionInput],
+    working_dir: &std::path::Path,
+    boundary_ts: Option<u64>,
+    boundary_user: Option<&str>,
+) -> Vec<MessageInfo> {
     let boundary_text = boundary_user.map(normalized_display_text);
+    let boundary_unwrapped = boundary_user
+        .map(|raw| normalized_user_input_text(working_dir, raw))
+        .unwrap_or_default();
     let split = turns
         .iter()
         .position(|turn| match boundary_ts {
@@ -9653,15 +10171,94 @@ fn display_prefix_from_transcript(
     // Display-only reconstruction: these rows have no kernel counterpart, so
     // mutation APIs (edit/delete/regenerate by array index) must stay disabled.
     const DISPLAY_ORIGIN: &str = "transcript_archive";
+
+    let mut ordered_inputs: Vec<&jeikcode_capabilities::session::SessionInput> = inputs
+        .iter()
+        .filter(|input| {
+            input.status == "promoted"
+                && (input.delivery == "steer" || input.delivery == "prompt")
+                && (!input.text.trim().is_empty() || !input.images.is_empty())
+        })
+        .collect();
+    ordered_inputs.sort_by_key(|input| (input.created_at, input.seq));
+    let mut used = vec![false; ordered_inputs.len()];
+
     let mut rows = Vec::new();
     for turn in &turns[..split] {
+        let turn_id_opt = (turn.turn_id > 0).then_some(turn.turn_id);
+        let turn_flush_ts = u64::try_from(turn.ts).ok();
+        let norm_turn_user = normalized_user_input_text(working_dir, &turn.user);
+
+        // 若输入日志中有与本轮开头用户消息匹配的持久化输入，恢复其真实 message_id 与时间戳。
+        let matched_prompt_idx = if norm_turn_user.is_empty() {
+            None
+        } else {
+            ordered_inputs
+                .iter()
+                .enumerate()
+                .find(|(idx, input)| {
+                    if used[*idx] {
+                        return false;
+                    }
+                    if let (Some(tid), Some(itid)) = (turn_id_opt, input.turn_id) {
+                        if tid == itid && input.delivery == "prompt" {
+                            return true;
+                        }
+                    }
+                    if turn_flush_ts.is_some_and(|ts| input.created_at > ts) {
+                        return false;
+                    }
+                    let norm_in = normalized_user_input_text(working_dir, &input.text);
+                    !norm_in.is_empty()
+                        && (norm_in == norm_turn_user
+                            || norm_turn_user.starts_with(&norm_in)
+                            || norm_in.starts_with(&norm_turn_user))
+                })
+                .map(|(idx, _)| idx)
+        };
+        let (user_id, client_input_id, user_ts, matched_is_steer) =
+            if let Some(idx) = matched_prompt_idx {
+                used[idx] = true;
+                let input = ordered_inputs[idx];
+                let primary_id = input
+                    .message_id
+                    .clone()
+                    .filter(|id| !id.trim().is_empty())
+                    .unwrap_or_else(|| format!("{ID_PREFIX}-{}-user", turn.turn_id));
+                (
+                    primary_id,
+                    Some(input.id.clone()),
+                    (input.created_at > 0).then_some(input.created_at),
+                    input.delivery == "steer",
+                )
+            } else {
+                (
+                    format!("{ID_PREFIX}-{}-user", turn.turn_id),
+                    None,
+                    None,
+                    false,
+                )
+            };
+
         if !turn.user.trim().is_empty() {
+            let user_content = if matched_is_steer
+                && !turn.user.contains("[jeikcode-steer]")
+                && !(turn.user.contains("<user-query>") && turn.user.contains("</user-query>"))
+            {
+                format!(
+                    "<user-query>\n{}\n</user-query>\n\n[jeikcode-steer]",
+                    turn.user.trim()
+                )
+            } else {
+                turn.user.clone()
+            };
             rows.push(message_info! {
                 seq: None,
-                turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                turn_id: turn_id_opt,
                 role: "user".into(),
-                id: Some(format!("{ID_PREFIX}-{}-user", turn.turn_id)),
-                content: turn.user.clone(),
+                id: Some(user_id),
+                client_input_id,
+                content: user_content,
                 reasoning: None,
                 synthetic: false,
                 internal_origin: Some(DISPLAY_ORIGIN.into()),
@@ -9669,10 +10266,34 @@ fn display_prefix_from_transcript(
                 tool_result: None,
                 artifacts: None,
                 images: None,
-                created_at: None,
+                created_at: user_ts,
                 elapsed_ms: None,
             });
         }
+
+        // 同一回合运行期间插入的中途 `promoted` steer 按时间序归位在该回合 root user 之后、
+        // 回合最终工具/回答行之前（严格不跨过 boundary_ts 吞并后续已留存尾巴的 steer）。
+        for (idx, input) in ordered_inputs.iter().enumerate() {
+            if used[idx] || input.delivery != "steer" {
+                continue;
+            }
+            if boundary_ts.is_some_and(|b| b > 0 && input.created_at >= b) {
+                continue;
+            }
+            let by_id = turn_id_opt.is_some() && input.turn_id == turn_id_opt;
+            let by_time = (input.turn_id.is_none() || input.turn_id == turn_id_opt)
+                && input.created_at > 0
+                && turn_flush_ts.is_some_and(|ts| input.created_at <= ts);
+            if by_id || by_time {
+                used[idx] = true;
+                if let Some(steer_row) =
+                    display_prefix_steer_row(input, working_dir, turn_id_opt, DISPLAY_ORIGIN)
+                {
+                    rows.push(steer_row);
+                }
+            }
+        }
+
         let calls: Vec<ToolCallInfo> = turn
             .tools
             .iter()
@@ -9711,7 +10332,7 @@ fn display_prefix_from_transcript(
             // Phase 1: Tool execution message (thinking + tool calls)
             rows.push(message_info! {
                 seq: None,
-                turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                turn_id: turn_id_opt,
                 role: "assistant".into(),
                 id: Some(format!("{ID_PREFIX}-{}-assistant-tools", turn.turn_id)),
                 content: String::new(),
@@ -9728,7 +10349,7 @@ fn display_prefix_from_transcript(
             for (index, tool) in turn.tools.iter().enumerate() {
                 rows.push(message_info! {
                     seq: None,
-                    turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                    turn_id: turn_id_opt,
                     role: "tool".into(),
                     id: Some(format!("{ID_PREFIX}-{}-tool-{index}", turn.turn_id)),
                     content: tool.result.clone(),
@@ -9769,7 +10390,7 @@ fn display_prefix_from_transcript(
             if has_text {
                 rows.push(message_info! {
                     seq: None,
-                    turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                    turn_id: turn_id_opt,
                     role: "assistant".into(),
                     id: Some(format!("{ID_PREFIX}-{}-assistant", turn.turn_id)),
                     content: turn.assistant.clone(),
@@ -9787,7 +10408,7 @@ fn display_prefix_from_transcript(
         } else {
             rows.push(message_info! {
                 seq: None,
-                turn_id: (turn.turn_id > 0).then_some(turn.turn_id),
+                turn_id: turn_id_opt,
                 role: "assistant".into(),
                 id: Some(format!("{ID_PREFIX}-{}-assistant", turn.turn_id)),
                 content: turn.assistant.clone(),
@@ -9803,6 +10424,82 @@ fn display_prefix_from_transcript(
             });
         }
     }
+
+    // 处理回合内压缩（mid-turn compaction）：`turns[split]` 在压缩之后才 flush，但其开场提问或早期 steer
+    // 发生在 `boundary_ts` 之前并被压缩截断；把这些早于 `boundary_ts` 的残留输入按时间序补回 prefix 末尾。
+    if let Some(boundary) = boundary_ts.filter(|&ts| ts > 0) {
+        let boundary_turn_id = turns
+            .get(split)
+            .and_then(|t| (t.turn_id > 0).then_some(t.turn_id));
+        if let Some(split_turn) = turns.get(split) {
+            let norm_split_user = normalized_user_input_text(working_dir, &split_turn.user);
+            let split_matches_boundary = !boundary_unwrapped.is_empty()
+                && !norm_split_user.is_empty()
+                && (boundary_unwrapped.starts_with(&norm_split_user)
+                    || norm_split_user.starts_with(&boundary_unwrapped));
+            if !split_matches_boundary && !split_turn.user.trim().is_empty() {
+                if let Some((idx, _)) = ordered_inputs.iter().enumerate().find(|(idx, input)| {
+                    !used[*idx]
+                        && input.delivery == "prompt"
+                        && input.created_at > 0
+                        && input.created_at < boundary
+                        && !norm_split_user.is_empty()
+                        && {
+                            let norm_in = normalized_user_input_text(working_dir, &input.text);
+                            !norm_in.is_empty()
+                                && (norm_in == norm_split_user
+                                    || norm_split_user.starts_with(&norm_in)
+                                    || norm_in.starts_with(&norm_split_user))
+                        }
+                }) {
+                    used[idx] = true;
+                    let input = ordered_inputs[idx];
+                    let primary_id = input
+                        .message_id
+                        .clone()
+                        .filter(|id| !id.trim().is_empty())
+                        .unwrap_or_else(|| format!("{ID_PREFIX}-{}-user", split_turn.turn_id));
+                    rows.push(message_info! {
+                        seq: None,
+                        turn_id: boundary_turn_id,
+                        role: "user".into(),
+                        id: Some(primary_id),
+                        client_input_id: Some(input.id.clone()),
+                        content: split_turn.user.clone(),
+                        reasoning: None,
+                        synthetic: false,
+                        internal_origin: Some(DISPLAY_ORIGIN.into()),
+                        tool_calls: None,
+                        tool_result: None,
+                        artifacts: None,
+                        images: None,
+                        created_at: (input.created_at > 0).then_some(input.created_at),
+                        elapsed_ms: None,
+                    });
+                }
+            }
+        }
+        let fallback_turn_id = boundary_turn_id.or_else(|| {
+            turns[..split]
+                .last()
+                .and_then(|t| (t.turn_id > 0).then_some(t.turn_id))
+        });
+        for (idx, input) in ordered_inputs.iter().enumerate() {
+            if used[idx]
+                || input.delivery != "steer"
+                || input.created_at == 0
+                || input.created_at >= boundary
+            {
+                continue;
+            }
+            used[idx] = true;
+            if let Some(steer_row) =
+                display_prefix_steer_row(input, working_dir, fallback_turn_id, DISPLAY_ORIGIN)
+            {
+                rows.push(steer_row);
+            }
+        }
+    }
     rows
 }
 
@@ -9812,19 +10509,27 @@ fn display_prefix_from_transcript(
 /// duplicate "你好啊". Invisible scaffolding and display-only presentation rows
 /// are preserved. Tool rows before the anchor are always covered by the prefix.
 fn splice_compacted_display(
-    mut messages: Vec<MessageInfo>,
-    prefix: Vec<MessageInfo>,
+    messages: Vec<MessageInfo>,
+    mut prefix: Vec<MessageInfo>,
 ) -> Vec<MessageInfo> {
     if prefix.is_empty() {
         return messages;
     }
-    let Some(anchor) = messages.iter().position(|m| {
-        m.role.eq_ignore_ascii_case("user")
-            && m.synthetic
-            && jeikcode_capabilities::compaction::is_compaction_anchor_text(&m.content)
-    }) else {
+    let Some(anchor) = messages.iter().position(is_compaction_anchor_message) else {
         return messages;
     };
+
+    let prefix_has_timestamps = prefix.iter().any(|m| m.created_at.is_some());
+    let (head, rest) = messages.split_at(anchor);
+    let tail = rest.get(1..).unwrap_or(&[]);
+
+    // 先收集已保留尾巴中的真实 ID，避免 prefix 与 tail 出现重复 ID 行。
+    let tail_ids: std::collections::HashSet<String> =
+        tail.iter().filter_map(|m| m.id.clone()).collect();
+    prefix.retain(|m| m.id.as_deref().is_none_or(|id| !tail_ids.contains(id)));
+    if prefix.is_empty() {
+        return messages;
+    }
 
     let prefix_users: Vec<String> = prefix
         .iter()
@@ -9839,23 +10544,58 @@ fn splice_compacted_display(
         .filter(|text| !text.is_empty())
         .collect();
 
-    let (head, rest) = messages.split_at(anchor);
-    let tail = rest.get(1..).unwrap_or(&[]);
-    let mut out = Vec::with_capacity(prefix.len() + head.len() + tail.len());
-    out.extend(prefix);
+    // 记录 prefix 用户行下标，便于把快照 `head` 中幸存用户行的真实 `id` / `created_at`
+    // 继承回对应的 `prefix` 用户行，防止覆盖丢 ID 导致尾视图无法与快照对齐。
+    let mut moved_head = Vec::new();
     for message in head {
         if message.role.eq_ignore_ascii_case("system") || message.synthetic {
-            out.push(message.clone());
+            let mut preserved = message.clone();
+            if prefix_has_timestamps {
+                // `head` 中的 `system` / `synthetic` 脚手架行保留在 `prefix` 之后（如 `sys`），
+                // 必须清空其早期创建时间，避免 `repair_display_clock` 倒查时把整个 `prefix`
+                // 的时间都拉回会话创建时刻。
+                preserved.created_at = None;
+            }
+            moved_head.push(preserved);
             continue;
         }
         let text = message.content.trim();
-        if message.role.eq_ignore_ascii_case("user")
-            && prefix_users.iter().any(|prefix_text| {
+        if message.role.eq_ignore_ascii_case("user") {
+            let matched_idx = prefix.iter().enumerate().find_map(|(idx, p)| {
+                if !p.role.eq_ignore_ascii_case("user") {
+                    return None;
+                }
+                if message.id.is_some() && p.id == message.id {
+                    return Some(idx);
+                }
+                let pt = p.content.trim();
+                (!pt.is_empty()
+                    && !text.is_empty()
+                    && (text.starts_with(pt) || pt.starts_with(text)))
+                .then_some(idx)
+            });
+            if let Some(idx) = matched_idx {
+                let target = &mut prefix[idx];
+                if let Some(real_id) = &message.id {
+                    if target
+                        .id
+                        .as_deref()
+                        .is_none_or(|id| id.starts_with("transcript-"))
+                    {
+                        target.id = Some(real_id.clone());
+                    }
+                }
+                if target.created_at.is_none() && message.created_at.is_some() {
+                    target.created_at = message.created_at;
+                }
+                continue;
+            }
+            if prefix_users.iter().any(|prefix_text| {
                 !prefix_text.is_empty()
                     && (text.starts_with(prefix_text.as_str()) || prefix_text.starts_with(text))
-            })
-        {
-            continue;
+            }) {
+                continue;
+            }
         }
         if message.role.eq_ignore_ascii_case("assistant")
             && prefix_assistants
@@ -9867,8 +10607,12 @@ fn splice_compacted_display(
         if message.role.eq_ignore_ascii_case("tool") {
             continue;
         }
-        out.push(message.clone());
+        moved_head.push(message.clone());
     }
+
+    let mut out = Vec::with_capacity(prefix.len() + moved_head.len() + tail.len());
+    out.extend(prefix);
+    out.extend(moved_head);
     out.extend(tail.iter().cloned());
     out
 }
@@ -10471,6 +11215,7 @@ fn merge_catalog_session_messages_for_display(
         std::path::Path::new(&session.meta.working_dir),
         &session.meta.id,
     );
+    propagate_contiguous_turn_ids(&mut messages);
     stamp_turn_elapsed_on_last_assistants(&mut messages, &session.meta.turn_stats);
     Ok(messages)
 }
@@ -10489,17 +11234,28 @@ fn fill_missing_display_clock(messages: &mut [MessageInfo], seed: u64) {
     }
 }
 
+fn can_clamp_fabricated_display_clock(message: &MessageInfo) -> bool {
+    message.role.eq_ignore_ascii_case("tool")
+        || message.role.eq_ignore_ascii_case("system")
+        || message.synthetic
+        || matches!(
+            message.internal_origin.as_deref(),
+            Some("turn_diagnostic") | Some("presentation")
+        )
+}
+
 /// 展示时间戳校准：把旧版本已落盘、比下一行还晚的伪造时间拉回行序。
 ///
-/// 转录行序本身就是时间序，所以只做「向下拉平」：一个比下一行更晚的时刻只可能
-/// 来自旧版本用会话 `updated_at` 补洞的伪造值（注入提示的 user 行也会命中）。
+/// 仅对可能由旧版 `updated_at` 补洞产生伪造时间戳的脚手架/工具行做「向下拉平」，
+/// 绝不因尾部存在乱序旧行而将真实 `user` / `assistant` 的壁钟（例如跨越零点的 `00:14`）
+/// 倒拽回前一天。
 fn repair_display_clock(messages: &mut [MessageInfo]) {
     let mut next_known: Option<u64> = None;
     for message in messages.iter_mut().rev() {
         match message.created_at {
             Some(ts) => {
                 let repaired = match next_known {
-                    Some(next) if ts > next => next,
+                    Some(next) if ts > next && can_clamp_fabricated_display_clock(message) => next,
                     _ => ts,
                 };
                 message.created_at = Some(repaired);
@@ -16012,6 +16768,8 @@ fn persist_admitted_user(request: &ChatRequest, session_id: &str, client_input_i
         created_at,
         message_id: Some(client_input_id.to_string()),
         operation_id: Some(client_input_id.to_string()),
+        anchor_message_id: None,
+        turn_id: None,
     };
     if let Err(error) = jeikcode_capabilities::session::inputs::append_global(&mut input) {
         tracing::warn!(
@@ -20532,6 +21290,8 @@ async fn admit_chat_steer(
         }),
         message_id: None,
         operation_id,
+        anchor_message_id: None,
+        turn_id: None,
     };
     if jeikcode_capabilities::session::inputs::append_global(&mut input).is_err() {
         return (
@@ -20720,6 +21480,8 @@ async fn chat_steer(
             }),
             message_id: None,
             operation_id,
+            anchor_message_id: None,
+            turn_id: None,
         };
         if !existing_admitted {
             let _ = jeikcode_capabilities::session::inputs::append_global(&mut input);
@@ -30278,6 +31040,8 @@ mod client_identity_tests {
             created_at: 1,
             message_id: Some("m-kernel-1".into()),
             operation_id: None,
+            anchor_message_id: None,
+            turn_id: None,
         }];
         let map = client_input_identity_map(inputs);
         let mut rows = vec![
@@ -30346,5 +31110,527 @@ mod client_identity_tests {
             .expect("legacy turn_diagnostic must not degrade to notice: None");
         assert_eq!(ln.severity, Some(NoticeSeverity::Error));
         assert_eq!(ln.status, Some(NoticeStatus::Settled));
+    }
+}
+
+#[cfg(test)]
+mod session_b95e_regression_tests {
+    use super::*;
+    use jeikcode_capabilities::session::{DisplayMeta, SessionInput, TurnRecord, TurnStat};
+    use jeikcode_kernel::message::Message;
+
+    fn test_turn(turn_id: u64, ts: i64, user: &str, assistant: &str) -> TurnRecord {
+        TurnRecord {
+            v: 1,
+            ts,
+            iso: String::new(),
+            session_id: "s-b95e".into(),
+            turn_id,
+            user: user.into(),
+            assistant: assistant.into(),
+            reasoning: String::new(),
+            tools: Vec::new(),
+            usage: Default::default(),
+        }
+    }
+
+    fn test_stat(
+        turn_id: u64,
+        after_message: usize,
+        position_valid: bool,
+        duration_ms: u64,
+    ) -> TurnStat {
+        TurnStat {
+            after_message,
+            position_valid,
+            turn_id,
+            round_count: 1,
+            tool_call_count: 0,
+            duration_ms,
+            total_tokens: 10,
+            errored: false,
+            used_tokens: 10,
+            ctx_window: 100,
+            model_usage: Vec::new(),
+            stop_reason: None,
+        }
+    }
+
+    fn test_msg_info(
+        role: &str,
+        id: Option<&str>,
+        content: &str,
+        created_at: Option<u64>,
+        turn_id: Option<u64>,
+        synthetic: bool,
+    ) -> MessageInfo {
+        message_info! {
+            turn_id,
+            seq: None,
+            role: role.into(),
+            id: id.map(str::to_string),
+            content: content.into(),
+            reasoning: None,
+            synthetic,
+            internal_origin: None,
+            tool_calls: None,
+            tool_result: None,
+            artifacts: None,
+            images: None,
+            created_at,
+            elapsed_ms: None,
+        }
+    }
+
+    #[test]
+    fn v4_coverage_ignores_sacred_pre_anchor_user_and_self_heals_missing_steers_once() {
+        let session_id = format!("b95e-heal-loop-{}", std::process::id());
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+
+        // 模拟 b95e4225：snap[7] 是 sacred_floor 保留下来的旧初代用户消息（位于 anchor 之前），
+        // anchor 之后是较新的第 5 轮提问与回答；turn_stats 里有 1 个历史错位（position_valid: false）
+        // 与 1 个锚点后新 TurnStat。
+        let mut sacred_u1 = Message::user("你好");
+        sacred_u1.id = Some("m-7f10b616".into());
+        sacred_u1.created_at_ms = 1_763_561_100_000;
+
+        let anchor = Message::synthetic_user("<!-- jeikcode:anchor v1 -->\ncompaction summary");
+
+        let mut u5 = Message::user("第5轮提问");
+        u5.id = Some("m-u5".into());
+        u5.created_at_ms = 1_763_566_000_000;
+
+        let mut a5 = Message::assistant("第5轮回答", Vec::new());
+        a5.id = Some("m-a5".into());
+        a5.created_at_ms = 1_763_566_034_000;
+
+        let snapshot = vec![sacred_u1, anchor, u5, a5];
+        let stats = vec![
+            test_stat(4, 1, false, 1_255_000),
+            test_stat(5, 4, true, 34_000),
+        ];
+
+        // 即使 sacred_u1 ("m-7f10b616") 不在 display_ids（旧覆盖缺陷），
+        // 只要锚点之后已完成轮次全在 display_ids，v4_display_covers_completed_user_turns 必须为 true。
+        let meta = DisplayMeta {
+            v: jeikcode_capabilities::session::DISPLAY_VERSION,
+            complete: true,
+            backfilled: true,
+            last_turn_id: 5,
+            completed_turns: vec![5],
+            ..DisplayMeta::default()
+        };
+        let mut display_ids: std::collections::HashSet<String> =
+            ["transcript-1-user", "m-u5", "m-a5"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        assert!(v4_display_covers_completed_user_turns(
+            &meta,
+            &display_ids,
+            &snapshot,
+            &stats,
+            5,
+        ));
+
+        // 存入一条压缩边界前（1_763_562_000_000 < 1_763_566_000_000）的历史 promoted steer。
+        let mut old_steer = SessionInput {
+            id: "cli-steer-4".into(),
+            seq: 1,
+            session_id: session_id.clone(),
+            delivery: "steer".into(),
+            status: "promoted".into(),
+            text: "中途插入的 steer".into(),
+            images: Vec::new(),
+            created_at: 1_763_562_000_000,
+            message_id: Some("m-steer-4".into()),
+            operation_id: Some("op-4".into()),
+            anchor_message_id: None,
+            turn_id: Some(4),
+        };
+        jeikcode_capabilities::session::inputs::append_global(&mut old_steer).unwrap();
+
+        // 首次读到被旧回填遗漏 steer 的 backfilled 日志时，应触发一次自愈。
+        assert!(display_needs_compacted_steer_heal(
+            &meta,
+            &display_ids,
+            &snapshot,
+            &session_id,
+        ));
+
+        // 自愈重建把 m-steer-4 写入 display.jsonl 后，后续读取不再重复自愈。
+        display_ids.insert("m-steer-4".into());
+        assert!(!display_needs_compacted_steer_heal(
+            &meta,
+            &display_ids,
+            &snapshot,
+            &session_id,
+        ));
+
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+    }
+
+    #[test]
+    fn append_pending_inputs_blocks_stale_promoted_steers_when_idle_and_anchors_active_ones() {
+        let session_id = format!("b95e-pending-anchor-{}", std::process::id());
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+
+        // 历史 Turn 4 promoted steer（1_000） + 更新的 Turn 5 prompt（2_000） + 当前活跃 op-6 steer（3_500）
+        let mut stale_steer = SessionInput {
+            id: "old-steer-1".into(),
+            seq: 1,
+            session_id: session_id.clone(),
+            delivery: "steer".into(),
+            status: "promoted".into(),
+            text: "压缩前的旧 steer".into(),
+            images: Vec::new(),
+            created_at: 1_000,
+            message_id: Some("m-old-steer".into()),
+            operation_id: Some("op-4".into()),
+            anchor_message_id: None,
+            turn_id: Some(4),
+        };
+        let mut newer_prompt = SessionInput {
+            id: "prompt-5".into(),
+            seq: 2,
+            session_id: session_id.clone(),
+            delivery: "prompt".into(),
+            status: "promoted".into(),
+            text: "第5轮新提问".into(),
+            images: Vec::new(),
+            created_at: 2_000,
+            message_id: Some("m-u5".into()),
+            operation_id: Some("op-5".into()),
+            anchor_message_id: None,
+            turn_id: Some(5),
+        };
+        let mut active_steer = SessionInput {
+            id: "active-steer-6".into(),
+            seq: 3,
+            session_id: session_id.clone(),
+            delivery: "steer".into(),
+            status: "promoted".into(),
+            text: "按因果锚点插回本轮中段的 steer".into(),
+            images: Vec::new(),
+            created_at: 3_500,
+            message_id: Some("m-steer-6".into()),
+            operation_id: Some("op-6".into()),
+            anchor_message_id: Some("m-asst-6-1".into()),
+            turn_id: Some(6),
+        };
+        jeikcode_capabilities::session::inputs::append_global(&mut stale_steer).unwrap();
+        jeikcode_capabilities::session::inputs::append_global(&mut newer_prompt).unwrap();
+
+        // 1. 会话空闲（operation_id == None）时，旧 steer 绝不能被拉到 Turn 5 尾巴末尾。
+        let mut idle_msgs = vec![
+            test_msg_info(
+                "user",
+                Some("m-u5"),
+                "第5轮新提问",
+                Some(2_000),
+                Some(5),
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-asst-5"),
+                "第5轮回答",
+                Some(2_010),
+                Some(5),
+                false,
+            ),
+        ];
+        let mut idle_turns = session_user_outline(&idle_msgs);
+        append_pending_inputs(
+            &mut idle_msgs,
+            &mut idle_turns,
+            &session_id,
+            None,
+            std::path::Path::new("/project"),
+            0,
+        );
+        assert_eq!(idle_msgs.len(), 2);
+        assert!(idle_msgs
+            .iter()
+            .all(|m| m.id.as_deref() != Some("m-old-steer")));
+        assert!(idle_turns
+            .iter()
+            .all(|t| t.id.as_deref() != Some("m-old-steer")));
+
+        // 2. 在 Turn 6 运行期（operation_id == Some("op-6")），active_steer 必须精准插在
+        // m-asst-6-1 之后、m-asst-6-2（更新轮次的正在输出正文）之前，大纲同步保持按 index 递增。
+        jeikcode_capabilities::session::inputs::append_global(&mut active_steer).unwrap();
+        let mut live_msgs = vec![
+            test_msg_info(
+                "user",
+                Some("m-u6"),
+                "第6轮提问",
+                Some(3_000),
+                Some(6),
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-asst-6-1"),
+                "第一轮阶段思考",
+                Some(3_100),
+                Some(6),
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-asst-6-2"),
+                "折入 steer 后的下一轮回答",
+                Some(3_800),
+                Some(6),
+                false,
+            ),
+        ];
+        let mut live_turns = session_user_outline(&live_msgs);
+        append_pending_inputs(
+            &mut live_msgs,
+            &mut live_turns,
+            &session_id,
+            Some("op-6"),
+            std::path::Path::new("/project"),
+            0,
+        );
+        let ids: Vec<_> = live_msgs.iter().map(|m| m.id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                Some("m-u6"),
+                Some("m-asst-6-1"),
+                Some("m-steer-6"),
+                Some("m-asst-6-2"),
+            ]
+        );
+        assert!(live_turns.windows(2).all(|w| w[0].index < w[1].index));
+        assert_eq!(live_turns.len(), 2);
+        assert_eq!(live_turns[1].index, 2);
+
+        jeikcode_capabilities::session::inputs::clear_global(&session_id);
+    }
+
+    #[test]
+    fn prefix_with_inputs_and_splice_preserve_turn4_steers_sacred_id_and_clocks() {
+        let turns = vec![
+            test_turn(1, 2_000, "你好", "你好，请说"),
+            test_turn(4, 5_000, "做个长重构", "重构完成"),
+            test_turn(5, 8_000, "第5轮", "收到"),
+        ];
+        let inputs = vec![
+            SessionInput {
+                id: "cli-u4".into(),
+                seq: 1,
+                session_id: "s".into(),
+                delivery: "prompt".into(),
+                status: "promoted".into(),
+                text: "做个长重构".into(),
+                images: Vec::new(),
+                created_at: 3_000,
+                message_id: Some("m-u4".into()),
+                operation_id: Some("op-4".into()),
+                anchor_message_id: None,
+                turn_id: Some(4),
+            },
+            SessionInput {
+                id: "cli-s1".into(),
+                seq: 2,
+                session_id: "s".into(),
+                delivery: "steer".into(),
+                status: "promoted".into(),
+                text: "顺便修下测试".into(),
+                images: Vec::new(),
+                created_at: 3_500,
+                message_id: Some("m-s1".into()),
+                operation_id: Some("op-4".into()),
+                anchor_message_id: None,
+                turn_id: Some(4),
+            },
+            SessionInput {
+                id: "cli-s2".into(),
+                seq: 3,
+                session_id: "s".into(),
+                delivery: "steer".into(),
+                status: "promoted".into(),
+                text: "再加一条断言".into(),
+                images: Vec::new(),
+                created_at: 4_000,
+                message_id: Some("m-s2".into()),
+                operation_id: Some("op-4".into()),
+                anchor_message_id: None,
+                turn_id: Some(4),
+            },
+        ];
+        let prefix = display_prefix_from_transcript_with_inputs(
+            &turns,
+            &inputs,
+            std::path::Path::new("."),
+            Some(7_000),
+            Some("第5轮"),
+        );
+
+        let mut sys = test_msg_info("system", None, "system prompt", Some(1_000), None, false);
+        sys.seq = None;
+        let sacred = test_msg_info("user", Some("m-7f10b616"), "你好", Some(1_500), None, false);
+        let anchor = test_msg_info(
+            "user",
+            None,
+            "<!-- jeikcode:anchor v1 -->\nsummary",
+            Some(5_100),
+            None,
+            true,
+        );
+        let tail_u5 = test_msg_info("user", Some("m-u5"), "第5轮", Some(7_000), None, false);
+        let tail_a5 = test_msg_info(
+            "assistant",
+            Some("m-a5"),
+            "收到",
+            Some(8_000),
+            Some(5),
+            false,
+        );
+
+        let mut spliced =
+            splice_compacted_display(vec![sys, sacred, anchor, tail_u5, tail_a5], prefix);
+        propagate_contiguous_turn_ids(&mut spliced);
+
+        let ids: Vec<_> = spliced.iter().map(|m| m.id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                Some("m-7f10b616"),
+                Some("transcript-1-assistant"),
+                Some("m-u4"),
+                Some("m-s1"),
+                Some("m-s2"),
+                Some("transcript-4-assistant"),
+                None, // moved `system`
+                Some("m-u5"),
+                Some("m-a5"),
+            ]
+        );
+        // 幸存 sacred user 的时间戳与 id 被完整保留，搬移后的 system 不再携带会污染倒流检查的旧时间戳
+        assert_eq!(spliced[0].created_at, Some(1_500));
+        assert_eq!(spliced[6].role, "system");
+        assert_eq!(spliced[6].created_at, None);
+        assert!(is_steer_user_message(&spliced[3]));
+        assert!(is_steer_user_message(&spliced[4]));
+    }
+
+    #[test]
+    fn stamp_turn_elapsed_matches_by_turn_id_and_isolates_post_stop_steer() {
+        let mut messages = vec![
+            // Turn 1（已压缩，turn_stats 中已剪掉 turn_id=1 的统计）
+            test_msg_info("user", Some("m-u1"), "T1", Some(1_000), None, false),
+            test_msg_info(
+                "assistant",
+                Some("m-a1"),
+                "A1",
+                Some(11_000),
+                Some(1),
+                false,
+            ),
+            // Turn 4 + mid-turn steer
+            test_msg_info("user", Some("m-u4"), "T4", Some(20_000), None, false),
+            test_msg_info(
+                "user",
+                Some("m-s4"),
+                "<user-query>\nsteer4\n</user-query>\n\n[jeikcode-steer]",
+                Some(30_000),
+                None,
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-a4"),
+                "A4",
+                Some(120_000),
+                Some(4),
+                false,
+            ),
+            // Post-stop steer 开启了独立的 Turn 5
+            test_msg_info(
+                "user",
+                Some("m-s5"),
+                "<user-query>\npost-stop\n</user-query>\n\n[jeikcode-steer]",
+                Some(130_000),
+                None,
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("m-a5"),
+                "A5",
+                Some(164_000),
+                Some(5),
+                false,
+            ),
+        ];
+        propagate_contiguous_turn_ids(&mut messages);
+        assert_eq!(messages[0].turn_id, Some(1));
+        assert_eq!(messages[2].turn_id, Some(4));
+        assert_eq!(messages[3].turn_id, Some(4));
+        assert_eq!(messages[5].turn_id, Some(5));
+
+        let stats = vec![
+            test_stat(4, 5, false, 95_000),
+            test_stat(5, 7, true, 34_000),
+        ];
+        stamp_turn_elapsed_on_last_assistants(&mut messages, &stats);
+
+        // Turn 1 没有 TurnStat，不可错位读取 Turn 4 的 95s，回退到自身 ts 差 10s
+        assert_eq!(messages[1].elapsed_ms, Some(10_000));
+        // Turn 4 带 mid-turn steer：stat=95s vs span=100s => 100s
+        assert_eq!(messages[4].elapsed_ms, Some(100_000));
+        // Turn 5（post-stop steer 新开回合）：精确拿到 Turn 5 的 34s，绝不被合并进 Turn 4
+        assert_eq!(messages[6].elapsed_ms, Some(34_000));
+    }
+
+    #[test]
+    fn repair_display_clock_never_drags_real_midnight_messages_backward() {
+        let mut rows = vec![
+            test_msg_info(
+                "user",
+                Some("u9"),
+                "23:59提问",
+                Some(1_763_567_940_000),
+                Some(9),
+                false,
+            ),
+            test_msg_info(
+                "tool",
+                Some("t9"),
+                "tool out",
+                Some(1_763_999_999_000),
+                Some(9),
+                false,
+            ),
+            test_msg_info(
+                "assistant",
+                Some("a9"),
+                "00:14回答",
+                Some(1_763_568_840_000),
+                Some(9),
+                false,
+            ),
+            // 极端情况下尾部出现时间戳回跳的行，也不得把 00:14 真实对话拉回 22:05
+            test_msg_info(
+                "user",
+                Some("stale"),
+                "旧异常行",
+                Some(1_763_561_131_000),
+                Some(4),
+                false,
+            ),
+        ];
+        repair_display_clock(&mut rows);
+
+        assert_eq!(rows[0].created_at, Some(1_763_567_940_000));
+        // tool 行（大于后继 assistant 00:14）仍被正确拉平到 00:14
+        assert_eq!(rows[1].created_at, Some(1_763_568_840_000));
+        // 真实跨零点 assistant 00:14 原样保留
+        assert_eq!(rows[2].created_at, Some(1_763_568_840_000));
     }
 }
