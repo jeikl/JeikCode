@@ -43,7 +43,7 @@ pub const MIN_COLLAPSE_SIZE: usize = 500;
 /// `compact_old_tool_results_in_place`).
 pub struct StubCompaction {
     /// Keep this many most-recent turns FULL (`1` = only the active turn). A "turn"
-    /// begins at a non-synthetic [`Role::User`] message.
+    /// starts at a real user message or an autonomous `/goal` turn.
     keep_recent_turns: usize,
     /// Never stub file-read results — compacting them makes the model "falsely
     /// confident" and re-edit the same file (core's 5–7 atomgr finding); keeping them
@@ -1018,9 +1018,10 @@ fn auto_drain_would_help(
 }
 
 /// Index at which the kept window (the `keep_recent_turns` most-recent turns) begins;
-/// everything before it is "old" and eligible to stub. A turn starts at a NON-synthetic
-/// [`Role::User`] message (synthetic users are kernel-injected summaries / resume notes,
-/// not real turns). Returns `0` when there are not strictly MORE than `keep_recent_turns`
+/// everything before it is "old" and eligible to stub. A turn starts at a real user
+/// message or an autonomous `/goal` turn (`Message::is_compaction_turn_start`); other
+/// synthetic users are kernel-injected summaries / resume notes, not turn boundaries.
+/// Returns `0` when there are not strictly MORE than `keep_recent_turns`
 /// real turns — i.e. nothing is old yet (mirrors core's `turns.len() <= keep_recent_turns`).
 fn active_turn_start(msgs: &[Message], keep_recent_turns: usize) -> usize {
     if keep_recent_turns == 0 {

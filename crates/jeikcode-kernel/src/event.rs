@@ -114,8 +114,9 @@ pub enum AgentCommand {
     /// Host-injected synthetic prompt (e.g. an automated goal-mode continuation).
     /// Same execution path as `SendMessage` (user_prompt_submit hook, task-boundary
     /// compaction, mid-turn FIFO queueing), but the conversation message is pushed
-    /// via `Message::synthetic_user`, so `sacred_floor` skips it and hosts can hide
-    /// it from user-facing projections.
+    /// via `Message::synthetic_turn`: still synthetic for `sacred_floor` / display
+    /// hiding, and it also opens a compaction turn boundary so multi-round `/goal`
+    /// sessions stay drainable.
     SendSyntheticMessage {
         text: String,
     },
