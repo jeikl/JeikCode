@@ -21,6 +21,118 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.2-beta.1 (2026-11-20)
+
+**This beta introduces scheduled tasks with dedicated AI dialog configuration, removes main session execution round limits with graceful soft-landing summaries, supports runtime seamless model switching, enables startup global Auto mode, provides silent desktop autostart with global hotkeys, and delivers full desktop package update architecture with two-hop legacy shell upgrades, alongside critical fixes for compaction notice misplacement, semver comparison bugs, single-mux WebSocket performance, and zero-blocking async runtimes.**
+
+- **[New Feature: Scheduled Tasks] AI dialog assistant and orthogonal calendar scheduling**:
+  - Added multi-schedule syntax (`Schedule::Calendar`) supporting orthogonal dates, weekdays, and multi-time combinations with atomic temp-file configuration persistence.
+  - Implemented 15-second background scheduling engine in `jeikcode-daemon` with local timezone accuracy, `one_shot` auto-deactivation, and `isolated` vs `reuse` session modes.
+  - Added dedicated `/api/schedules/ai-dialog` mounting an isolated `set_schedule` tool to manage scheduled tasks via natural conversation without polluting workspace context.
+  - Integrated `ScheduleDialog.tsx` in WebUI with visual date picker, prompt editor, `Run Now` instant trial, active badges in the sidebar, and project-level task trees.
+
+- **[New Feature: Unbounded Rounds] Complete removal of main session round limits with soft-landing summary**:
+  - Removed execution round limits for main sessions (`max_rounds` defaults to `0` / unbounded, while subagents retain a 300-round ceiling).
+  - Replaced abrupt `StopReason::MaxRounds` terminations with an intelligent soft landing: disables tool execution for one final summary round while emitting localized warning notices.
+
+- **[New Feature: Runtime Model Swap] Hot-swapping models during active turns without context loss**:
+  - Supported hot-swapping models during active turns, applying the new model cleanly at the next round boundary without breaking stream execution or losing conversation history.
+  - Added display-only "Switch to <model>" chips bound to assistant messages, persisted to `<session>.model-switches.jsonl` and `<session>.toolmetrics.jsonl` without polluting model context.
+
+- **[New Feature: Startup Automation] Startup global Auto/Bypass mode and persistent mode memory**:
+  - Added configurable `agent_mode_policy` (`memory` vs `global`) and `agent_global_mode` (`build`, `plan`, `accept_edits`, `bypass` / Auto).
+  - Automatically loads desktop settings on daemon startup to initialize global Auto mode, and sets default `permission_mode` to `"auto"` for scheduled tasks.
+  - Added a direct gear settings button in `ModeSelector.tsx` leading to Agent Mode configurations with full 11-locale support.
+
+- **[New Feature: Full Desktop Updates] Full desktop package updates and legacy shell two-hop upgrades**:
+  - Added desktop shell compatibility metadata (`desktop/shell-compat.json` with `min_shell_version`); automatically prompts for full desktop package download if shell is below requirement or installation directory is read-only.
+  - Implemented automated two-hop upgrade continuation for legacy desktop shells: Step 1 hot-updates the core to latest, and Step 2 prompts to download and install the new desktop shell package in one click.
+
+- **[New Feature: Desktop & Shortcut] Silent-to-tray autostart and global hotkey**:
+  - Added silent-to-tray login autostart for Windows (`--minimized`) without window flashes, and ensured reliable foreground window activation.
+  - Added configurable global shortcut `Ctrl+Alt+J` with interactive keycap recording in `ShortcutRecorder.tsx`.
+
+- **[New Feature: UI Overhaul] Minimalist high-information-density UI redesign**:
+  - Replaced expansive git commit cards with concise, single-line `gitCommitBanner` summary banners showing branch name, commit hash, and line stats.
+  - Replaced cumbersome execution timer blocks with sleek, inline `ElapsedBadge` chips.
+  - Streamlined `app.css` and `theme.css` spacing, margins, and typography, boosting screen information density by ~35%.
+
+- **[Deep Fix: Compaction Anchoring] Multi-turn compaction notice misplacement and causal anchoring**:
+  - Resolved multi-turn compaction notice misplacement and drifting by introducing continuous `event_id`, `turn_id`, and `anchor_message_id` causal anchors.
+  - Bumped display ledger format to `DISPLAY_VERSION = 5` with single-writer persistence, pre-compaction flushing, and in-place notice card state convergence.
+
+- **[Deep Fix: SemVer Comparison] Numeric prerelease comparison and cross-lockfile consistency**:
+  - Fixed semver prerelease comparison algorithms in bump/release scripts, preventing `beta.10` from sorting before `beta.2` via true numeric segmentation.
+  - Aligned cross-lockfile package version extraction across `desktop/src-tauri/Cargo.lock` and root `Cargo.lock`.
+
+- **[Performance & Concurrency] Zero-blocking async runtime and HTTP/2 shared pools**:
+  - Multiplexed all global events and session watches onto a single WebSocket (`/stream/ws`), freeing HTTP/1.1 connection slots and eliminating multi-tab stalls.
+  - Lazy-loaded Terminal (saving 377KB+ initial bundle), Git, and Preview inspectors, allowing closing terminals to zero.
+  - Offloaded all disk and session I/O to dedicated blocking threads, and deployed Tokio reactor lag watchdog alerting on >100ms delays.
+  - Enabled HTTP/2 across all providers via global shared `reqwest` connection pool, and sharded session registry locks across 64 shards (raising active limit from 32 to 128).
+
+- **[Resilience & Bug Fixes] Long-session stability, decimal cursor fix, and process safety**:
+  - Fixed decimal cursor (`before_seq=0.953`) 400 errors during upward history pagination by strictly using integer `serverSeq` cursors and falling back to offset pagination.
+  - Fixed Linux TGID migration self-kill defect (#88) and added timeout error banners.
+  - Unified provider retry backoff ladders with jitter and supported interrupted stream resumption.
+  - Raised default streaming and transition timeouts to 360s for reasoning models.
+
+---
+
+**本次 beta 带来多项突破性全新功能：支持强大 AI 配置的全新定时任务系统、彻底移除主会话轮次上限并引入优雅软着陆机制、回合内运行时无缝模型热切换、开机自动全局 Auto/Bypass 模式、全量桌面端更新体系与存量旧壳两跳平滑升级、桌面端静默自启与全局热键，以及全界面极简高密度比改造；同时针对多轮对话压缩错位、SemVer 版本号数值比对缺陷、单链路 WebSocket 复用与全栈异步零阻塞架构进行了深水区根因级修复与全面升级。**
+
+- **[新增功能：定时任务] 支持强大的 AI 对话配置、指定时间多维度独立解耦配置**：
+  - 新增日历正交多时间点调度语法（`Schedule::Calendar`），支持指定日期、星期与多时间点正交组合，配置写入采用同目录原子临时文件保证安全性。
+  - 在守护进程部署 15 秒高精度后台调度循环，按本地时区精准触发，支持单次任务（`one_shot`）自动停用以及新建独立会话或复用会话模式。
+  - 推出专属 `/api/schedules/ai-dialog` 独立端点与单挂载 `set_schedule` 工具，支持纯自然语言对话配置与管理定时任务，绝不污染主编码工具池。
+  - WebUI 全面上线 `ScheduleDialog.tsx`，支持可视化日程配置、即时试跑（`Run Now`）、左侧栏激活指示徽标与项目内定时任务折叠组展示。
+
+- **[新增功能：轮次上限解锁] 彻底移除主会话执行轮次上限，支持温和优雅的软着陆总结**：
+  - 彻底解除主会话的轮次硬性上限（主会话默认 `max_rounds = 0` 不受限，子 Agent 维持 300 轮安全边界）。
+  - 将达到轮次上限的强杀逻辑改造为智能软着陆机制：禁用工具保留最后 1 轮让模型生成最终总结，并触发多语言警告通知收口。
+
+- **[新增功能：运行时切模] 运行时无缝模型热切换，回合执行中随时换模且零上下文丢失**：
+  - 支持在回合执行过程中动态更换模型，在当前小轮结束后自动切换 Provider，不打断流式生成、不丢失历史上下文。
+  - 新增绑定 Assistant 消息的仅展示 “Switch to <模型>” 状态徽标，换模耗时与工具执行指标实时写入 `<session>.model-switches.jsonl` 与 `<session>.toolmetrics.jsonl`，绝不污染模型提示词。
+
+- **[新增功能：启动自动化] 启动自动全局 Auto/Bypass 模式与智能体记忆策略**：
+  - 扩展 `agent_mode_policy`（`memory` 按会话记忆 vs `global` 全局统一）与 `agent_global_mode`（`build`、`plan`、`accept_edits`、`bypass` / Auto）。
+  - 守护进程冷启动自动读取系统设置加载全局 Auto/Bypass 模式，所有后台定时任务默认 `permission_mode = "auto"` 自动免审批执行。
+  - 深度持久化每会话审批模式，彻底解决草稿或落地页重启后回退至 `build` 确认模式的顽疾。
+
+- **[新增功能：全量更新] 全新桌面端全量更新机制，低版本外壳自动拦截与两跳平滑升级**：
+  - 新增 `desktop/shell-compat.json` 外壳兼容性判定；当检测到外壳版本低于要求或安装目录只读时，自动提示下载完整安装包。
+  - 针对存量老版本桌面客户端实现两跳升级机制：第 1 跳就地热更新核心至最新版，重启后新核心自动引导第 2 跳一键全量升级桌面外壳。
+
+- **[新增功能：桌面端体验] 桌面端无闪烁静默自启与全局呼出热键**：
+  - Windows 系统下支持通过注册表注入 `--minimized` 实现托盘静默自启（消除冷启白屏闪烁），并确保托盘唤醒即置顶聚焦。
+  - 新增默认 `Ctrl+Alt+J` 全局呼出/隐藏热键，集成 `ShortcutRecorder.tsx` 动态按键录制。
+
+- **[新增功能：界面重构] 全界面极简风与高信息密度比重构**：
+  - 新增单行极简 `gitCommitBanner` 提交成功横条，精炼呈现分支、提交哈希与变更量统计，杜绝全量文件刷屏。
+  - 引入精致内嵌的 `ElapsedBadge` 耗时徽标，优化思考过程与模型耗时排版。
+  - 全面精简 `app.css` 与 `theme.css` 内外边距及文字字阶，有效信息屏占比提升约 35%。
+
+- **[深水区架构修复：压缩错位治理] 修复多轮对话压缩消息张冠李戴错位缺陷**：
+  - 引入因果锚定（`anchor_message_id`、连续递增 `event_id` 与 `turn_id`），彻底消灭多轮压缩和转向历史中系统卡片跳跃、挂错回合与重复刷屏的严重 Bug。
+  - 升级 `DISPLAY_VERSION = 5`，支持单写账本持久化，在压缩前执行预落盘校验并在卡片状态变更时原地收敛更新。
+
+- **[深水区架构修复：版本比对修复] 修复升级版本号数值比对倒流 Bug**：
+  - 修复版本递增与发版脚本中先行版本号（Prerelease）的字符串字典序缺陷，将数字部分转为纯数值比较，彻底消灭 `beta.10` 比 `beta.2` 更小的排序错误。
+  - 对齐跨 Lockfile 独立包多版本提取规则，兼容数值型 query 参数。
+
+- **[极致性能与高并发跃升] 单链路 WebSocket 多路复用与全栈异步零阻塞**：
+  - 全面落地单 WebSocket（`/stream/ws`）多路复用，释放浏览器 6 个并发连接池槽位，多标签切换秒开不卡死。
+  - 右侧终端（省下 377KB 首屏包）、Git 与预览面板彻底改为按需懒加载，支持关闭全部终端至 0。
+  - 网络线程盘 I/O 清零，全面切离至阻塞线程池；部署自适应 Reactor 调度延迟看门狗（超调 100ms 限流报警）。
+  - 全仓开启 HTTP/2 与全局共享连接池，锁升级为 64 分片，活跃并发会话上限由 32 提升至 128。
+
+- **[稳定性与缺陷修复] 历史翻页小数游标修复与进程防自毁**：
+  - 修复向上加载历史消息时小数游标（`before_seq=0.953`）导致的 400 崩溃，严格分离整数 `serverSeq` 游标并支持 offset 降级。
+  - 修复 Linux 环境旧版环境扫描误杀当前守护进程（#88）的重大缺陷。
+  - 统一大模型供应商重试退避阶梯并支持未完成流式响应断点续传。
+  - 将流式与状态过渡超时阈值提升至 360 秒，完美适配长耗时思考模型。
+
 ## v7.5.2-beta.0 (2026-11-17)
 
 **This beta eliminates WebUI multi-tab stalls, connection pool exhaustion, modal hangs, and legacy-migration daemon self-termination (#88). It multiplexes live streams over a single WebSocket, lazy-loads the right inspector and extra language packs, isolates blocking backend IO onto worker threads, and aggregates cold-start metadata loading.**
