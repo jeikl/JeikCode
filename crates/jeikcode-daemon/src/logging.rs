@@ -16,7 +16,7 @@ use jeikcode_config::Config;
 use tracing_subscriber::fmt::MakeWriter;
 
 /// Default log filter keeping `info` for workspace crates while muting noisy transport crates.
-const DEFAULT_LOG_DIRECTIVES: &str =
+pub const DEFAULT_LOG_DIRECTIVES: &str =
     "info,hyper=warn,hyper_util=warn,h2=warn,rustls=warn,reqwest=warn,tower=warn,mio=warn";
 
 /// Roll size cap for each process log file (`.old` single-generation rotation).

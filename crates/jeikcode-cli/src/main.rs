@@ -5273,7 +5273,6 @@ mod tests {
         merge_startup_notices, normalize_attach_base, parse_desktop_webui_args,
         print_shell_completion, resolve_working_dir, runtime_config_from,
         should_fork_busy_continue, token_from_url, truncate_log_line, Cli, Commands,
-        DEFAULT_LOG_DIRECTIVES,
     };
     use clap::Parser;
     use clap_complete::Shell;
@@ -5509,7 +5508,10 @@ mod tests {
     fn default_log_directives_parse() {
         // A malformed default would silently disable ALL logging via the fallback
         // path in `init_file_logging`; pin that it is a valid EnvFilter directive.
-        assert!(tracing_subscriber::EnvFilter::try_new(DEFAULT_LOG_DIRECTIVES).is_ok());
+        assert!(tracing_subscriber::EnvFilter::try_new(
+            jeikcode_daemon::logging::DEFAULT_LOG_DIRECTIVES
+        )
+        .is_ok());
     }
 
     #[test]
