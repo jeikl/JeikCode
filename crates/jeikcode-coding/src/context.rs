@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 use jeikcode_capabilities::compaction::is_compaction_anchor_text;
 use jeikcode_kernel::message::{Message, Role, SessionSnapshot, LEGACY_COLD_SUMMARY_ORIGIN};
-use jeikcode_kernel::tool::ToolDef;
 
 use crate::config::CodingAgentConfig;
 use crate::parts::CodingParts;
@@ -17,20 +16,6 @@ use crate::runtime::RuntimeContextStats;
 pub(crate) fn current_parts_snapshot(parts: &CodingParts) -> Option<SessionSnapshot> {
     let binding = parts.session.as_ref()?;
     binding.manager.load_snapshot(&binding.id).ok()
-}
-
-pub(crate) fn estimate_tool_defs_tokens(tools: &[ToolDef]) -> usize {
-    if tools.is_empty() {
-        return 0;
-    }
-    let byte_count: usize = tools
-        .iter()
-        .map(|tool| {
-            let schema_len = tool.parameters.to_string().len();
-            tool.name.len() + tool.description.len() + schema_len + 24
-        })
-        .sum();
-    (byte_count / 4).max(1)
 }
 
 pub(crate) fn estimate_text_block_tokens(text: &str) -> usize {
@@ -94,7 +79,7 @@ pub fn compute_runtime_context_stats(
 
     let tool_defs_tokens = parts
         .mounted_tools()
-        .map(|tools| estimate_tool_defs_tokens(&tools.defs()))
+        .map(|tools| tools.snapshot().defs_token_estimate() as usize)
         .unwrap_or(0);
 
     compute_snapshot_context_stats(
@@ -175,13 +160,27 @@ where
             .filter(|m| m.internal_origin.as_deref() == Some(LEGACY_COLD_SUMMARY_ORIGIN))
             .map(|m| m.estimate_tokens() as usize)
             .sum();
-        let cold_tokens = v2_cold_tokens.saturating_add(legacy_cold_tokens);
+        // Legacy cold summaries predate the v2 wire projection: they are stored with
+        // an `internal_origin` and are NOT sent anymore. Only count them while there
+        // is no live v2 usage to anchor the report; once a provider reports usage,
+        // the wire is authoritative and counting them would overstate the cold zone
+        // (and understate the messages bucket via `sent - cold`).
+        let legacy_cold_counts = observed_used_tokens == 0;
+        let cold_tokens = v2_cold_tokens.saturating_add(if legacy_cold_counts {
+            legacy_cold_tokens
+        } else {
+            0
+        });
 
         let wire_non_frozen_tokens: usize = non_frozen
             .iter()
             .map(|m| m.estimate_tokens() as usize)
             .sum();
-        let est_non_frozen_tokens = wire_non_frozen_tokens.saturating_add(legacy_cold_tokens);
+        let est_non_frozen_tokens = wire_non_frozen_tokens.saturating_add(if legacy_cold_counts {
+            legacy_cold_tokens
+        } else {
+            0
+        });
         let msg_count = non_frozen.len();
         let snapshot_used = snapshot_last_used_tokens(messages);
 
@@ -209,17 +208,34 @@ where
         snapshot_used_tokens
     };
 
-    let sent_tokens = if used_tokens > 0 {
-        let obs = used_tokens as usize;
+    // Keep the report internally consistent: `system + tool_defs + sent` must equal
+    // the authoritative `used_tokens` whenever one exists. Provider usage can be
+    // smaller than our fixed-overhead estimate on a short first turn with a large
+    // tool catalog; scale the estimates down instead of letting the buckets exceed
+    // the real prompt size. `cold` is part of `sent`, so clamp it there too.
+    let used = used_tokens as usize;
+    let (system_tokens, tool_defs_tokens) = if used > 0 {
         let overhead = system_tokens.saturating_add(tool_defs_tokens);
-        if obs > overhead {
-            obs.saturating_sub(overhead).max(cold_zone_tokens)
+        if overhead > used {
+            let scaled_system = if overhead == 0 {
+                0
+            } else {
+                used.saturating_mul(system_tokens) / overhead
+            };
+            (scaled_system, used.saturating_sub(scaled_system))
         } else {
-            est_non_sys_tokens.max(cold_zone_tokens)
+            (system_tokens, tool_defs_tokens)
         }
+    } else {
+        (system_tokens, tool_defs_tokens)
+    };
+    let overhead = system_tokens.saturating_add(tool_defs_tokens);
+    let sent_tokens = if used > 0 {
+        used.saturating_sub(overhead)
     } else {
         est_non_sys_tokens
     };
+    let cold_zone_tokens = cold_zone_tokens.min(sent_tokens);
 
     let utilization = if context_window > 0 {
         (used_tokens as f32 / context_window as f32).clamp(0.0, 1.0)
@@ -422,5 +438,63 @@ mod tests {
             stats.system_tokens + stats.tool_defs_tokens + stats.sent_tokens,
             42_000
         );
+    }
+
+    #[test]
+    fn live_usage_excludes_legacy_cold_summaries_from_the_breakdown() {
+        let sys = Message::system("System persona");
+        let user = Message::user("Keep going");
+        let legacy_cold = Message {
+            internal_origin: Some(LEGACY_COLD_SUMMARY_ORIGIN.to_string()),
+            ..Message::synthetic_user(format!("{LEGACY_COLD_SUMMARY_PREFIX}Legacy summary."))
+        };
+        let reply = Message::assistant("Working on it.", Vec::new());
+        let snap = SessionSnapshot::new(vec![sys, user, legacy_cold, reply]);
+        let observed = 50_000u32;
+
+        let stats = compute_snapshot_context_stats(
+            Some(&snap),
+            || unreachable!("leading system present"),
+            5_000,
+            200_000,
+            "test-model",
+            PathBuf::from("."),
+            observed,
+        );
+
+        assert_eq!(
+            stats.cold_zone_tokens, 0,
+            "legacy cold summaries are not on the v2 wire once live usage exists"
+        );
+        assert_eq!(
+            stats.system_tokens + stats.tool_defs_tokens + stats.sent_tokens,
+            observed as usize
+        );
+    }
+
+    #[test]
+    fn breakdown_clamps_to_observed_usage_when_fixed_overhead_is_larger() {
+        let snap =
+            SessionSnapshot::new(vec![Message::system("System persona"), Message::user("Hi")]);
+        let observed = 1_000u32;
+
+        let stats = compute_snapshot_context_stats(
+            Some(&snap),
+            || unreachable!("leading system present"),
+            50_000,
+            200_000,
+            "test-model",
+            PathBuf::from("."),
+            observed,
+        );
+
+        assert_eq!(stats.used_tokens, observed);
+        assert_eq!(stats.sent_tokens, 0);
+        assert_eq!(
+            stats.system_tokens + stats.tool_defs_tokens,
+            observed as usize,
+            "overhead must be scaled down so the buckets never exceed real usage"
+        );
+        assert_eq!(stats.cold_zone_tokens, 0);
     }
 }
