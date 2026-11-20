@@ -37,6 +37,7 @@ fn _isolate_jeikcode_home() {
 
 pub mod config;
 pub mod config_sync;
+pub mod context;
 mod controllers;
 pub mod custom_prompts;
 pub mod parts;
