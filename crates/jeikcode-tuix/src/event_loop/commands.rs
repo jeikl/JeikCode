@@ -4944,7 +4944,9 @@ fn apply_compact_threshold_update(
 }
 
 fn format_tok(t: usize) -> String {
-    if t >= 1000 {
+    if t >= 1_000_000 {
+        format!("{:.1}M", t as f64 / 1_000_000.0)
+    } else if t >= 1000 {
         format!("{:.1}K", t as f64 / 1000.0)
     } else {
         format!("{t}")
@@ -4983,12 +4985,17 @@ fn format_effective_compact_threshold(
         coding.compact_max_tokens,
     );
     if effective >= 1.0 {
-        return format!("off ({model}, {})", format_tok(context_window as usize));
+        return format!(
+            "off  ·  {}  ·  {model}",
+            format_tok(context_window as usize)
+        );
     }
     let budget = jeikcode_coding::watermark_input_budget(context_window);
     let trigger_tokens = ((budget as f64) * (effective as f64)).round() as usize;
+    // Language-neutral: the surrounding i18n message owns the sentence. Avoid
+    // embedding English ("of ... budget") inside zh/vi catalogs.
     format!(
-        "~{} / {} ({:.0}% of {} budget, {model})",
+        "~{} / {} ({:.0}%)  ·  {}  ·  {model}",
         format_tok(trigger_tokens),
         format_tok(context_window as usize),
         (effective * 100.0).round(),
@@ -5017,12 +5024,10 @@ fn classify_compact_subcommand(arg: &str) -> CompactSubcommand<'_> {
         }
     }
     let lower = trimmed.to_ascii_lowercase();
-    if lower == "thresholds"
-        || lower.starts_with("threshold=")
-        || lower.starts_with("threshold:")
-        || lower.starts_with("thresholds=")
-        || lower.starts_with("thresholds:")
-    {
+    let first = lower.split_whitespace().next().unwrap_or("");
+    if first.starts_with("threshold") {
+        // Catch `threshold=350k`, `thresholds`, `thresholdfoo`, … before they
+        // fall through to a real (paid) manual compaction with a focus string.
         return CompactSubcommand::ThresholdNearMiss(trimmed);
     }
     let focus = (!trimmed.is_empty()).then(|| trimmed.to_string());
@@ -8354,6 +8359,10 @@ mod compact_threshold_tests {
         assert_eq!(
             classify_compact_subcommand("threshold:350k"),
             CompactSubcommand::ThresholdNearMiss("threshold:350k")
+        );
+        assert_eq!(
+            classify_compact_subcommand("thresholdfoo 350k"),
+            CompactSubcommand::ThresholdNearMiss("thresholdfoo 350k")
         );
         assert_eq!(
             classify_compact_subcommand("focus on api changes"),
