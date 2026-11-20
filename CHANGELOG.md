@@ -21,6 +21,70 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.2-beta.2 (2026-11-20)
+
+**This beta makes multi-round `/goal` autonomous sessions compactable, adds a configurable auto-compaction threshold with a `/compact threshold` command, turns `/context` into an accurate native breakdown, and hardens provider/config reliability across Tokio runtimes, Gemini overflow responses, project-key tests, and macOS/Windows edge cases.**
+
+- **[Autonomous Sessions & Compaction] `/goal` sessions now compact instead of collapsing into one turn**:
+  - Multi-round `/goal` continuations are persisted as autonomous turn boundaries, so auto, manual, and overflow compaction can drain and summarize older rounds.
+  - Tool-schema token overhead is included in mid-turn and pre-send pressure estimates, and cached when the mounted tool catalog is published.
+  - Mid-turn auto compaction re-arms only after a real drain; stub-only rewrites no longer break the provider prompt cache every round.
+  - Gemini/Vertex HTTP 400 context-overflow bodies are recognized, while output-limit errors are not misclassified as context overflow.
+
+- **[Configurable Compaction] `[coding]` thresholds and the `/compact threshold` command**:
+  - Added `compact_threshold` (default 0.9) and optional `compact_max_tokens`; the stricter of the ratio and token cap wins.
+  - Added `/compact threshold [350k | 35% | 0.35 | 1m | off | default]` to show the effective trigger on the active model, persist updates, and hot-reload the runtime.
+  - `off` is a true off switch; an explicit token cap still re-enables compaction.
+  - Manual `/compact` keeps its historical recent-turn budget; deleting the last provider now stops the live runtime instead of leaving the old provider serving requests.
+
+- **[Context Visibility] Accurate `/context` breakdown on coding-runtime**:
+  - `/context` now reports the system prompt/frozen prefix, mounted tool definitions, cold compacted zone, and message bucket instead of zeros.
+  - Footer occupancy and the report history are separated, so `/compact -> /context` no longer double-counts system + tools.
+  - Legacy cold summaries are excluded once live provider usage exists, and the buckets stay consistent with the reported total.
+
+- **[Provider & Test Reliability] Cross-runtime HTTP pool, 401 recovery, and CI stability**:
+  - Scoped the shared HTTP client pool to the current Tokio runtime, eliminating `dispatch task is gone` failures when runtimes are recreated in tests or embedded hosts.
+  - Serialized 401 recovery tests with the SSL certificate environment tests and added a small transport retry budget for stale localhost keep-alive connections.
+  - Fixed an event-ordering race where `ModelSwitched` could be delivered after the next round's text.
+
+- **[Config, Build & Docs] Project-key contract and cross-platform fixes**:
+  - Replaced the stale project-hash golden with a neutral fixture and added `jeikcode-config` lib tests to CI.
+  - Updated plugin integration tests to `UserCommandRegistry` and supplied `ProviderError.resumable` in kernel tests.
+  - Fixed macOS desktop staging (globstar to Node file scanner), cross-platform write-lock/symlink ignore handling, and CLI log-directive references.
+  - Synced compaction turn-boundary comments and configuration documentation.
+
+---
+
+**本次 beta 让多轮 `/goal` 自治会话可以正常压缩，新增可配置的自动压缩阈值与 `/compact threshold` 命令，让 `coding-runtime` 的 `/context` 输出真实明细，并系统性修复了跨 Tokio runtime 的共享 HTTP 池、Gemini 溢出识别、项目 key 测试与 macOS/Windows 边界问题。**
+
+- **[自治会话与压缩] `/goal` 多轮会话不再被折叠成单个轮次**：
+  - 多轮 `/goal` 续跑会持久化为自治轮次边界，自动、手动与溢出压缩都能归档并摘要旧轮次。
+  - 轮内与发前上下文估算纳入工具 schema 开销，并在工具目录发布时缓存。
+  - mid-turn 自动压缩只在真正删除历史后重新放行；纯 stub 改写不再每轮破坏服务商前缀缓存。
+  - 识别 Gemini/Vertex HTTP 400 上下文溢出报文，同时避免把输出上限错误误判为溢出。
+
+- **[可配置压缩] `[coding]` 阈值与 `/compact threshold` 命令**：
+  - 新增 `compact_threshold`（默认 0.9）与可选 `compact_max_tokens`，取其与比例中更严格的一方。
+  - 新增 `/compact threshold [350k | 35% | 0.35 | 1m | off | default]`，可查看当前模型的实际触发点、持久化更新并热重载运行时。
+  - `off` 为真正关闭；显式 token 上限仍会重新启用压缩。
+  - 手动 `/compact` 保留历史 recent-turn 预算；删除最后一个 provider 会停用运行时，而不是让旧 provider 继续服务。
+
+- **[上下文可视化] coding-runtime 的 `/context` 真实明细**：
+  - `/context` 现在展示系统提示/冻结前缀、挂载工具定义、冷压缩区与消息桶，而不是全 0。
+  - 页脚总占用与报表历史分离，`/compact -> /context` 不再重复计算 system + tools。
+  - 出现实时 provider 用量后不再计入 legacy 冷摘要，各桶与上报总量保持一致。
+
+- **[Provider 与测试稳定性] 跨 runtime HTTP 池、401 恢复与 CI 稳定性**：
+  - 共享 HTTP 客户端池绑定当前 Tokio runtime，消除测试或嵌入式宿主重建 runtime 后 `dispatch task is gone` 的失败。
+  - 401 恢复测试与 SSL 证书环境测试串行化，并为本地 keep-alive 陈旧连接增加很小的传输重试预算。
+  - 修复 `ModelSwitched` 可能晚于下一轮正文到达的事件顺序竞态。
+
+- **[配置、构建与文档] 项目 key 契约与跨平台修复**：
+  - 使用中性夹具修正 project-hash golden，并把 `jeikcode-config` lib 测试加入 CI。
+  - 插件集成测试改用 `UserCommandRegistry`；内核测试补齐 `ProviderError.resumable`。
+  - 修复 macOS 桌面打包（globstar → Node 文件扫描）、跨平台写锁/符号链接 ignore 处理与 CLI 日志常量引用。
+  - 同步压缩轮次边界注释与配置文档。
+
 ## v7.5.2-beta.1 (2026-11-20)
 
 **This beta introduces scheduled tasks with dedicated AI dialog configuration, removes main session execution round limits with graceful soft-landing summaries, supports runtime seamless model switching, enables startup global Auto mode, provides silent desktop autostart with global hotkeys, and delivers full desktop package update architecture with two-hop legacy shell upgrades, alongside critical fixes for compaction notice misplacement, semver comparison bugs, single-mux WebSocket performance, and zero-blocking async runtimes.**
