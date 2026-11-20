@@ -29,6 +29,7 @@ raw: |-
   ## Task Checklist Guidelines & Operations:
   - When to use: Use for multi-step tasks (>2 steps). For simple Q&A, deliberate carefully and answer directly without creating a checklist.
   - Incremental Update (`update: [...]`): Tick each completed item immediately instead of batching all ticks at the end.
+  - Combined call: `plan` and `update` may be used together; internally `plan` is always applied before `update`.
   - Requirement Steering: When requirements evolve or steer, prefer incremental `update` (tick, retitle, add, move, or remove specific items) to add or remove tasks and adjust their priorities. Use `plan` to overwrite only when the plan structure changes substantially and a full rebuild is genuinely needed.
   - Do not proactively delete or clear task items: Unless the user explicitly asks to remove specific tasks or all plans, preserve unmentioned tasks during `update`, and include the old tasks you intend to keep in a `plan` rebuild. When delivering the final conclusion of the current turn, if all checklist items are fully completed (including modified, added, removed, or initial items), there is no need to manually clear or delete the checklist; the system clears the list automatically, and you may directly create a new plan in the next turn.
 

@@ -21,7 +21,7 @@ use jeikcode_kernel::event::{AgentCommand, AgentEvent};
 use jeikcode_kernel::stream::StreamEvent;
 use jeikcode_kernel::testkit::{
     ApprovalMiddleware, EchoTool, MockProvider, RecorderHook, RiskyWriteTool, ScriptedProvider,
-    SilentStreamProvider, StallThenProvider,
+    StallThenProvider,
 };
 use jeikcode_kernel::tool::{ToolCall, ToolRegistry};
 use std::sync::Arc;
@@ -53,12 +53,9 @@ fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
 // ── (1a) STREAM TIMEOUT → RECONNECT → RECOVER ────────────────────────────────
 //
 // FIRST stream opens then PENDS FOREVER (idle stall); the SECOND succeeds. With
-// `.stream_timeout(50ms)` the idle-timeout fires, the kernel RECONNECTS (codex
-// parity, up to MAX_STREAM_RETRIES=5) — re-issuing the round from history with
-// backoff — and recovers. We assert a `reconnecting` Warning is emitted AND the
-// turn completes SUCCESSFULLY (success path runs; NO error). Core guarantee: a
-// single mid-stream stall no longer kills the turn.
-#[tokio::test]
+// `.stream_timeout(50ms)` the idle-timeout fires, the kernel retries on the
+// unified ladder and recovers. Virtual time keeps the ladder instant.
+#[tokio::test(start_paused = true)]
 async fn stream_timeout_reconnects_then_recovers() {
     let reg = ToolRegistry::new();
     let provider = Arc::new(StallThenProvider::new(
@@ -87,7 +84,12 @@ async fn stream_timeout_reconnects_then_recovers() {
         let mut completed = false;
         while let Some(ev) = handle.events.recv().await {
             match ev {
-                AgentEvent::Warning(m) if m.contains("reconnecting") => saw_reconnect = true,
+                jeikcode_kernel::event::AgentEvent::SystemNotice(ref notice)
+                    if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+                {
+                    saw_reconnect = true
+                }
+                AgentEvent::RetryNotice { .. } => saw_reconnect = true,
                 AgentEvent::Error { message, .. } => error_msg = Some(message),
                 AgentEvent::TurnComplete { .. } => {
                     completed = true;
@@ -122,11 +124,11 @@ async fn stream_timeout_reconnects_then_recovers() {
 
 // ── (1b) STREAM TIMEOUT → EXHAUST RETRIES → CLEAN-FAIL ───────────────────────
 //
-// PENDS FOREVER on every attempt. The kernel reconnects MAX_STREAM_RETRIES=5
-// times (with backoff), then clean-fails: on_error + Error (mentions timeout) +
-// TurnComplete — never looping forever, never a bogus success. Slower than (1a)
-// because it walks the full backoff ladder, so it gets a generous guard.
-#[tokio::test]
+// PENDS FOREVER on every attempt. The kernel walks the unified ladder (9
+// attempts) then clean-fails: on_error + Error (mentions timeout) +
+// TurnComplete — never looping forever, never a bogus success. Virtual time
+// keeps the full 257s ladder instant.
+#[tokio::test(start_paused = true)]
 async fn stream_timeout_exhausts_retries_then_fails() {
     let reg = ToolRegistry::new();
     let provider = Arc::new(StallThenProvider::new(100, vec![]));
@@ -143,14 +145,19 @@ async fn stream_timeout_exhausts_retries_then_fails() {
 
     handle.commands.send(send("go")).unwrap();
 
-    // Guard >> the full backoff ladder (200+400+800+1600+3200 ≈ 6.2s) + 6× 50ms.
-    let (reconnects, error_msg, completed) = tokio::time::timeout(Duration::from_secs(15), async {
-        let mut reconnects = 0;
+    // Virtual time: the unified ladder (0+2+5+10+15+30+45+60+90s) auto-advances.
+    let (notices, error_msg, completed) = tokio::time::timeout(Duration::from_secs(600), async {
+        let mut notices = 0;
         let mut error_msg: Option<String> = None;
         let mut completed = false;
         while let Some(ev) = handle.events.recv().await {
             match ev {
-                AgentEvent::Warning(m) if m.contains("reconnecting") => reconnects += 1,
+                jeikcode_kernel::event::AgentEvent::SystemNotice(ref notice)
+                    if notice.status == jeikcode_kernel::event::NoticeStatus::Active =>
+                {
+                    notices += 1
+                }
+                AgentEvent::RetryNotice { .. } => notices += 1,
                 AgentEvent::Error { message, .. } => error_msg = Some(message),
                 AgentEvent::TurnComplete { .. } => {
                     completed = true;
@@ -159,7 +166,7 @@ async fn stream_timeout_exhausts_retries_then_fails() {
                 _ => {}
             }
         }
-        (reconnects, error_msg, completed)
+        (notices, error_msg, completed)
     })
     .await
     .expect("exhausted retries must clean-fail within the guard, not loop forever");
@@ -168,10 +175,7 @@ async fn stream_timeout_exhausts_retries_then_fails() {
         completed,
         "after exhausting retries the turn must clean-fail with TurnComplete"
     );
-    assert_eq!(
-        reconnects, 5,
-        "must reconnect exactly MAX_STREAM_RETRIES=5 times before failing"
-    );
+    assert_eq!(notices, 9, "每次重试都发一条进度（同一 id 原地更新）");
     assert!(
         error_msg.as_deref().is_some_and(|m| m.contains("timeout")),
         "the exhausted timeout must surface as an Error mentioning 'timeout'; got {error_msg:?}"
@@ -252,9 +256,12 @@ async fn response_id_heartbeat_does_not_reset_ttft() {
 
     assert!(completed);
     assert!(
-        error_msg
-            .as_deref()
-            .is_some_and(|m| m.contains("首token") || m.contains("延迟")),
+        error_msg.as_deref().is_some_and(|m| {
+            m.contains("首token")
+                || m.contains("延迟")
+                || m.contains("first token")
+                || m.contains("latency")
+        }),
         "TTFT must surface a first-token error; got {error_msg:?}"
     );
 }
@@ -385,5 +392,299 @@ async fn no_timeout_by_default_unchanged() {
     assert_eq!(
         text, "answer",
         "the default path is unchanged — full text delivered"
+    );
+}
+
+/// 思考静默进入过渡期后不得叠加两倍超时（360s + 360s = 720s）：
+/// 首个 thinking token 之后若一直无正文/工具输出，总静默时间不得超过 transition 上限。
+#[tokio::test(start_paused = true)]
+async fn thinking_silence_does_not_stack_streaming_and_transition_timeouts() {
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use jeikcode_kernel::message::Message;
+    use jeikcode_kernel::provider::{ChatOptions, LlmProvider};
+    use jeikcode_kernel::stream::ProviderError;
+    use jeikcode_kernel::timeouts::TimeoutPolicy;
+
+    struct ThinkThenStallProvider(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl LlmProvider for ThinkThenStallProvider {
+        fn model_name(&self) -> &str {
+            "think-stall"
+        }
+        fn context_window(&self) -> u32 {
+            0
+        }
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[jeikcode_kernel::tool::ToolDef],
+            _options: &ChatOptions,
+        ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                Ok(Box::pin(
+                    futures::stream::once(async { StreamEvent::Reasoning("thinking...".into()) })
+                        .chain(futures::stream::pending()),
+                ))
+            } else {
+                Ok(Box::pin(futures::stream::iter(vec![
+                    StreamEvent::TextDelta("recovered".into()),
+                    StreamEvent::Done { truncated: false },
+                ])))
+            }
+        }
+    }
+    use futures::StreamExt;
+
+    let mut policy = TimeoutPolicy::unbounded();
+    policy.ttft = Some(Duration::from_millis(50));
+    policy.streaming = Some(Duration::from_millis(100));
+    policy.transition = Some(Duration::from_millis(100));
+
+    let provider = Arc::new(ThinkThenStallProvider(std::sync::atomic::AtomicUsize::new(
+        0,
+    )));
+    let mut handle = Agent::builder()
+        .provider(provider.clone())
+        .tools(ToolRegistry::new().mount(&[] as &[&str]))
+        .timeouts(policy)
+        .build()
+        .spawn();
+
+    let started = tokio::time::Instant::now();
+    handle.commands.send(send("go")).unwrap();
+
+    let mut text = String::new();
+    let mut completed = false;
+    while let Some(ev) = handle.events.recv().await {
+        match ev {
+            AgentEvent::TextDelta(t) => text.push_str(&t),
+            AgentEvent::TurnComplete { .. } => {
+                completed = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let elapsed = started.elapsed();
+    assert!(completed);
+    assert_eq!(text, "recovered");
+    // 若错误叠加了 streaming(100ms) + transition(100ms)，此处会 >= 200ms。
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "thinking silence stacked streaming + transition timeouts: {elapsed:?}"
+    );
+}
+
+/// 同一故障重试耗尽与恢复时都必须复用同一个 `event_id` 并以 settled 收口。
+#[tokio::test(start_paused = true)]
+async fn retry_incidents_settle_same_event_id_on_exhaustion_and_recovery() {
+    use jeikcode_kernel::event::{NoticeSeverity, NoticeStatus};
+
+    // (1) 重试耗尽：所有 Active 进度与最后一条 Settled/Error 共用同一 event_id。
+    let mut handle = Agent::builder()
+        .provider(Arc::new(StallThenProvider::new(100, vec![])))
+        .tools(ToolRegistry::new().mount(&[] as &[&str]))
+        .stream_timeout(LIVENESS)
+        .build()
+        .spawn();
+    handle.commands.send(send("go")).unwrap();
+    let mut exhausted_events = Vec::new();
+    while let Some(ev) = handle.events.recv().await {
+        match ev {
+            AgentEvent::SystemNotice(n) => exhausted_events.push(n),
+            AgentEvent::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(exhausted_events.len(), 10, "9 次活跃重试 + 1 次终态收口");
+    let first_id = exhausted_events[0].event_id.clone();
+    assert!(
+        exhausted_events.iter().all(|n| n.event_id == first_id),
+        "所有尝试与终态必须共用同一个 event_id"
+    );
+    let last = exhausted_events.last().unwrap();
+    assert_eq!(last.status, NoticeStatus::Settled);
+    assert_eq!(last.severity, NoticeSeverity::Error);
+    assert_eq!(last.revision, 10);
+
+    // (2) 恢复成功：复用同一 event_id 收口为 Info / Settled。
+    let mut handle2 = Agent::builder()
+        .provider(Arc::new(StallThenProvider::new(
+            1,
+            vec![
+                StreamEvent::TextDelta("ok".into()),
+                StreamEvent::Done { truncated: false },
+            ],
+        )))
+        .tools(ToolRegistry::new().mount(&[] as &[&str]))
+        .stream_timeout(LIVENESS)
+        .build()
+        .spawn();
+    handle2.commands.send(send("go")).unwrap();
+    let mut recovered_events = Vec::new();
+    while let Some(ev) = handle2.events.recv().await {
+        match ev {
+            AgentEvent::SystemNotice(n) => recovered_events.push(n),
+            AgentEvent::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(recovered_events.len(), 2, "1 次活跃重试 + 1 次恢复收口");
+    assert_eq!(recovered_events[0].event_id, recovered_events[1].event_id);
+    assert_eq!(recovered_events[0].status, NoticeStatus::Active);
+    assert_eq!(recovered_events[1].status, NoticeStatus::Settled);
+    assert_eq!(recovered_events[1].severity, NoticeSeverity::Info);
+}
+
+/// 同一逻辑轮中连续发生两次“先吐字再断流并续写”时，必须按恢复点分拆为两张独立锚定的故障卡，同时累计总重试预算。
+#[tokio::test(start_paused = true)]
+async fn same_round_resume_then_second_drop_opens_distinct_anchored_incidents() {
+    use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus};
+    use jeikcode_kernel::stream::ProviderError;
+
+    let drop_err = |msg: &str| ProviderError {
+        retryable: true,
+        resumable: true,
+        message: msg.into(),
+        http_status: None,
+        code: None,
+        retry_after_secs: None,
+    };
+
+    let provider = Arc::new(MockProvider::new(vec![
+        vec![
+            StreamEvent::TextDelta("part-1 ".into()),
+            StreamEvent::Error(drop_err("drop-1")),
+        ],
+        vec![
+            StreamEvent::TextDelta("part-2 ".into()),
+            StreamEvent::Error(drop_err("drop-2")),
+        ],
+        vec![
+            StreamEvent::TextDelta("part-3".into()),
+            StreamEvent::Done { truncated: false },
+        ],
+    ]));
+
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(ToolRegistry::new().mount(&[] as &[&str]))
+        .build()
+        .spawn();
+    handle.commands.send(send("go")).unwrap();
+
+    #[derive(Debug)]
+    enum Seen {
+        Assistant(String),
+        Notice(jeikcode_kernel::event::SystemNotice),
+    }
+
+    let mut timeline = Vec::new();
+    let mut completed = false;
+    tokio::time::timeout(OUTER_GUARD, async {
+        while let Some(ev) = handle.events.recv().await {
+            match ev {
+                AgentEvent::AssistantMessage { message_id } => {
+                    timeline.push(Seen::Assistant(message_id));
+                }
+                AgentEvent::SystemNotice(notice) => {
+                    timeline.push(Seen::Notice(notice));
+                }
+                AgentEvent::TurnComplete { reason } => {
+                    assert_eq!(reason, jeikcode_kernel::event::StopReason::Stopped);
+                    completed = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("multi-drop same-round recovery must finish quickly in virtual time");
+
+    assert!(completed);
+
+    let assistant_ids: Vec<String> = timeline
+        .iter()
+        .filter_map(|item| match item {
+            Seen::Assistant(id) => Some(id.clone()),
+            Seen::Notice(_) => None,
+        })
+        .collect();
+    assert!(
+        assistant_ids.len() >= 2,
+        "每次断流前产出文本都应持有独立 assistant message_id: {assistant_ids:?}"
+    );
+    let m1 = assistant_ids[0].clone();
+    let m2 = assistant_ids[1].clone();
+    assert_ne!(m1, m2);
+
+    let retry_notices: Vec<_> = timeline
+        .iter()
+        .filter_map(|item| match item {
+            Seen::Notice(n) if n.kind == NoticeKind::Retry => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        retry_notices.len(),
+        4,
+        "两次中断应各产生 Active -> Settled 共 4 条重试通知，实际: {retry_notices:#?}"
+    );
+
+    let card1_active = &retry_notices[0];
+    let card1_settled = &retry_notices[1];
+    let card2_active = &retry_notices[2];
+    let card2_settled = &retry_notices[3];
+
+    assert_eq!(card1_active.status, NoticeStatus::Active);
+    assert_eq!(card1_settled.status, NoticeStatus::Settled);
+    assert_eq!(card1_settled.severity, NoticeSeverity::Info);
+    assert_eq!(card1_active.event_id, card1_settled.event_id);
+    assert_eq!(card1_active.anchor_message_id.as_deref(), Some(m1.as_str()));
+    assert_eq!(
+        card1_settled.anchor_message_id.as_deref(),
+        Some(m1.as_str())
+    );
+
+    assert_eq!(card2_active.status, NoticeStatus::Active);
+    assert_eq!(card2_settled.status, NoticeStatus::Settled);
+    assert_eq!(card2_settled.severity, NoticeSeverity::Info);
+    assert_eq!(card2_active.event_id, card2_settled.event_id);
+    assert_eq!(card2_active.anchor_message_id.as_deref(), Some(m2.as_str()));
+    assert_eq!(
+        card2_settled.anchor_message_id.as_deref(),
+        Some(m2.as_str())
+    );
+
+    assert_ne!(
+        card1_active.event_id, card2_active.event_id,
+        "两次断流不能合并为同一个 event_id"
+    );
+    assert!(
+        card1_active.text.contains("1/"),
+        "首张卡片应从第 1 次尝试计数: {}",
+        card1_active.text
+    );
+    assert!(
+        card2_active.text.contains("2/"),
+        "第二张卡片必须延续同轮累计重试预算 (2/N): {}",
+        card2_active.text
+    );
+
+    // 验证时间顺序：m1 -> card1_active -> card1_settled -> m2 (或先 settled 后 m2) -> card2_active -> m3/settled
+    let pos_card1_settled = timeline
+        .iter()
+        .position(|s| matches!(s, Seen::Notice(n) if n.event_id == card1_settled.event_id && n.status == NoticeStatus::Settled))
+        .unwrap();
+    let pos_card2_active = timeline
+        .iter()
+        .position(|s| matches!(s, Seen::Notice(n) if n.event_id == card2_active.event_id && n.status == NoticeStatus::Active))
+        .unwrap();
+    assert!(
+        pos_card1_settled < pos_card2_active,
+        "card1 必须在打开 card2 之前完成 Settled"
     );
 }

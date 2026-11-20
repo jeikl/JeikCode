@@ -18081,6 +18081,15 @@ fn project_kernel_event(
             snapshot: jeikcode_kernel::message::SessionSnapshot::new(Vec::new()),
         }),
         Kernel::Warning(message) => Some(AgentEvent::Warning(message)),
+        Kernel::SystemNotice(notice) => {
+            if notice.status == jeikcode_kernel::event::NoticeStatus::Settled
+                && notice.severity == jeikcode_kernel::event::NoticeSeverity::Error
+            {
+                None
+            } else {
+                Some(AgentEvent::Warning(notice.text))
+            }
+        }
         Kernel::RateLimited {
             reset_at_display,
             reset_label,
@@ -20811,9 +20820,10 @@ fn handle_agent_event(
             let detail = enrich_todo_detail(&name, &arguments, &detail, &state.todo_titles);
             let display = display_tool_name(&name);
 
-            // The merged `todowrite` carries EITHER the full-list PLAN shape (`{todos:[…]}`) or
-            // the incremental `{action}` / `{actions:[…]}` shape; a resumed session may also
-            // carry legacy `todo` calls. Distinguish by ARG SHAPE, not tool name.
+            // The merged `todowrite` carries the declarative PLAN shape (`{plan:[…]}` or legacy
+            // `{todos:[…]}`) and/or the incremental `{action}` / `{actions:[…]}` / `{update:[…]}`
+            // shape; a plan call may also carry `update`, applied after the rebuild. A resumed
+            // session may carry legacy `todo` calls. Distinguish by ARG SHAPE, not tool name.
             let is_todo_call = is_todo_tool_name(&name);
             let todo_plan =
                 if is_todo_call && jeikcode_capabilities::tools::todo::is_todo_plan(&arguments) {
@@ -23254,6 +23264,8 @@ pub(crate) fn build_status(state: &UiState, ctx: &LoopCtx) -> crate::render::Sta
             crate::i18n::t(hint_msg).into_owned(),
             crate::render::HintSeverity::Info,
         ))
+    } else if jeikcode_config::config::runtime_state::is_dead() {
+        None
     } else if let Some(v) = ctx.update_hint.lock().ok().and_then(|g| g.clone()) {
         let text = if jeikcode_updater::is_package_managed() {
             crate::i18n::t(crate::i18n::Msg::StatusUpgradeHintPm { version: &v }).into_owned()

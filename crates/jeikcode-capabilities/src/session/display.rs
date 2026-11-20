@@ -14,18 +14,18 @@
 //! later compaction cannot remove them. A content-addressed blob store can be
 //! layered under the same field without changing the read model.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use jeikcode_kernel::event::StopReason;
+use jeikcode_kernel::event::{NoticeKind, NoticeSeverity, NoticeStatus, StopReason, SystemNotice};
 use jeikcode_kernel::hook::{LifecycleHooks, TurnCtx};
-use jeikcode_kernel::message::{Conversation, Message, Role};
+use jeikcode_kernel::message::{CompactReport, CompactTrigger, Conversation, Message, Role};
 use serde::{Deserialize, Serialize};
 
 use super::manager::SessionManager;
 use super::{SessionResult, SessionStoreError};
 
-pub const DISPLAY_VERSION: u32 = 4;
+pub const DISPLAY_VERSION: u32 = 5;
 pub const MAX_DISPLAY_BYTES: usize = 512 * 1024 * 1024;
 /// The reader loads the whole log (records + inline images). Keep a bounded
 /// read but align it with realistic image-heavy sessions; beyond this the
@@ -89,6 +89,55 @@ pub struct DisplayRecord {
     pub created_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    /// v5 系统通知字段：同 `event_id` 对应同一故障/边界，跨轮次按 `anchor_message_id` 就位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_kind: Option<NoticeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<NoticeSeverity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<NoticeStatus>,
+}
+
+impl Default for DisplayRecord {
+    fn default() -> Self {
+        Self {
+            v: DISPLAY_VERSION,
+            session_id: String::new(),
+            turn_id: 0,
+            index: 0,
+            seq: 0,
+            role: String::new(),
+            id: None,
+            content: String::new(),
+            reasoning: None,
+            synthetic: false,
+            internal_origin: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            is_error: false,
+            images: Vec::new(),
+            created_at: None,
+            elapsed_ms: None,
+            event_id: None,
+            part_id: None,
+            anchor_message_id: None,
+            anchor_part_id: None,
+            notice_kind: None,
+            revision: None,
+            severity: None,
+            status: None,
+        }
+    }
 }
 
 fn display_version() -> u32 {
@@ -96,6 +145,30 @@ fn display_version() -> u32 {
 }
 
 impl DisplayRecord {
+    pub fn from_system_notice(session_id: &str, turn_id: u64, notice: &SystemNotice) -> Self {
+        Self {
+            v: DISPLAY_VERSION,
+            session_id: session_id.to_string(),
+            turn_id,
+            index: 0,
+            seq: 0,
+            role: "assistant".to_string(),
+            id: Some(notice.event_id.clone()),
+            content: notice.text.clone(),
+            internal_origin: Some("turn_diagnostic".to_string()),
+            created_at: Some(u64::try_from(super::now_ms()).unwrap_or(0)),
+            event_id: Some(notice.event_id.clone()),
+            part_id: Some(notice.part_id.clone()),
+            anchor_message_id: notice.anchor_message_id.clone(),
+            anchor_part_id: notice.anchor_part_id.clone(),
+            notice_kind: Some(notice.kind),
+            revision: Some(notice.revision),
+            severity: Some(notice.severity),
+            status: Some(notice.status),
+            ..Self::default()
+        }
+    }
+
     pub fn from_message(
         session_id: &str,
         working_dir: &std::path::Path,
@@ -169,6 +242,27 @@ impl DisplayRecord {
                 .as_ref()
                 .map(|meta| meta.elapsed_ms)
                 .filter(|elapsed| *elapsed > 0),
+            event_id: message
+                .notice
+                .as_ref()
+                .and_then(|notice| notice.event_id.clone()),
+            part_id: message
+                .notice
+                .as_ref()
+                .and_then(|notice| notice.part_id.clone()),
+            anchor_message_id: message
+                .notice
+                .as_ref()
+                .and_then(|notice| notice.anchor_message_id.clone()),
+            anchor_part_id: message
+                .notice
+                .as_ref()
+                .and_then(|notice| notice.anchor_part_id.clone()),
+            notice_kind: message.notice.as_ref().map(|notice| notice.kind),
+            revision: message.notice.as_ref().and_then(|notice| notice.revision),
+            severity: message.notice.as_ref().map(|notice| notice.severity),
+            status: message.notice.as_ref().map(|notice| notice.status),
+            ..Self::default()
         }
     }
 }
@@ -176,6 +270,53 @@ impl DisplayRecord {
 /// Cap on the exact turn/prompt id sets. A session with more turns is far beyond
 /// any realistic UI; the high-water mark still orders new appends.
 const MAX_COMPLETED_TURNS: usize = 8192;
+const MAX_FLUSHED_RECORD_IDS: usize = 65_536;
+/// 与 `MAX_FLUSHED_RECORD_IDS`、`MAX_COMPLETED_TURNS` 的理论体积上限对齐，避免长会话在元数据落盘时触发 64 KiB 截断导致账本与 meta 撕裂。
+const MAX_DISPLAY_META_BYTES: usize = 16 * 1024 * 1024;
+
+/// 预校验并序列化 `.display.meta.json`，确保在追加 `.display.jsonl` 之前就能发现体积超限。
+fn serialize_display_meta(meta: &DisplayMeta) -> SessionResult<Vec<u8>> {
+    let bytes = serde_json::to_vec_pretty(meta).map_err(|error| SessionStoreError::Corrupt {
+        kind: "display meta",
+        message: error.to_string(),
+    })?;
+    super::manager::ensure_size("display meta", bytes.len(), MAX_DISPLAY_META_BYTES)?;
+    Ok(bytes)
+}
+
+fn read_display_meta_file(path: &std::path::Path) -> SessionResult<Option<DisplayMeta>> {
+    crate::session::manager::read_json_optional_bounded::<DisplayMeta>(
+        path,
+        "display meta",
+        MAX_DISPLAY_META_BYTES,
+    )
+}
+
+/// 将新落盘记录中的 `id` 与用户侧 `admitted_prompt_ids` 同步更新到元数据。
+fn record_flushed_rows_in_meta<'a>(
+    meta: &mut DisplayMeta,
+    records: impl IntoIterator<Item = &'a DisplayRecord>,
+    record_admitted_prompts: bool,
+) {
+    for record in records {
+        if let Some(rec_id) = record.id.as_deref() {
+            SessionManager::push_bounded_ids(
+                &mut meta.flushed_record_ids,
+                rec_id,
+                MAX_FLUSHED_RECORD_IDS,
+            );
+        }
+        if record_admitted_prompts && record.role.eq_ignore_ascii_case("user") {
+            if let Some(rec_id) = record.id.as_deref() {
+                SessionManager::push_bounded_ids(
+                    &mut meta.admitted_prompt_ids,
+                    rec_id,
+                    MAX_COMPLETED_TURNS,
+                );
+            }
+        }
+    }
+}
 
 /// The prompting user row of a turn slice — the durable idempotency identity.
 fn display_turn_prompt_id(records: &[DisplayRecord]) -> Option<String> {
@@ -215,6 +356,27 @@ fn display_completed_prompt_ids(records: &[DisplayRecord]) -> Vec<String> {
     ids
 }
 
+fn display_record_ids_for_meta(records: &[DisplayRecord]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for record in records {
+        if let Some(key) = record
+            .event_id
+            .as_deref()
+            .or(record.id.as_deref())
+            .filter(|id| !id.is_empty())
+        {
+            if !ids.iter().any(|known| known == key) {
+                ids.push(key.to_string());
+            }
+        }
+    }
+    if ids.len() > MAX_FLUSHED_RECORD_IDS {
+        let drop = ids.len() - MAX_FLUSHED_RECORD_IDS;
+        ids.drain(..drop);
+    }
+    ids
+}
+
 /// Sidecar telling the reader whether the log covers the whole session. A log
 /// without meta (crash between append and meta write) is ignored and rebuilt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +405,12 @@ pub struct DisplayMeta {
     /// at fold). This is the row-dedup set; it must not imply turn completion.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub admitted_prompt_ids: Vec<String>,
+    /// 回合内检查点已经增量写盘的记录身份集合，与 `completed_prompt_ids` 严格隔离。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flushed_record_ids: Vec<String>,
+    /// 增量检查点 `(turn_id, slice)` 幂等键集合。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flushed_slice_keys: Vec<String>,
     /// True when the prefix was reconstructed from the compacted snapshot/JSONL
     /// (images from already-drained turns cannot be recovered).
     #[serde(default)]
@@ -261,6 +429,8 @@ impl Default for DisplayMeta {
             completed_turns: Vec::new(),
             completed_prompt_ids: Vec::new(),
             admitted_prompt_ids: Vec::new(),
+            flushed_record_ids: Vec::new(),
+            flushed_slice_keys: Vec::new(),
             backfilled: false,
             updated_at: 0,
         }
@@ -353,11 +523,27 @@ struct TurnAnchor {
     start_index: usize,
 }
 
+#[derive(Clone, Debug)]
+struct BufferedNotice {
+    notice: SystemNotice,
+    dirty: bool,
+}
+
+#[derive(Default)]
+struct TurnDisplayState {
+    anchor: Option<TurnAnchor>,
+    notices: Vec<BufferedNotice>,
+    next_slice_seq: u32,
+    /// 本轮提问或前置切片是否已经安全写入显示账本（如 pre_compaction 或检查点）。
+    /// 一旦置 true，即使后续压缩裁剪了 convo 里的 u-1 锚点，终态仍可续写新增回复。
+    prompt_flushed_to_ledger: bool,
+}
+
 pub struct DisplayHook {
     mgr: std::sync::Arc<SessionManager>,
     session_id: String,
     working_dir: std::path::PathBuf,
-    anchor: Mutex<Option<TurnAnchor>>,
+    state: Mutex<TurnDisplayState>,
 }
 
 impl DisplayHook {
@@ -370,13 +556,18 @@ impl DisplayHook {
             mgr,
             session_id: session_id.into(),
             working_dir: working_dir.into(),
-            anchor: Mutex::new(None),
+            state: Mutex::new(TurnDisplayState::default()),
         }
     }
 
-    /// Append the conversation slice for one settled turn. Returns `false` when
-    /// there is no valid prompt-anchored slice (rolled back / empty / turn_id 0).
-    fn write_slice(&self, convo: &Conversation, turn_id: u64, anchor: Option<&TurnAnchor>) -> bool {
+    fn build_slice_records(
+        &self,
+        convo: &Conversation,
+        turn_id: u64,
+        anchor: Option<&TurnAnchor>,
+        skip_turn_diagnostics: bool,
+        prompt_flushed_to_ledger: bool,
+    ) -> Option<Vec<DisplayRecord>> {
         // Mid-turn compaction can drain messages BEFORE the recorded start index.
         // Re-anchor on the turn's prompt message (id first, then text) so the
         // display slice still starts at the real user question.
@@ -388,20 +579,34 @@ impl DisplayHook {
                     .rposition(|message| message.id.as_deref() == Some(id))
             })
         });
-        let start = anchored.unwrap_or_else(|| {
+        let start = if let Some(pos) = anchored {
+            pos
+        } else if prompt_flushed_to_ledger {
+            // 如果前置切片已落盘且压缩裁掉了原始 u-1 锚点，从剩余消息起续写新增回复；
+            // 已落盘的旧消息会由 append_display_slice / append_display_turn 按 id 去重跳过。
+            0
+        } else {
             anchor
                 .map(|anchor| anchor.start_index.min(convo.messages.len()))
                 .unwrap_or(convo.messages.len())
-        });
-        if start >= convo.messages.len() || turn_id == 0 || convo.messages[start].role != Role::User
+        };
+        if start >= convo.messages.len() || turn_id == 0 {
+            return None;
+        }
+        if anchored.is_none()
+            && !prompt_flushed_to_ledger
+            && convo.messages[start].role != Role::User
         {
-            // Never write a slice that starts mid-assistant/tool: that would
-            // persist a turn without its question. The caller may fall back to
-            // `write_cancelled_user` when the turn was rolled back.
-            return false;
+            // Never write a slice that starts mid-assistant/tool without an already
+            // flushed prompt: the caller falls back to `write_cancelled_user`.
+            return None;
         }
         let records: Vec<DisplayRecord> = convo.messages[start..]
             .iter()
+            .filter(|message| {
+                !(skip_turn_diagnostics && message.is_display_only())
+                    && !(prompt_flushed_to_ledger && message.synthetic)
+            })
             .enumerate()
             .map(|(index, message)| {
                 DisplayRecord::from_message(
@@ -413,14 +618,173 @@ impl DisplayHook {
                 )
             })
             .collect();
-        if let Err(error) = self
-            .mgr
-            .append_display_turn(&self.session_id, turn_id, &records)
-        {
-            eprintln!("[DisplayHook] append display transcript failed: {error}");
+        Some(records)
+    }
+
+    /// Append the conversation slice for one settled turn. Returns `false` when
+    /// there is no valid prompt-anchored slice (rolled back / empty / turn_id 0).
+    async fn write_slice_async(
+        &self,
+        convo: &Conversation,
+        turn_id: u64,
+        anchor: Option<&TurnAnchor>,
+        skip_turn_diagnostics: bool,
+        prompt_flushed_to_ledger: bool,
+    ) -> bool {
+        let Some(records) = self.build_slice_records(
+            convo,
+            turn_id,
+            anchor,
+            skip_turn_diagnostics,
+            prompt_flushed_to_ledger,
+        ) else {
             return false;
+        };
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let prompt_id = anchor.and_then(|a| a.id.clone());
+        match tokio::task::spawn_blocking(move || {
+            mgr.append_display_turn_with_prompt_id(
+                &session_id,
+                turn_id,
+                &records,
+                prompt_id.as_deref(),
+            )
+        })
+        .await
+        {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                eprintln!("[DisplayHook] append display transcript failed: {error}");
+                false
+            }
+            Err(error) => {
+                eprintln!("[DisplayHook] append display worker failed: {error}");
+                false
+            }
         }
-        true
+    }
+
+    async fn flush_checkpoint_records_async(
+        &self,
+        convo: &Conversation,
+        turn_id: u64,
+        slice_key: &str,
+    ) {
+        if turn_id == 0 {
+            return;
+        }
+        let (anchor, skip_diagnostics, prompt_flushed) = {
+            let guard = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                guard.anchor.clone(),
+                !guard.notices.is_empty(),
+                guard.prompt_flushed_to_ledger,
+            )
+        };
+        if let Some(records) = self.build_slice_records(
+            convo,
+            turn_id,
+            anchor.as_ref(),
+            skip_diagnostics,
+            prompt_flushed,
+        ) {
+            let mgr = Arc::clone(&self.mgr);
+            let session_id = self.session_id.clone();
+            let slice_key = slice_key.to_string();
+            match tokio::task::spawn_blocking(move || {
+                mgr.append_display_slice(&session_id, turn_id, &slice_key, &records)
+            })
+            .await
+            {
+                Ok(Ok(true)) => {
+                    let mut guard = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    guard.prompt_flushed_to_ledger = true;
+                }
+                Ok(Ok(false)) => {}
+                Ok(Err(error)) => {
+                    eprintln!("[DisplayHook] checkpoint flush slice failed: {error}");
+                }
+                Err(error) => {
+                    eprintln!("[DisplayHook] checkpoint flush worker failed: {error}");
+                }
+            }
+        }
+    }
+
+    async fn flush_dirty_notices_async(&self, turn_id: u64, promote_active_to_settled: bool) {
+        let pending: Vec<(SystemNotice, DisplayRecord)> = {
+            let guard = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .notices
+                .iter()
+                .filter(|item| {
+                    item.notice.persist
+                        && (item.dirty
+                            || (promote_active_to_settled
+                                && item.notice.status == NoticeStatus::Active))
+                })
+                .map(|item| {
+                    let mut n = item.notice.clone();
+                    if promote_active_to_settled && n.status == NoticeStatus::Active {
+                        n.status = NoticeStatus::Settled;
+                    }
+                    let record = DisplayRecord::from_system_notice(&self.session_id, turn_id, &n);
+                    (n, record)
+                })
+                .collect()
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let flushed_pairs = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::with_capacity(pending.len());
+            for (notice, record) in pending {
+                if let Err(error) = mgr.upsert_display_notice_record(&session_id, record) {
+                    tracing::warn!(
+                        target: "jeikcode_capabilities::session::display",
+                        session_id = %session_id,
+                        turn_id,
+                        error = %error,
+                        "flush dirty display notice failed"
+                    );
+                    eprintln!("[DisplayHook] upsert display notice failed: {error}");
+                } else {
+                    out.push((notice.event_id, notice.revision, notice.status));
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default();
+
+        let mut guard = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (event_id, revision, status) in flushed_pairs {
+            if let Some(entry) = guard
+                .notices
+                .iter_mut()
+                .find(|item| item.notice.event_id == event_id)
+            {
+                if entry.notice.revision == revision {
+                    entry.notice.status = status;
+                    entry.dirty = false;
+                }
+            }
+        }
     }
 
     /// CANCEL = UNDO rolls the model context back to before the prompt. The UI
@@ -428,7 +792,7 @@ impl DisplayHook {
     /// that was folded into this turn before the cancel. Otherwise a refresh
     /// (or another browser) makes it look like those questions never existed —
     /// the "ghost question" bug.
-    fn write_cancelled_user(
+    async fn write_cancelled_user_async(
         &self,
         convo: &Conversation,
         turn_id: u64,
@@ -447,9 +811,6 @@ impl DisplayHook {
         });
         let mut records: Vec<DisplayRecord> = Vec::new();
         if let Some(start) = anchor_pos {
-            // PRESERVE mode (or a rolled-back slice that still carries the
-            // prompt): keep the anchor and every real user row after it, so a
-            // mid-turn steer survives a cancelled/failed turn.
             for (index, message) in convo.messages[start..].iter().enumerate() {
                 if message.role != Role::User || message.synthetic {
                     continue;
@@ -467,8 +828,6 @@ impl DisplayHook {
             }
         }
         if records.is_empty() {
-            // The convo was rolled back before the prompt: keep the question
-            // itself from the anchor so it is never a ghost.
             records.push(DisplayRecord {
                 v: DISPLAY_VERSION,
                 session_id: self.session_id.clone(),
@@ -478,115 +837,287 @@ impl DisplayHook {
                 role: "user".into(),
                 id: anchor.id.clone(),
                 content: super::user_text_for_display(&self.working_dir, &anchor.text),
-                reasoning: None,
-                synthetic: false,
                 internal_origin: Some("transcript_archive".into()),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                is_error: false,
-                images: Vec::new(),
                 created_at: Some(u64::try_from(super::now_ms()).unwrap_or(0)),
-                elapsed_ms: None,
+                ..DisplayRecord::default()
             });
         }
-        // CANCEL = UNDO rolls the kernel context back, but the user already saw
-        // the partial assistant stream. Persist that partial as a read-only
-        // display row so a cold start / another browser still renders the text,
-        // reasoning and tool calls that were on screen before the stop.
-        if records
-            .iter()
-            .any(|record| record.role.eq_ignore_ascii_case("user"))
-        {
-            if let Some(partial) = super::partial::load_global(&self.session_id) {
-                let has_partial = !partial.text.trim().is_empty()
-                    || !partial.reasoning.trim().is_empty()
-                    || !partial.tool_calls.is_empty();
-                if has_partial {
-                    let calls: Vec<jeikcode_kernel::tool::ToolCall> = partial
-                        .tool_calls
-                        .iter()
-                        .filter_map(|call| {
-                            Some(jeikcode_kernel::tool::ToolCall {
-                                id: call.id.clone()?,
-                                name: call.name.clone()?,
-                                arguments: call.arguments.clone(),
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let working_dir = self.working_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            if records
+                .iter()
+                .any(|record| record.role.eq_ignore_ascii_case("user"))
+            {
+                if let Some(partial) = super::partial::load_global(&session_id) {
+                    let has_partial = !partial.text.trim().is_empty()
+                        || !partial.reasoning.trim().is_empty()
+                        || !partial.tool_calls.is_empty();
+                    if has_partial {
+                        let calls: Vec<jeikcode_kernel::tool::ToolCall> = partial
+                            .tool_calls
+                            .iter()
+                            .filter_map(|call| {
+                                Some(jeikcode_kernel::tool::ToolCall {
+                                    id: call.id.clone()?,
+                                    name: call.name.clone()?,
+                                    arguments: call.arguments.clone(),
+                                })
                             })
-                        })
-                        .collect();
-                    let mut message = Message::assistant(partial.text.clone(), calls);
-                    message.reasoning =
-                        (!partial.reasoning.trim().is_empty()).then(|| partial.reasoning.clone());
-                    message.id = partial.message_id.clone();
-                    let mut record = DisplayRecord::from_message(
-                        &self.session_id,
-                        &self.working_dir,
-                        turn_id,
-                        u32::try_from(records.len()).unwrap_or(u32::MAX),
-                        &message,
-                    );
-                    // It no longer exists in the rolled-back model context.
-                    record.internal_origin = Some("transcript_archive".into());
-                    record.created_at = (partial.updated_at > 0).then_some(partial.updated_at);
-                    records.push(record);
+                            .collect();
+                        let mut message = Message::assistant(partial.text.clone(), calls);
+                        message.reasoning = (!partial.reasoning.trim().is_empty())
+                            .then(|| partial.reasoning.clone());
+                        message.id = partial.message_id.clone();
+                        let mut record = DisplayRecord::from_message(
+                            &session_id,
+                            &working_dir,
+                            turn_id,
+                            u32::try_from(records.len()).unwrap_or(u32::MAX),
+                            &message,
+                        );
+                        record.internal_origin = Some("transcript_archive".into());
+                        record.created_at = (partial.updated_at > 0).then_some(partial.updated_at);
+                        records.push(record);
+                    }
                 }
             }
-        }
-        match self
-            .mgr
-            .append_display_turn(&self.session_id, turn_id, &records)
-        {
-            Ok(()) => true,
-            Err(error) => {
-                eprintln!("[DisplayHook] append cancelled turn failed: {error}");
-                false
+            match mgr.append_display_turn(&session_id, turn_id, &records) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("[DisplayHook] append cancelled turn failed: {error}");
+                    false
+                }
             }
-        }
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 
 #[async_trait]
 impl LifecycleHooks for DisplayHook {
     async fn turn_start(&self, convo: &mut Conversation) {
-        // The kernel pushes the prompt BEFORE run_turn→turn_start. Prefer the
-        // latest real user message; for a synthetic continuation there is none,
-        // so fall back to the last message (the synthetic prompt).
         let message = convo
             .messages
             .iter()
             .rev()
             .find(|message| message.role == Role::User && !message.synthetic)
             .or_else(|| convo.messages.last());
-        *self
-            .anchor
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = message.map(|message| TurnAnchor {
+        let anchor = message.map(|message| TurnAnchor {
             id: message.id.clone(),
             text: message.text.clone(),
             synthetic: message.synthetic,
             start_index: convo.messages.len(),
         });
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = TurnDisplayState {
+            anchor,
+            notices: Vec::new(),
+            next_slice_seq: 0,
+            prompt_flushed_to_ledger: false,
+        };
+    }
+
+    async fn on_turn_checkpoint(&self, convo: &Conversation, ctx: &TurnCtx) {
+        let slice_key = {
+            let mut guard = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.next_slice_seq = guard.next_slice_seq.saturating_add(1);
+            format!("t{}:c{}", ctx.turn_id, guard.next_slice_seq)
+        };
+        self.flush_checkpoint_records_async(convo, ctx.turn_id, &slice_key)
+            .await;
+        self.flush_dirty_notices_async(ctx.turn_id, false).await;
+    }
+
+    async fn on_system_notice(&self, notice: &SystemNotice, convo: &Conversation, ctx: &TurnCtx) {
+        let (should_flush_slice, flush_notice_key) = {
+            let mut guard = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut accepted = true;
+            if let Some(existing) = guard
+                .notices
+                .iter_mut()
+                .find(|item| item.notice.event_id == notice.event_id)
+            {
+                if (existing.notice.status == NoticeStatus::Settled
+                    && notice.status != NoticeStatus::Settled)
+                    || notice.revision < existing.notice.revision
+                {
+                    accepted = false;
+                } else {
+                    existing.notice = notice.clone();
+                    existing.dirty = true;
+                }
+            } else {
+                guard.notices.push(BufferedNotice {
+                    notice: notice.clone(),
+                    dirty: true,
+                });
+            }
+            if !accepted || !notice.persist {
+                (false, None)
+            } else if notice.revision == 1 || notice.status == NoticeStatus::Settled {
+                guard.next_slice_seq = guard.next_slice_seq.saturating_add(1);
+                (
+                    true,
+                    Some(format!("t{}:n{}", ctx.turn_id, guard.next_slice_seq)),
+                )
+            } else {
+                (false, None)
+            }
+        };
+        if should_flush_slice {
+            if let Some(slice_key) = flush_notice_key {
+                self.flush_checkpoint_records_async(convo, ctx.turn_id, &slice_key)
+                    .await;
+            }
+            self.flush_dirty_notices_async(ctx.turn_id, false).await;
+        }
+    }
+
+    async fn pre_compaction(
+        &self,
+        convo: &Conversation,
+        _trigger: &CompactTrigger,
+        ctx: Option<&TurnCtx>,
+    ) {
+        let Some(turn_id) = ctx.map(|c| c.turn_id).filter(|&id| id > 0) else {
+            return;
+        };
+        let slice_key = {
+            let mut guard = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.next_slice_seq = guard.next_slice_seq.saturating_add(1);
+            format!("t{}:precompact:{}", turn_id, guard.next_slice_seq)
+        };
+        self.flush_checkpoint_records_async(convo, turn_id, &slice_key)
+            .await;
+        self.flush_dirty_notices_async(turn_id, false).await;
+    }
+
+    async fn post_compaction(
+        &self,
+        _report: &CompactReport,
+        notice: &SystemNotice,
+        ctx: Option<&TurnCtx>,
+    ) {
+        let turn_id = ctx.map(|c| c.turn_id).unwrap_or(0);
+        let record = DisplayRecord::from_system_notice(&self.session_id, turn_id, notice);
+        let mgr = Arc::clone(&self.mgr);
+        let session_id = self.session_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(error) = mgr.upsert_display_notice_record(&session_id, record) {
+                tracing::warn!(
+                    target: "jeikcode_capabilities::session::display",
+                    session_id = %session_id,
+                    turn_id,
+                    error = %error,
+                    "post_compaction display notice failed"
+                );
+                eprintln!("[DisplayHook] post_compaction notice failed: {error}");
+            }
+        })
+        .await;
     }
 
     async fn turn_complete(&self, convo: &Conversation, reason: &StopReason, ctx: &TurnCtx) {
         // A rejected prompt never became a turn: nothing to show.
         if matches!(reason, StopReason::PromptRejected) {
+            let _ = std::mem::take(
+                &mut *self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
             return;
         }
-        let anchor = self
-            .anchor
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        let state = std::mem::take(
+            &mut *self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        let skip_diagnostics = !state.notices.is_empty();
         if matches!(reason, StopReason::Cancelled) {
-            // PRESERVE mode keeps the partial conversation → write it normally.
-            // Default CANCEL = UNDO rolled it back → persist the question alone so
-            // refresh / another browser still sees what was asked.
-            if !self.write_slice(convo, ctx.turn_id, anchor.as_ref()) {
-                self.write_cancelled_user(convo, ctx.turn_id, anchor.as_ref());
+            if !self
+                .write_slice_async(
+                    convo,
+                    ctx.turn_id,
+                    state.anchor.as_ref(),
+                    skip_diagnostics,
+                    state.prompt_flushed_to_ledger,
+                )
+                .await
+            {
+                let _ = self
+                    .write_cancelled_user_async(convo, ctx.turn_id, state.anchor.as_ref())
+                    .await;
             }
-            return;
+        } else {
+            self.write_slice_async(
+                convo,
+                ctx.turn_id,
+                state.anchor.as_ref(),
+                skip_diagnostics,
+                state.prompt_flushed_to_ledger,
+            )
+            .await;
         }
-        self.write_slice(convo, ctx.turn_id, anchor.as_ref());
+        // 收口并刷入本轮全部未落盘/仍处于活跃态的通知，保证终态之后不留 active 卡。
+        let pending_notices: Vec<DisplayRecord> = state
+            .notices
+            .into_iter()
+            .filter_map(|item| {
+                if !item.notice.persist {
+                    return None;
+                }
+                let mut notice = item.notice;
+                let need_write = item.dirty || notice.status == NoticeStatus::Active;
+                if !need_write {
+                    return None;
+                }
+                if notice.status == NoticeStatus::Active {
+                    notice.status = NoticeStatus::Settled;
+                    notice.revision = notice.revision.saturating_add(1);
+                }
+                Some(DisplayRecord::from_system_notice(
+                    &self.session_id,
+                    ctx.turn_id,
+                    &notice,
+                ))
+            })
+            .collect();
+        if !pending_notices.is_empty() {
+            let mgr = Arc::clone(&self.mgr);
+            let session_id = self.session_id.clone();
+            let turn_id = ctx.turn_id;
+            let _ = tokio::task::spawn_blocking(move || {
+                for record in pending_notices {
+                    if let Err(error) = mgr.upsert_display_notice_record(&session_id, record) {
+                        tracing::warn!(
+                            target: "jeikcode_capabilities::session::display",
+                            session_id = %session_id,
+                            turn_id,
+                            error = %error,
+                            "final flush display notice failed"
+                        );
+                        eprintln!("[DisplayHook] final flush notice failed: {error}");
+                    }
+                }
+            })
+            .await;
+        }
     }
 }
 
@@ -620,11 +1151,7 @@ impl SessionManager {
     }
 
     fn read_display_index(&self, id: &str) -> SessionResult<Option<Vec<DisplayIndexRow>>> {
-        let Some(meta) = crate::session::manager::read_json_optional::<DisplayMeta>(
-            &self.display_meta_path(id)?,
-            "display meta",
-        )?
-        else {
+        let Some(meta) = read_display_meta_file(&self.display_meta_path(id)?)? else {
             return Ok(None);
         };
         if !meta.complete || meta.v != DISPLAY_VERSION {
@@ -661,9 +1188,8 @@ impl SessionManager {
         Ok(Some(rows))
     }
 
-    /// Return the v4 meta + a complete offset index, rebuilding it once from the
-    /// log when absent/stale. Tail readers can then seek without parsing the
-    /// whole file on every page.
+    /// Return the meta + a complete offset index, lazily upgrading v4 if needed and
+    /// rebuilding the index once from the log when absent/stale.
     pub fn ensure_display_index(
         &self,
         id: &str,
@@ -675,6 +1201,7 @@ impl SessionManager {
             };
             return Ok(Some((meta, rows)));
         }
+        let _ = self.with_display_lock(id, || self.ensure_v5_display_unlocked(id));
         let Some((meta, records)) = self.read_display(id)? else {
             return Ok(None);
         };
@@ -694,8 +1221,142 @@ impl SessionManager {
         turn_id: u64,
         records: &[DisplayRecord],
     ) -> SessionResult<()> {
+        self.append_display_turn_with_prompt_id(id, turn_id, records, None)
+    }
+
+    pub(crate) fn append_display_turn_with_prompt_id(
+        &self,
+        id: &str,
+        turn_id: u64,
+        records: &[DisplayRecord],
+        prompt_id_override: Option<&str>,
+    ) -> SessionResult<()> {
         self.with_display_lock(id, || {
-            self.append_display_turn_unlocked(id, turn_id, records)
+            self.append_display_turn_unlocked(id, turn_id, records, prompt_id_override)
+        })
+    }
+
+    fn push_bounded_ids(target: &mut Vec<String>, id: &str, cap: usize) {
+        if id.is_empty() || target.iter().any(|known| known == id) {
+            return;
+        }
+        target.push(id.to_string());
+        if target.len() > cap {
+            let drop = target.len() - cap;
+            target.drain(..drop);
+        }
+    }
+
+    /// 懒升级：将完整落盘的 v4 日志原地归一化升级为 v5（不丢失历史消息与图片），
+    /// 并把未带锚点的旧通知挂到所属 turn 末尾。
+    fn ensure_v5_display_unlocked(&self, id: &str) -> SessionResult<()> {
+        let meta_path = self.display_meta_path(id)?;
+        let Some(meta) = read_display_meta_file(&meta_path)? else {
+            return Ok(());
+        };
+        if meta.v != 4 || !meta.complete {
+            return Ok(());
+        }
+        let Some((_, records)) = self.read_display(id)? else {
+            return Ok(());
+        };
+        self.rewrite_display_rows_with_slices_unlocked(
+            id,
+            &records,
+            meta.last_turn_id,
+            &meta.completed_turns,
+            meta.backfilled,
+            &meta.flushed_slice_keys,
+        )
+    }
+
+    /// 回合内 `(turn_id, slice_key)` 增量落盘：与终态 `completed_prompt_ids` 严格分离，
+    /// 保证每轮/工具批检查点及压缩前能提前落盘，同时绝不会屏蔽后续轮次或 `turn_complete`。
+    pub fn append_display_slice(
+        &self,
+        id: &str,
+        turn_id: u64,
+        slice_key: &str,
+        records: &[DisplayRecord],
+    ) -> SessionResult<bool> {
+        if records.is_empty() || turn_id == 0 || slice_key.trim().is_empty() {
+            return Ok(false);
+        }
+        self.with_display_lock(id, || {
+            self.ensure_v5_display_unlocked(id)?;
+            let meta_path = self.display_meta_path(id)?;
+            let mut meta = match read_display_meta_file(&meta_path)? {
+                Some(meta) => meta,
+                None => {
+                    if turn_id != 1 {
+                        return Ok(false);
+                    }
+                    DisplayMeta {
+                        complete: true,
+                        ..DisplayMeta::default()
+                    }
+                }
+            };
+            if meta.v != DISPLAY_VERSION || !meta.complete {
+                return Ok(false);
+            }
+            if meta.flushed_slice_keys.iter().any(|k| k == slice_key) {
+                return Ok(true);
+            }
+            let prompt_id = display_turn_prompt_id(records);
+            if prompt_id
+                .as_deref()
+                .is_some_and(|pid| meta.completed_prompt_ids.iter().any(|known| known == pid))
+            {
+                return Ok(true);
+            }
+            let append_records: Vec<&DisplayRecord> = records
+                .iter()
+                .filter(|record| {
+                    record.id.as_deref().map_or(true, |rec_id| {
+                        !meta.admitted_prompt_ids.iter().any(|known| known == rec_id)
+                            && !meta
+                                .completed_prompt_ids
+                                .iter()
+                                .any(|known| known == rec_id)
+                            && !meta.flushed_record_ids.iter().any(|known| known == rec_id)
+                    })
+                })
+                .collect();
+            let mut next_seq = meta.last_seq;
+            let mut log_bytes = Vec::new();
+            if !append_records.is_empty() {
+                log_bytes.reserve(append_records.len() * 512);
+                for record in &append_records {
+                    next_seq = next_seq.saturating_add(1);
+                    let mut rec = (*record).clone();
+                    rec.v = DISPLAY_VERSION;
+                    rec.seq = next_seq;
+                    serde_json::to_writer(&mut log_bytes, &rec).map_err(|error| {
+                        SessionStoreError::Corrupt {
+                            kind: "display record",
+                            message: error.to_string(),
+                        }
+                    })?;
+                    log_bytes.push(b'\n');
+                }
+                record_flushed_rows_in_meta(&mut meta, append_records.iter().copied(), true);
+            }
+            Self::push_bounded_ids(&mut meta.flushed_slice_keys, slice_key, MAX_COMPLETED_TURNS);
+            meta.last_turn_id = meta.last_turn_id.max(turn_id);
+            meta.last_seq = next_seq;
+            meta.updated_at = u64::try_from(super::now_ms()).unwrap_or(0);
+            // 先校验并序列化 metadata，防止追加日志后再因 meta 超限失败造成 last_seq 撕裂。
+            let meta_bytes = serialize_display_meta(&meta)?;
+            if !log_bytes.is_empty() {
+                let path = self.display_path(id)?;
+                self.append_jsonl_line_at(id, &path, "display transcript", &log_bytes)?;
+            }
+            self.write_display_meta_bytes(id, &meta_bytes)?;
+            if let Ok(path) = self.display_index_path(id) {
+                let _ = std::fs::remove_file(path);
+            }
+            Ok(true)
         })
     }
 
@@ -704,15 +1365,14 @@ impl SessionManager {
         id: &str,
         turn_id: u64,
         records: &[DisplayRecord],
+        prompt_id_override: Option<&str>,
     ) -> SessionResult<()> {
         if records.is_empty() {
             return Ok(());
         }
+        self.ensure_v5_display_unlocked(id)?;
         let meta_path = self.display_meta_path(id)?;
-        let mut meta = match crate::session::manager::read_json_optional::<DisplayMeta>(
-            &meta_path,
-            "display meta",
-        )? {
+        let mut meta = match read_display_meta_file(&meta_path)? {
             Some(meta) => meta,
             None => {
                 if turn_id != 1 {
@@ -736,19 +1396,26 @@ impl SessionManager {
         // a turn id, and the old turn-id set would silently drop the NEW turn.
         // A legacy meta without prompt ids keeps the old turn-id guard until the
         // next idle read rebuilds it.
-        let prompt_id = display_turn_prompt_id(records);
+        let prompt_id = display_turn_prompt_id(records).or_else(|| {
+            prompt_id_override
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
         let prompt_completed = prompt_id.as_deref().is_some_and(|prompt_id| {
             meta.completed_prompt_ids
                 .iter()
                 .any(|known| known == prompt_id)
         });
         // `completed_prompt_ids` is the SETTLED-turn idempotency key. Admission
-        // writes only to `admitted_prompt_ids`, so a prompt written early cannot
-        // suppress the assistant/tool remainder here.
+        // and incremental checkpoints write to `admitted_prompt_ids` /
+        // `flushed_record_ids`, never marking the turn complete early.
         if prompt_completed {
             return Ok(());
         }
-        if meta.completed_prompt_ids.is_empty() && meta.admitted_prompt_ids.is_empty() {
+        if meta.completed_prompt_ids.is_empty()
+            && meta.admitted_prompt_ids.is_empty()
+            && meta.flushed_record_ids.is_empty()
+        {
             // Truly legacy meta (no prompt identity at all): the turn-id
             // high-water mark is all we have.
             if meta.completed_turns.contains(&turn_id)
@@ -768,41 +1435,45 @@ impl SessionManager {
         let append_records: Vec<&DisplayRecord> = records
             .iter()
             .filter(|record| {
-                // Admission may have written the opening prompt (and a future
-                // incremental writer may have written steers). Those ids are
-                // authoritative and must not be appended a second time at
-                // turn_complete. Assistant/tool records keep their own ids.
-                record.id.as_deref().map_or(true, |id| {
-                    !meta.admitted_prompt_ids.iter().any(|known| known == id)
-                        && !meta.completed_prompt_ids.iter().any(|known| known == id)
+                // 跳过入口预写和回合内检查点已经落盘的记录，避免终态重复写。
+                record.id.as_deref().map_or(true, |rec_id| {
+                    !meta.admitted_prompt_ids.iter().any(|known| known == rec_id)
+                        && !meta
+                            .completed_prompt_ids
+                            .iter()
+                            .any(|known| known == rec_id)
+                        && !meta.flushed_record_ids.iter().any(|known| known == rec_id)
                 })
             })
             .collect();
-        if append_records.is_empty() {
-            return Ok(());
-        }
-        let mut bytes = Vec::with_capacity(append_records.len() * 512);
         let mut next_seq = meta.last_seq;
-        for record in append_records {
-            next_seq = next_seq.saturating_add(1);
-            let mut record = record.clone();
-            record.v = DISPLAY_VERSION;
-            record.seq = next_seq;
-            serde_json::to_writer(&mut bytes, &record).map_err(|error| {
-                SessionStoreError::Corrupt {
-                    kind: "display record",
-                    message: error.to_string(),
-                }
-            })?;
-            bytes.push(b'\n');
+        let mut log_bytes = Vec::new();
+        if !append_records.is_empty() {
+            log_bytes.reserve(append_records.len() * 512);
+            for record in &append_records {
+                next_seq = next_seq.saturating_add(1);
+                let mut record = (*record).clone();
+                record.v = DISPLAY_VERSION;
+                record.seq = next_seq;
+                serde_json::to_writer(&mut log_bytes, &record).map_err(|error| {
+                    SessionStoreError::Corrupt {
+                        kind: "display record",
+                        message: error.to_string(),
+                    }
+                })?;
+                log_bytes.push(b'\n');
+            }
+            record_flushed_rows_in_meta(&mut meta, append_records.iter().copied(), false);
         }
-        let path = self.display_path(id)?;
-        self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
         meta.last_turn_id = meta.last_turn_id.max(turn_id);
         meta.last_seq = next_seq;
         if !meta.completed_turns.contains(&turn_id) {
             meta.completed_turns.push(turn_id);
         }
+        // 回合终态收口后，清理该 turn 的瞬态切片去重键，避免长会话元数据持续膨胀。
+        let settled_slice_prefix = format!("t{turn_id}:");
+        meta.flushed_slice_keys
+            .retain(|key| !key.starts_with(&settled_slice_prefix));
         for record in records {
             if !record.role.eq_ignore_ascii_case("user") {
                 continue;
@@ -810,18 +1481,14 @@ impl SessionManager {
             let Some(id) = record.id.as_deref() else {
                 continue;
             };
-            if !meta.admitted_prompt_ids.iter().any(|known| known == id) {
-                meta.admitted_prompt_ids.push(id.to_string());
-            }
+            Self::push_bounded_ids(&mut meta.admitted_prompt_ids, id, MAX_COMPLETED_TURNS);
         }
         if let Some(prompt_id) = prompt_id {
-            if !meta
-                .completed_prompt_ids
-                .iter()
-                .any(|known| known == &prompt_id)
-            {
-                meta.completed_prompt_ids.push(prompt_id);
-            }
+            Self::push_bounded_ids(
+                &mut meta.completed_prompt_ids,
+                &prompt_id,
+                MAX_COMPLETED_TURNS,
+            );
         }
         // Keep the exact sets bounded. A session with >8192 turns is far beyond
         // any realistic UI; the high-water mark still orders new appends.
@@ -829,20 +1496,19 @@ impl SessionManager {
             let drop = meta.completed_turns.len() - MAX_COMPLETED_TURNS;
             meta.completed_turns.drain(..drop);
         }
-        if meta.completed_prompt_ids.len() > MAX_COMPLETED_TURNS {
-            let drop = meta.completed_prompt_ids.len() - MAX_COMPLETED_TURNS;
-            meta.completed_prompt_ids.drain(..drop);
-        }
-        if meta.admitted_prompt_ids.len() > MAX_COMPLETED_TURNS {
-            let drop = meta.admitted_prompt_ids.len() - MAX_COMPLETED_TURNS;
-            meta.admitted_prompt_ids.drain(..drop);
-        }
         meta.updated_at = u64::try_from(super::now_ms()).unwrap_or(0);
-        self.write_display_meta(id, &meta)?;
+        let meta_bytes = serialize_display_meta(&meta)?;
+        if !log_bytes.is_empty() {
+            let path = self.display_path(id)?;
+            self.append_jsonl_line_at(id, &path, "display transcript", &log_bytes)?;
+        }
+        self.write_display_meta_bytes(id, &meta_bytes)?;
         // The append changed last_seq; the old index is stale. The next tail read
         // rebuilds it once from the (now complete) log.
-        if let Ok(path) = self.display_index_path(id) {
-            let _ = std::fs::remove_file(path);
+        if !append_records.is_empty() {
+            if let Ok(path) = self.display_index_path(id) {
+                let _ = std::fs::remove_file(path);
+            }
         }
         Ok(())
     }
@@ -871,11 +1537,9 @@ impl SessionManager {
         created_at: Option<u64>,
     ) -> SessionResult<Option<DisplayRecord>> {
         self.with_display_lock(id, || {
+            self.ensure_v5_display_unlocked(id)?;
             let meta_path = self.display_meta_path(id)?;
-            let mut meta = match crate::session::manager::read_json_optional::<DisplayMeta>(
-                &meta_path,
-                "display meta",
-            )? {
+            let mut meta = match read_display_meta_file(&meta_path)? {
                 Some(meta) => meta,
                 None => DisplayMeta {
                     complete: true,
@@ -901,15 +1565,9 @@ impl SessionManager {
                 role: "user".to_string(),
                 id: Some(prompt_id.to_string()),
                 content: content.to_string(),
-                reasoning: None,
-                synthetic: false,
-                internal_origin: None,
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                is_error: false,
                 images: images.to_vec(),
                 created_at,
-                elapsed_ms: None,
+                ..DisplayRecord::default()
             };
             let mut bytes = Vec::with_capacity(512);
             serde_json::to_writer(&mut bytes, &record).map_err(|error| {
@@ -919,13 +1577,23 @@ impl SessionManager {
                 }
             })?;
             bytes.push(b'\n');
-            let path = self.display_path(id)?;
-            self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
             meta.last_turn_id = next_turn_id;
             meta.last_seq = next_seq;
-            meta.admitted_prompt_ids.push(prompt_id.to_string());
+            Self::push_bounded_ids(
+                &mut meta.admitted_prompt_ids,
+                prompt_id,
+                MAX_COMPLETED_TURNS,
+            );
+            Self::push_bounded_ids(
+                &mut meta.flushed_record_ids,
+                prompt_id,
+                MAX_FLUSHED_RECORD_IDS,
+            );
             meta.updated_at = u64::try_from(super::now_ms()).unwrap_or(0);
-            self.write_display_meta(id, &meta)?;
+            let meta_bytes = serialize_display_meta(&meta)?;
+            let path = self.display_path(id)?;
+            self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
+            self.write_display_meta_bytes(id, &meta_bytes)?;
             if let Ok(idx_path) = self.display_index_path(id) {
                 let _ = std::fs::remove_file(idx_path);
             }
@@ -933,10 +1601,237 @@ impl SessionManager {
         })
     }
 
-    /// Append a standalone display-only notice record (e.g. compaction mark,
-    /// tool-fold notice, command notice, or warning) to `display.jsonl` with an
-    /// authoritative monotonic `seq` and unique `id`. Never enters `snapshot.messages`
-    /// or `model_history`.
+    fn read_last_non_diagnostic_anchor_id(&self, id: &str) -> Option<String> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = self.display_path(id).ok()?;
+        let mut file = std::fs::File::open(&path).ok()?;
+        let len = file.metadata().ok()?.len();
+        let start = len.saturating_sub(64 * 1024);
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).ok()?;
+        let decoded = String::from_utf8_lossy(&buf);
+        let mut lines: Vec<&str> = decoded.lines().collect();
+        if start > 0 && !lines.is_empty() {
+            lines.remove(0);
+        }
+        for line in lines.iter().rev() {
+            let Ok(record) = serde_json::from_str::<DisplayRecord>(line) else {
+                continue;
+            };
+            if record.synthetic
+                || record.internal_origin.as_deref() == Some("turn_diagnostic")
+                || record.internal_origin.as_deref() == Some("verify_cadence")
+            {
+                continue;
+            }
+            if record.role.eq_ignore_ascii_case("user")
+                || record.role.eq_ignore_ascii_case("assistant")
+            {
+                return record.id;
+            }
+        }
+        None
+    }
+
+    fn notice_insertion_index(records: &[DisplayRecord], notice: &DisplayRecord) -> usize {
+        if let Some(anchor_id) = notice.anchor_message_id.as_deref() {
+            if let Some(anchor_pos) = records
+                .iter()
+                .rposition(|record| record.id.as_deref() == Some(anchor_id))
+            {
+                let mut idx = anchor_pos + 1;
+                while idx < records.len() {
+                    let row = &records[idx];
+                    if row.role.eq_ignore_ascii_case("tool") {
+                        idx += 1;
+                        continue;
+                    }
+                    if row.internal_origin.as_deref() == Some("turn_diagnostic")
+                        && row.anchor_message_id.as_deref() == Some(anchor_id)
+                    {
+                        idx += 1;
+                        continue;
+                    }
+                    break;
+                }
+                return idx;
+            }
+        }
+        records.len()
+    }
+
+    /// 唯一账本写入/原地更新入口（v5）：同 `event_id` 按 `revision` 幂等覆盖并遵守
+    /// `settled` 不降级约束；新事件若因果锚点在日志末尾则 O(1) 追加，否则按锚点插槽落位。
+    pub fn upsert_display_notice_record(
+        &self,
+        id: &str,
+        mut notice: DisplayRecord,
+    ) -> SessionResult<Option<DisplayRecord>> {
+        let trimmed = notice.content.trim().to_string();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        notice.content = trimmed;
+        notice.v = DISPLAY_VERSION;
+        notice.role = "assistant".to_string();
+        notice.internal_origin = Some("turn_diagnostic".to_string());
+
+        self.with_display_lock(id, || {
+            self.ensure_v5_display_unlocked(id)?;
+            let meta_path = self.display_meta_path(id)?;
+            let mut meta = match read_display_meta_file(&meta_path)? {
+                Some(meta) => meta,
+                // 若 `.display.meta.json` 尚未建立（即便 turn_id > 1），按完备初始元数据落盘，
+                // 避免首张通知被静默丢弃并退化为仅靠快照兜底。
+                None => DisplayMeta {
+                    complete: true,
+                    ..DisplayMeta::default()
+                },
+            };
+            if meta.v != DISPLAY_VERSION || !meta.complete {
+                tracing::warn!(
+                    target: "jeikcode_capabilities::session::display",
+                    session_id = id,
+                    turn_id = notice.turn_id,
+                    meta_version = meta.v,
+                    complete = meta.complete,
+                    event_id = notice.event_id.as_deref().unwrap_or(""),
+                    "skipping display notice upsert because display meta is incomplete or mismatched"
+                );
+                return Ok(None);
+            }
+            if notice.turn_id == 0 {
+                notice.turn_id = meta.last_turn_id;
+            }
+            let event_key = notice
+                .event_id
+                .clone()
+                .or_else(|| notice.id.clone())
+                .unwrap_or_else(|| format!("notice-{}", uuid::Uuid::new_v4()));
+            notice.id = Some(event_key.clone());
+            notice.event_id = Some(event_key.clone());
+            if notice.part_id.is_none() {
+                notice.part_id = Some(format!("{event_key}:1:notice"));
+            }
+            if notice.created_at.is_none() {
+                notice.created_at = Some(u64::try_from(super::now_ms()).unwrap_or(0));
+            }
+            if notice.status.is_none() {
+                notice.status = Some(NoticeStatus::Settled);
+            }
+            if notice.revision.is_none() {
+                notice.revision = Some(1);
+            }
+
+            let maybe_existing = meta.flushed_record_ids.iter().any(|k| k == &event_key);
+            if maybe_existing {
+                if let Some((_read_meta, mut records)) = self.read_display(id)? {
+                    if let Some(pos) = records.iter().rposition(|row| {
+                        row.event_id.as_deref() == Some(&event_key)
+                            || row.id.as_deref() == Some(&event_key)
+                    }) {
+                        let existing = &records[pos];
+                        let existing_settled = existing.status == Some(NoticeStatus::Settled);
+                        let incoming_settled = notice.status == Some(NoticeStatus::Settled);
+                        if (existing_settled && !incoming_settled)
+                            || (existing.revision.unwrap_or(0) > notice.revision.unwrap_or(0))
+                        {
+                            return Ok(Some(existing.clone()));
+                        }
+                        if existing.content == notice.content
+                            && existing.status == notice.status
+                            && existing.severity == notice.severity
+                            && existing.notice_kind == notice.notice_kind
+                        {
+                            return Ok(Some(existing.clone()));
+                        }
+                        let mut updated = notice.clone();
+                        updated.seq = existing.seq;
+                        updated.created_at = existing.created_at.or(notice.created_at);
+                        if updated.anchor_message_id.is_none() {
+                            updated.anchor_message_id = existing.anchor_message_id.clone();
+                        }
+                        if updated.anchor_part_id.is_none() {
+                            updated.anchor_part_id = existing.anchor_part_id.clone();
+                        }
+                        records[pos] = updated;
+                        self.rewrite_display_rows_with_slices_unlocked(
+                            id,
+                            &records,
+                            meta.last_turn_id,
+                            &meta.completed_turns,
+                            meta.backfilled,
+                            &meta.flushed_slice_keys,
+                        )?;
+                        let result = self
+                            .read_display(id)?
+                            .and_then(|(_, rows)| rows.get(pos).cloned())
+                            .unwrap_or(records[pos].clone());
+                        return Ok(Some(result));
+                    }
+                }
+            }
+
+            let can_fast_append = notice.anchor_message_id.as_deref().is_none_or(|anchor| {
+                self.read_last_non_diagnostic_anchor_id(id).as_deref() == Some(anchor)
+            });
+            if !can_fast_append {
+                if let Some((_, mut records)) = self.read_display(id)? {
+                    // 按 anchor_message_id 找到因果插槽，保持历史顺序与直播一致。
+                    if let Some(pos) = records.iter().rposition(|row| {
+                        row.event_id.as_deref() == Some(&event_key)
+                            || row.id.as_deref() == Some(&event_key)
+                    }) {
+                        return Ok(Some(records[pos].clone()));
+                    }
+                    let insert_at = Self::notice_insertion_index(&records, &notice);
+                    records.insert(insert_at, notice);
+                    self.rewrite_display_rows_with_slices_unlocked(
+                        id,
+                        &records,
+                        meta.last_turn_id,
+                        &meta.completed_turns,
+                        meta.backfilled,
+                        &meta.flushed_slice_keys,
+                    )?;
+                    let inserted = self
+                        .read_display(id)?
+                        .and_then(|(_, rows)| rows.get(insert_at).cloned())
+                        .unwrap_or_else(|| records[insert_at].clone());
+                    return Ok(Some(inserted));
+                }
+            }
+
+            let next_seq = meta.last_seq.saturating_add(1);
+            notice.seq = next_seq;
+            let mut bytes = Vec::with_capacity(256);
+            serde_json::to_writer(&mut bytes, &notice).map_err(|error| {
+                SessionStoreError::Corrupt {
+                    kind: "display notice record",
+                    message: error.to_string(),
+                }
+            })?;
+            bytes.push(b'\n');
+            meta.last_seq = next_seq;
+            Self::push_bounded_ids(
+                &mut meta.flushed_record_ids,
+                &event_key,
+                MAX_FLUSHED_RECORD_IDS,
+            );
+            meta.updated_at = u64::try_from(super::now_ms()).unwrap_or(0);
+            let meta_bytes = serialize_display_meta(&meta)?;
+            let path = self.display_path(id)?;
+            self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
+            self.write_display_meta_bytes(id, &meta_bytes)?;
+            if let Ok(idx_path) = self.display_index_path(id) {
+                let _ = std::fs::remove_file(idx_path);
+            }
+            Ok(Some(notice))
+        })
+    }
+
+    /// 兼容接口：将纯文本通知转化为结构化 v5 显示通知并走唯一 upsert 入口。
     pub fn append_display_notice(
         &self,
         id: &str,
@@ -944,64 +1839,34 @@ impl SessionManager {
         notice_id: Option<String>,
     ) -> SessionResult<Option<DisplayRecord>> {
         let text = content.into();
-        let text = text.trim().to_string();
-        if text.is_empty() {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
             return Ok(None);
         }
-        self.with_display_lock(id, || {
-            let meta_path = self.display_meta_path(id)?;
-            let Some(mut meta) = crate::session::manager::read_json_optional::<DisplayMeta>(
-                &meta_path,
-                "display meta",
-            )?
-            else {
-                return Ok(None);
-            };
-            if meta.v != DISPLAY_VERSION || !meta.complete {
-                return Ok(None);
-            }
-            let next_seq = meta.last_seq.saturating_add(1);
-            let record_id = notice_id.unwrap_or_else(|| format!("notice-{}", uuid::Uuid::new_v4()));
-            let record = DisplayRecord {
+        let (notice_kind, severity) = infer_legacy_notice_meta(&trimmed, notice_id.as_deref());
+        let event_key = notice_id.unwrap_or_else(|| format!("notice-{}", uuid::Uuid::new_v4()));
+        self.upsert_display_notice_record(
+            id,
+            DisplayRecord {
                 v: DISPLAY_VERSION,
                 session_id: id.to_string(),
-                turn_id: meta.last_turn_id,
-                index: 0,
-                seq: next_seq,
                 role: "assistant".to_string(),
-                id: Some(record_id),
-                content: text,
-                reasoning: None,
-                synthetic: false,
+                id: Some(event_key.clone()),
+                content: trimmed,
                 internal_origin: Some("turn_diagnostic".to_string()),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                is_error: false,
-                images: Vec::new(),
                 created_at: Some(u64::try_from(super::now_ms()).unwrap_or(0)),
-                elapsed_ms: None,
-            };
-            let mut bytes = Vec::with_capacity(256);
-            serde_json::to_writer(&mut bytes, &record).map_err(|error| {
-                SessionStoreError::Corrupt {
-                    kind: "display notice record",
-                    message: error.to_string(),
-                }
-            })?;
-            bytes.push(b'\n');
-            let path = self.display_path(id)?;
-            self.append_jsonl_line_at(id, &path, "display transcript", &bytes)?;
-            meta.last_seq = next_seq;
-            meta.updated_at = u64::try_from(super::now_ms()).unwrap_or(0);
-            self.write_display_meta(id, &meta)?;
-            if let Ok(idx_path) = self.display_index_path(id) {
-                let _ = std::fs::remove_file(idx_path);
-            }
-            Ok(Some(record))
-        })
+                event_id: Some(event_key.clone()),
+                part_id: Some(format!("{event_key}:1:notice")),
+                notice_kind: Some(notice_kind),
+                revision: Some(1),
+                severity: Some(severity),
+                status: Some(NoticeStatus::Settled),
+                ..DisplayRecord::default()
+            },
+        )
     }
 
-    /// Rewrite the v4 log in place (explicit mutation). `backfilled=false` keeps
+    /// Rewrite the log in place (explicit mutation). `backfilled=false` keeps
     /// the exact `completed_turns` contract, so a normal read can trust the
     /// trimmed log without falling back to the snapshot.
     pub(crate) fn display_has_presentation_request(
@@ -1013,7 +1878,7 @@ impl SessionManager {
         let Some((meta, records)) = self.read_display(id).ok().flatten() else {
             return false;
         };
-        if meta.v != DISPLAY_VERSION {
+        if !matches!(meta.v, 4 | DISPLAY_VERSION) {
             return false;
         }
         let prefix = format!("presentation-{anchor_turn_id}-{request_id}-");
@@ -1040,6 +1905,7 @@ impl SessionManager {
             return Ok(true);
         }
         self.with_display_lock(id, || {
+            self.ensure_v5_display_unlocked(id)?;
             let Some((meta, mut records)) = self.read_display(id)? else {
                 return Ok(false);
             };
@@ -1068,7 +1934,7 @@ impl SessionManager {
                     .map(|position| position + 1)
             };
             let Some(insert_at) = insert_at else {
-                // The v4 log cannot address the anchor. Drop it under the same
+                // The log cannot address the anchor. Drop it under the same
                 // display lock so a concurrent turn-complete append cannot land
                 // between this decision and invalidation.
                 self.invalidate_display_unlocked(id)?;
@@ -1099,24 +1965,18 @@ impl SessionManager {
                         None => format!("presentation-{anchor_turn_id}-{id_epoch}-{index}"),
                     }),
                     content: content.clone(),
-                    reasoning: None,
-                    synthetic: false,
                     internal_origin: Some("presentation".into()),
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                    is_error: false,
-                    images: Vec::new(),
-                    created_at: None,
-                    elapsed_ms: None,
+                    ..DisplayRecord::default()
                 })
                 .collect();
             records.splice(insert_at..insert_at, new_rows);
-            self.rewrite_display_rows_unlocked(
+            self.rewrite_display_rows_with_slices_unlocked(
                 id,
                 &records,
                 meta.last_turn_id,
                 &meta.completed_turns,
                 meta.backfilled,
+                &meta.flushed_slice_keys,
             )?;
             Ok(true)
         })
@@ -1149,20 +2009,42 @@ impl SessionManager {
         completed_turns: &[u64],
         backfilled: bool,
     ) -> SessionResult<()> {
-        let meta_path = self.display_meta_path(id)?;
+        self.rewrite_display_rows_with_slices_unlocked(
+            id,
+            records,
+            last_turn_id,
+            completed_turns,
+            backfilled,
+            &[],
+        )
+    }
+
+    fn rewrite_display_rows_with_slices_unlocked(
+        &self,
+        id: &str,
+        records: &[DisplayRecord],
+        last_turn_id: u64,
+        completed_turns: &[u64],
+        backfilled: bool,
+        flushed_slice_keys: &[String],
+    ) -> SessionResult<()> {
         // Drop the old index first: a crash between the log rewrite and the new
         // index must never leave a same-length stale index that still passes the
         // `last_seq` check.
         if let Ok(path) = self.display_index_path(id) {
             let _ = std::fs::remove_file(path);
         }
+        let prompt_ids = display_completed_prompt_ids(records);
+        let flushed_record_ids = display_record_ids_for_meta(records);
         let mut incomplete = DisplayMeta {
             complete: false,
             last_turn_id: 0,
             last_seq: 0,
             completed_turns: completed_turns.to_vec(),
-            completed_prompt_ids: display_completed_prompt_ids(records),
-            admitted_prompt_ids: display_completed_prompt_ids(records),
+            completed_prompt_ids: prompt_ids.clone(),
+            admitted_prompt_ids: prompt_ids,
+            flushed_record_ids,
+            flushed_slice_keys: flushed_slice_keys.to_vec(),
             backfilled,
             updated_at: u64::try_from(super::now_ms()).unwrap_or(0),
             ..DisplayMeta::default()
@@ -1198,14 +2080,14 @@ impl SessionManager {
         self.write_display_meta(id, &incomplete)
     }
 
-    fn write_display_meta(&self, id: &str, meta: &DisplayMeta) -> SessionResult<()> {
+    fn write_display_meta_bytes(&self, id: &str, bytes: &[u8]) -> SessionResult<()> {
         let path = self.display_meta_path(id)?;
-        let bytes =
-            serde_json::to_vec_pretty(meta).map_err(|error| SessionStoreError::Corrupt {
-                kind: "display meta",
-                message: error.to_string(),
-            })?;
-        self.write_bytes_atomic(&path, &bytes, "display meta", 64 * 1024)
+        self.write_bytes_atomic(&path, bytes, "display meta", MAX_DISPLAY_META_BYTES)
+    }
+
+    fn write_display_meta(&self, id: &str, meta: &DisplayMeta) -> SessionResult<()> {
+        let bytes = serialize_display_meta(meta)?;
+        self.write_display_meta_bytes(id, &bytes)
     }
 
     /// Read a complete display log. `None` means it is absent or incomplete; the
@@ -1215,16 +2097,13 @@ impl SessionManager {
         id: &str,
     ) -> SessionResult<Option<(DisplayMeta, Vec<DisplayRecord>)>> {
         let meta_path = self.display_meta_path(id)?;
-        let Some(meta) =
-            crate::session::manager::read_json_optional::<DisplayMeta>(&meta_path, "display meta")?
-        else {
+        let Some(meta) = read_display_meta_file(&meta_path)? else {
             return Ok(None);
         };
         // An old/future display projection must be rebuilt from the canonical
-        // state rather than interpreted with the current coordinate system. v3
-        // is still readable as a MIGRATION SOURCE; the normal read path filters
-        // for `v == 4` and never trusts v3 directly.
-        if !meta.complete || !matches!(meta.v, 3 | DISPLAY_VERSION) {
+        // state rather than interpreted with the current coordinate system. v3/v4
+        // remain readable for migration/lazy-upgrade.
+        if !meta.complete || !matches!(meta.v, 3 | 4 | DISPLAY_VERSION) {
             return Ok(None);
         }
         let path = self.display_path(id)?;
@@ -1249,15 +2128,17 @@ impl SessionManager {
                 });
             }
             match serde_json::from_slice::<DisplayRecord>(line) {
-                Ok(record) if matches!(record.v, 3 | DISPLAY_VERSION) => {
-                    if record.v == DISPLAY_VERSION {
-                        // v4 seq is the ordering contract: strictly increasing and
-                        // mirrored by meta.last_seq. A crash between the append and
-                        // the meta write falls back to the canonical rebuild.
+                Ok(mut record) if matches!(record.v, 3 | 4 | DISPLAY_VERSION) => {
+                    if matches!(record.v, 4 | DISPLAY_VERSION) {
+                        // v4/v5 seq is the ordering contract: strictly increasing and
+                        // mirrored by meta.last_seq.
                         if record.seq == 0 || record.seq <= last_seq {
                             return Ok(None);
                         }
                         last_seq = record.seq;
+                    }
+                    if record.v == 4 {
+                        normalize_v4_record(&mut record);
                     }
                     records.push(record);
                 }
@@ -1275,8 +2156,11 @@ impl SessionManager {
                 }
             }
         }
-        if meta.v == DISPLAY_VERSION && meta.last_seq != last_seq {
+        if matches!(meta.v, 4 | DISPLAY_VERSION) && meta.last_seq != last_seq {
             return Ok(None);
+        }
+        if meta.v == 4 {
+            records = normalize_v4_unanchored_notices(records);
         }
         Ok(Some((meta, records)))
     }
@@ -1303,6 +2187,107 @@ impl SessionManager {
     }
 }
 
+fn infer_legacy_notice_meta(text: &str, id: Option<&str>) -> (NoticeKind, NoticeSeverity) {
+    let id_str = id.unwrap_or("");
+    if id_str.starts_with("compact:")
+        || [
+            "已压缩",
+            "已壓縮",
+            "无需压缩",
+            "無需壓縮",
+            "Compacted",
+            "Nothing to compact",
+            "Đã thu gọn",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        return (NoticeKind::Compaction, NoticeSeverity::Info);
+    }
+    if id_str.ends_with(":retry") || text.contains("重试") || text.contains("retry") {
+        return (NoticeKind::Retry, NoticeSeverity::Warning);
+    }
+    if text.contains("速率限制") || text.contains("rate limit") || text.contains("429") {
+        return (NoticeKind::RateLimit, NoticeSeverity::Warning);
+    }
+    if text.contains("超时") || text.contains("timeout") {
+        return (NoticeKind::Timeout, NoticeSeverity::Warning);
+    }
+    if text.contains("错误")
+        || text.contains("失败")
+        || text.contains("Error")
+        || text.contains("failed")
+    {
+        return (NoticeKind::Error, NoticeSeverity::Error);
+    }
+    (NoticeKind::Warning, NoticeSeverity::Warning)
+}
+
+fn normalize_v4_record(record: &mut DisplayRecord) {
+    if record.internal_origin.as_deref() == Some("turn_diagnostic") {
+        let key = record
+            .event_id
+            .clone()
+            .or_else(|| record.id.clone())
+            .unwrap_or_else(|| format!("notice-{}-{}", record.turn_id, record.seq));
+        if record.event_id.is_none() {
+            record.event_id = Some(key.clone());
+        }
+        if record.part_id.is_none() {
+            record.part_id = Some(format!("{key}:1:notice"));
+        }
+        let (kind, sev) = infer_legacy_notice_meta(&record.content, record.id.as_deref());
+        if record.notice_kind.is_none() {
+            record.notice_kind = Some(kind);
+        }
+        if record.severity.is_none() {
+            record.severity = Some(sev);
+        }
+        if record.status.is_none() {
+            record.status = Some(NoticeStatus::Settled);
+        }
+        if record.revision.is_none() {
+            record.revision = Some(1);
+        }
+    }
+    record.v = DISPLAY_VERSION;
+}
+
+/// 将 v4 遗留日志中未带 `anchor_message_id` 的 `turn_diagnostic` 顺延挂到其所属
+/// `turn_id` 末尾，修复旧版本因中途插入导致的通知倒悬在问题之前。
+fn normalize_v4_unanchored_notices(records: Vec<DisplayRecord>) -> Vec<DisplayRecord> {
+    let mut out = Vec::with_capacity(records.len());
+    let mut pending_by_turn: std::collections::BTreeMap<u64, Vec<DisplayRecord>> =
+        std::collections::BTreeMap::new();
+    let mut current_turn: Option<u64> = None;
+
+    for record in records {
+        let is_unanchored_diag = record.internal_origin.as_deref() == Some("turn_diagnostic")
+            && record.anchor_message_id.is_none();
+        if let Some(prev_turn) = current_turn {
+            if record.turn_id != prev_turn {
+                if let Some(buffered) = pending_by_turn.remove(&prev_turn) {
+                    out.extend(buffered);
+                }
+            }
+        }
+        if !is_unanchored_diag {
+            current_turn = Some(record.turn_id);
+            out.push(record);
+        } else {
+            current_turn.get_or_insert(record.turn_id);
+            pending_by_turn
+                .entry(record.turn_id)
+                .or_default()
+                .push(record);
+        }
+    }
+    for (_, buffered) in pending_by_turn {
+        out.extend(buffered);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1317,15 +2302,8 @@ mod tests {
             role: "user".into(),
             id: Some(format!("m-{turn_id}-{index}")),
             content: text.into(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
             created_at: Some(1_000 + i64::from(index) as u64),
-            elapsed_ms: None,
+            ..DisplayRecord::default()
         }
     }
 
@@ -1703,5 +2681,385 @@ mod tests {
         assert!(mgr.read_display("s1").unwrap().is_some());
         mgr.invalidate_display("s1").unwrap();
         assert!(mgr.read_display("s1").unwrap().is_none());
+    }
+
+    #[test]
+    fn display_notice_upserts_in_place_by_event_id_without_polluting_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        mgr.write_display_backfill("s1", &[record(1, 0, "Q")], 1)
+            .unwrap();
+        let text1 = "网络连接中断，已保留当前输出，重试 1/9 次";
+        let first = mgr
+            .upsert_display_notice_record(
+                "s1",
+                DisplayRecord {
+                    turn_id: 1,
+                    id: Some("m-a:retry".into()),
+                    event_id: Some("m-a:retry".into()),
+                    part_id: Some("m-a:retry:1:notice".into()),
+                    content: text1.into(),
+                    notice_kind: Some(NoticeKind::Retry),
+                    revision: Some(1),
+                    severity: Some(NoticeSeverity::Warning),
+                    status: Some(NoticeStatus::Active),
+                    ..DisplayRecord::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+        // 幂等重复（同 event_id, 同 revision/content）：不新增记录。
+        let second = mgr
+            .append_display_notice("s1", text1, Some("m-a:retry".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.id, first.id);
+
+        // 同一 event_id、更高 revision 的更新或终态收敛：原地更新为唯一记录，不再追加 9 条！
+        let third = mgr
+            .upsert_display_notice_record(
+                "s1",
+                DisplayRecord {
+                    turn_id: 1,
+                    id: Some("m-a:retry".into()),
+                    event_id: Some("m-a:retry".into()),
+                    part_id: Some("m-a:retry:1:notice".into()),
+                    content: "自动重连失败，已终止".into(),
+                    notice_kind: Some(NoticeKind::Error),
+                    revision: Some(2),
+                    severity: Some(NoticeSeverity::Error),
+                    status: Some(NoticeStatus::Settled),
+                    ..DisplayRecord::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(third.seq, first.seq, "原地更新应保留原有因果 seq 位置");
+        assert_eq!(third.status, Some(NoticeStatus::Settled));
+
+        // 已 settled 后即使收到滞后 active 帧也不得降级。
+        let stale = mgr
+            .upsert_display_notice_record(
+                "s1",
+                DisplayRecord {
+                    turn_id: 1,
+                    id: Some("m-a:retry".into()),
+                    event_id: Some("m-a:retry".into()),
+                    content: "滞后重试 1/9".into(),
+                    notice_kind: Some(NoticeKind::Retry),
+                    revision: Some(99),
+                    severity: Some(NoticeSeverity::Warning),
+                    status: Some(NoticeStatus::Active),
+                    ..DisplayRecord::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale.status, Some(NoticeStatus::Settled));
+        assert_eq!(stale.content, "自动重连失败，已终止");
+
+        let (_, rows) = mgr.read_display("s1").unwrap().unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.id.as_deref() == Some("m-a:retry"))
+                .count(),
+            1,
+            "v5 同 event_id 在账本里只保留单一权威记录"
+        );
+    }
+
+    #[test]
+    fn display_notice_initializes_missing_meta_when_turn_id_gt_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        mgr.write_meta(&crate::session::SessionMeta::new("s-turn2", "/tmp", 1))
+            .unwrap();
+        // Deliberately do NOT write `.display.meta.json` yet, and upsert with turn_id = 2.
+        let inserted = mgr
+            .upsert_display_notice_record(
+                "s-turn2",
+                DisplayRecord {
+                    turn_id: 2,
+                    id: Some("warn-max-rounds:2".into()),
+                    event_id: Some("warn-max-rounds:2".into()),
+                    content: "Round limit reached".into(),
+                    notice_kind: Some(NoticeKind::Warning),
+                    severity: Some(NoticeSeverity::Warning),
+                    status: Some(NoticeStatus::Settled),
+                    ..DisplayRecord::default()
+                },
+            )
+            .unwrap();
+        let inserted = inserted
+            .expect("missing display meta on turn_id > 1 must initialize and persist notice");
+        assert_eq!(inserted.id.as_deref(), Some("warn-max-rounds:2"));
+        assert_eq!(inserted.turn_id, 2);
+        let (_, rows) = mgr.read_display("s-turn2").unwrap().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, Some(NoticeSeverity::Warning));
+    }
+
+    #[test]
+    fn append_display_slice_checkpoint_flushes_early_without_blocking_turn_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        let q1 = record(1, 0, "Q1");
+        let mut a1 = record(1, 1, "A1");
+        a1.role = "assistant".into();
+        let mut a2 = record(1, 2, "A2");
+        a2.role = "assistant".into();
+
+        // 第一轮检查点提前写 [Q1, A1]。
+        assert!(mgr
+            .append_display_slice("s1", 1, "t1:c1", &[q1.clone(), a1.clone()])
+            .unwrap());
+        let (meta1, rows1) = mgr.read_display("s1").unwrap().unwrap();
+        assert_eq!(rows1.len(), 2);
+        assert!(
+            !meta1.completed_prompt_ids.contains(&"m-1-0".to_string()),
+            "切片检查点绝不得提前标为 completed_prompt_ids"
+        );
+
+        // 相同 slice_key 幂等跳过。
+        assert!(mgr
+            .append_display_slice("s1", 1, "t1:c1", &[q1.clone(), a1.clone()])
+            .unwrap());
+        assert_eq!(mgr.read_display("s1").unwrap().unwrap().1.len(), 2);
+
+        // turn_complete 只补写剩余 A2 并把 m-1-0 标记为 completed。
+        mgr.append_display_turn("s1", 1, &[q1, a1, a2]).unwrap();
+        let (meta2, rows2) = mgr.read_display("s1").unwrap().unwrap();
+        assert_eq!(rows2.len(), 3);
+        assert_eq!(
+            rows2.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(),
+            vec!["Q1", "A1", "A2"]
+        );
+        assert!(meta2.completed_prompt_ids.contains(&"m-1-0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn display_hook_flushes_before_midturn_compaction_and_anchors_notices() {
+        use jeikcode_kernel::message::CompactReport;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = std::sync::Arc::new(SessionManager::with_root(dir.path()));
+        let hook = DisplayHook::new(mgr.clone(), "s1", dir.path());
+
+        let mut convo = Conversation::new();
+        let mut q = Message::user("长任务");
+        q.id = Some("u-1".into());
+        convo.push(q);
+        hook.turn_start(&mut convo).await;
+
+        let mut a1 = Message::assistant("第一轮输出", Vec::new());
+        a1.id = Some("a-1".into());
+        convo.push(a1);
+        let ctx = TurnCtx {
+            turn_id: 1,
+            ..Default::default()
+        };
+        hook.on_turn_checkpoint(&convo, &ctx).await;
+
+        // 发出绑定在 a-1 上的重试通知，然后恢复收口。
+        let n1 = SystemNotice {
+            event_id: "retry-1".into(),
+            part_id: "retry-1:1:notice".into(),
+            kind: NoticeKind::Retry,
+            severity: NoticeSeverity::Warning,
+            status: NoticeStatus::Active,
+            revision: 1,
+            text: "流空闲超时，重试 1/9 次".into(),
+            anchor_message_id: Some("a-1".into()),
+            anchor_part_id: None,
+            turn_id: Some(1),
+            persist: true,
+        };
+        hook.on_system_notice(&n1, &convo, &ctx).await;
+
+        // 回合中发生自动压缩：先 pre_compaction 落盘，随后裁剪内存 convo，再写入压缩边界。
+        hook.pre_compaction(
+            &convo,
+            &CompactTrigger::Auto { utilization: 0.9 },
+            Some(&ctx),
+        )
+        .await;
+        convo.messages.drain(..1); // 裁掉前面消息（a-1 也在日志里安全保留了）
+        let compact_report = CompactReport {
+            epoch_before: 0,
+            epoch_after: 1,
+            removed: 1,
+            bytes_before: 4000,
+            bytes_after: 800,
+            committed: true,
+        };
+        let compact_notice = SystemNotice {
+            event_id: "compact:epoch:1".into(),
+            part_id: "compact:epoch:1:1:notice".into(),
+            kind: NoticeKind::Compaction,
+            severity: NoticeSeverity::Info,
+            status: NoticeStatus::Settled,
+            revision: 1,
+            text: "已压缩 · 摘要 1 条".into(),
+            anchor_message_id: Some("a-1".into()),
+            anchor_part_id: None,
+            turn_id: Some(1),
+            persist: true,
+        };
+        hook.post_compaction(&compact_report, &compact_notice, Some(&ctx))
+            .await;
+
+        let mut a2 = Message::assistant("最终回复", Vec::new());
+        a2.id = Some("a-2".into());
+        convo.push(a2);
+        hook.turn_complete(&convo, &StopReason::Stopped, &ctx).await;
+
+        let (_, rows) = mgr.read_display("s1").unwrap().unwrap();
+        let contents: Vec<&str> = rows.iter().map(|r| r.content.as_str()).collect();
+        // u-1, a-1, retry-1 (settled on turn_complete), compact:epoch:1, a-2
+        assert_eq!(
+            contents,
+            vec![
+                "长任务",
+                "第一轮输出",
+                "流空闲超时，重试 1/9 次",
+                "已压缩 · 摘要 1 条",
+                "最终回复"
+            ]
+        );
+        let retry_row = rows
+            .iter()
+            .find(|r| r.event_id.as_deref() == Some("retry-1"))
+            .unwrap();
+        assert_eq!(retry_row.status, Some(NoticeStatus::Settled));
+    }
+
+    #[test]
+    fn v4_unanchored_notices_migrate_to_turn_tail_lazily() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        // 构造一个带错位 v4 通知的老日志：turn=1 里 user(seq=1) -> notice(seq=2) -> assistant(seq=3)
+        let u1 = DisplayRecord {
+            v: 4,
+            session_id: "s1".into(),
+            turn_id: 1,
+            index: 0,
+            seq: 1,
+            role: "user".into(),
+            id: Some("u-1".into()),
+            content: "提问".into(),
+            ..DisplayRecord::default()
+        };
+        let old_notice = DisplayRecord {
+            v: 4,
+            session_id: "s1".into(),
+            turn_id: 1,
+            index: 0,
+            seq: 2,
+            role: "assistant".into(),
+            id: Some("notice-old".into()),
+            content: "已压缩 · 摘要 3 条".into(),
+            internal_origin: Some("turn_diagnostic".into()),
+            ..DisplayRecord::default()
+        };
+        let a1 = DisplayRecord {
+            v: 4,
+            session_id: "s1".into(),
+            turn_id: 1,
+            index: 1,
+            seq: 3,
+            role: "assistant".into(),
+            id: Some("a-1".into()),
+            content: "回答".into(),
+            ..DisplayRecord::default()
+        };
+        let mut bytes = Vec::new();
+        for r in [&u1, &old_notice, &a1] {
+            serde_json::to_writer(&mut bytes, r).unwrap();
+            bytes.push(b'\n');
+        }
+        std::fs::write(mgr.display_path("s1").unwrap(), &bytes).unwrap();
+        mgr.write_display_meta(
+            "s1",
+            &DisplayMeta {
+                v: 4,
+                complete: true,
+                last_turn_id: 1,
+                last_seq: 3,
+                completed_turns: vec![1],
+                completed_prompt_ids: vec!["u-1".into()],
+                admitted_prompt_ids: vec!["u-1".into()],
+                ..DisplayMeta::default()
+            },
+        )
+        .unwrap();
+
+        let (meta, rows) = mgr.read_display("s1").unwrap().unwrap();
+        assert_eq!(meta.v, 4);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["u-1", "a-1", "notice-old"],
+            "未带锚点的 v4 旧通知在读取时应顺延至所属 turn 末尾"
+        );
+        let migrated_notice = &rows[2];
+        assert_eq!(migrated_notice.notice_kind, Some(NoticeKind::Compaction));
+        assert_eq!(migrated_notice.status, Some(NoticeStatus::Settled));
+    }
+
+    #[test]
+    fn large_display_meta_past_64kib_does_not_tear_log_and_prunes_settled_slice_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+
+        let mut records = Vec::with_capacity(2200);
+        for i in 0..2200u32 {
+            let mut rec = DisplayRecord {
+                v: DISPLAY_VERSION,
+                session_id: "s-large".into(),
+                turn_id: 1,
+                index: i,
+                seq: 0,
+                role: if i == 0 {
+                    "user".into()
+                } else {
+                    "assistant".into()
+                },
+                id: Some(format!("m-0000000000000000000000000000{i:04}")),
+                content: format!("row-{i}"),
+                ..DisplayRecord::default()
+            };
+            if i > 0 && i % 50 == 0 {
+                rec.role = "tool".into();
+                rec.tool_call_id = Some(format!("call-{i}"));
+            }
+            records.push(rec);
+        }
+
+        // 先通过检查点写入超过 64 KiB 阈值的记录并落盘。
+        for chunk_idx in 0..10u32 {
+            let end = ((chunk_idx + 1) * 220) as usize;
+            let key = format!("t1:c{}", chunk_idx + 1);
+            assert!(mgr
+                .append_display_slice("s-large", 1, &key, &records[..end])
+                .unwrap());
+        }
+        let meta_path = mgr.display_meta_path("s-large").unwrap();
+        assert!(
+            std::fs::metadata(&meta_path).unwrap().len() > 64 * 1024,
+            "metadata should grow past old 64 KiB cap without failing"
+        );
+
+        // 回合收口后：瞬态切片键应被清理，且日志与 meta 的 last_seq 保持一致可读。
+        mgr.append_display_turn("s-large", 1, &records).unwrap();
+        let (meta, read_rows) = mgr.read_display("s-large").unwrap().unwrap();
+        assert_eq!(read_rows.len(), 2200);
+        assert_eq!(meta.last_seq, 2200);
+        assert!(
+            meta.flushed_slice_keys
+                .iter()
+                .all(|key| !key.starts_with("t1:")),
+            "settled turn slice keys must be pruned"
+        );
     }
 }

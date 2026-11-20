@@ -155,6 +155,7 @@ impl Tool for GlobTool {
         };
 
         let wd = ctx.working_dir.clone();
+        let hint_wd = wd.clone();
         let base2 = base.clone();
         let hint_base = base.clone();
         let hint_matcher = matcher.clone();
@@ -230,15 +231,20 @@ impl Tool for GlobTool {
                         "\n[Search timed out after {search_secs}s; narrow the pattern/path]"
                     ));
                 }
-                let hint =
-                    super::search_visibility_hint(&hint_base, a.include_sensitive, true, |path| {
+                let hint = super::search_visibility_hint(
+                    &hint_base,
+                    &hint_wd,
+                    a.include_sensitive,
+                    true,
+                    |path| {
                         if hint_has_separator {
                             let rel = path.strip_prefix(&hint_base).unwrap_or(path);
                             hint_matcher.is_match(rel)
                         } else {
                             hint_matcher.is_match(path.file_name().unwrap_or_default())
                         }
-                    });
+                    },
+                );
                 let examples = |paths: &[std::path::PathBuf]| {
                     paths
                         .iter()
@@ -247,18 +253,25 @@ impl Tool for GlobTool {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
+                let rule = |p: &Option<std::path::PathBuf>| {
+                    p.as_ref()
+                        .map(|p| format!(" Rule: {}.", crate::pathnorm::to_display(p)))
+                        .unwrap_or_default()
+                };
                 if !hint.sensitive.is_empty() {
                     msg.push_str(&format!(
-                        "\n[Sensitive path hint: {} credential file(s) under this path are excluded from search (e.g. {}). Use `read` with explicit approval, or retry with include_sensitive=true (approval required outside Auto mode).]",
+                        "\n[Sensitive path hint: {} credential file(s) under this path are excluded from search (e.g. {}).{} Use `read` with explicit approval, or retry with include_sensitive=true (approval required outside Auto mode).]",
                         hint.sensitive.len(),
-                        examples(&hint.sensitive)
+                        examples(&hint.sensitive),
+                        rule(&hint.sensitive_source)
                     ));
                 }
                 if !a.include_ignored && !hint.noise.is_empty() {
                     msg.push_str(&format!(
-                        "\n[Search ignore hint: {} file(s) under this path are excluded by `.codegraphignore` (e.g. {}). If the target is one of them, retry with include_ignored=true.]",
+                        "\n[Search ignore hint: {} file(s) under this path are excluded by `.codegraphignore` (e.g. {}).{} If the target is one of them, retry with include_ignored=true.]",
                         hint.noise.len(),
-                        examples(&hint.noise)
+                        examples(&hint.noise),
+                        rule(&hint.noise_source)
                     ));
                 }
                 ok(msg)
@@ -349,6 +362,7 @@ fn run_glob_walk(
     // applied to search; `.jeikcode_store` is always visited.
     for_each_project_entry(
         base,
+        wd,
         false,
         include_ignored,
         true,

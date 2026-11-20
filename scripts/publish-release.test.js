@@ -16,7 +16,10 @@ const {
   collectBinaries,
   publish,
   assetName,
+  isVersionBumpOnlyDiff,
+  resolveDesktopCompat,
 } = require('./publish-release');
+const { buildDesktopManifest } = require('./publish-desktop-manifest');
 
 test('noise commits and groups', () => {
   assert.equal(isNoise('chore(release): 自动同步 v7.1.29 [linux-x64] 校验清单 [skip ci]'), true);
@@ -188,4 +191,59 @@ test('prerelease manifest stays in dist and does not touch the repo file', () =>
   assert.equal(staged.version, tag);
   assert.match(fs.readFileSync(path.join(root, 'release_notes.md'), 'utf8'), /v7\.1\.30-beta\.1/);
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('isVersionBumpOnlyDiff ignores pure version line bumps and catches real edits', () => {
+  const onlyBump = [
+    'diff --git a/desktop/src-tauri/Cargo.toml b/desktop/src-tauri/Cargo.toml',
+    '@@ -5 +5 @@',
+    '-version = "7.5.2-beta.0"',
+    '+version = "7.5.2-beta.1"',
+  ].join('\n');
+  assert.equal(isVersionBumpOnlyDiff(onlyBump), true);
+
+  const withPlugin = [
+    'diff --git a/desktop/src-tauri/Cargo.toml b/desktop/src-tauri/Cargo.toml',
+    '@@ -5 +5 @@',
+    '-version = "7.5.2-beta.0"',
+    '+version = "7.5.2-beta.1"',
+    '+tauri-plugin-updater = "2"',
+  ].join('\n');
+  assert.equal(isVersionBumpOnlyDiff(withPlugin), false);
+});
+
+test('resolveDesktopCompat reads min_shell_version and buildDesktopManifest collects signed & unsigned assets', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jeik-desktop-manifest-'));
+  try {
+    fs.mkdirSync(path.join(root, 'desktop'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'desktop', 'shell-compat.json'), JSON.stringify({
+      min_shell_version: '7.5.0',
+      latest_shell_version: '7.5.3',
+    }));
+    const compat = resolveDesktopCompat({ root, tag: 'v7.5.3' });
+    assert.equal(compat.min_shell_version, '7.5.0');
+    assert.equal(compat.latest_shell_version, '7.5.3');
+    assert.equal(compat.shell_changed, true);
+
+    const dist = path.join(root, 'desktop-dist');
+    fs.mkdirSync(dist, { recursive: true });
+    fs.writeFileSync(path.join(dist, 'JeikCode.Desktop_7.5.3_x64-setup.exe'), 'nsis-bytes');
+    fs.writeFileSync(path.join(dist, 'JeikCode.Desktop_7.5.3_x64-setup.exe.sig'), 'sig-win');
+    fs.writeFileSync(path.join(dist, 'JeikCode.Desktop_aarch64.app.tar.gz'), 'mac-arm-bytes');
+    fs.writeFileSync(path.join(dist, 'JeikCode.Desktop_7.5.3_amd64.deb'), 'deb-bytes');
+
+    const manifest = buildDesktopManifest({
+      tag: 'v7.5.3',
+      distDir: dist,
+      repo: 'jeikl/JeikCode',
+      pubDate: '2026-11-20T09:50:00Z',
+    });
+    assert.equal(manifest.version, '7.5.3');
+    assert.equal(manifest.platforms['windows-x86_64'].signature, 'sig-win');
+    assert.equal(manifest.platforms['darwin-aarch64'], undefined);
+    assert.equal(manifest.installers['darwin-arm64-app'].size, 13);
+    assert.equal(manifest.installers['linux-x64-deb'].filename, 'JeikCode.Desktop_7.5.3_amd64.deb');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -92,6 +92,9 @@ pub struct LiveJoin {
     pub snapshot: Arc<SessionSnapshot>,
     pub replay: Vec<LiveObservation>,
     pub receiver: broadcast::Receiver<LiveObservation>,
+    /// 连接建立瞬间的权威运行状态：客户端靠它无条件收尾，不依赖 replay 是否
+    /// 恰好包含终态帧。
+    pub turn_active: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -502,6 +505,7 @@ impl LiveViewHub {
                         snapshot,
                         replay: stashed.replay.clone(),
                         receiver: self.events.subscribe(),
+                        turn_active: stashed.turn_active,
                     });
                 }
             }
@@ -520,6 +524,7 @@ impl LiveViewHub {
             snapshot,
             replay: state.replay.clone(),
             receiver,
+            turn_active: state.turn_active,
         })
     }
 

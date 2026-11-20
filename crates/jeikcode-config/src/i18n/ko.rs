@@ -127,6 +127,109 @@ pub(super) fn ko(msg: Msg<'_>) -> Cow<'static, str> {
             format!("압축됨 · {}개 요약 · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("도구 출력 접힘 · ~{} tok 절약", saved).into(),
+        Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
+            format!("모델이 빈 응답을 반환했습니다. {wait}초 후 재시도합니다({attempt}/{max})…")
+        } else {
+            format!("모델이 빈 응답을 반환했습니다. 재시도 중입니다({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryThinking { attempt, max, wait } => if wait > 0 {
+            format!("모델이 추론 내용만 반환했습니다. {wait}초 후 재시도합니다({attempt}/{max})…")
+        } else {
+            format!("모델이 추론 내용만 반환했습니다. 재시도 중입니다({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryMalformed { attempt, max, wait } => if wait > 0 {
+            format!("응답 형식이 올바르지 않습니다. {wait}초 후 재시도합니다({attempt}/{max})…")
+        } else {
+            format!("응답 형식이 올바르지 않습니다. 재시도 중입니다({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryFirstToken { secs, attempt, max } =>
+            format!("모델 지연이 높습니다: {secs}초 동안 응답이 없어 재시도 중입니다({attempt}/{max})…").into(),
+        Msg::AgentRetryApi { reason, wait, attempt, max } =>
+            format!("API 오류 {reason}, {wait}초 후 재시도합니다({attempt}/{max})…").into(),
+        Msg::AgentOverWindow { estimate_k, window_k, buffer_k } =>
+            format!(
+                "요청 크기가 약 {estimate_k}K tokens로 컨텍스트 임계치에 도달했습니다(창 ~{window_k}K − 여유 {buffer_k}K). 입력을 줄이거나 더 큰 컨텍스트 모델로 전환하세요."
+            ).into(),
+        Msg::AgentContextOverflow { round, attempt } =>
+            format!("{round}라운드에서 컨텍스트가 초과되었습니다(시도 {attempt}회). 압축 후 재시도합니다").into(),
+        Msg::AgentStreamReconnecting { attempt, max } =>
+            format!("스트림 유휴 시간 초과 — 다시 연결 중({attempt}/{max})").into(),
+        Msg::AgentResponseTruncated => "응답이 길이 제한으로 잘렸습니다: finish_reason=length".into(),
+        Msg::AgentUnsupportedSnapshot { version, supported } =>
+            format!("지원되지 않는 스냅샷 버전 {version}(지원 버전 {supported})이므로 빈 세션으로 시작합니다").into(),
+        Msg::AgentModelHighLatencyTerminal { retries, secs } =>
+            format!("모델 지연 시간이 너무 깁니다. 잠시 후 다시 시도해 주세요({retries}회 연속 {secs}초 내 첫 응답 없음)").into(),
+        Msg::AgentExhaustedMalformed { max } =>
+            format!("모델이 구문 분석할 수 없는 응답을 {max}회 연속 반환했습니다(상위 서비스 일시 오류). 바로 재시도하거나 잠시 후 다시 시도하세요.").into(),
+        Msg::AgentExhaustedThinkingOverWindowIntro { max } =>
+            format!("모델이 본문이나 도구 호출 없이 추론만 {max}회 연속 반환했습니다. 요청이 컨텍스트 한도를 초과했으므로 입력을 줄이거나 /compact 후 재시도하세요.").into(),
+        Msg::AgentExhaustedThinkingOverWindowSize { max, prompt_k, window_k } =>
+            format!("모델이 본문이나 도구 호출 없이 추론만 {max}회 연속 반환했습니다. 현재 요청은 약 {prompt_k}K tokens로 모델 한도(약 {window_k}K)에 근접했으므로 /compact 또는 입력 축소를 권장합니다.").into(),
+        Msg::AgentExhaustedThinkingGeneric { max } =>
+            format!("모델이 본문이나 도구 호출 없이 추론만 {max}회 연속 반환했습니다. 바로 재시도하거나 잠시 후 다시 시도하세요.").into(),
+        Msg::AgentExhaustedEmptyOverWindowIntro { max } =>
+            format!("모델이 빈 응답을 {max}회 연속 반환했습니다. 요청이 컨텍스트 한도를 초과했으므로 입력을 줄이거나 /compact 후 재시도하세요.").into(),
+        Msg::AgentExhaustedEmptyOverWindowSize { max, prompt_k, window_k } =>
+            format!("모델이 빈 응답을 {max}회 연속 반환했습니다. 현재 요청은 약 {prompt_k}K tokens로 모델 한도(약 {window_k}K)에 근접했으므로 /compact 또는 입력 축소를 권장합니다.").into(),
+        Msg::AgentExhaustedEmptyGeneric { max } =>
+            format!("모델이 빈 응답을 {max}회 연속 반환했습니다(컨텍스트 길이와 무관한 일시적 상위 오류). 바로 재시도하거나 잠시 후 다시 시도하세요.").into(),
+        Msg::AgentStatusRateLimited => "요청 속도 제한을 초과했거나 할당량이 소진되었습니다".into(),
+        Msg::AgentStatusUpstreamUnavailable => "상위 서비스를 일시적으로 사용할 수 없습니다".into(),
+        Msg::AgentStatusResponseTimeout => "모델 응답 시간이 초과되었습니다".into(),
+        Msg::AgentStatusConnectionFailed => "네트워크 연결에 실패했습니다".into(),
+        Msg::AgentStatusInsufficientBalance => "계정 잔액이 부족합니다".into(),
+        Msg::AgentStatusUnauthorized => "API 키 인증에 실패했거나 만료되었습니다".into(),
+        Msg::StreamReadRetryExhausted { attempts } =>
+            format!("네트워크 연결이 끊어졌습니다: 원격 호스트가 연결을 종료하거나 재설정했으며 {attempts}회 자동 재연결에 실패했습니다. 다시 시도할 수 있습니다.").into(),
+        Msg::StreamReadPartialResponse =>
+            "응답이 중단되었습니다: 안전하게 보관된 부분 응답이 유지되므로 이어서 진행할 수 있습니다.".into(),
+        Msg::StreamReadInterrupted =>
+            "네트워크 연결이 끊어졌습니다: 원격 호스트가 연결을 종료하거나 재설정했습니다. 다시 시도할 수 있습니다.".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("연결이 끊어져 현재 출력을 유지한 채 자동 재연결 중입니다(최대 {max}회)…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("연결이 끊어졌으며 현재 출력을 유지한 채 재시도 중입니다({attempt}/{max})").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("스트림 유휴 시간 초과: 현재 출력을 유지한 채 재시도 중({attempt}/{max})")
+        } else {
+            format!("스트림 유휴 시간 초과: 재시도 중({attempt}/{max})")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("네트워크 연결 끊김: 현재 출력을 유지한 채 재시도 중({attempt}/{max})")
+        } else {
+            format!("네트워크 연결 끊김: 재시도 중({attempt}/{max})")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("연결이 복구되었습니다({attempts}회 재시도 후 계속 진행)").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "자동 재연결 후에도 스트림 응답 시간이 초과되어 이번 턴을 종료했습니다".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("속도 제한에 도달했습니다. {secs}초 후 자동으로 재시도합니다…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "속도 제한 한도에 도달하여 일시 중지되었습니다. 초기화될 때까지 기다리거나 모델을 전환해 계속하세요".into()
+        } else {
+            format!("속도 제한으로 일시 중지됨: {detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "일부 응답 생성 후 스트림 시간이 초과되었습니다. 부분 응답은 유지되어 이어서 진행할 수 있습니다.".into(),
+        Msg::StreamReadResetHint =>
+            "이 오류는 사내 네트워크나 프록시 환경에서 자주 발생합니다. 프록시, VPN, 방화벽 설정을 확인한 뒤 다시 시도하세요.".into(),
+        Msg::StreamReadDetailsPrefix => "세부 정보: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "반복 루프 의심: 동일한 출력과 도구 호출 패턴이 반복되고 있어 턴을 중지하기 전에 모델에 방향 전환을 요청했습니다.".into()
+        } else {
+            "반복 루프 의심: 동일한 출력과 도구 호출 패턴이 반복되고 있어 모델에 방향 전환을 요청했습니다.".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("중지됨: 모델이 {rounds}라운드 연속으로 동일한 추론/텍스트 및 도구 호출 패턴을 반복했습니다").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("도구 루프 의심: 동일한 호출 또는 읽기 전용 일괄 실행이 {threshold}회 연속 같은 결과를 반환하여 모델에 방향 전환을 요청했습니다").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("도구 루프 감지됨: 동일한 호출 또는 읽기 전용 일괄 실행이 {threshold}회 연속 같은 결과를 반환하여 다음 요청 전에 중지합니다").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("중지됨: 모델이 {rounds}라운드 연속으로 동일한 도구 호출 패턴을 반복했습니다").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("최대 라운드 한도({cap}라운드)에 도달하여 도구 호출을 중단하고 진행 상황과 다음 단계를 요약합니다.").into(),
         _ => super::en::en(msg),
     }
 }

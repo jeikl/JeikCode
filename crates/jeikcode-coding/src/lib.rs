@@ -44,6 +44,7 @@ pub mod persona;
 pub mod plan_mode;
 pub mod plugin_hooks;
 pub mod provider_factory;
+pub mod provider_swap;
 pub mod runtime;
 pub mod session_runtime_registry;
 pub mod session_title;

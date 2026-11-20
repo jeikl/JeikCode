@@ -69,11 +69,16 @@ impl HttpClient {
         // Client-level timeout is the spawn hard cap so a progressing tools/call
         // is not killed by mcp_secs. initialize / list still use a shorter
         // per-request tokio timeout below.
-        let client = crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
-            .connect_timeout(idle.min(Duration::from_secs(30)))
-            .timeout(Duration::from_millis(super::config::hard_cap_ms()))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let spec = crate::http_pool::HttpClientSpec {
+            connect_timeout: idle.min(Duration::from_secs(30)),
+            request_timeout: Some(Duration::from_millis(super::config::hard_cap_ms())),
+            pool_idle_timeout: Some(Duration::from_secs(15)),
+            skip_tls_verify: false,
+            force_tls12: false,
+            user_agent: None,
+        };
+        let client =
+            crate::http_pool::shared_http_client(&spec).unwrap_or_else(|_| reqwest::Client::new());
 
         Self {
             server_name,

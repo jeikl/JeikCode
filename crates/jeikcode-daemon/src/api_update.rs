@@ -1,13 +1,16 @@
 use anyhow::Result;
 use axum::{
     extract::{Query, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::AppState;
 use jeikcode_coding::config_sync::{
@@ -46,6 +49,43 @@ impl UpdateChannel {
 pub struct UpdateCheckQuery {
     #[serde(default)]
     pub channel: Option<String>,
+    /// 轻量角标检查模式：跳过庞大的全量历史版本与更新说明正文，响应压至 < 1 KB
+    #[serde(default, deserialize_with = "de_opt_bool")]
+    pub summary: Option<bool>,
+    /// 强制穿透进程内 TTL 缓存（供用户手动点击“检查更新”时即时拉取最新）
+    #[serde(default, deserialize_with = "de_opt_bool")]
+    pub refresh: Option<bool>,
+}
+
+/// Query strings come from multiple clients: the WebUI sends `summary=1`,
+/// while API clients may send `true`. Accept both without making the endpoint
+/// return 400 for a valid boolean intent.
+fn de_opt_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Boolish {
+        Bool(bool),
+        Int(u8),
+        Str(String),
+    }
+    match Option::<Boolish>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Boolish::Bool(v)) => Ok(Some(v)),
+        Some(Boolish::Int(0)) => Ok(Some(false)),
+        Some(Boolish::Int(1)) => Ok(Some(true)),
+        Some(Boolish::Int(v)) => Err(D::Error::custom(format!("expected 0/1 boolean, got {v}"))),
+        Some(Boolish::Str(v)) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(Some(true)),
+            "0" | "false" | "no" | "off" => Ok(Some(false)),
+            other => Err(D::Error::custom(format!(
+                "expected 0/1/true/false boolean, got {other:?}"
+            ))),
+        },
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -59,6 +99,9 @@ pub struct ExecuteUpdateRequest {
     /// Reinstall even when current already matches latest (stability testing).
     #[serde(default)]
     pub force: Option<bool>,
+    /// 更新模式："binary"（默认路径 A 原地热更新后端）或 "desktop_installer"（路径 B 兜底下载桌面安装包）
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,6 +111,34 @@ pub struct UpdateVersionEntry {
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DesktopHostUpdateInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_version: Option<String>,
+    pub legacy_shell: bool,
+    pub bundle_type: String,
+    pub native_updater_supported: bool,
+    pub signed_updater_ready: bool,
+    pub binary_writable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_shell_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_shell_version: Option<String>,
+    pub shell_changed: bool,
+    pub shell_has_update: bool,
+    pub shell_update_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_json_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,6 +154,8 @@ pub struct UpdateCheckResponse {
     /// Channel history, newest first. `versions[0]` is `latest_version`.
     #[serde(default)]
     pub versions: Vec<UpdateVersionEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_host: Option<DesktopHostUpdateInfo>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,6 +174,7 @@ pub struct UpdateStatus {
 
 static CURRENT_UPDATE_STATUS: Mutex<Option<UpdateStatus>> = Mutex::new(None);
 static IS_UPDATING: AtomicBool = AtomicBool::new(false);
+static PREPARED_DESKTOP_INSTALLER: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
 fn get_update_status() -> UpdateStatus {
     CURRENT_UPDATE_STATUS
@@ -401,37 +475,283 @@ async fn resolve_desktop_installer_url(version: &str) -> Option<String> {
     }
 }
 
-/// GET /api/update/check
-pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoResponse {
-    let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let is_desktop = is_desktop_environment();
-    let channel = match query.channel.as_deref() {
-        Some("beta") => UpdateChannel::Beta,
-        Some("stable") => UpdateChannel::Stable,
-        _ => UpdateChannel::default(),
-    };
+const UPDATE_CHECK_CACHE_TTL: Duration = Duration::from_secs(600);
 
-    // 离线/内网隔离模式下，直接返回当前版本且无新版，绝不产生外网探测请求
-    if jeikcode_config::config::offline::is_offline_active() {
-        return Json(UpdateCheckResponse {
-            current_version: current_version.clone(),
-            latest_version: current_version,
-            has_update: false,
-            is_desktop,
-            release_notes: None,
-            download_url: None,
-            released_at: None,
-            channel: channel.as_str().to_string(),
-            versions: Vec::new(),
+#[derive(Clone)]
+struct CachedUpdateCheck {
+    fetched_at: Instant,
+    response: UpdateCheckResponse,
+}
+
+fn update_check_cache() -> &'static tokio::sync::Mutex<HashMap<(u8, bool), CachedUpdateCheck>> {
+    static CACHE: OnceLock<tokio::sync::Mutex<HashMap<(u8, bool), CachedUpdateCheck>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
+fn update_check_inflight_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn project_update_response(
+    mut resp: UpdateCheckResponse,
+    summary_only: bool,
+) -> UpdateCheckResponse {
+    if summary_only {
+        resp.release_notes = None;
+        resp.versions.clear();
+    }
+    resp
+}
+
+fn build_update_check_http_response(
+    headers: &HeaderMap,
+    payload: UpdateCheckResponse,
+) -> axum::response::Response {
+    let body = match serde_json::to_vec(&payload) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let etag = crate::response_etag(&body);
+    let not_modified = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',').any(|cand| {
+                let cand = cand.trim();
+                cand == "*"
+                    || cand == etag
+                    || cand.strip_prefix("W/").is_some_and(|weak| weak == etag)
+            })
         });
+    if not_modified {
+        let mut resp = StatusCode::NOT_MODIFIED.into_response();
+        if let Ok(val) = HeaderValue::from_str(&etag) {
+            resp.headers_mut().insert(header::ETAG, val);
+        }
+        return resp;
+    }
+    let mut resp = axum::response::Response::new(axum::body::Body::from(body));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    if let Ok(val) = HeaderValue::from_str(&etag) {
+        resp.headers_mut().insert(header::ETAG, val);
+    }
+    resp
+}
+
+fn strip_leading_v(v: &str) -> String {
+    v.trim()
+        .trim_start_matches('v')
+        .trim_start_matches('V')
+        .to_string()
+}
+
+fn check_binary_writable() -> bool {
+    jeikcode_updater::current_exe_path()
+        .and_then(|exe| jeikcode_updater::ensure_writable(&exe))
+        .is_ok()
+}
+
+fn resolve_env_proxy_url() -> Option<String> {
+    for key in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(if trimmed.contains("://") {
+                    trimmed.to_string()
+                } else {
+                    format!("http://{trimmed}")
+                });
+            }
+        }
+    }
+    None
+}
+
+fn is_loopback_host_header(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let host_only = if trimmed.starts_with('[') {
+        trimmed
+            .split(']')
+            .next()
+            .map(|s| s.trim_start_matches('['))
+            .unwrap_or("")
+    } else {
+        trimmed.split(':').next().unwrap_or("")
+    };
+    host_only.eq_ignore_ascii_case("localhost") || host_only == "127.0.0.1" || host_only == "::1"
+}
+
+fn is_authorized_desktop_installer_request(headers: &HeaderMap) -> bool {
+    let is_desktop_win = headers
+        .get("x-jeikcode-desktop-window")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim() == "1");
+    if !is_desktop_win {
+        return false;
+    }
+    let host_ok = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(is_loopback_host_header);
+    if !host_ok {
+        return false;
+    }
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        if let Ok(parsed) = reqwest::Url::parse(origin) {
+            if !parsed.host_str().is_some_and(|h| {
+                h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "::1"
+            }) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+async fn resolve_desktop_host_info(
+    latest_version: &str,
+    assets: &[GitHubReleaseAsset],
+    fallback_installer_url: Option<String>,
+) -> Option<DesktopHostUpdateInfo> {
+    let rt = jeikcode_updater::desktop_runtime_info();
+    if !rt.is_desktop {
+        return None;
     }
 
+    let binary_writable = check_binary_writable();
+    let native_updater_supported = rt.bundle_type != "deb" && rt.bundle_type != "unknown";
+
+    let mut min_shell_version: Option<String> = None;
+    let mut latest_shell_version: Option<String> = None;
+    let mut shell_changed = false;
+    let mut updater_json_url: Option<String> = None;
+    let mut installer_url = fallback_installer_url;
+    let mut installer_sha256: Option<String> = None;
+    let mut installer_size: Option<u64> = None;
+
+    if !latest_version.is_empty() {
+        let has_desktop_updater_asset = assets
+            .iter()
+            .any(|a| a.name.eq_ignore_ascii_case("desktop-updater.json"));
+        let has_latest_json_asset = assets
+            .iter()
+            .any(|a| a.name.eq_ignore_ascii_case("latest.json"));
+
+        if has_latest_json_asset || assets.is_empty() {
+            if let Ok(manifest) = jeikcode_updater::fetch_manifest_for_tag(latest_version).await {
+                if let Some(compat) = manifest.desktop {
+                    min_shell_version = compat.min_shell_version.map(|s| strip_leading_v(&s));
+                    latest_shell_version = compat.latest_shell_version.map(|s| strip_leading_v(&s));
+                    shell_changed = compat.shell_changed;
+                }
+            }
+        }
+
+        if has_desktop_updater_asset {
+            let url = jeikcode_updater::desktop_updater_url_for_tag(latest_version);
+            if let Ok(dm) = jeikcode_updater::fetch_desktop_updater_manifest(&url).await {
+                if let Some(key) = jeikcode_updater::resolve_desktop_installer_key(&rt.bundle_type)
+                {
+                    if let Some(entry) = dm.installers.get(key) {
+                        if !entry.url.trim().is_empty() {
+                            installer_url = Some(entry.url.clone());
+                        }
+                        if !entry.sha256.trim().is_empty() {
+                            installer_sha256 = Some(entry.sha256.clone());
+                        }
+                        if entry.size > 0 {
+                            installer_size = Some(entry.size);
+                        }
+                    }
+                }
+                if let Some(tauri_key) = jeikcode_updater::resolve_desktop_tauri_platform_key() {
+                    if let Some(plat) = dm.platforms.get(tauri_key) {
+                        if !plat.signature.trim().is_empty() {
+                            updater_json_url = Some(url.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if latest_shell_version.is_none() {
+            latest_shell_version = Some(strip_leading_v(latest_version));
+        }
+    }
+
+    let has_installer_target = installer_url.is_some() || updater_json_url.is_some();
+    let shell_has_update = if !has_installer_target {
+        false
+    } else if rt.legacy_shell {
+        true
+    } else if let (Some(cur), Some(target)) = (&rt.shell_version, &latest_shell_version) {
+        compare_versions(target, cur)
+    } else {
+        false
+    };
+
+    let min_shell_broken = if let (Some(cur), Some(min_v)) = (&rt.shell_version, &min_shell_version)
+    {
+        compare_versions(min_v, cur)
+    } else if rt.legacy_shell {
+        min_shell_version
+            .as_deref()
+            .is_some_and(|min_v| compare_versions(min_v, env!("CARGO_PKG_VERSION")))
+    } else {
+        false
+    };
+
+    let shell_update_required = !binary_writable || min_shell_broken;
+
+    Some(DesktopHostUpdateInfo {
+        shell_version: rt.shell_version,
+        legacy_shell: rt.legacy_shell,
+        bundle_type: rt.bundle_type,
+        native_updater_supported,
+        signed_updater_ready: rt.signed_updater_ready && updater_json_url.is_some(),
+        binary_writable,
+        min_shell_version,
+        latest_shell_version,
+        shell_changed,
+        shell_has_update,
+        shell_update_required,
+        updater_json_url,
+        installer_url,
+        installer_sha256,
+        installer_size,
+        proxy_url: resolve_env_proxy_url(),
+    })
+}
+
+async fn fetch_uncached_update_check(
+    channel: UpdateChannel,
+    is_desktop: bool,
+    current_version: String,
+    include_desktop_detail: bool,
+) -> UpdateCheckResponse {
     let client = create_update_client();
 
     let mut latest_version = String::new();
     let mut release_notes = None;
     let mut released_at = None;
     let mut download_url = None;
+    let mut desktop_installer_fallback = None;
+    let mut matched_assets: Vec<GitHubReleaseAsset> = Vec::new();
     let mut versions: Vec<UpdateVersionEntry> = Vec::new();
 
     let updater_channel = match channel {
@@ -462,15 +782,15 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
                     browser_download_url: a.browser_download_url.clone(),
                 })
                 .collect();
+            download_url = find_cli_asset_url(&assets, &latest_version).or_else(|| {
+                jeikcode_updater::detect_target()
+                    .map(|target| jeikcode_updater::binary_url(&latest_version, target))
+            });
             if is_desktop {
-                download_url = find_desktop_installer_url_in_assets(&assets)
+                desktop_installer_fallback = find_desktop_installer_url_in_assets(&assets)
                     .or_else(|| resolve_desktop_installer_url_fallback(&latest_version));
-            } else {
-                download_url = find_cli_asset_url(&assets, &latest_version).or_else(|| {
-                    jeikcode_updater::detect_target()
-                        .map(|target| jeikcode_updater::binary_url(&latest_version, target))
-                });
             }
+            matched_assets = assets;
         }
     }
 
@@ -479,10 +799,11 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
         if let Ok(m) = jeikcode_updater::fetch_manifest().await {
             latest_version = m.version;
             released_at = m.released_at;
-            if is_desktop {
-                download_url = resolve_desktop_installer_url(&latest_version).await;
-            } else if let Some(target) = jeikcode_updater::detect_target() {
+            if let Some(target) = jeikcode_updater::detect_target() {
                 download_url = Some(jeikcode_updater::binary_url(&latest_version, target));
+            }
+            if is_desktop {
+                desktop_installer_fallback = resolve_desktop_installer_url(&latest_version).await;
             }
         } else if let Some(ref c) = client {
             if let Ok(resp) = c.get(GITHUB_LATEST_API_URL).send().await {
@@ -491,19 +812,19 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
                         latest_version = rel.tag_name.clone();
                         release_notes = rel.body;
                         released_at = rel.published_at;
+                        download_url =
+                            find_cli_asset_url(&rel.assets, &latest_version).or_else(|| {
+                                jeikcode_updater::detect_target().map(|target| {
+                                    jeikcode_updater::binary_url(&latest_version, target)
+                                })
+                            });
                         if is_desktop {
-                            download_url = find_desktop_installer_url_in_assets(&rel.assets)
-                                .or_else(|| {
+                            desktop_installer_fallback =
+                                find_desktop_installer_url_in_assets(&rel.assets).or_else(|| {
                                     resolve_desktop_installer_url_fallback(&latest_version)
                                 });
-                        } else {
-                            download_url = find_cli_asset_url(&rel.assets, &latest_version)
-                                .or_else(|| {
-                                    jeikcode_updater::detect_target().map(|target| {
-                                        jeikcode_updater::binary_url(&latest_version, target)
-                                    })
-                                });
                         }
+                        matched_assets = rel.assets;
                     }
                 }
             }
@@ -519,8 +840,44 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
 
     let has_update =
         !latest_version.is_empty() && compare_versions(&latest_version, &current_version);
+    let desktop_host = if is_desktop && include_desktop_detail {
+        resolve_desktop_host_info(&latest_version, &matched_assets, desktop_installer_fallback)
+            .await
+    } else if is_desktop {
+        let rt = jeikcode_updater::desktop_runtime_info();
+        let binary_writable = check_binary_writable();
+        let native_updater_supported = rt.bundle_type != "deb" && rt.bundle_type != "unknown";
+        let shell_has_update = if rt.legacy_shell {
+            desktop_installer_fallback.is_some()
+        } else if let Some(cur) = &rt.shell_version {
+            !latest_version.is_empty() && compare_versions(&latest_version, cur)
+        } else {
+            false
+        };
+        Some(DesktopHostUpdateInfo {
+            shell_version: rt.shell_version,
+            legacy_shell: rt.legacy_shell,
+            bundle_type: rt.bundle_type,
+            native_updater_supported,
+            signed_updater_ready: rt.signed_updater_ready,
+            binary_writable,
+            min_shell_version: None,
+            latest_shell_version: (!latest_version.is_empty())
+                .then(|| strip_leading_v(&latest_version)),
+            shell_changed: false,
+            shell_has_update,
+            shell_update_required: !binary_writable,
+            updater_json_url: None,
+            installer_url: desktop_installer_fallback,
+            installer_sha256: None,
+            installer_size: None,
+            proxy_url: resolve_env_proxy_url(),
+        })
+    } else {
+        None
+    };
 
-    Json(UpdateCheckResponse {
+    UpdateCheckResponse {
         current_version,
         latest_version,
         has_update,
@@ -530,7 +887,133 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
         released_at,
         channel: channel.as_str().to_string(),
         versions,
-    })
+        desktop_host,
+    }
+}
+
+/// GET /api/update/check
+pub async fn check_update(
+    headers: HeaderMap,
+    Query(query): Query<UpdateCheckQuery>,
+) -> impl IntoResponse {
+    let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let is_desktop = is_desktop_environment();
+    let channel = match query.channel.as_deref() {
+        Some("beta") => UpdateChannel::Beta,
+        Some("stable") => UpdateChannel::Stable,
+        _ => UpdateChannel::default(),
+    };
+    let summary_only = query.summary.unwrap_or(false);
+    let force_refresh = query.refresh.unwrap_or(false);
+
+    // 离线/内网隔离模式下，直接返回当前版本且无新版，绝不产生外网探测请求
+    if jeikcode_config::config::offline::is_offline_active()
+        || jeikcode_config::config::runtime_state::is_dead()
+    {
+        return build_update_check_http_response(
+            &headers,
+            UpdateCheckResponse {
+                current_version: current_version.clone(),
+                latest_version: current_version,
+                has_update: false,
+                is_desktop,
+                release_notes: None,
+                download_url: None,
+                released_at: None,
+                channel: channel.as_str().to_string(),
+                versions: Vec::new(),
+                desktop_host: None,
+            },
+        );
+    }
+
+    let cache_key = (
+        match channel {
+            UpdateChannel::Stable => 0u8,
+            UpdateChannel::Beta => 1u8,
+        },
+        is_desktop,
+    );
+
+    if !force_refresh {
+        let guard = update_check_cache().lock().await;
+        if let Some(hit) = guard.get(&cache_key) {
+            if hit.fetched_at.elapsed() < UPDATE_CHECK_CACHE_TTL {
+                return build_update_check_http_response(
+                    &headers,
+                    project_update_response(hit.response.clone(), summary_only),
+                );
+            }
+        }
+    }
+
+    // 单飞合并：多标签页同时打开时只放行一次外部 release 请求，其余等待复用结果
+    let _inflight = update_check_inflight_lock().lock().await;
+    if !force_refresh {
+        let guard = update_check_cache().lock().await;
+        if let Some(hit) = guard.get(&cache_key) {
+            if hit.fetched_at.elapsed() < UPDATE_CHECK_CACHE_TTL {
+                return build_update_check_http_response(
+                    &headers,
+                    project_update_response(hit.response.clone(), summary_only),
+                );
+            }
+        }
+    }
+
+    let fresh = fetch_uncached_update_check(channel, is_desktop, current_version, true).await;
+    if !fresh.latest_version.is_empty() {
+        update_check_cache().lock().await.insert(
+            cache_key,
+            CachedUpdateCheck {
+                fetched_at: Instant::now(),
+                response: fresh.clone(),
+            },
+        );
+    }
+
+    build_update_check_http_response(&headers, project_update_response(fresh, summary_only))
+}
+
+/// Warm the update check cache once at server startup so the first WebUI badge
+/// request is a local cache hit instead of a 2~7s GitHub round trip.
+pub async fn prewarm_update_check() {
+    if jeikcode_config::config::runtime_state::is_dead()
+        || jeikcode_config::config::offline::is_offline_active()
+    {
+        return;
+    }
+    let channel = UpdateChannel::default();
+    let is_desktop = is_desktop_environment();
+    let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let cache_key = (
+        match channel {
+            UpdateChannel::Stable => 0u8,
+            UpdateChannel::Beta => 1u8,
+        },
+        is_desktop,
+    );
+    if let Some(hit) = update_check_cache().lock().await.get(&cache_key) {
+        if hit.fetched_at.elapsed() < UPDATE_CHECK_CACHE_TTL {
+            return;
+        }
+    }
+    let _inflight = update_check_inflight_lock().lock().await;
+    if let Some(hit) = update_check_cache().lock().await.get(&cache_key) {
+        if hit.fetched_at.elapsed() < UPDATE_CHECK_CACHE_TTL {
+            return;
+        }
+    }
+    let fresh = fetch_uncached_update_check(channel, is_desktop, current_version, true).await;
+    if !fresh.latest_version.is_empty() {
+        update_check_cache().lock().await.insert(
+            cache_key,
+            CachedUpdateCheck {
+                fetched_at: Instant::now(),
+                response: fresh,
+            },
+        );
+    }
 }
 
 /// GET /api/update/status
@@ -541,8 +1024,28 @@ pub async fn get_status() -> impl IntoResponse {
 /// POST /api/update/execute
 pub async fn execute_update(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Option<Json<ExecuteUpdateRequest>>,
 ) -> impl IntoResponse {
+    if jeikcode_config::config::runtime_state::is_dead() {
+        return Json(serde_json::json!({
+            "success": false,
+            "message": "updates are disabled"
+        }));
+    }
+    let req = payload.map(|Json(p)| p).unwrap_or_default();
+    let is_desktop_installer_mode = req.mode.as_deref() == Some("desktop_installer");
+    if is_desktop_installer_mode {
+        if !jeikcode_updater::desktop_runtime_info().is_desktop
+            || !is_authorized_desktop_installer_request(&headers)
+        {
+            return Json(serde_json::json!({
+                "success": false,
+                "message": "仅允许本机桌面窗口触发桌面端安装包更新"
+            }));
+        }
+    }
+
     if IS_UPDATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -553,7 +1056,6 @@ pub async fn execute_update(
         }));
     }
 
-    let req = payload.map(|Json(p)| p).unwrap_or_default();
     let listen_host = state.bind_host.clone();
     let listen_port = state.bind_port;
     let restart_token = state.webui_tokens.display();
@@ -575,9 +1077,22 @@ pub async fn execute_update(
             error_code: None,
         });
 
-        // WebUI is embedded in this binary. Remote browsers and the desktop
-        // shell all hit this process — never open a host-side installer wizard.
-        // Swap the running jeikcode in place, then restart so the new UI is served.
+        if is_desktop_installer_mode {
+            if let Err(failure) = run_desktop_installer_download(req.version, req.channel).await {
+                set_update_status(UpdateStatus {
+                    status: "error".to_string(),
+                    progress: 0,
+                    bytes: 0,
+                    total: 0,
+                    error: Some(format!("{:#}", failure.error)),
+                    error_code: Some(failure.kind.as_str().to_string()),
+                });
+            }
+            IS_UPDATING.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        // 路径 A：原地替换 jeikcode 二进制（内嵌 WebUI，适用远程浏览器、CLI 及兼容桌面端）
         if let Err(e) = run_cli_update(
             req.version,
             req.channel,
@@ -611,6 +1126,174 @@ pub async fn execute_update(
         "success": true,
         "message": "已开始更新流程"
     }))
+}
+
+async fn run_desktop_installer_download(
+    version_opt: Option<String>,
+    channel_opt: Option<String>,
+) -> std::result::Result<(), jeikcode_updater::UpgradeFailure> {
+    let rt = jeikcode_updater::desktop_runtime_info();
+    let installer_key = jeikcode_updater::resolve_desktop_installer_key(&rt.bundle_type)
+        .ok_or_else(|| {
+            jeikcode_updater::UpgradeFailure::new(
+                jeikcode_updater::UpgradeFailureKind::UnsupportedPlatform,
+                anyhow::anyhow!("unsupported desktop platform or bundle: {}", rt.bundle_type),
+            )
+        })?;
+
+    let target_tag = if let Some(v) = version_opt.filter(|s| !s.trim().is_empty()) {
+        jeikcode_updater::normalize_version_tag(&v)
+    } else {
+        let ch = match channel_opt.as_deref() {
+            Some("beta") => jeikcode_updater::UpdateChannel::Beta,
+            _ => jeikcode_updater::UpdateChannel::Stable,
+        };
+        let manifest = jeikcode_updater::fetch_manifest_for_channel(ch)
+            .await
+            .map_err(|e| {
+                jeikcode_updater::UpgradeFailure::new(
+                    jeikcode_updater::UpgradeFailureKind::ManifestFetch,
+                    e,
+                )
+            })?;
+        jeikcode_updater::normalize_version_tag(&manifest.version)
+    };
+
+    let manifest_url = jeikcode_updater::desktop_updater_url_for_tag(&target_tag);
+    let dm = jeikcode_updater::fetch_desktop_updater_manifest(&manifest_url)
+        .await
+        .map_err(|e| {
+            jeikcode_updater::UpgradeFailure::new(
+                jeikcode_updater::UpgradeFailureKind::ManifestFetch,
+                e,
+            )
+        })?;
+
+    let entry = dm.installers.get(installer_key).ok_or_else(|| {
+        jeikcode_updater::UpgradeFailure::new(
+            jeikcode_updater::UpgradeFailureKind::UnsupportedPlatform,
+            anyhow::anyhow!(
+                "no desktop installer found for target {installer_key} in {target_tag}"
+            ),
+        )
+    })?;
+
+    *PREPARED_DESKTOP_INSTALLER.lock().unwrap() = None;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<jeikcode_updater::UpgradeEvent>();
+    let url = entry.url.clone();
+    let sha256 = entry.sha256.clone();
+    let size = entry.size;
+    let filename = entry.filename.clone();
+    let driver = tokio::spawn(async move {
+        jeikcode_updater::download_desktop_installer_verified(&url, &sha256, size, &filename, &tx)
+            .await
+    });
+
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            jeikcode_updater::UpgradeEvent::Downloading { bytes, total } => {
+                let pct = if total > 0 {
+                    ((bytes * 100) / total) as u32
+                } else {
+                    0
+                };
+                set_update_status(UpdateStatus {
+                    status: "downloading".to_string(),
+                    progress: pct.min(100),
+                    bytes,
+                    total,
+                    error: None,
+                    error_code: None,
+                });
+            }
+            jeikcode_updater::UpgradeEvent::Verifying => {
+                set_update_status(UpdateStatus {
+                    status: "installing".to_string(),
+                    progress: 99,
+                    bytes: 0,
+                    total: 0,
+                    error: None,
+                    error_code: None,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let path = match driver.await {
+        Ok(res) => res?,
+        Err(join_err) => {
+            return Err(jeikcode_updater::UpgradeFailure::new(
+                jeikcode_updater::UpgradeFailureKind::Other,
+                anyhow::anyhow!("desktop installer download task panicked: {join_err}"),
+            ));
+        }
+    };
+
+    *PREPARED_DESKTOP_INSTALLER.lock().unwrap() = Some(path);
+    set_update_status(UpdateStatus {
+        status: "ready".to_string(),
+        progress: 100,
+        bytes: 0,
+        total: 0,
+        error: None,
+        error_code: None,
+    });
+    Ok(())
+}
+
+/// POST /api/update/desktop/install
+/// 仅限本机桌面窗口调用：在已校验 SHA256 后拉起脱离的子安装器并优雅退出当前服务，实现老壳平滑升级。
+pub async fn install_prepared_desktop(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let rt = jeikcode_updater::desktop_runtime_info();
+    if !rt.is_desktop || !is_authorized_desktop_installer_request(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "success": false,
+                "message": "仅允许本机桌面窗口执行安装"
+            })),
+        );
+    }
+
+    let prepared = PREPARED_DESKTOP_INSTALLER.lock().unwrap().take();
+    let Some(installer_path) = prepared else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "message": "没有已就绪的桌面安装包"
+            })),
+        );
+    };
+
+    let shutdown_tx = state.shutdown_tx.clone();
+    let desktop_pid = rt.desktop_pid;
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let _ = shutdown_tx.send(true);
+        crate::stop_server();
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        if let Err(err) = jeikcode_updater::launch_desktop_installer(&installer_path, desktop_pid) {
+            tracing::error!("failed to launch prepared desktop installer: {err:#}");
+            return;
+        }
+        // 给外部 NSIS/脚本预留短暂窗口完成父壳清理，避免旧壳误判意外退出并重拉内核
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        std::process::exit(0);
+    });
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "message": "正在启动桌面端安装程序"
+        })),
+    )
 }
 
 async fn run_cli_update(
@@ -806,6 +1489,15 @@ pub async fn get_upgrade_diffs(Query(query): Query<UpgradeDiffsQuery>) -> impl I
     let current_ver = format!("v{}", env!("CARGO_PKG_VERSION"));
     let last_seen = get_last_seen_version(&home);
 
+    if jeikcode_config::config::runtime_state::is_dead() {
+        return Json(UpgradeDiffsResponse {
+            should_prompt: false,
+            current_version: current_ver,
+            last_seen_version: last_seen,
+            diffs: Vec::new(),
+        });
+    }
+
     let diffs = scan_jeikcode_config_diffs(&home);
 
     if diffs.is_empty() {
@@ -845,6 +1537,13 @@ pub async fn apply_diffs(Json(req): Json<ApplyDiffsRequest>) -> impl IntoRespons
     let home = Config::config_dir();
     let current_ver = format!("v{}", env!("CARGO_PKG_VERSION"));
 
+    if jeikcode_config::config::runtime_state::is_dead() {
+        return Json(serde_json::json!({
+            "success": true,
+            "applied_count": 0,
+        }));
+    }
+
     let diffs = scan_jeikcode_config_diffs(&home);
     let selected_items: Vec<ConfigDiffItem> = diffs
         .into_iter()
@@ -880,6 +1579,10 @@ pub fn register_update_routes(router: Router<AppState>) -> Router<AppState> {
         .route("/api/update/check", get(check_update))
         .route("/api/update/status", get(get_status))
         .route("/api/update/execute", post(execute_update))
+        .route(
+            "/api/update/desktop/install",
+            post(install_prepared_desktop),
+        )
         .route("/api/config/upgrade-diffs", get(get_upgrade_diffs))
         .route("/api/config/apply-diffs", post(apply_diffs))
         .route("/api/config/dismiss-diffs", post(dismiss_diffs))
@@ -888,6 +1591,27 @@ pub fn register_update_routes(router: Router<AppState>) -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_check_query_accepts_numeric_and_text_booleans() {
+        let numeric = Query::<UpdateCheckQuery>::try_from_uri(
+            &"/api/update/check?summary=1&refresh=0".parse().unwrap(),
+        )
+        .expect("numeric boolean query")
+        .0;
+        assert_eq!(numeric.summary, Some(true));
+        assert_eq!(numeric.refresh, Some(false));
+
+        let textual = Query::<UpdateCheckQuery>::try_from_uri(
+            &"/api/update/check?summary=true&refresh=false"
+                .parse()
+                .unwrap(),
+        )
+        .expect("textual boolean query")
+        .0;
+        assert_eq!(textual.summary, Some(true));
+        assert_eq!(textual.refresh, Some(false));
+    }
 
     #[test]
     fn test_compare_versions() {
@@ -986,5 +1710,64 @@ mod tests {
         assert_eq!(highest_beta.unwrap().tag_name, "v7.2.4-beta.5");
         let highest_stable = find_highest_release(&releases, UpdateChannel::Stable);
         assert_eq!(highest_stable.unwrap().tag_name, "v7.2.4");
+    }
+
+    #[test]
+    fn test_summary_projection_and_etag_304() {
+        let full = UpdateCheckResponse {
+            current_version: "v7.2.0".to_string(),
+            latest_version: "v7.2.1".to_string(),
+            has_update: true,
+            is_desktop: false,
+            release_notes: Some("Long release notes body".to_string()),
+            download_url: Some("https://example.invalid/app.bin".to_string()),
+            released_at: Some("2026-11-16T00:00:00Z".to_string()),
+            channel: "stable".to_string(),
+            versions: vec![UpdateVersionEntry {
+                version: "v7.2.1".to_string(),
+                notes: Some("note".to_string()),
+                released_at: None,
+            }],
+            desktop_host: None,
+        };
+        let summary = project_update_response(full.clone(), true);
+        assert!(summary.release_notes.is_none());
+        assert!(summary.versions.is_empty());
+        assert!(summary.has_update);
+
+        let first = build_update_check_http_response(&HeaderMap::new(), summary.clone());
+        assert_eq!(first.status(), StatusCode::OK);
+        let etag = first
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .expect("update response must carry ETag")
+            .to_string();
+
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&etag).unwrap());
+        let cached = build_update_check_http_response(&req_headers, summary);
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[test]
+    fn test_desktop_installer_request_guard() {
+        let mut ok_headers = HeaderMap::new();
+        ok_headers.insert("x-jeikcode-desktop-window", HeaderValue::from_static("1"));
+        ok_headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:13457"));
+        ok_headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:13457"),
+        );
+        assert!(is_authorized_desktop_installer_request(&ok_headers));
+
+        let mut remote_headers = HeaderMap::new();
+        remote_headers.insert("x-jeikcode-desktop-window", HeaderValue::from_static("1"));
+        remote_headers.insert(header::HOST, HeaderValue::from_static("192.168.1.50:13457"));
+        assert!(!is_authorized_desktop_installer_request(&remote_headers));
+
+        let mut missing_flag = HeaderMap::new();
+        missing_flag.insert(header::HOST, HeaderValue::from_static("127.0.0.1:13457"));
+        assert!(!is_authorized_desktop_installer_request(&missing_flag));
     }
 }

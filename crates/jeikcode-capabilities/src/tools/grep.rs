@@ -674,9 +674,13 @@ impl Tool for GrepTool {
             // actually contain this pattern. Sensitive files are never read here;
             // their hint is a path-level hard-exclusion notice.
             let hint = result.0.is_empty().then(|| {
-                super::search_visibility_hint(&root, include_sensitive, include_logs, |path| {
-                    file_matches_pattern(&initial_matcher, path)
-                })
+                super::search_visibility_hint(
+                    &root,
+                    &base,
+                    include_sensitive,
+                    include_logs,
+                    |path| file_matches_pattern(&initial_matcher, path),
+                )
             });
             (result, hint)
         })
@@ -700,11 +704,17 @@ impl Tool for GrepTool {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
+                let rule = |p: &Option<std::path::PathBuf>| {
+                    p.as_ref()
+                        .map(|p| format!(" Rule: {}.", crate::pathnorm::to_display(p)))
+                        .unwrap_or_default()
+                };
                 if !hint.sensitive.is_empty() {
                     msg.push_str(&format!(
-                        "\n[Sensitive path hint: {} credential file(s) under this path are excluded from search (e.g. {}). Use `read` with explicit approval, or retry with include_sensitive=true (approval required outside Auto mode).]",
+                        "\n[Sensitive path hint: {} credential file(s) under this path are excluded from search (e.g. {}).{} Use `read` with explicit approval, or retry with include_sensitive=true (approval required outside Auto mode).]",
                         hint.sensitive.len(),
-                        examples(&hint.sensitive)
+                        examples(&hint.sensitive),
+                        rule(&hint.sensitive_source)
                     ));
                 }
                 if !include_logs && !hint.logs.is_empty() {
@@ -716,9 +726,10 @@ impl Tool for GrepTool {
                 }
                 if !include_ignored && !hint.noise.is_empty() {
                     msg.push_str(&format!(
-                        "\n[Search ignore hint: {} file(s) under this path are excluded by `.codegraphignore` (e.g. {}). If the target is one of them, retry with include_ignored=true.]",
+                        "\n[Search ignore hint: {} file(s) under this path are excluded by `.codegraphignore` (e.g. {}).{} If the target is one of them, retry with include_ignored=true.]",
                         hint.noise.len(),
-                        examples(&hint.noise)
+                        examples(&hint.noise),
+                        rule(&hint.noise_source)
                     ));
                 }
                 if !explicit_regex {
@@ -784,15 +795,23 @@ async fn missing_path_fallback(
     // The requested path is missing; include ignored files so a same-named
     // local doc is still discovered and reported as a fallback candidate. Keep
     // sensitive files out of the automatic fallback.
-    for_each_project_entry(working_dir, false, true, true, false, |entry| {
-        if Instant::now() >= deadline || candidates.len() >= 6 {
-            return false;
-        }
-        if entry.file_name().to_string_lossy() == leaf {
-            candidates.push(entry.path().to_path_buf());
-        }
-        true
-    });
+    for_each_project_entry(
+        working_dir,
+        working_dir,
+        false,
+        true,
+        true,
+        false,
+        |entry| {
+            if Instant::now() >= deadline || candidates.len() >= 6 {
+                return false;
+            }
+            if entry.file_name().to_string_lossy() == leaf {
+                candidates.push(entry.path().to_path_buf());
+            }
+            true
+        },
+    );
     if candidates.len() == 1 {
         let candidate = candidates.remove(0);
         return Some((
@@ -1263,6 +1282,7 @@ fn search(
     // attachments stay searchable.
     for_each_project_entry(
         root,
+        base,
         false,
         include_ignored,
         include_logs,
@@ -1792,6 +1812,160 @@ mod tests {
             unfiltered.content.contains("noise.txt"),
             "include_ignored must bypass codegraphignore: {}",
             unfiltered.content
+        );
+    }
+
+    #[tokio::test]
+    async fn project_jeikcode_noise_filters_and_include_ignored_opens_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode")).unwrap();
+        std::fs::write(
+            d.path().join(".jeikcode").join(".codegraphignore"),
+            "noise.txt\n",
+        )
+        .unwrap();
+        std::fs::write(d.path().join("noise.txt"), "NEEDLE noise\n").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "NEEDLE keep\n").unwrap();
+
+        let default = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(default.content.contains("keep.rs"), "{}", default.content);
+        assert!(
+            !default.content.contains("noise.txt"),
+            "project .jeikcode noise must filter grep: {}",
+            default.content
+        );
+
+        let opened = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE","include_ignored":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            opened.content.contains("noise.txt"),
+            "include_ignored must open project .jeikcode noise: {}",
+            opened.content
+        );
+    }
+
+    #[tokio::test]
+    async fn project_jeikcode_sensitive_filters_by_default() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode")).unwrap();
+        std::fs::write(
+            d.path().join(".jeikcode").join(".codegraphignore.graph"),
+            "secret.txt\n",
+        )
+        .unwrap();
+        std::fs::write(d.path().join("secret.txt"), "NEEDLE secret\n").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "NEEDLE keep\n").unwrap();
+
+        let default = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(default.content.contains("keep.rs"), "{}", default.content);
+        assert!(
+            !default.content.contains("secret.txt"),
+            "project .jeikcode sensitive rule must hide grep: {}",
+            default.content
+        );
+
+        let ignored_only = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE","include_ignored":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            !ignored_only.content.contains("secret.txt"),
+            "include_ignored must never open sensitive paths: {}",
+            ignored_only.content
+        );
+
+        let opened = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE","include_sensitive":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            opened.content.contains("secret.txt"),
+            "include_sensitive must open project .jeikcode sensitive paths: {}",
+            opened.content
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_jeikcode_rule_applies_to_subdir_search() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode")).unwrap();
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(
+            d.path().join(".jeikcode").join(".codegraphignore"),
+            "src/noise.txt\n",
+        )
+        .unwrap();
+        std::fs::write(d.path().join("src/noise.txt"), "NEEDLE noise\n").unwrap();
+        std::fs::write(d.path().join("src/keep.rs"), "NEEDLE keep\n").unwrap();
+
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE","path":"src"}"#, &ctx(d.path()))
+            .await;
+        assert!(r.content.contains("keep.rs"), "{}", r.content);
+        assert!(
+            !r.content.contains("noise.txt"),
+            "workspace .jeikcode rules must apply to subdir searches: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn project_jeikcode_rule_overrides_root_noise_rule() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".codegraphignore"), "*.generated.txt\n").unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode")).unwrap();
+        std::fs::write(
+            d.path().join(".jeikcode").join(".codegraphignore"),
+            "!keep.generated.txt\n",
+        )
+        .unwrap();
+        std::fs::write(d.path().join("keep.generated.txt"), "NEEDLE keep\n").unwrap();
+        std::fs::write(d.path().join("other.generated.txt"), "NEEDLE other\n").unwrap();
+
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(r.content.contains("keep.generated.txt"), "{}", r.content);
+        assert!(
+            !r.content.contains("other.generated.txt"),
+            "root rule must still hide other.generated.txt: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_codegraphignore_whitelist_reopens_parent_rule() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("sub")).unwrap();
+        std::fs::write(d.path().join(".codegraphignore"), "sub/noise.txt\n").unwrap();
+        std::fs::write(
+            d.path().join("sub").join(".codegraphignore"),
+            "!noise.txt\n",
+        )
+        .unwrap();
+        std::fs::write(d.path().join("sub/noise.txt"), "NEEDLE noise\n").unwrap();
+        std::fs::write(d.path().join("sub/keep.rs"), "NEEDLE keep\n").unwrap();
+
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE","path":"sub"}"#, &ctx(d.path()))
+            .await;
+        assert!(r.content.contains("keep.rs"), "{}", r.content);
+        assert!(
+            r.content.contains("noise.txt"),
+            "nested whitelist must re-open the parent rule: {}",
+            r.content
         );
     }
 

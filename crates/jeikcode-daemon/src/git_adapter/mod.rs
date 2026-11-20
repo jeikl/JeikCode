@@ -531,8 +531,32 @@ fn load_from_disk() -> HashMap<String, GitAdapterConfig> {
     let Ok(bytes) = std::fs::read(&path) else {
         return HashMap::new();
     };
-    let mut map: HashMap<String, GitAdapterConfig> =
-        serde_json::from_slice(&bytes).unwrap_or_default();
+    // Parse entry-by-entry: one migrated/bad project binding must not discard
+    // every other project's saved configuration (a subsequent save would then
+    // overwrite the file with an almost-empty map).
+    let mut map: HashMap<String, GitAdapterConfig> = HashMap::new();
+    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(serde_json::Value::Object(root)) => {
+            for (key, value) in root {
+                match serde_json::from_value::<GitAdapterConfig>(value) {
+                    Ok(config) => {
+                        map.insert(key, config);
+                    }
+                    Err(error) => {
+                        tracing::warn!("[git_adapter] skipping invalid binding `{key}`: {error}")
+                    }
+                }
+            }
+        }
+        Ok(_) => tracing::warn!(
+            "[git_adapter] {} is not a JSON object; keeping it untouched",
+            path.display()
+        ),
+        Err(error) => tracing::warn!(
+            "[git_adapter] failed to parse {}: {error}; keeping it untouched",
+            path.display()
+        ),
+    }
     let mut modified = false;
     for cfg in map.values_mut() {
         if cfg.enabled && !cfg.is_github_app_mode() {

@@ -127,6 +127,109 @@ pub(super) fn zh_tw(msg: Msg<'_>) -> Cow<'static, str> {
             format!("已壓縮 · 摘要 {} 條 · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("已摺疊工具輸出 · 節省 ~{} tok", saved).into(),
+        Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
+            format!("模型回傳空回應，{wait} 秒後重試（{attempt}/{max}）…")
+        } else {
+            format!("模型回傳空回應，正在重試（{attempt}/{max}）…")
+        }.into(),
+        Msg::AgentRetryThinking { attempt, max, wait } => if wait > 0 {
+            format!("模型只回傳了思考，{wait} 秒後重試（{attempt}/{max}）…")
+        } else {
+            format!("模型只回傳了思考，正在重試（{attempt}/{max}）…")
+        }.into(),
+        Msg::AgentRetryMalformed { attempt, max, wait } => if wait > 0 {
+            format!("回應格式異常，{wait} 秒後重試（{attempt}/{max}）…")
+        } else {
+            format!("回應格式異常，正在重試（{attempt}/{max}）…")
+        }.into(),
+        Msg::AgentRetryFirstToken { secs, attempt, max } =>
+            format!("模型延遲過高：{secs} 秒內無回應，正在重試（{attempt}/{max}）…").into(),
+        Msg::AgentRetryApi { reason, wait, attempt, max } =>
+            format!("API 錯誤 {reason}，{wait} 秒後重試（{attempt}/{max}）…").into(),
+        Msg::AgentOverWindow { estimate_k, window_k, buffer_k } =>
+            format!(
+                "請求約 {estimate_k}K tokens 已達內容視窗水位（視窗約 {window_k}K − 緩衝 {buffer_k}K）：請精簡輸入或改用更大視窗的模型。"
+            ).into(),
+        Msg::AgentContextOverflow { round, attempt } =>
+            format!("第 {round} 輪內容視窗溢位（第 {attempt} 次嘗試）；正在壓縮並重試").into(),
+        Msg::AgentStreamReconnecting { attempt, max } =>
+            format!("串流閒置逾時 — 正在重新連線（{attempt}/{max}）").into(),
+        Msg::AgentResponseTruncated => "回應已截斷：finish_reason=length".into(),
+        Msg::AgentUnsupportedSnapshot { version, supported } =>
+            format!("不支援的快照版本 {version}（核心支援 {supported}）；將以空白工作階段啟動").into(),
+        Msg::AgentModelHighLatencyTerminal { retries, secs } =>
+            format!("模型延遲過高，請稍後再試（連續 {retries} 次在 {secs} 秒內未收到首個回應）").into(),
+        Msg::AgentExhaustedMalformed { max } =>
+            format!("模型連續 {max} 次回傳無法解析的回應（上游偶發異常）。可直接重試，或稍後再試。").into(),
+        Msg::AgentExhaustedThinkingOverWindowIntro { max } =>
+            format!("模型連續 {max} 次只回傳思考、未給出正文或工具呼叫。如前所述，本次請求已超過模型內容視窗——請精簡輸入或執行 /compact 後重試。").into(),
+        Msg::AgentExhaustedThinkingOverWindowSize { max, prompt_k, window_k } =>
+            format!("模型連續 {max} 次只回傳思考、未給出正文或工具呼叫。目前請求約 {prompt_k}K tokens，已接近或超過模型視窗（約 {window_k}K），建議執行 /compact 或精簡輸入後重試。").into(),
+        Msg::AgentExhaustedThinkingGeneric { max } =>
+            format!("模型連續 {max} 次只回傳思考、未給出正文或工具呼叫。可直接重試，或稍後再試。").into(),
+        Msg::AgentExhaustedEmptyOverWindowIntro { max } =>
+            format!("模型連續 {max} 次回傳空回應。如前所述，本次請求已超過模型內容視窗——請精簡輸入或執行 /compact 後重試。").into(),
+        Msg::AgentExhaustedEmptyOverWindowSize { max, prompt_k, window_k } =>
+            format!("模型連續 {max} 次回傳空回應。目前請求約 {prompt_k}K tokens，已接近或超過模型視窗（約 {window_k}K），建議執行 /compact 或精簡輸入後重試。").into(),
+        Msg::AgentExhaustedEmptyGeneric { max } =>
+            format!("模型連續 {max} 次回傳空回應（上游偶發異常，與內容長度無關）。可直接重試，或稍後再試。").into(),
+        Msg::AgentStatusRateLimited => "請求過於頻繁或額度已用盡".into(),
+        Msg::AgentStatusUpstreamUnavailable => "上游服務暫時無法使用".into(),
+        Msg::AgentStatusResponseTimeout => "模型回應逾時".into(),
+        Msg::AgentStatusConnectionFailed => "網路連線失敗".into(),
+        Msg::AgentStatusInsufficientBalance => "帳戶餘額不足".into(),
+        Msg::AgentStatusUnauthorized => "API 金鑰未授權或已失效".into(),
+        Msg::StreamReadRetryExhausted { attempts } =>
+            format!("網路連線中斷：遠端關閉或重設了連線，自動重新連線 {attempts} 次後仍失敗，可重試。").into(),
+        Msg::StreamReadPartialResponse =>
+            "回應中斷：已保留可安全儲存的部分回覆，可繼續。".into(),
+        Msg::StreamReadInterrupted =>
+            "網路連線中斷：遠端關閉或重設了連線，可重試。".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("連線中斷，正在自動重新連線（最多 {max} 次），已保留目前輸出…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("連線中斷，已保留目前輸出，重試 {attempt}/{max} 次").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("串流閒置逾時，已保留目前輸出，重試 {attempt}/{max} 次")
+        } else {
+            format!("串流閒置逾時，正在重試 {attempt}/{max} 次")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("網路連線中斷，已保留目前輸出，重試 {attempt}/{max} 次")
+        } else {
+            format!("網路連線中斷，正在重試 {attempt}/{max} 次")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("連線已恢復（重試 {attempts} 次後繼續）").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "自動重新連線後串流回應仍逾時，已終止本輪".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("觸發速率限制，{secs} 秒後自動重試…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "達到速率限制額度，已暫停，請等待重設或切換模型後繼續".into()
+        } else {
+            format!("達到速率限制已暫停：{detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "串流在已產生部分回覆後逾時；已保留部分回覆，可繼續。".into(),
+        Msg::StreamReadResetHint =>
+            "此錯誤常見於公司網路或代理環境，請檢查代理、VPN 或防火牆設定後重試。".into(),
+        Msg::StreamReadDetailsPrefix => "詳細資訊：".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "疑似複讀死迴圈：偵測到連續重複相同的輸出與工具呼叫，已提示模型最後一次調整方向，否則將終止本輪。".into()
+        } else {
+            "疑似複讀死迴圈：偵測到連續重複相同的輸出與工具呼叫，已提示模型調整方向。".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("已停止：模型連續 {rounds} 輪複讀相同的推理、文字與工具呼叫模式").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("疑似工具呼叫迴圈：相同呼叫或唯讀批次處理連續 {threshold} 次回傳相同結果，已提示模型調整策略").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("偵測到工具呼叫死迴圈：相同呼叫或唯讀批次處理連續 {threshold} 次回傳相同結果，已在下次請求前停止").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("已停止：模型連續 {rounds} 輪重複相同的工具呼叫模式").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("已達到最大輪次上限（{cap} 輪）；已停止呼叫工具並產生進度總結與後續建議。").into(),
         _ => super::zh_cn::zh_cn(msg),
     }
 }

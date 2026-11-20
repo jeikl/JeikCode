@@ -135,6 +135,44 @@ pub struct MessageMeta {
     /// string for older snapshots).
     #[serde(default)]
     pub finish_reason: String,
+    /// Time to first content token (thinking / text / tool chunk) in ms from request open.
+    /// `None` if unavailable or from an older snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+}
+
+/// 持久化到会话消息上的结构化系统通知元数据，使快照回放、`DisplayHook` 与实时事件
+/// 共用同一身份（`event_id`）、因果锚点（`anchor_message_id`）、严重级别与收敛状态。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageNoticeMeta {
+    pub kind: crate::event::NoticeKind,
+    pub severity: crate::event::NoticeSeverity,
+    pub status: crate::event::NoticeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u32>,
+}
+
+impl From<&crate::event::SystemNotice> for MessageNoticeMeta {
+    fn from(notice: &crate::event::SystemNotice) -> Self {
+        Self {
+            kind: notice.kind,
+            severity: notice.severity,
+            status: notice.status,
+            event_id: Some(notice.event_id.clone()),
+            part_id: Some(notice.part_id.clone()),
+            anchor_message_id: notice.anchor_message_id.clone(),
+            anchor_part_id: notice.anchor_part_id.clone(),
+            revision: Some(notice.revision),
+        }
+    }
 }
 
 /// Provider-neutral message.
@@ -246,6 +284,9 @@ pub struct Message {
     /// (`m-<uuid>`) when absent so a stored message carries its identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// 结构化系统通知元数据（仅 `turn_diagnostic` 等展示型消息携带，绝不进入模型上下文）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<MessageNoticeMeta>,
 }
 
 impl Message {
@@ -265,6 +306,7 @@ impl Message {
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     pub fn user(text: impl Into<String>) -> Self {
@@ -283,6 +325,7 @@ impl Message {
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     pub fn assistant(text: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
@@ -301,6 +344,7 @@ impl Message {
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     /// A tool RESULT. `is_error` is now STORED (a real adapter must echo it to the
@@ -325,6 +369,7 @@ impl Message {
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     /// A KERNEL-INJECTED synthetic `Role::User` message (compaction cold summary or
@@ -350,6 +395,7 @@ impl Message {
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     /// A KERNEL-INJECTED synthetic `Role::User` message that opens a new autonomous
@@ -379,6 +425,7 @@ impl Message {
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     /// A KERNEL-INJECTED `Role::User` message carrying `images` — used by the agent
@@ -402,6 +449,7 @@ impl Message {
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
 
@@ -1916,6 +1964,7 @@ mod tests {
             provider_model: Some("deepseek-v4-flash".into()),
             session_id: Some("sess-1".into()),
             finish_reason: "stop".into(),
+            ttft_ms: Some(42),
         });
         with_meta.reasoning = Some("thinking…".to_string());
         c.push(with_meta);

@@ -18,6 +18,7 @@ import {
 type Row = {
   id?: string;
   seq?: number;
+  transient?: boolean;
   role: 'user' | 'assistant' | 'system';
   parts: Array<{ kind: 'text' | 'notice' | 'tool'; text?: string; tool?: { id: string; name: string; status: string } }>;
   clientInputId?: string;
@@ -90,13 +91,14 @@ test('two same-text sends with different ids remain two user rows', () => {
   );
 });
 
-test('notice is a top-level system record placed by seq, not an assistant part', () => {
+test('transient notice is a top-level system record placed after target without borrowing seq', () => {
   const canvas: Row[] = [user('u-1', '问', 1), answer('a-1', '答', 2)];
   const withNotice = paintAssistantNotice(canvas as any, '已压缩', 'a-1') as unknown as Row[];
   assert.equal(withNotice.length, 3);
   assert.equal(withNotice[2]!.role, 'system');
+  assert.equal(withNotice[2]!.transient, true);
   assert.equal(withNotice[2]!.parts[0]!.kind, 'notice');
-  assert.equal(withNotice[2]!.seq, 2.5);
+  assert.equal(withNotice[2]!.seq, undefined);
   // Replaying the notice must not add a second row.
   assert.equal(paintAssistantNotice(withNotice as any, '已压缩', 'a-1'), withNotice);
 });

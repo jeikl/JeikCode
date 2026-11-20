@@ -3230,7 +3230,11 @@ impl ToolMiddleware for RepairToolArgsMiddleware {
         // edit_file extractor selection survives any future alias / case-insensitive
         // tool resolution in the kernel — matching v1, which repaired with the
         // corrected name.
+        let original_args = call.arguments.clone();
         self.repair_call(tool.name(), &tool.parameters_schema(), call);
+        if call.arguments != original_args {
+            crate::call_signals::mark_repaired(&call.id);
+        }
         // grok-inspired STRUCTURED DIAGNOSTIC: when every repair layer fails and
         // the arguments are still not valid JSON, deny with a field-level schema
         // description instead of silently passing garbage through. The model sees

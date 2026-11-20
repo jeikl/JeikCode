@@ -41,7 +41,7 @@ export function AtMentionMenu({
           type="button"
           title={item.up ? '..' : dirPart + item.name + (item.is_dir ? '/' : '')}
         >
-          <span class="at-icon">{item.up ? '⬆' : item.is_dir ? '📁' : '📄'}</span>
+          <span class="at-icon">{item.up ? '↑' : item.is_dir ? '/' : '·'}</span>
           <span class="at-name">{item.up ? '..' : dirPart + item.name + (item.is_dir ? '/' : '')}</span>
         </button>
       ))}

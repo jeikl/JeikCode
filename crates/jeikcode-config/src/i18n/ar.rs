@@ -127,6 +127,109 @@ pub(super) fn ar(msg: Msg<'_>) -> Cow<'static, str> {
             format!("تم الضغط · تم تلخيص {} رسالة · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("تم طيّ مخرجات الأداة · توفير ~{} tok", saved).into(),
+        Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
+            format!("أعاد النموذج استجابة فارغة، ستتم إعادة المحاولة خلال {wait} ثانية ({attempt}/{max})…")
+        } else {
+            format!("أعاد النموذج استجابة فارغة، جارٍ إعادة المحاولة ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryThinking { attempt, max, wait } => if wait > 0 {
+            format!("أعاد النموذج التفكير فقط، ستتم إعادة المحاولة خلال {wait} ثانية ({attempt}/{max})…")
+        } else {
+            format!("أعاد النموذج التفكير فقط، جارٍ إعادة المحاولة ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryMalformed { attempt, max, wait } => if wait > 0 {
+            format!("تنسيق الاستجابة غير صالح، ستتم إعادة المحاولة خلال {wait} ثانية ({attempt}/{max})…")
+        } else {
+            format!("تنسيق الاستجابة غير صالح، جارٍ إعادة المحاولة ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryFirstToken { secs, attempt, max } =>
+            format!("استجابة النموذج بطيئة: لم تصل أي بيانات خلال {secs} ثانية، جارٍ إعادة المحاولة ({attempt}/{max})…").into(),
+        Msg::AgentRetryApi { reason, wait, attempt, max } =>
+            format!("خطأ API {reason}، ستتم إعادة المحاولة خلال {wait} ثانية ({attempt}/{max})…").into(),
+        Msg::AgentOverWindow { estimate_k, window_k, buffer_k } =>
+            format!(
+                "وصل الطلب (~{estimate_k}K tokens) إلى حد السياق (النافذة ~{window_k}K − الاحتياطي {buffer_k}K): اختصر الإدخال أو انتقل إلى نموذج بنافذة أكبر."
+            ).into(),
+        Msg::AgentContextOverflow { round, attempt } =>
+            format!("تجاوز السياق في الجولة {round} (المحاولة {attempt})؛ جارٍ الضغط وإعادة المحاولة").into(),
+        Msg::AgentStreamReconnecting { attempt, max } =>
+            format!("انتهت مهلة سكون البث — جارٍ إعادة الاتصال ({attempt}/{max})").into(),
+        Msg::AgentResponseTruncated => "تم اقتطاع الاستجابة: finish_reason=length".into(),
+        Msg::AgentUnsupportedSnapshot { version, supported } =>
+            format!("إصدار اللقطة {version} غير مدعوم (المدعوم {supported})؛ جارٍ البدء بجلسة فارغة").into(),
+        Msg::AgentModelHighLatencyTerminal { retries, secs } =>
+            format!("زمن استجابة النموذج مرتفع جدًا، يُرجى المحاولة لاحقًا ({retries} محاولات متتالية دون أول استجابة خلال {secs} ثانية)").into(),
+        Msg::AgentExhaustedMalformed { max } =>
+            format!("أعاد النموذج استجابات غير قابلة للتحليل {max} مرات متتالية (عطل مؤقت من المزوّد). يمكنك إعادة المحاولة الآن أو لاحقًا.").into(),
+        Msg::AgentExhaustedThinkingOverWindowIntro { max } =>
+            format!("أعاد النموذج التفكير فقط دون نص أو أدوات {max} مرات متتالية. يتجاوز هذا الطلب نافذة السياق — اختصر الإدخال أو استخدم /compact ثم أعد المحاولة.").into(),
+        Msg::AgentExhaustedThinkingOverWindowSize { max, prompt_k, window_k } =>
+            format!("أعاد النموذج التفكير فقط دون نص أو أدوات {max} مرات متتالية. الطلب الحالي ~{prompt_k}K tokens قريب من نافذة النموذج (~{window_k}K)؛ يُنصح باستخدام /compact أو اختصار الإدخال.").into(),
+        Msg::AgentExhaustedThinkingGeneric { max } =>
+            format!("أعاد النموذج التفكير فقط دون نص أو أدوات {max} مرات متتالية. يمكنك إعادة المحاولة الآن أو لاحقًا.").into(),
+        Msg::AgentExhaustedEmptyOverWindowIntro { max } =>
+            format!("أعاد النموذج استجابات فارغة {max} مرات متتالية. يتجاوز هذا الطلب نافذة السياق — اختصر الإدخال أو استخدم /compact ثم أعد المحاولة.").into(),
+        Msg::AgentExhaustedEmptyOverWindowSize { max, prompt_k, window_k } =>
+            format!("أعاد النموذج استجابات فارغة {max} مرات متتالية. الطلب الحالي ~{prompt_k}K tokens قريب من نافذة النموذج (~{window_k}K)؛ يُنصح باستخدام /compact أو اختصار الإدخال.").into(),
+        Msg::AgentExhaustedEmptyGeneric { max } =>
+            format!("أعاد النموذج استجابات فارغة {max} مرات متتالية (عطل مؤقت من المزوّد لا يتعلق بطول السياق). يمكنك إعادة المحاولة الآن أو لاحقًا.").into(),
+        Msg::AgentStatusRateLimited => "تم تجاوز حد معدل الطلبات أو نفاد الحصة".into(),
+        Msg::AgentStatusUpstreamUnavailable => "الخدمة البعيدة غير متاحة مؤقتًا".into(),
+        Msg::AgentStatusResponseTimeout => "انتهت مهلة استجابة النموذج".into(),
+        Msg::AgentStatusConnectionFailed => "فشل الاتصال بالشبكة".into(),
+        Msg::AgentStatusInsufficientBalance => "رصيد الحساب غير كافٍ".into(),
+        Msg::AgentStatusUnauthorized => "مفتاح API غير مصرح به أو منتهي الصلاحية".into(),
+        Msg::StreamReadRetryExhausted { attempts } =>
+            format!("انقطع اتصال الشبكة: أغلق المضيف البعيد الاتصال أو أعاد ضبطه وفشلت إعادة الاتصال بعد {attempts} محاولات. يمكنك إعادة المحاولة.").into(),
+        Msg::StreamReadPartialResponse =>
+            "انقطعت الاستجابة: تم الاحتفاظ بالجزء الآمن من الاستجابة ويمكنك المتابعة.".into(),
+        Msg::StreamReadInterrupted =>
+            "انقطع اتصال الشبكة: أغلق المضيف البعيد الاتصال أو أعاد ضبطه. يمكنك إعادة المحاولة.".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("انقطع الاتصال، جارٍ إعادة الاتصال تلقائيًا (حتى {max} محاولات) مع الاحتفاظ بالمخرجات الحالية…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("انقطع الاتصال مع الاحتفاظ بالمخرجات الحالية، إعادة المحاولة {attempt}/{max}").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("توقف البث بسبب انتهاء المهلة مع الاحتفاظ بالمخرجات الحالية، إعادة المحاولة {attempt}/{max}")
+        } else {
+            format!("توقف البث بسبب انتهاء المهلة، إعادة المحاولة {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("انقطع اتصال الشبكة مع الاحتفاظ بالمخرجات الحالية، إعادة المحاولة {attempt}/{max}")
+        } else {
+            format!("انقطع اتصال الشبكة، إعادة المحاولة {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("تمت استعادة الاتصال بعد {attempts} محاولة، جارٍ المتابعة").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "استمرت مهلة البث في الانتهاء بعد محاولات إعادة الاتصال التلقائي؛ تم إنهاء هذه الجولة".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("تم بلوغ حد المعدل، ستتم إعادة المحاولة تلقائيًا بعد {secs} ثانية…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "تم بلوغ حصة حد المعدل وتوقف التنفيذ مؤقتًا؛ انتظر إعادة التعيين أو بدّل النموذج للمتابعة".into()
+        } else {
+            format!("تم الإيقاف المؤقت بسبب حد المعدل: {detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "انتهت مهلة البث بعد استجابة جزئية؛ تم الاحتفاظ بالجزء المستلم ويمكنك المتابعة.".into(),
+        Msg::StreamReadResetHint =>
+            "يحدث هذا الخطأ غالبًا في شبكات الشركات أو بيئات الوكيل؛ يُرجى التحقق من إعدادات الوكيل أو VPN أو جدار الحماية.".into(),
+        Msg::StreamReadDetailsPrefix => "التفاصيل: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "احتمال حلقة تكرار: تم رصد تكرار نفس المخرجات واستدعاءات الأدوات؛ يُطلب من النموذج تغيير المسار قبل إيقاف هذه الجولة.".into()
+        } else {
+            "احتمال حلقة تكرار: تم رصد تكرار نفس المخرجات واستدعاءات الأدوات؛ يُطلب من النموذج تغيير المسار.".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("تم الإيقاف: أعاد النموذج نفس نمط التفكير والنص واستدعاء الأدوات لمدة {rounds} جولات متتالية").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("احتمال حلقة أدوات: أعاد الاستدعاء نفسه أو دفعة القراءة فقط نفس النتيجة {threshold} مرات؛ يُطلب من النموذج تغيير المسار").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("تم اكتشاف حلقة أدوات: أعاد الاستدعاء نفسه أو دفعة القراءة فقط نفس النتيجة {threshold} مرات؛ تم الإيقاف قبل إرسال طلب جديد").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("تم الإيقاف: كرر النموذج نفس نمط استدعاءات الأدوات لمدة {rounds} جولات متتالية").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("تم بلوغ الحد الأقصى للجولات ({cap})؛ تم إيقاف استدعاء الأدوات لتلخيص التقدم والخطوات التالية.").into(),
         _ => super::en::en(msg),
     }
 }

@@ -25,9 +25,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod context;
 pub mod display;
+pub mod eval_trace;
 pub mod inputs;
 pub mod instructions;
 pub mod manager;
+mod model_switch_log;
 mod mtime_file;
 pub mod partial;
 pub mod presentation;
@@ -35,6 +37,7 @@ pub mod recall;
 pub mod rewind;
 pub mod snapshot;
 pub mod status_reminder;
+pub mod tool_metrics;
 pub mod transcript;
 mod usage_provider;
 pub mod user_wrap;
@@ -45,6 +48,12 @@ pub use display::{
     DisplayHook, DisplayImage, DisplayIndexRow, DisplayMeta, DisplayRecord, DisplayToolCall,
     DISPLAY_VERSION,
 };
+pub use eval_trace::{
+    default_bundles_dir_for, evaluate_session_metrics, prune_eval_storage, read_trace_records,
+    reconstruct_turn_round_upstream_request, reconstruct_upstream_request, ContextBundle,
+    LatencyStats, ReconstructedUpstreamRequest, SessionEvalReport, SessionTraceEndMiddleware,
+    SessionTraceHook, SessionTraceStartMiddleware, TraceRecord,
+};
 pub use inputs::SessionInput;
 pub use manager::{
     aggregate_session_cost, CatalogDiagnostic, CatalogDiagnosticKind, CatalogEntry,
@@ -54,6 +63,7 @@ pub use manager::{
     SessionLease, SessionLineage, SessionManager, SessionMeta, SessionOrigin, SessionResult,
     SessionStoreError, StorageOwner, TokenBreakdown, TurnStat,
 };
+pub use model_switch_log::{ModelSwitchRecord, MODEL_SWITCH_VERSION};
 pub use partial::{PartialStream, PartialToolCall};
 pub use presentation::{
     anchor_from_legacy_position, DisplayAnchor, LegacyTurnBoundary, PresentationEntry,
@@ -66,6 +76,7 @@ pub use rewind::{
 };
 pub use snapshot::{RewindTransactionReceipt, SnapshotHook};
 pub use status_reminder::StatusReminderHook;
+pub use tool_metrics::{ToolMetricRecord, ToolMetricStatus};
 pub use transcript::{ToolRecord, TranscriptHook, TurnRecord, UsageRecord};
 pub use usage_provider::UsageRecordingProvider;
 pub use user_wrap::UserWrapHook;

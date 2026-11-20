@@ -50,6 +50,8 @@ export interface ProjectionMessage {
    *  Deliberately separate from `seq`: disk DisplayRecord.seq and the replay
    *  cursor are different coordinate systems. Never persisted as display order. */
   streamSeq?: number;
+  /** Display-only runtime model-switch marker for this assistant round. */
+  switchTo?: string;
 }
 
 /**
@@ -1551,11 +1553,20 @@ export function paintAssistantNotice<T extends ProjectionMessage>(
   id?: string,
 ): T[] {
   if (!text) return messages;
-  // 只在**末尾连续区域**去重，不能全局去重：
-  // 全局 `some` 会让一条历史 notice 永远占着画布（它已被写进缓存），
-  // 而它的 seq 落在当时那一轮之后、后续每一轮之前 —— 视觉上就是
-  // “这条提示粘在之后所有模型回答的下面”。
-  // 只检查尾部（同一轮的重复帧），跨轮的不再复用。
+  // 身份优先：同一条通知（同 id）只存在一行。重试提示被终态详情改写时，
+  // 原地替换文本，而不是追加第二张卡。
+  if (id) {
+    const existing = messages.findIndex((message) => message.id === id);
+    if (existing >= 0) {
+      const current = messages[existing]!;
+      const already = current.parts.some((part) => part.kind === 'notice' && part.text === text);
+      if (already) return messages;
+      const next = messages.slice();
+      next[existing] = { ...current, parts: [{ kind: 'notice', text }] } as unknown as T;
+      return next;
+    }
+  }
+  // 只在**末尾连续区域**按文本去重（同一轮的重复帧），跨轮的不再复用。
   const hasNotice = (message: ProjectionMessage): boolean =>
     message.role === 'system'
     && message.parts.some((part) => part.kind === 'notice' && part.text === text);
@@ -1566,44 +1577,14 @@ export function paintAssistantNotice<T extends ProjectionMessage>(
     break;
   }
 
-  const seqOf = (message: ProjectionMessage | undefined): number | undefined =>
-    typeof message?.seq === 'number' ? message.seq : undefined;
-
+  // 瞬时提示只按画布位置排序：绝不借用持久行的 `seq`（那会让它在对账时
+  // 被重排到伪造的锚点旁边）。命中锚点行就插在其后，否则放末尾。
   let at = messages.length;
-  let anchorSeq: number | undefined;
-  let targetFound = false;
   if (targetId) {
     const target = messages.findIndex(
       (message) => message.id === targetId || message.clientInputId === targetId,
     );
-    if (target >= 0) {
-      at = target + 1;
-      anchorSeq = seqOf(messages[target]);
-      targetFound = true;
-    }
-  }
-  if (!targetFound) {
-    // The exact assistant round may be above the current canvas window or may
-    // not have painted yet. Falling back to the absolute tail makes the notice
-    // permanently stick below the final answer. The current turn's user prompt
-    // is the nearest stable boundary: place the transient advisory right after
-    // it, before the answer rows.
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i]!.role === 'user') {
-        at = i + 1;
-        anchorSeq = seqOf(messages[i]);
-        break;
-      }
-    }
-  }
-  if (anchorSeq == null) {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const seq = seqOf(messages[i]);
-      if (seq != null) {
-        anchorSeq = seq;
-        break;
-      }
-    }
+    if (target >= 0) at = target + 1;
   }
 
   const noticeId = id ?? (targetId ? `notice-${targetId}` : `notice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -1613,8 +1594,7 @@ export function paintAssistantNotice<T extends ProjectionMessage>(
     // Live advisory only. `stripTransientNoticeRows` removes it before it can
     // become a durable canvas row; durable boundaries use `authoritative_notice`.
     transient: true,
-    parts: [{ kind: 'notice', text }],
-    ...(anchorSeq != null ? { seq: anchorSeq + 0.5 } : {}),
+    parts: [{ kind: 'notice', text, id: `${noticeId}:1:notice` }],
   } as unknown as T;
   const next = messages.slice();
   next.splice(at, 0, row);
@@ -1629,37 +1609,9 @@ export function paintAssistantNotice<T extends ProjectionMessage>(
  * 继续排在它后面 —— 用户看到的就是「这条提示带到以后所有模型回答的下面」。
  * 所以落缓存前统一剥掉；需要时由当前轮自己的事件重新生成。
  */
-/** 旧版本曾把“停止确认 / 发送被阻止”等输入态提示写进系统行。
- *  它们不是历史：即使后来补上了 id + seq，也必须在缓存读写时剥掉，
- *  否则会永远粘在最新回答下面。
- *
- *  只匹配旧版已经落缓存的文案前缀（当前版本已改为 toast，不再产生新行），
- *  不参与任何实时路由判定。 */
-const TRANSIENT_ADVISORY_MARKERS = [
-  '正在重试',
-  '秒后重试',
-  '正在重连',
-  '只返回了思考',
-  '空响应',
-  '响应格式异常',
-  '上下文水位',
-  '上下文已溢出',
-  'retrying',
-  'only reasoning',
-  'empty response',
-  'malformed response',
-  'stream idle timeout',
-  'context watermark',
-  'context overflow',
-] as const;
-
-/** True for legacy persisted retry/liveness advisories that must never be
- *  re-projected as transcript rows after a reload. New advisories are live-only. */
-export function isTransientAdvisoryText(text: string): boolean {
-  const value = text.trim().toLowerCase();
-  if (!value) return false;
-  return TRANSIENT_ADVISORY_MARKERS.some((marker) => value.includes(marker));
-}
+/** 旧版曾把“停止确认 / 发送被阻止”等本地输入态提示写进系统行。
+ *  清理缓存时，不再按重试/超时的多语言文本关键词瞎猜（那会让权威事件卡被误删
+ *  或因翻译变化漏删），改为严格依据结构化持久化与生命周期契约判别。 */
 
 const EPHEMERAL_ADVISORY_PREFIXES = [
   '已请求停止当前回合',
@@ -1705,14 +1657,17 @@ export function stripTransientNoticeRows<
       continue;
     }
     const parts = row.parts ?? [];
-    // Rate-limit cards and retry/liveness advisories are live-turn feedback;
-    // they must never survive a cache round-trip. This also cleans legacy
-    // notice/rate_limited parts that were attached to assistant rows.
+    const hasStructuredEvent = parts.some(
+      (part) => part.kind === 'notice' && typeof part.eventId === 'string' && part.eventId.length > 0,
+    );
+    const preserveAuthoritativeNotice =
+      row.role === 'system' && (row.persistent === true || hasStructuredEvent) && row.transient !== true;
     const cleanedParts = parts.filter((part) => {
       if (part.kind === 'rate_limited') return false;
       if (
-        part.kind === 'notice'
-        && (isEphemeralAdvisoryText(part.text ?? '') || isTransientAdvisoryText(part.text ?? ''))
+        !preserveAuthoritativeNotice &&
+        part.kind === 'notice' &&
+        isEphemeralAdvisoryText(part.text ?? '')
       ) {
         return false;
       }
@@ -1726,23 +1681,33 @@ export function stripTransientNoticeRows<
       : ({ ...row, parts: cleanedParts } as T);
     if (nextRow.role !== 'system') {
       // An assistant row that only carried a transient advisory is not an answer.
-      if (cleanedParts.length === 0 && parts.length > 0) continue;
+      if (cleanedParts.length === 0 && parts.length > 0) {
+        changed = true;
+        continue;
+      }
       out.push(nextRow);
       continue;
     }
-    if (cleanedParts.length === 0) continue;
-    if (nextRow.persistent === true) {
+    if (cleanedParts.length === 0) {
+      changed = true;
+      continue;
+    }
+    if (preserveAuthoritativeNotice) {
       out.push(nextRow);
       continue;
     }
-    if (nextRow.transient === true) continue;
-    // Legacy rows had id+seq but no durability marker. A notice-only system
-    // row is an advisory, not a transcript record: drop it. Authoritative
-    // boundaries are reloaded from display.jsonl and carry `persistent`.
+    if (nextRow.transient === true) {
+      changed = true;
+      continue;
+    }
+    // Legacy rows had id+seq but no durability marker (`persistent`) and no v5 `eventId`.
     const onlyTransient = cleanedParts.every(
       (part) => part.kind === 'notice' || part.kind === 'rate_limited',
     );
-    if (onlyTransient) continue;
+    if (onlyTransient) {
+      changed = true;
+      continue;
+    }
     out.push(nextRow);
   }
   return changed ? out : rows;
@@ -1775,12 +1740,42 @@ function withLocalOnlyParts<T extends { id?: string }>(row: T, canvasById: Map<s
   return { ...row, parts: [...diskParts, ...missing] };
 }
 
-/** 本地通知行（命令输出 / 压缩标记）在画布中的插入位置：钉在创建时的锚点之后，绝不越过未落盘的新轮次。 */
-function localNoticeInsertIndex<T extends { id?: string; sourceIndex?: number }>(
+/** 本地通知行（命令输出 / 压缩标记 / 系统事件）在画布中的插入位置：
+ *  优先按 `anchorMessageId` 钉在真实因果锚点之后，绝不越过未落盘的新轮次；
+ *  仅当旧数据缺少锚点时才回退 `seq` 序。 */
+function localNoticeInsertIndex<T extends { id?: string; clientInputId?: string; role?: string; parts?: MsgPart[]; sourceIndex?: number }>(
   rows: T[],
-  notice: { seq?: number },
+  notice: { seq?: number; parts?: MsgPart[] },
   maxIndex: number,
 ): number {
+  const anchorId = notice.parts?.find(
+    (part): part is Extract<MsgPart, { kind: 'notice' }> => part.kind === 'notice',
+  )?.anchorMessageId;
+  if (anchorId) {
+    const anchorIdx = rows.findIndex(
+      (row, index) =>
+        index < maxIndex &&
+        (row.id === anchorId ||
+          row.clientInputId === anchorId ||
+          (row.role === 'assistant' &&
+            (row.parts ?? []).some(
+              (p) => 'id' in p && typeof p.id === 'string' && p.id.startsWith(`${anchorId}:`),
+            ))),
+    );
+    if (anchorIdx >= 0) {
+      let at = anchorIdx + 1;
+      while (
+        at < maxIndex &&
+        rows[at]?.role === 'system' &&
+        (rows[at]?.parts ?? []).some(
+          (p) => p.kind === 'notice' && p.anchorMessageId === anchorId,
+        )
+      ) {
+        at += 1;
+      }
+      return at;
+    }
+  }
   if (typeof notice.seq !== 'number') return maxIndex;
   const next = rows.findIndex(
     (row) => typeof (row as { seq?: number }).seq === 'number'
@@ -2055,9 +2050,13 @@ export function spliceAuthoritativeDiskTail<
 
   for (let i = 0; i < canvas.length; i += 1) {
     const message = canvas[i]!;
-    const anchored = message.role === 'system';
-    if (anchored) {
-      anchoredNotices.push(message);
+    if (message.role === 'system') {
+      // 持久行 = 显式标记，或「带账本 seq 且未标记 transient」的旧版通知；
+      // 瞬时提示是 live-only，合并时丢弃。
+      const row = message as { persistent?: boolean; transient?: boolean; seq?: number };
+      if (row.persistent === true || (row.transient !== true && typeof row.seq === 'number')) {
+        anchoredNotices.push(message);
+      }
       continue;
     }
     // steer 行的绝对下标是 fold 时按当前窗口末尾推算出来的，从来没被磁盘确认过；

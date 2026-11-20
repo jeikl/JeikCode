@@ -26,17 +26,26 @@ done:
 FunctionEnd
 !endif
 
-!macro NSIS_HOOK_PREINSTALL
-  ; Terminate all existing running instances of desktop and daemon before extracting files
+!macro KILL_INSTDIR_CHILDREN
   nsExec::Exec 'taskkill /F /IM "jeikcode-desktop.exe" /T'
-  nsExec::Exec 'taskkill /F /IM "jeikcode.exe" /T'
-  nsExec::Exec 'taskkill /F /IM "jeikcode-daemon.exe" /T'
-  nsExec::Exec 'taskkill /F /IM "cli-bin.exe" /T'
+  ; 仅精确终止从安装目录 $INSTDIR 启动的托管子进程，避免误杀外部终端的 CLI/TUI 会话
+  System::Call 'kernel32::SetEnvironmentVariable(t "JEIK_INSTDIR", t "$INSTDIR")'
+  nsExec::Exec "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $\"$$d = [System.IO.Path]::GetFullPath($$env:JEIK_INSTDIR).TrimEnd([char]92); Get-CimInstance Win32_Process | Where-Object { $$_.Name -in @('jeikcode.exe','jeikcode-daemon.exe','cli-bin.exe') -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$d, [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }$\""
   Sleep 800
+!macroend
 
-  ; Clean up potentially locked old binaries in installation directory
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro KILL_INSTDIR_CHILDREN
+
+  ; 清理安装目录下可能被占用或由热更新残留的二进制及备份文件
   IfFileExists "$INSTDIR\resources\jeikcode.exe" 0 +2
     Delete "$INSTDIR\resources\jeikcode.exe"
+  IfFileExists "$INSTDIR\resources\jeikcode.exe.bak" 0 +2
+    Delete "$INSTDIR\resources\jeikcode.exe.bak"
+  IfFileExists "$INSTDIR\resources\.jeikcode.rolling" 0 +2
+    Delete "$INSTDIR\resources\.jeikcode.rolling"
+  IfFileExists "$INSTDIR\resources\.jeikcode.download" 0 +2
+    Delete "$INSTDIR\resources\.jeikcode.download"
   IfFileExists "$INSTDIR\resources\cli-bin" 0 +2
     Delete "$INSTDIR\resources\cli-bin"
 !macroend
@@ -96,11 +105,8 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  ; Terminate any running instances before uninstalling
-  nsExec::Exec 'taskkill /F /IM "jeikcode-desktop.exe" /T'
-  nsExec::Exec 'taskkill /F /IM "jeikcode.exe" /T'
-  nsExec::Exec 'taskkill /F /IM "jeikcode-daemon.exe" /T'
-  Sleep 800
+  ; 卸载前仅终止安装目录内的托管实例
+  !insertmacro KILL_INSTDIR_CHILDREN
 !macroend
 
 !macro NSIS_HOOK_UNINSTALL

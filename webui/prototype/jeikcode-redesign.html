@@ -1,0 +1,1563 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>JeikCode · WebUI 重构原型</title>
+<style>
+  /* ============================================================
+     JeikCode redesign prototype
+     Style: dark-first technical minimalism / three-pane agent workspace
+     Single file, no external assets.
+     ============================================================ */
+  :root {
+    --bg: #0c0c0d;
+    --panel: #111113;
+    --sidebar: #0f0f11;
+    --card: #17171a;
+    --raised: #1d1d21;
+    --raised-hover: #242429;
+    --hover: rgba(255, 255, 255, 0.055);
+    --active: rgba(255, 255, 255, 0.085);
+    --hairline: rgba(255, 255, 255, 0.075);
+    --hairline-soft: rgba(255, 255, 255, 0.05);
+    --ink: #f0f0f2;
+    --ink-2: #a6a6ad;
+    --ink-3: #6e6e76;
+    --accent: #5b8def;
+    --accent-strong: #3b82f6;
+    --accent-soft: rgba(91, 141, 239, 0.14);
+    --green: #4ade80;
+    --red: #f87171;
+    --amber: #fbbf24;
+    --violet: #8b5cf6;
+    --radius-sm: 6px;
+    --radius: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
+    --font: "Segoe UI Variable Text", "Segoe UI", Inter, -apple-system, BlinkMacSystemFont,
+      "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    --mono: "Cascadia Code", "SF Mono", Consolas, ui-monospace, monospace;
+    --shadow: 0 24px 48px -24px rgba(0, 0, 0, 0.7), 0 2px 8px rgba(0, 0, 0, 0.25);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--ink);
+    font: 13px/1.55 var(--font);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  ::selection { background: rgba(91, 141, 239, 0.35); color: #fff; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  .icon {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* ---------- app frame ---------- */
+  .app { display: grid; grid-template-rows: 38px minmax(0, 1fr); height: 100vh; height: 100dvh; }
+
+  .titlebar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 8px 0 14px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--hairline-soft);
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  .titlebar-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .logo { width: 19px; height: 19px; flex: none; }
+  .brand-name { font-size: 12.5px; font-weight: 600; letter-spacing: 0.1px; }
+  .beta {
+    font-size: 10px;
+    color: var(--ink-3);
+    border: 1px solid var(--hairline);
+    border-radius: 999px;
+    padding: 1px 6px;
+    line-height: 14px;
+  }
+  .titlebar-center {
+    flex: 1;
+    min-width: 0;
+    text-align: center;
+    color: var(--ink-3);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .titlebar-center b { color: var(--ink-2); font-weight: 500; }
+  .titlebar-center .sep { margin: 0 6px; color: #3f3f45; }
+  .win-actions { display: flex; align-items: center; gap: 2px; -webkit-app-region: no-drag; }
+  .win-btn {
+    width: 34px;
+    height: 26px;
+    border-radius: 6px;
+    display: grid;
+    place-items: center;
+    color: var(--ink-2);
+  }
+  .win-btn:hover { background: var(--hover); color: var(--ink); }
+  .win-btn.close:hover { background: #e81123; color: #fff; }
+  .win-btn .icon { width: 13px; height: 13px; }
+
+  .workspace {
+    display: grid;
+    grid-template-columns: 56px 264px minmax(0, 1fr) 320px;
+    min-height: 0;
+  }
+
+  /* ---------- left rail ---------- */
+  .rail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    padding: 9px 0;
+    background: var(--sidebar);
+    border-right: 1px solid var(--hairline-soft);
+    min-height: 0;
+  }
+  .rail-btn {
+    position: relative;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    display: grid;
+    place-items: center;
+    color: var(--ink-3);
+    transition: background 0.12s, color 0.12s;
+  }
+  .rail-btn:hover { background: var(--hover); color: var(--ink-2); }
+  .rail-btn.active { background: var(--accent-soft); color: #9db8ff; }
+  .rail-btn .icon { width: 19px; height: 19px; }
+  .rail-btn .mini-badge {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 0 2px var(--sidebar);
+  }
+  .rail-spacer { flex: 1; }
+  .rail-sep { width: 24px; height: 1px; background: var(--hairline); margin: 4px 0; }
+  .avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+  }
+  [data-tip] { position: relative; }
+  [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    left: calc(100% + 10px);
+    top: 50%;
+    transform: translateY(-50%) scale(0.97);
+    transform-origin: left center;
+    background: #202024;
+    border: 1px solid var(--hairline);
+    color: var(--ink);
+    font-size: 11px;
+    line-height: 1;
+    padding: 6px 8px;
+    border-radius: 6px;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s, transform 0.12s;
+    z-index: 60;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  }
+  [data-tip]:hover::after { opacity: 1; transform: translateY(-50%) scale(1); }
+
+  /* ---------- sidebar ---------- */
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--sidebar);
+    border-right: 1px solid var(--hairline-soft);
+  }
+  .sidebar-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 13px 12px 8px 14px;
+  }
+  .sidebar-title { font-size: 14.5px; font-weight: 600; letter-spacing: 0.2px; }
+  .sidebar-actions { display: flex; align-items: center; gap: 1px; }
+  .icon-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    color: var(--ink-3);
+  }
+  .icon-btn:hover { background: var(--hover); color: var(--ink); }
+  .icon-btn .icon { width: 16px; height: 16px; }
+
+  .new-chat {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 12px 10px;
+    padding: 8px 10px;
+    border-radius: 9px;
+    border: 1px solid var(--hairline);
+    background: var(--raised);
+    color: var(--ink);
+    font-size: 12.5px;
+    font-weight: 500;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .new-chat:hover { background: #232328; border-color: rgba(255, 255, 255, 0.12); }
+  .new-chat .icon { width: 15px; height: 15px; color: var(--ink-2); }
+  .new-chat .kbd {
+    margin-left: auto;
+    color: var(--ink-3);
+    font: 10.5px var(--mono);
+    border: 1px solid var(--hairline);
+    border-radius: 5px;
+    padding: 1px 5px;
+    line-height: 15px;
+  }
+
+  .sidebar-search {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0 12px 8px;
+    padding: 6px 9px;
+    border-radius: 8px;
+    background: var(--card);
+    border: 1px solid var(--hairline-soft);
+    color: var(--ink-3);
+    font-size: 12px;
+    cursor: text;
+  }
+  .sidebar-search:focus-within { border-color: rgba(91, 141, 239, 0.4); }
+  .sidebar-search .icon { width: 14px; height: 14px; }
+  .sidebar-search input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+  }
+  .sidebar-search input::placeholder { color: var(--ink-3); }
+
+  .sidebar-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 0 8px 12px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  }
+  .section-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 11px 8px 5px;
+    color: var(--ink-3);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.45px;
+    text-transform: uppercase;
+  }
+  .section-label .count { margin-left: auto; font-weight: 500; letter-spacing: 0; text-transform: none; }
+  .project-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 7px;
+    color: var(--ink-2);
+    font-size: 12.5px;
+  }
+  .project-row:hover { background: var(--hover); }
+  .project-row .icon { width: 14px; height: 14px; color: var(--ink-3); }
+  .project-row .chev { margin-left: auto; width: 12px; height: 12px; color: var(--ink-3); }
+  .session-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px 6px 9px;
+    border-radius: 7px;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    cursor: pointer;
+    position: relative;
+    transition: background 0.1s, color 0.1s;
+  }
+  .session-row:hover { background: var(--hover); color: var(--ink); }
+  .session-row.active {
+    background: var(--raised);
+    color: var(--ink);
+    box-shadow: inset 0 0 0 1px var(--hairline-soft);
+  }
+  .session-row .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex: none;
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .session-row .dot.idle { background: var(--ink-3); box-shadow: none; }
+  .session-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .session-row .time { font-size: 10.5px; color: var(--ink-3); flex: none; }
+  .session-row .badge {
+    font-size: 9.5px;
+    color: #9db8ff;
+    background: var(--accent-soft);
+    border-radius: 4px;
+    padding: 0 4px;
+    line-height: 15px;
+    flex: none;
+  }
+  .sidebar-foot { border-top: 1px solid var(--hairline-soft); padding: 7px 8px; }
+  .user-card {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .user-card:hover { background: var(--hover); }
+  .user-card .avatar { width: 24px; height: 24px; font-size: 10px; }
+  .user-card .name { font-size: 12px; font-weight: 500; line-height: 1.3; }
+  .user-card .plan { font-size: 10.5px; color: var(--ink-3); }
+  .user-card .icon { margin-left: auto; width: 14px; height: 14px; color: var(--ink-3); }
+
+  /* ---------- main column ---------- */
+  .main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg);
+    position: relative;
+  }
+  .main-header {
+    height: 52px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 18px;
+    border-bottom: 1px solid var(--hairline-soft);
+    background: rgba(12, 12, 13, 0.72);
+    backdrop-filter: blur(12px);
+  }
+  .main-title { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .main-title .t {
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .main-title .s {
+    font-size: 11px;
+    color: var(--ink-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .header-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--hairline);
+    color: var(--ink-2);
+    font-size: 11px;
+    background: var(--panel);
+    white-space: nowrap;
+  }
+  .header-pill .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+  .header-actions { margin-left: auto; display: flex; align-items: center; gap: 1px; }
+
+  .conversation {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+    scroll-behavior: smooth;
+    /* Soften the last visible row where the transcript meets the composer. */
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+  }
+  .conversation-inner {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 26px 32px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+
+  .msg { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+  .msg.user { align-items: flex-end; }
+  .user-bubble {
+    max-width: 78%;
+    background: var(--raised);
+    border: 1px solid var(--hairline-soft);
+    border-radius: 16px 16px 4px 16px;
+    padding: 10px 14px;
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: var(--ink);
+    overflow-wrap: anywhere;
+  }
+  .msg-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10.5px;
+    color: var(--ink-3);
+  }
+  .assistant-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); }
+  .assistant-avatar {
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    display: grid;
+    place-items: center;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  }
+  .assistant-name { font-weight: 600; color: var(--ink); }
+  .run-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    color: var(--ink-3);
+    border: 1px solid var(--hairline);
+    border-radius: 999px;
+    padding: 1px 7px;
+  }
+  .run-badge .status-dot { width: 5px; height: 5px; }
+  .prose { font-size: 13.5px; line-height: 1.72; color: #d7d7db; overflow-wrap: anywhere; }
+  .prose p { margin: 0 0 10px; }
+  .prose p:last-child { margin-bottom: 0; }
+  .prose strong { color: var(--ink); font-weight: 600; }
+  .prose code {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--card);
+    border: 1px solid var(--hairline-soft);
+    border-radius: 5px;
+    padding: 1px 5px;
+    color: #c9d1ff;
+    white-space: nowrap;
+  }
+  .prose ul { margin: 0 0 10px; padding-left: 18px; }
+  .prose li { margin: 3px 0; }
+  .prose li::marker { color: var(--ink-3); }
+  .prose .accent { color: #9db8ff; }
+
+  /* ---------- tool cards ---------- */
+  .card {
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    background: var(--card);
+    overflow: hidden;
+  }
+  .card + .card { margin-top: 8px; }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--hairline-soft);
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+  .card-head .icon { width: 14px; height: 14px; color: var(--ink-3); }
+  .card-head .title { font-weight: 500; color: var(--ink); }
+  .card-head .status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--green);
+    white-space: nowrap;
+  }
+  .card-head .status .icon { width: 12px; height: 12px; color: var(--green); }
+  .card-body { padding: 8px 12px 10px; }
+  .file-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font: 11.5px/1.5 var(--mono);
+    color: var(--ink-2);
+    min-width: 0;
+  }
+  .file-row .icon { width: 13px; height: 13px; color: var(--ink-3); }
+  .file-row .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-row .stat { margin-left: auto; font-size: 11px; flex: none; }
+  .file-row .add { color: var(--green); }
+  .file-row .del { color: var(--red); }
+  .file-row .new { color: #9db8ff; }
+
+  .diff { font: 11.5px/1.7 var(--mono); padding: 4px 0; overflow: auto; }
+  .diff .line { display: flex; gap: 10px; padding: 0 12px; white-space: pre; min-width: max-content; }
+  .diff .ln { width: 28px; text-align: right; color: var(--ink-3); flex: none; user-select: none; }
+  .diff .add { background: rgba(74, 222, 128, 0.07); color: #a7f3c4; }
+  .diff .del { background: rgba(248, 113, 113, 0.07); color: #fca5a5; }
+  .diff .ctx { color: var(--ink-2); }
+
+  .cmd {
+    font: 12px/1.75 var(--mono);
+    color: #cfd6e6;
+    background: #0a0a0b;
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 4px 12px 10px;
+    border: 1px solid var(--hairline-soft);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .cmd .prompt { color: var(--green); }
+  .cmd .ok { color: var(--green); }
+  .cmd .out { color: var(--ink-3); font-size: 11.5px; }
+
+  .todo { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; font-size: 12.5px; color: var(--ink-2); }
+  .check {
+    width: 15px;
+    height: 15px;
+    border-radius: 4px;
+    border: 1px solid var(--hairline);
+    display: grid;
+    place-items: center;
+    flex: none;
+    margin-top: 1px;
+    color: transparent;
+  }
+  .check.done { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .check.done .icon { width: 10px; height: 10px; stroke-width: 2.4; }
+  .check.running { border-color: var(--accent); }
+  .check.running::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    background: var(--accent);
+    animation: pulse 1.4s infinite;
+  }
+  .todo.done { color: var(--ink-3); text-decoration: line-through; text-decoration-color: rgba(255, 255, 255, 0.2); }
+
+  /* ---------- composer ---------- */
+  .composer-wrap {
+    flex: none;
+    position: relative;
+    padding: 8px 32px 16px;
+    background: linear-gradient(to bottom, rgba(12, 12, 13, 0) 0, var(--bg) 18px);
+  }
+  .composer-inner { max-width: 860px; margin: 0 auto; }
+  .approval {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-bottom: 8px;
+    padding: 8px 12px;
+    border: 1px solid rgba(251, 191, 36, 0.22);
+    background: rgba(251, 191, 36, 0.06);
+    border-radius: 10px;
+    font-size: 12px;
+    color: #e8d6a8;
+    animation: rise 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .approval .icon { width: 14px; height: 14px; color: var(--amber); flex: none; }
+  .approval .text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .approval .text code {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: rgba(251, 191, 36, 0.1);
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
+  .approval button {
+    font-size: 11.5px;
+    padding: 4px 9px;
+    border-radius: 6px;
+    border: 1px solid rgba(251, 191, 36, 0.25);
+    color: #f3e2b4;
+    background: rgba(251, 191, 36, 0.08);
+    white-space: nowrap;
+  }
+  .approval button:hover { background: rgba(251, 191, 36, 0.15); }
+  .approval .dismiss { border-color: transparent; background: transparent; color: var(--ink-3); padding: 4px 6px; }
+  .approval .dismiss:hover { color: var(--ink); background: var(--hover); }
+
+  .composer {
+    border: 1px solid var(--hairline);
+    background: var(--card);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow);
+    padding: 10px 10px 8px 14px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .composer:focus-within {
+    border-color: rgba(91, 141, 239, 0.45);
+    box-shadow: 0 0 0 3px rgba(91, 141, 239, 0.1), var(--shadow);
+  }
+  .composer textarea {
+    display: block;
+    width: 100%;
+    min-height: 44px;
+    max-height: 160px;
+    resize: none;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--ink);
+    font: 13.5px/1.6 var(--font);
+    padding: 2px 0 6px;
+  }
+  .composer textarea::placeholder { color: var(--ink-3); }
+  .composer-foot { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 26px;
+    padding: 0 8px;
+    border-radius: 7px;
+    color: var(--ink-2);
+    font-size: 11.5px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .chip:hover { background: var(--hover); color: var(--ink); }
+  .chip .icon { width: 13px; height: 13px; color: var(--ink-3); }
+  .chip.warn { color: #e8c37a; }
+  .chip.warn .icon { color: var(--amber); }
+  .chip.model { color: var(--ink-2); }
+  .chip.model .icon { width: 12px; height: 12px; }
+  .send {
+    margin-left: auto;
+    width: 30px;
+    height: 30px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    display: grid;
+    place-items: center;
+    transition: background 0.15s, transform 0.15s;
+  }
+  .send:hover { background: #6f9bf5; transform: translateY(-1px); }
+  .send:disabled { background: var(--raised); color: var(--ink-3); cursor: default; transform: none; }
+  .send .icon { width: 15px; height: 15px; stroke-width: 2; }
+  .composer-hint {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 5px;
+    color: var(--ink-3);
+    font-size: 10.5px;
+    padding-top: 7px;
+  }
+  .composer-hint kbd {
+    font: 10px var(--mono);
+    border: 1px solid var(--hairline);
+    border-radius: 4px;
+    padding: 0 4px;
+    color: var(--ink-2);
+    line-height: 15px;
+  }
+
+  /* ---------- right dock ---------- */
+  .dock {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--panel);
+    border-left: 1px solid var(--hairline-soft);
+  }
+  .dock-header {
+    height: 46px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px 0 10px;
+    border-bottom: 1px solid var(--hairline-soft);
+  }
+  .dock-tabs { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; }
+  .dock-tab {
+    height: 28px;
+    padding: 0 8px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    color: var(--ink-3);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+  .dock-tab:hover { color: var(--ink-2); background: var(--hover); }
+  .dock-tab.active { color: var(--ink); background: var(--raised); }
+  .dock-tab .icon { width: 13px; height: 13px; }
+  .dock-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  }
+  .dock-section { padding: 12px 10px; }
+  .dock-title {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.45px;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 2px 4px 8px;
+  }
+  .activity-row {
+    display: flex;
+    gap: 9px;
+    padding: 8px;
+    border-radius: 8px;
+    position: relative;
+  }
+  .activity-row:hover { background: var(--hover); }
+  .activity-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    background: var(--card);
+    border: 1px solid var(--hairline-soft);
+    display: grid;
+    place-items: center;
+    flex: none;
+    color: var(--ink-2);
+  }
+  .activity-icon .icon { width: 13px; height: 13px; }
+  .activity-main { min-width: 0; flex: 1; }
+  .activity-main .a-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--ink);
+    min-width: 0;
+  }
+  .activity-main .a-title span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .activity-main .a-sub {
+    font-size: 11px;
+    color: var(--ink-3);
+    margin-top: 1px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .activity-main .a-time { font-size: 10px; color: var(--ink-3); margin-top: 2px; }
+  .status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex: none; }
+  .status-dot.run { background: var(--accent); animation: pulse 1.4s infinite; }
+  .status-dot.warn { background: var(--amber); }
+  .status-dot.idle { background: var(--ink-3); }
+  .change-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font: 11.5px/1.5 var(--mono);
+    color: var(--ink-2);
+    min-width: 0;
+  }
+  .change-row:hover { background: var(--hover); }
+  .change-row .icon { width: 13px; height: 13px; color: var(--ink-3); }
+  .change-row .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .change-row .plus { color: var(--green); margin-left: auto; flex: none; }
+  .change-row .minus { color: var(--red); flex: none; }
+  .terminal {
+    font: 11.5px/1.8 var(--mono);
+    color: #c9d1d9;
+    padding: 10px 12px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .terminal .p { color: var(--green); }
+  .terminal .dim { color: var(--ink-3); }
+  .terminal .ok { color: var(--green); }
+  .dock-foot {
+    flex: none;
+    border-top: 1px solid var(--hairline-soft);
+    padding: 8px;
+    display: flex;
+    gap: 6px;
+  }
+  .dock-foot button {
+    flex: 1;
+    height: 28px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    color: var(--ink-2);
+    background: var(--card);
+    border: 1px solid var(--hairline-soft);
+  }
+  .dock-foot button:hover { background: var(--raised); color: var(--ink); }
+
+  .hidden { display: none !important; }
+
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ---------- responsive ---------- */
+  @media (max-width: 1320px) {
+    .workspace { grid-template-columns: 56px 250px minmax(0, 1fr); }
+    .dock { display: none; }
+    .dock.open {
+      display: flex;
+      position: fixed;
+      top: 38px;
+      right: 0;
+      bottom: 0;
+      width: 320px;
+      z-index: 45;
+      box-shadow: -24px 0 48px rgba(0, 0, 0, 0.45);
+    }
+  }
+  @media (max-width: 920px) {
+    .workspace { grid-template-columns: 56px minmax(0, 1fr); }
+    .sidebar {
+      display: none;
+      position: fixed;
+      top: 38px;
+      bottom: 0;
+      left: 56px;
+      width: 264px;
+      z-index: 46;
+      box-shadow: 24px 0 48px rgba(0, 0, 0, 0.5);
+      border-right: 1px solid var(--hairline);
+    }
+    .sidebar.open { display: flex; }
+    body:has(.sidebar.open)::before {
+      content: "";
+      position: fixed;
+      inset: 38px 0 0;
+      z-index: 45;
+      background: rgba(0, 0, 0, 0.32);
+      backdrop-filter: blur(1px);
+    }
+  }
+  @media (max-width: 640px) {
+    .workspace { grid-template-columns: minmax(0, 1fr); }
+    .rail { display: none; }
+    .sidebar { left: 0; width: min(320px, 86vw); }
+    .titlebar-center { display: none; }
+    .main-header { padding: 0 12px; gap: 8px; }
+    .main-title .s { display: none; }
+    .header-pill { display: none; }
+    .header-actions > .icon-btn:nth-child(3),
+    .header-actions > .icon-btn:nth-child(4) { display: none; }
+    .conversation-inner { padding: 20px 16px 32px; }
+    .composer-wrap { padding: 0 14px 12px; }
+    .user-bubble { max-width: 88%; }
+    .dock.open { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  }
+</style>
+</head>
+<body>
+
+<!-- icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></symbol>
+    <symbol id="i-git" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="7" r="4"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-square" viewBox="0 0 24 24"><rect width="14" height="14" x="5" y="5" rx="2"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="m12 3-1.9 5.7a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+    <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+    <symbol id="i-command" viewBox="0 0 24 24"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 0 0 3-3Z"/></symbol>
+    <symbol id="i-diff" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></symbol>
+  </defs>
+</svg>
+
+<div class="app">
+  <!-- ================= titlebar ================= -->
+  <header class="titlebar">
+    <div class="titlebar-left">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+        <defs>
+          <linearGradient id="logoGradient" x1="0" y1="0" x2="1" y2="1">
+            <stop stop-color="#5b8def"/><stop offset="1" stop-color="#8b5cf6"/>
+          </linearGradient>
+        </defs>
+        <path d="M12 2 22 12 12 22 2 12Z" fill="url(#logoGradient)"/>
+      </svg>
+      <span class="brand-name">JeikCode</span>
+      <span class="beta">beta</span>
+    </div>
+    <div class="titlebar-center">
+      <b>jeikcode</b><span class="sep">·</span>根仓库<span class="sep">·</span>main
+    </div>
+    <div class="win-actions">
+      <button class="win-btn" aria-label="最小化"><svg class="icon"><use href="#i-minus"/></svg></button>
+      <button class="win-btn" aria-label="最大化"><svg class="icon"><use href="#i-square"/></svg></button>
+      <button class="win-btn close" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
+    </div>
+  </header>
+
+  <!-- ================= workspace ================= -->
+  <div class="workspace">
+    <!-- left rail -->
+    <nav class="rail" aria-label="主导航">
+      <button class="rail-btn active" data-tip="主页" id="rail-home"><svg class="icon"><use href="#i-home"/></svg></button>
+      <button class="rail-btn" data-tip="新对话" id="rail-new"><svg class="icon"><use href="#i-plus"/></svg></button>
+      <button class="rail-btn" data-tip="搜索" id="rail-search"><svg class="icon"><use href="#i-search"/></svg></button>
+      <button class="rail-btn" data-tip="文件" data-dock="files"><svg class="icon"><use href="#i-folder"/></svg></button>
+      <button class="rail-btn" data-tip="Git" data-dock="files"><svg class="icon"><use href="#i-git"/></svg></button>
+      <button class="rail-btn" data-tip="终端" data-dock="terminal"><svg class="icon"><use href="#i-terminal"/></svg></button>
+      <div class="rail-spacer"></div>
+      <button class="rail-btn" data-tip="活动" data-dock="activity" id="rail-activity">
+        <svg class="icon"><use href="#i-activity"/></svg><span class="mini-badge"></span>
+      </button>
+      <div class="rail-sep"></div>
+      <button class="rail-btn" data-tip="设置" id="rail-settings"><svg class="icon"><use href="#i-settings"/></svg></button>
+      <button class="rail-btn" data-tip="jeik"><span class="avatar">J</span></button>
+    </nav>
+
+    <!-- sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <span class="sidebar-title">会话</span>
+        <div class="sidebar-actions">
+          <button class="icon-btn" aria-label="搜索" id="sidebar-search-btn"><svg class="icon"><use href="#i-search"/></svg></button>
+          <button class="icon-btn" aria-label="新对话" id="sidebar-new-btn"><svg class="icon"><use href="#i-plus"/></svg></button>
+        </div>
+      </div>
+
+      <button class="new-chat" id="new-chat-btn">
+        <svg class="icon"><use href="#i-plus"/></svg>
+        新对话
+        <span class="kbd">Ctrl N</span>
+      </button>
+
+      <label class="sidebar-search">
+        <svg class="icon"><use href="#i-search"/></svg>
+        <input id="session-search" type="text" placeholder="搜索会话、项目、文件" />
+      </label>
+
+      <div class="sidebar-scroll">
+        <div class="section-label">项目 <span class="count">1</span></div>
+        <div class="project-row">
+          <svg class="icon"><use href="#i-folder"/></svg>
+          jeikcode
+          <svg class="icon chev"><use href="#i-chevron"/></svg>
+        </div>
+
+        <div class="session-row active" data-session>
+          <span class="dot"></span>
+          <span class="name">重构 WebUI：Codex 风格三栏布局</span>
+          <span class="time">刚刚</span>
+        </div>
+        <div class="session-row" data-session>
+          <span class="dot idle"></span>
+          <span class="name">修复 Session 切换与提问面板</span>
+          <span class="time">12 分</span>
+        </div>
+        <div class="session-row" data-session>
+          <span class="dot idle"></span>
+          <span class="name">GitHub Actions 流水线构建结果</span>
+          <span class="time">昨天</span>
+        </div>
+        <div class="session-row" data-session>
+          <span class="dot idle"></span>
+          <span class="name">Antigravity v4.8.8 发布检查</span>
+          <span class="time">昨天</span>
+        </div>
+
+        <div class="section-label">最近 <span class="count">8</span></div>
+        <div class="session-row" data-session>
+          <span class="dot idle"></span>
+          <span class="name">你好</span>
+          <span class="time">3 天</span>
+        </div>
+        <div class="session-row" data-session>
+          <span class="dot idle"></span>
+          <span class="name">你好啊</span>
+          <span class="time">4 天</span>
+        </div>
+        <div class="session-row" data-session>
+          <span class="dot idle"></span>
+          <span class="name">检查 Codex 风格 UI 的可行性</span>
+          <span class="time">5 天</span>
+        </div>
+        <div class="session-row" data-session>
+          <span class="dot idle"></span>
+          <span class="name">整理 OpenMausBot 的设计系统</span>
+          <span class="time">6 天</span>
+        </div>
+        <div class="session-row" data-session>
+          <span class="dot idle"></span>
+          <span class="name">工具调用卡片重构讨论</span>
+          <span class="time">1 周</span>
+        </div>
+      </div>
+
+      <div class="sidebar-foot">
+        <div class="user-card">
+          <span class="avatar">J</span>
+          <div>
+            <div class="name">jeik</div>
+            <div class="plan">本地工作区 · beta</div>
+          </div>
+          <svg class="icon"><use href="#i-chevron"/></svg>
+        </div>
+      </div>
+    </aside>
+
+    <!-- main column -->
+    <main class="main">
+      <header class="main-header">
+        <div class="main-title">
+          <span class="t">重构 WebUI：Codex 风格三栏布局</span>
+          <span class="s">jeikcode · beta · 主分支</span>
+        </div>
+        <span class="header-pill"><span class="dot"></span>运行中</span>
+        <div class="header-actions">
+          <button class="icon-btn" id="header-sidebar" aria-label="切换会话栏" data-tip="会话栏">
+            <svg class="icon"><use href="#i-message"/></svg>
+          </button>
+          <button class="icon-btn" id="header-dock" aria-label="切换活动面板" data-tip="活动面板">
+            <svg class="icon"><use href="#i-panel"/></svg>
+          </button>
+          <button class="icon-btn" id="header-diff" aria-label="Diff" data-tip="Diff">
+            <svg class="icon"><use href="#i-diff"/></svg>
+          </button>
+          <button class="icon-btn" aria-label="更多"><svg class="icon"><use href="#i-more"/></svg></button>
+        </div>
+      </header>
+
+      <div class="conversation" id="conversation">
+        <div class="conversation-inner" id="conversation-inner">
+          <!-- user -->
+          <div class="msg user">
+            <div class="user-bubble">
+              我想把 jeikcode 的 WebUI 重构成 Codex 那种风格：左侧图标栏 + 会话列表 + 中间对话 + 右侧活动面板。先看一下我们现在的布局和样式基础，给我一个改造方案。
+            </div>
+            <div class="msg-meta"><span>jeik</span><span>·</span><span>今天 21:36</span></div>
+          </div>
+
+          <!-- assistant intro -->
+          <div class="msg">
+            <div class="assistant-head">
+              <span class="assistant-avatar">J</span>
+              <span class="assistant-name">JeikCode</span>
+              <span class="run-badge"><span class="status-dot idle"></span>已完成 2.4s</span>
+            </div>
+            <div class="prose">
+              <p>我扫了一遍 <code>webui/</code>，现状是 <strong>Preact + 18k 行全局 CSS + 14k 行的 <code>Chat.tsx</code> 单体</strong>，但三栏骨架已经存在：<code>Sidebar</code>、<code>main-column</code>、<code>RightInspectorPanel</code>。所以不需要推倒重来，建议分三层迁移：</p>
+              <ul>
+                <li><strong>视觉层</strong>：先把 <code>theme.css</code> 的调色板升级为语义 token（surface / ink / accent / radius / motion）。</li>
+                <li><strong>布局层</strong>：新建 <code>AppFrame</code>，把 Sidebar 变成可折叠的会话栏，右侧 Inspector 改成 Dock。</li>
+                <li><strong>组件层</strong>：拆 <code>Chat.tsx</code>，把消息、工具卡、Composer 各自独立。</li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- tool card: read files -->
+          <div class="card">
+            <div class="card-head">
+              <svg class="icon"><use href="#i-folder"/></svg>
+              <span class="title">读取文件</span>
+              <span class="status"><svg class="icon"><use href="#i-check"/></svg>已完成</span>
+            </div>
+            <div class="card-body">
+              <div class="file-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/styles/theme.css</span><span class="stat add">+153</span></div>
+              <div class="file-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/styles/app.css</span><span class="stat add">+18,269</span></div>
+              <div class="file-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/components/Chat.tsx</span><span class="stat add">+14,242</span></div>
+              <div class="file-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/app.tsx</span><span class="stat add">+1,940</span></div>
+            </div>
+          </div>
+
+          <div class="msg">
+            <div class="prose">
+              <p>关键发现：<code>app.css</code> 里有 <strong>298 个分段</strong>和大量硬编码颜色，<code>Chat.tsx</code> 目前是 <strong>14,242 行</strong>。建议先加 token 层和 <code>ui/</code> primitives，再逐面迁移，避免一次性重写。下面是我建议的第一版视觉稿：</p>
+            </div>
+          </div>
+
+          <!-- diff card -->
+          <div class="card">
+            <div class="card-head">
+              <svg class="icon"><use href="#i-diff"/></svg>
+              <span class="title">编辑 webui/src/styles/theme.css</span>
+              <span class="status"><svg class="icon"><use href="#i-check"/></svg>已应用</span>
+            </div>
+            <div class="diff">
+              <div class="line del"><span class="ln">12</span><span>- --app-primary-background: #1b1c1e;</span></div>
+              <div class="line add"><span class="ln">12</span><span>+ --surface-app: #0c0c0d;</span></div>
+              <div class="line add"><span class="ln">13</span><span>+ --surface-panel: #111113;</span></div>
+              <div class="line add"><span class="ln">14</span><span>+ --surface-card: #17171a;</span></div>
+              <div class="line add"><span class="ln">15</span><span>+ --ink-primary: #f0f0f2;</span></div>
+              <div class="line add"><span class="ln">16</span><span>+ --ink-secondary: #a6a6ad;</span></div>
+              <div class="line add"><span class="ln">17</span><span>+ --accent: #5b8def;</span></div>
+              <div class="line add"><span class="ln">18</span><span>+ --radius-card: 10px;</span></div>
+              <div class="line add"><span class="ln">19</span><span>+ --motion-fast: 160ms cubic-bezier(.22, 1, .36, 1);</span></div>
+              <div class="line ctx"><span class="ln">20</span><span>  --app-sans-font-family: ...</span></div>
+            </div>
+          </div>
+
+          <!-- command card -->
+          <div class="card">
+            <div class="card-head">
+              <svg class="icon"><use href="#i-terminal"/></svg>
+              <span class="title">运行命令</span>
+              <span class="status"><svg class="icon"><use href="#i-check"/></svg>通过</span>
+            </div>
+            <div class="cmd"><span class="prompt">$</span> npm run typecheck
+<span class="ok">✓</span> tsc --noEmit 通过
+<span class="prompt">$</span> npm run build
+<span class="ok">✓</span> vite build 完成 · 3.21s
+<span class="out">dist/ 已更新 · 0 errors · 0 warnings</span></div>
+          </div>
+
+          <!-- todo card -->
+          <div class="card">
+            <div class="card-head">
+              <svg class="icon"><use href="#i-check"/></svg>
+              <span class="title">重构清单</span>
+              <span class="status" style="color: var(--ink-3)">2 / 5</span>
+            </div>
+            <div class="card-body">
+              <div class="todo done"><span class="check done"><svg class="icon"><use href="#i-check"/></svg></span>盘点现有布局与样式</div>
+              <div class="todo done"><span class="check done"><svg class="icon"><use href="#i-check"/></svg></span>定义语义 token</div>
+              <div class="todo"><span class="check running"></span>新建 AppFrame 三栏壳</div>
+              <div class="todo"><span class="check"></span>拆分 Chat.tsx</div>
+              <div class="todo"><span class="check"></span>迁移工具卡 / Composer</div>
+            </div>
+          </div>
+
+          <div class="msg">
+            <div class="assistant-head">
+              <span class="assistant-avatar">J</span>
+              <span class="assistant-name">JeikCode</span>
+              <span class="run-badge"><span class="status-dot run"></span>运行中</span>
+            </div>
+            <div class="prose">
+              <p>下一步我会先生成 <code>AppFrame.tsx</code> 和 token 覆盖层，然后把 Composer 与消息列接到新壳上。你可以在右侧「活动」里查看每个工具调用。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- composer -->
+      <div class="composer-wrap">
+        <div class="composer-inner">
+          <div class="approval" id="approval">
+            <svg class="icon"><use href="#i-shield"/></svg>
+            <span class="text">JeikCode 请求运行 <code>npm run build</code>（可能写入 dist/）</span>
+            <button id="approve-once">允许一次</button>
+            <button id="approve-always">始终允许</button>
+            <button class="dismiss" id="approve-deny" aria-label="拒绝"><svg class="icon"><use href="#i-x"/></svg></button>
+          </div>
+
+          <div class="composer">
+            <textarea id="composer-input" rows="1" placeholder="给 JeikCode 发送消息…"></textarea>
+            <div class="composer-foot">
+              <button class="chip" id="attach-btn" aria-label="添加附件"><svg class="icon"><use href="#i-plus"/></svg></button>
+              <button class="chip warn" id="access-chip"><svg class="icon"><use href="#i-shield"/></svg>完全访问</button>
+              <button class="chip model" id="model-chip">gemini-3.8-flash-high<svg class="icon"><use href="#i-chevron"/></svg></button>
+              <button class="send" id="send" aria-label="发送" disabled><svg class="icon"><use href="#i-arrow-up"/></svg></button>
+            </div>
+          </div>
+          <div class="composer-hint">
+            <span><kbd>Enter</kbd> 发送</span>
+            <span>·</span>
+            <span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span>
+            <span>·</span>
+            <span><kbd>Ctrl</kbd> + <kbd>K</kbd> 命令面板</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- right dock -->
+    <aside class="dock" id="dock">
+      <div class="dock-header">
+        <div class="dock-tabs" role="tablist">
+          <button class="dock-tab active" data-tab="activity" role="tab"><svg class="icon"><use href="#i-activity"/></svg>活动</button>
+          <button class="dock-tab" data-tab="files" role="tab"><svg class="icon"><use href="#i-file"/></svg>文件</button>
+          <button class="dock-tab" data-tab="terminal" role="tab"><svg class="icon"><use href="#i-terminal"/></svg>终端</button>
+        </div>
+        <button class="icon-btn" id="dock-close" aria-label="关闭活动面板"><svg class="icon"><use href="#i-x"/></svg></button>
+      </div>
+
+      <div class="dock-body">
+        <!-- activity -->
+        <section data-panel="activity">
+          <div class="dock-section">
+            <div class="dock-title">等待你处理</div>
+            <div class="activity-row">
+              <div class="activity-icon" style="color: var(--amber)"><svg class="icon"><use href="#i-shield"/></svg></div>
+              <div class="activity-main">
+                <div class="a-title"><span>运行命令</span><span class="status-dot warn"></span></div>
+                <div class="a-sub">npm run build · 等待批准</div>
+                <div class="a-time">刚刚</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dock-section">
+            <div class="dock-title">今天</div>
+            <div class="activity-row">
+              <div class="activity-icon" style="color: var(--green)"><svg class="icon"><use href="#i-check"/></svg></div>
+              <div class="activity-main">
+                <div class="a-title"><span>运行 npm run typecheck</span></div>
+                <div class="a-sub">tsc --noEmit · 0 errors</div>
+                <div class="a-time">21:42</div>
+              </div>
+            </div>
+            <div class="activity-row">
+              <div class="activity-icon"><svg class="icon"><use href="#i-diff"/></svg></div>
+              <div class="activity-main">
+                <div class="a-title"><span>编辑 theme.css</span><span style="color: var(--green); font-size: 10.5px">+12</span><span style="color: var(--red); font-size: 10.5px">-3</span></div>
+                <div class="a-sub">webui/src/styles/theme.css</div>
+                <div class="a-time">21:41</div>
+              </div>
+            </div>
+            <div class="activity-row">
+              <div class="activity-icon"><svg class="icon"><use href="#i-folder"/></svg></div>
+              <div class="activity-main">
+                <div class="a-title"><span>读取 4 个文件</span></div>
+                <div class="a-sub">theme.css · app.css · Chat.tsx · app.tsx</div>
+                <div class="a-time">21:40</div>
+              </div>
+            </div>
+            <div class="activity-row">
+              <div class="activity-icon" style="color: var(--ink-3)"><svg class="icon"><use href="#i-clock"/></svg></div>
+              <div class="activity-main">
+                <div class="a-title"><span>思考 2.4s</span></div>
+                <div class="a-sub">分析改造范围与迁移顺序</div>
+                <div class="a-time">21:40</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- files -->
+        <section data-panel="files" class="hidden">
+          <div class="dock-section">
+            <div class="dock-title">工作区变更</div>
+            <div class="change-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/styles/theme.css</span><span class="plus">+12</span><span class="minus">-3</span></div>
+            <div class="change-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/app.tsx</span><span class="plus">+8</span><span class="minus">-2</span></div>
+            <div class="change-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/components/AppFrame.tsx</span><span class="plus">+64</span><span class="minus">new</span></div>
+            <div class="change-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/components/Composer.tsx</span><span class="plus">+41</span><span class="minus">new</span></div>
+          </div>
+          <div class="dock-section">
+            <div class="dock-title">最近文件</div>
+            <div class="change-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/styles/app.css</span></div>
+            <div class="change-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/components/Chat.tsx</span></div>
+            <div class="change-row"><svg class="icon"><use href="#i-file"/></svg><span class="path">webui/src/components/Sidebar.tsx</span></div>
+          </div>
+        </section>
+
+        <!-- terminal -->
+        <section data-panel="terminal" class="hidden">
+          <div class="terminal"><span class="p">$</span> npm run typecheck
+<span class="dim">&gt; jeikcode-webui@7.5.1-beta.1 typecheck</span>
+<span class="dim">&gt; tsc --noEmit</span>
+<span class="ok">✓</span> 0 errors
+
+<span class="p">$</span> npm run build
+<span class="dim">&gt; vite v8.3.5 building for production...</span>
+<span class="dim">✓ 1482 modules transformed.</span>
+<span class="dim">dist/assets/index-8f3a2c.js   412.18 kB │ gzip: 128.44 kB</span>
+<span class="ok">✓ built in 3.21s</span>
+
+<span class="p">$</span> <span class="dim">_</span></div>
+        </section>
+      </div>
+
+      <div class="dock-foot">
+        <button id="dock-all">查看全部活动</button>
+        <button id="dock-clear">清空</button>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+
+  /* ---------- dock tabs ---------- */
+  function selectTab(tab) {
+    $$('.dock-tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
+    $$('.dock-body [data-panel]').forEach((p) => {
+      p.classList.toggle('hidden', p.dataset.panel !== tab);
+    });
+  }
+
+  function openDock(tab) {
+    const dock = $('#dock');
+    dock.classList.remove('hidden');
+    dock.classList.add('open');
+    selectTab(tab || 'activity');
+  }
+
+  function closeDock() {
+    const dock = $('#dock');
+    dock.classList.add('hidden');
+    dock.classList.remove('open');
+  }
+
+  $$('.dock-tab').forEach((tab) => {
+    tab.addEventListener('click', () => selectTab(tab.dataset.tab));
+  });
+
+  $$('.rail-btn[data-dock]').forEach((btn) => {
+    btn.addEventListener('click', () => openDock(btn.dataset.dock));
+  });
+
+  $('#header-dock').addEventListener('click', () => {
+    const dock = $('#dock');
+    const display = getComputedStyle(dock).display;
+    if (dock.classList.contains('hidden') || display === 'none') openDock('activity');
+    else closeDock();
+  });
+
+  $('#dock-close').addEventListener('click', closeDock);
+
+  /* ---------- sidebar toggle ---------- */
+  $('#header-sidebar').addEventListener('click', () => {
+    $('#sidebar').classList.toggle('open');
+  });
+
+  /* ---------- session selection ---------- */
+  $$('[data-session]').forEach((row) => {
+    row.addEventListener('click', () => {
+      $$('[data-session]').forEach((r) => r.classList.remove('active'));
+      row.classList.add('active');
+      const name = row.querySelector('.name')?.textContent?.trim();
+      if (name) {
+        const title = $('.main-title .t');
+        if (title) title.textContent = name;
+      }
+      $('#sidebar').classList.remove('open');
+    });
+  });
+
+  /* ---------- search focus ---------- */
+  function focusSearch() {
+    const input = $('#session-search');
+    input.focus();
+    input.select();
+  }
+  $('#rail-search').addEventListener('click', focusSearch);
+  $('#sidebar-search-btn').addEventListener('click', focusSearch);
+
+  /* ---------- new chat ---------- */
+  function newChat() {
+    const name = '新对话 ' + new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    const row = document.createElement('div');
+    row.className = 'session-row active';
+    row.dataset.session = '';
+    row.innerHTML = '<span class="dot"></span><span class="name"></span><span class="time">刚刚</span>';
+    row.querySelector('.name').textContent = name;
+    row.addEventListener('click', () => {
+      $$('[data-session]').forEach((r) => r.classList.remove('active'));
+      row.classList.add('active');
+    });
+    const list = $('.sidebar-scroll');
+    list.insertBefore(row, list.querySelector('.section-label + .project-row')?.nextSibling || null);
+    $$('[data-session]').forEach((r) => r.classList.remove('active'));
+    row.classList.add('active');
+    $('.main-title .t').textContent = name;
+    $('#sidebar').classList.remove('open');
+  }
+  $('#new-chat-btn').addEventListener('click', newChat);
+  $('#sidebar-new-btn').addEventListener('click', newChat);
+  $('#rail-new').addEventListener('click', newChat);
+
+  /* ---------- approval bar ---------- */
+  function dismissApproval() {
+    const bar = $('#approval');
+    if (!bar) return;
+    bar.style.opacity = '0';
+    bar.style.transform = 'translateY(4px)';
+    bar.style.transition = 'opacity .18s, transform .18s';
+    setTimeout(() => bar.remove(), 180);
+    $$('.activity-row').forEach((row) => {
+      if (row.textContent.includes('等待批准')) row.remove();
+    });
+  }
+  ['#approve-once', '#approve-always', '#approve-deny'].forEach((selector) => {
+    const button = $(selector);
+    if (button) button.addEventListener('click', dismissApproval);
+  });
+
+  /* ---------- composer ---------- */
+  const textarea = $('#composer-input');
+  const send = $('#send');
+  const conversation = $('#conversation');
+  const inner = $('#conversation-inner');
+
+  function refreshSend() {
+    send.disabled = !textarea.value.trim();
+  }
+  function autoGrow() {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 160) + 'px';
+  }
+  textarea.addEventListener('input', () => { refreshSend(); autoGrow(); });
+  textarea.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      if (!send.disabled) send.click();
+    }
+  });
+
+  send.addEventListener('click', () => {
+    const text = textarea.value.trim();
+    if (!text) return;
+
+    const userMsg = document.createElement('div');
+    userMsg.className = 'msg user';
+    const bubble = document.createElement('div');
+    bubble.className = 'user-bubble';
+    bubble.textContent = text;
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.textContent = 'jeik · 刚刚';
+    userMsg.append(bubble, meta);
+    inner.appendChild(userMsg);
+
+    textarea.value = '';
+    autoGrow();
+    refreshSend();
+    conversation.scrollTop = conversation.scrollHeight;
+
+    const reply = document.createElement('div');
+    reply.className = 'msg';
+    reply.innerHTML = '<div class="assistant-head"><span class="assistant-avatar">J</span><span class="assistant-name">JeikCode</span><span class="run-badge"><span class="status-dot run"></span>运行中</span></div><div class="prose"><p>收到。我先读取相关文件，然后给你具体改动。</p></div>';
+    setTimeout(() => {
+      inner.appendChild(reply);
+      conversation.scrollTop = conversation.scrollHeight;
+    }, 550);
+  });
+
+  refreshSend();
+  autoGrow();
+
+  /* ---------- demo buttons ---------- */
+  $('#attach-btn').addEventListener('click', () => textarea.focus());
+  $('#access-chip').addEventListener('click', () => {
+    const chip = $('#access-chip');
+    chip.classList.toggle('warn');
+    chip.innerHTML = chip.classList.contains('warn')
+      ? '<svg class="icon"><use href="#i-shield"/></svg>完全访问'
+      : '<svg class="icon"><use href="#i-shield"/></svg>只读';
+  });
+  $('#model-chip').addEventListener('click', () => {
+    const chip = $('#model-chip');
+    const models = ['gemini-3.8-flash-high', 'claude-opus-5.5', 'gpt-5.5-codex', 'deepseek-v4-pro'];
+    const current = chip.textContent.trim().split('\n')[0];
+    const next = models[(models.indexOf(current) + 1) % models.length] || models[0];
+    chip.innerHTML = next + '<svg class="icon"><use href="#i-chevron"/></svg>';
+  });
+  $('#header-diff').addEventListener('click', () => openDock('files'));
+  $('#dock-all').addEventListener('click', () => openDock('activity'));
+  $('#dock-clear').addEventListener('click', () => {
+    $$('.activity-row').forEach((row) => row.remove());
+    const empty = document.createElement('div');
+    empty.className = 'dock-section';
+    empty.innerHTML = '<div class="dock-title">活动</div><div style="color: var(--ink-3); font-size: 12px; padding: 8px;">暂无内容。等 JeikCode 使用了工具或请求批准后，就会显示在这里。</div>';
+    $('.dock-body [data-panel="activity"]').appendChild(empty);
+  });
+
+  /* keep tooltip from clipping outside the rail on the right edge */
+  $$('.rail-btn').forEach((button) => {
+    button.addEventListener('click', () => {
+      $$('.rail-btn').forEach((b) => b.classList.remove('active'));
+      button.classList.add('active');
+    });
+  });
+</script>
+</body>
+</html>

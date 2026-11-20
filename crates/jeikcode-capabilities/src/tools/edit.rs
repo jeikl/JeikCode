@@ -3005,7 +3005,7 @@ static EDIT_LOCKS: LazyLock<StdMutex<HashMap<String, Weak<tokio::sync::Mutex<()>
 
 /// Holds BOTH the in-process per-path mutex and the cross-process sidecar lock.
 /// Dropping it releases the OS lock first, then the in-process guard.
-struct EditLockGuard {
+pub(crate) struct EditLockGuard {
     _os: EditOsLock,
     _in_process: OwnedMutexGuard<()>,
 }
@@ -3020,7 +3020,37 @@ impl Drop for EditOsLock {
     }
 }
 
-async fn acquire_edit_lock(
+/// Canonicalize a target write path (even before the file exists, via its deepest
+/// existing ancestor) off the async worker and return its shared lock key.
+pub(crate) async fn lock_key_for_write_path(path: PathBuf) -> String {
+    tokio::task::spawn_blocking(move || {
+        let normalized = crate::pathnorm::lexical_normalize(&path);
+        if let Ok(canonical) = std::fs::canonicalize(&normalized) {
+            return crate::pathnorm::path_case_key(&canonical);
+        }
+        let mut cursor = normalized.as_path();
+        let mut suffix_parts = Vec::new();
+        while !cursor.exists() {
+            let Some(name) = cursor.file_name() else {
+                break;
+            };
+            suffix_parts.push(name.to_os_string());
+            let Some(parent) = cursor.parent() else {
+                break;
+            };
+            cursor = parent;
+        }
+        let mut resolved = std::fs::canonicalize(cursor).unwrap_or_else(|_| cursor.to_path_buf());
+        for part in suffix_parts.into_iter().rev() {
+            resolved.push(part);
+        }
+        crate::pathnorm::path_case_key(&resolved)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+pub(crate) async fn acquire_edit_lock(
     key: &str,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<EditLockGuard, String> {
@@ -3064,22 +3094,39 @@ async fn acquire_os_lock(
     key: &str,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<EditOsLock, String> {
-    let path = edit_lock_path(key)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|e| {
-            format!(
-                "edit: cannot open the file lock {}: {e}. The file was NOT modified.",
-                path.display()
-            )
-        })?;
+    let key_owned = key.to_string();
+    let (path, file) = tokio::task::spawn_blocking(move || {
+        let path = edit_lock_path(&key_owned)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| {
+                format!(
+                    "edit: cannot open the file lock {}: {e}. The file was NOT modified.",
+                    path.display()
+                )
+            })?;
+        Ok::<_, String>((path, file))
+    })
+    .await
+    .map_err(|e| format!("edit: lock init task failed: {e}"))??;
+    let file = Arc::new(file);
     let deadline = std::time::Instant::now() + EDIT_LOCK_TIMEOUT;
     loop {
-        match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => return Ok(EditOsLock { file }),
+        let try_file = Arc::clone(&file);
+        let try_res =
+            tokio::task::spawn_blocking(move || fs2::FileExt::try_lock_exclusive(&*try_file))
+                .await
+                .map_err(|e| format!("edit: lock task failed: {e}"))?;
+        match try_res {
+            Ok(()) => {
+                let raw_file = Arc::try_unwrap(file)
+                    .or_else(|shared| shared.try_clone())
+                    .map_err(|e| format!("edit: lock handle duplicate failed: {e}"))?;
+                return Ok(EditOsLock { file: raw_file });
+            }
             Err(e) if is_lock_contended(&e) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(

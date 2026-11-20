@@ -127,6 +127,109 @@ pub(super) fn ru(msg: Msg<'_>) -> Cow<'static, str> {
             format!("Сжато · {} сообщ. суммировано · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("Вывод инструментов свёрнут · сэкономлено ~{} tok", saved).into(),
+        Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
+            format!("Модель вернула пустой ответ, повтор через {wait}с ({attempt}/{max})…")
+        } else {
+            format!("Модель вернула пустой ответ, повторная попытка ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryThinking { attempt, max, wait } => if wait > 0 {
+            format!("Модель вернула только размышления, повтор через {wait}с ({attempt}/{max})…")
+        } else {
+            format!("Модель вернула только размышления, повторная попытка ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryMalformed { attempt, max, wait } => if wait > 0 {
+            format!("Некорректный формат ответа, повтор через {wait}с ({attempt}/{max})…")
+        } else {
+            format!("Некорректный формат ответа, повторная попытка ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryFirstToken { secs, attempt, max } =>
+            format!("Высокая задержка модели: нет ответа в течение {secs}с, повтор ({attempt}/{max})…").into(),
+        Msg::AgentRetryApi { reason, wait, attempt, max } =>
+            format!("Ошибка API {reason}, повтор через {wait}с ({attempt}/{max})…").into(),
+        Msg::AgentOverWindow { estimate_k, window_k, buffer_k } =>
+            format!(
+                "Запрос ~{estimate_k}K tokens достиг порога контекста (окно ~{window_k}K − запас {buffer_k}K): сократите ввод или выберите модель с большим окном."
+            ).into(),
+        Msg::AgentContextOverflow { round, attempt } =>
+            format!("Переполнение контекста на раунде {round} (попытка {attempt}); выполняется сжатие и повтор").into(),
+        Msg::AgentStreamReconnecting { attempt, max } =>
+            format!("Тайм-аут простоя потока — переподключение ({attempt}/{max})").into(),
+        Msg::AgentResponseTruncated => "Ответ обрезан по лимиту длины: finish_reason=length".into(),
+        Msg::AgentUnsupportedSnapshot { version, supported } =>
+            format!("Неподдерживаемая версия снимка {version} (поддерживается {supported}); запуск с пустой сессией").into(),
+        Msg::AgentModelHighLatencyTerminal { retries, secs } =>
+            format!("Слишком высокая задержка модели, попробуйте позже ({retries} попыток подряд без первого токена за {secs}с)").into(),
+        Msg::AgentExhaustedMalformed { max } =>
+            format!("Модель {max} раз подряд вернула нечитаемый ответ (временный сбой сервера). Можно повторить сразу или позже.").into(),
+        Msg::AgentExhaustedThinkingOverWindowIntro { max } =>
+            format!("Модель {max} раз подряд вернула только размышления без текста и вызовов инструментов. Запрос превышает контекстное окно — сократите ввод или выполните /compact.").into(),
+        Msg::AgentExhaustedThinkingOverWindowSize { max, prompt_k, window_k } =>
+            format!("Модель {max} раз подряд вернула только размышления без текста и вызовов инструментов. Текущий запрос ~{prompt_k}K tokens близок к лимиту окна (~{window_k}K); выполните /compact или сократите ввод.").into(),
+        Msg::AgentExhaustedThinkingGeneric { max } =>
+            format!("Модель {max} раз подряд вернула только размышления без текста и вызовов инструментов. Можно повторить сразу или позже.").into(),
+        Msg::AgentExhaustedEmptyOverWindowIntro { max } =>
+            format!("Модель {max} раз подряд вернула пустой ответ. Запрос превышает контекстное окно — сократите ввод или выполните /compact.").into(),
+        Msg::AgentExhaustedEmptyOverWindowSize { max, prompt_k, window_k } =>
+            format!("Модель {max} раз подряд вернула пустой ответ. Текущий запрос ~{prompt_k}K tokens близок к лимиту окна (~{window_k}K); выполните /compact или сократите ввод.").into(),
+        Msg::AgentExhaustedEmptyGeneric { max } =>
+            format!("Модель {max} раз подряд вернула пустой ответ (временный сбой сервера, не связанный с длиной контекста). Можно повторить сразу или позже.").into(),
+        Msg::AgentStatusRateLimited => "Превышен лимит частоты запросов или исчерпана квота".into(),
+        Msg::AgentStatusUpstreamUnavailable => "Вышестоящий сервис временно недоступен".into(),
+        Msg::AgentStatusResponseTimeout => "Время ожидания ответа модели истекло".into(),
+        Msg::AgentStatusConnectionFailed => "Сбой сетевого подключения".into(),
+        Msg::AgentStatusInsufficientBalance => "Недостаточно средств на счёте".into(),
+        Msg::AgentStatusUnauthorized => "Ключ API не авторизован или истёк".into(),
+        Msg::StreamReadRetryExhausted { attempts } =>
+            format!("Сетевое соединение прервано: удалённый узел закрыл или сбросил соединение, не удалось переподключиться за {attempts} попыток. Можно повторить.").into(),
+        Msg::StreamReadPartialResponse =>
+            "Ответ прерван: безопасная часть ответа сохранена, можно продолжить.".into(),
+        Msg::StreamReadInterrupted =>
+            "Сетевое соединение прервано: удалённый узел закрыл или сбросил соединение. Можно повторить.".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("Соединение прервано, выполняется автоматическое переподключение (до {max} попыток), текущий вывод сохранён…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("Соединение прервано, текущий вывод сохранён, повтор {attempt}/{max}").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("Поток завис по тайм-ауту, текущий вывод сохранён, повтор {attempt}/{max}")
+        } else {
+            format!("Поток завис по тайм-ауту, повтор {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("Сетевое соединение прервано, текущий вывод сохранён, повтор {attempt}/{max}")
+        } else {
+            format!("Сетевое соединение прервано, повтор {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("Соединение восстановлено после {attempts} повторов, продолжаем").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "Ответ потока по-прежнему превышает тайм-аут после автоматических переподключений; ход завершён".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("Сработало ограничение частоты, автоповтор через {secs}с…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "Достигнут лимит запросов, выполнение приостановлено; дождитесь сброса или переключите модель".into()
+        } else {
+            format!("Приостановлено из-за лимита запросов: {detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "Тайм-аут потока после частичного ответа; полученная часть сохранена, можно продолжить.".into(),
+        Msg::StreamReadResetHint =>
+            "Эта ошибка часто возникает в корпоративных сетях или при использовании прокси; проверьте настройки прокси, VPN и брандмауэра.".into(),
+        Msg::StreamReadDetailsPrefix => "Подробности: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "Возможный цикл повторов: обнаружен повторяющийся шаблон вывода и вызовов инструментов; модели предложено сменить курс перед остановкой хода.".into()
+        } else {
+            "Возможный цикл повторов: обнаружен повторяющийся шаблон вывода и вызовов инструментов; модели предложено сменить курс.".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("остановлено: модель воспроизводила один и тот же шаблон рассуждений, текста и вызовов инструментов {rounds} раундов подряд").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("возможен цикл инструментов: один и тот же вызов или пакет только для чтения вернул одинаковый результат {threshold} раз(а); модели предложено сменить курс").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("обнаружен цикл инструментов: один и тот же вызов или пакет только для чтения вернул одинаковый результат {threshold} раз(а); остановка до следующего запроса").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("остановлено: модель повторяла один и тот же шаблон вызовов инструментов {rounds} раундов подряд").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Достигнут лимит раундов ({cap}); вызовы инструментов остановлены для подведения итогов и следующих шагов.").into(),
         _ => super::en::en(msg),
     }
 }

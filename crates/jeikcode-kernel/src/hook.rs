@@ -294,6 +294,37 @@ pub trait LifecycleHooks: Send + Sync {
     /// hammering disk. PURE OBSERVATION.
     async fn on_turn_progress(&self, _convo: &Conversation) {}
 
+    /// 回合内持久切片检查点（携带 TurnCtx），用于在轮次或工具批 settled 时
+    /// 增量刷盘，避免长时间不写盘导致上下文压缩或崩溃丢失锚点与通知。
+    async fn on_turn_checkpoint(&self, _convo: &Conversation, _ctx: &TurnCtx) {}
+
+    /// 回合内发出结构化系统通知时触发，让 DisplayHook 成为唯一的显示账本写入入口。
+    async fn on_system_notice(
+        &self,
+        _notice: &crate::event::SystemNotice,
+        _convo: &Conversation,
+        _ctx: &TurnCtx,
+    ) {
+    }
+
+    /// 压缩提交并裁减会话消息之前触发，先把本轮前置消息与缓冲通知落盘。
+    async fn pre_compaction(
+        &self,
+        _convo: &Conversation,
+        _trigger: &crate::message::CompactTrigger,
+        _ctx: Option<&TurnCtx>,
+    ) {
+    }
+
+    /// 压缩提交完成后触发，供 DisplayHook 写入唯一权威的压缩边界标记。
+    async fn post_compaction(
+        &self,
+        _report: &crate::message::CompactReport,
+        _notice: &crate::event::SystemNotice,
+        _ctx: Option<&TurnCtx>,
+    ) {
+    }
+
     /// A turn has TERMINATED — fired EXACTLY ONCE per turn on EVERY terminal path
     /// (normal stop, `max_rounds` / `max_continuations` fuse, provider
     /// error, stream timeout, cancel), AFTER any `offer_continuation` continuations are
@@ -477,6 +508,45 @@ impl LifecycleHooks for HookChain {
     async fn on_turn_progress(&self, convo: &Conversation) {
         for h in &self.hooks {
             h.on_turn_progress(convo).await;
+        }
+    }
+
+    async fn on_turn_checkpoint(&self, convo: &Conversation, ctx: &TurnCtx) {
+        for h in &self.hooks {
+            h.on_turn_checkpoint(convo, ctx).await;
+        }
+    }
+
+    async fn on_system_notice(
+        &self,
+        notice: &crate::event::SystemNotice,
+        convo: &Conversation,
+        ctx: &TurnCtx,
+    ) {
+        for h in &self.hooks {
+            h.on_system_notice(notice, convo, ctx).await;
+        }
+    }
+
+    async fn pre_compaction(
+        &self,
+        convo: &Conversation,
+        trigger: &crate::message::CompactTrigger,
+        ctx: Option<&TurnCtx>,
+    ) {
+        for h in &self.hooks {
+            h.pre_compaction(convo, trigger, ctx).await;
+        }
+    }
+
+    async fn post_compaction(
+        &self,
+        report: &crate::message::CompactReport,
+        notice: &crate::event::SystemNotice,
+        ctx: Option<&TurnCtx>,
+    ) {
+        for h in &self.hooks {
+            h.post_compaction(report, notice, ctx).await;
         }
     }
 

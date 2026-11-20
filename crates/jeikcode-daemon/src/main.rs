@@ -160,6 +160,7 @@ async fn main() {
             AttachConsole(ATTACH_PARENT_PROCESS);
         }
     }
+    jeikcode_daemon::logging::init_process_file_logging("jeikcode-daemon.log", "jeikcode-daemon");
 
     // Used by IDE packaging to reject a daemon compiled after the private
     // signer overlay was removed. Keep this check side-effect free.

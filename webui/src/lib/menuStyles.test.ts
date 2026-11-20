@@ -37,3 +37,22 @@ test('approval modes use canonical order and label bypass wire mode as Auto', ()
   assert.match(messages, /'mode\.auto':\s*'Auto'/);
   assert.doesNotMatch(messages, /'mode\.bypass':/);
 });
+
+test('ModeSelector places settings gear before global switch and SystemSettingsDialog exposes Agent Mode options', () => {
+  const selector = readFileSync(join(root, 'src/components/ModeSelector.tsx'), 'utf8');
+  const dialog = readFileSync(join(root, 'src/components/SystemSettingsDialog.tsx'), 'utf8');
+
+  const controlsIdx = selector.indexOf('mode-global-controls');
+  const settingsBtnIdx = selector.indexOf('mode-settings-btn');
+  const switchIdx = selector.indexOf('mode-global-switch');
+  assert.ok(controlsIdx >= 0 && settingsBtnIdx > controlsIdx && switchIdx > settingsBtnIdx);
+  assert.match(selector, /onOpenModeSettings/);
+
+  assert.match(dialog, /name="agent_mode_policy"/);
+  assert.match(dialog, /value="memory"/);
+  assert.match(dialog, /value="global"/);
+  assert.match(dialog, /value="build"/);
+  assert.match(dialog, /value="plan"/);
+  assert.match(dialog, /value="accept_edits"/);
+  assert.match(dialog, /value="bypass"/);
+});

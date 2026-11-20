@@ -75,14 +75,14 @@ impl LifecycleHooks for RoundBudgetHook {
             return;
         }
         let round = ctx.round;
-        // `pre_request` only runs for round in 1..=max (the fuse returns before it at
-        // round > max), so `round >= max` uniquely identifies the last executing round.
-        // A one-line stderr trace (same channel as the CLI's `[rules]`/`[scope]` lines)
-        // makes the pressure observable — you can see exactly when landing was forced.
-        if round >= max {
+        // `pre_request` only runs for round in 1..=max during active work (`round == max`
+        // is the last executing round); when `round > max` the kernel may enter a
+        // tool-disabled soft-landing summary round, so `round_budget` must NOT inject
+        // a contradictory `report_finding` instruction then.
+        if round == max {
             eprintln!("[budget] round {round}/{max}: injected FINAL landing reminder");
             messages.push(Message::synthetic_user(final_reminder(round, max)));
-        } else if round as f32 >= max as f32 * self.threshold {
+        } else if round < max && round as f32 >= max as f32 * self.threshold {
             eprintln!("[budget] round {round}/{max}: injected soft landing reminder");
             messages.push(Message::synthetic_user(soft_reminder(round, max)));
         }
@@ -163,6 +163,16 @@ mod tests {
         // No round fuse → no budget to pressure against, even at a huge round.
         let msgs = run(9999, None).await;
         assert_eq!(msgs.len(), 2, "unbounded run gets no reminder");
+    }
+
+    #[tokio::test]
+    async fn no_op_past_max_soft_landing_round() {
+        let msgs = run(41, Some(40)).await;
+        assert_eq!(
+            msgs.len(),
+            2,
+            "round > max belongs to tool-disabled soft landing and must not inject report_finding"
+        );
     }
 
     #[tokio::test]

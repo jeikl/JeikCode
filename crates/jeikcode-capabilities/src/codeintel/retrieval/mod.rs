@@ -5,11 +5,13 @@
 //! query time only reads the statistics and scores the symbol corpus.
 
 pub mod bm25;
+pub mod candidates;
 pub mod concepts;
 pub mod dirindex;
 pub mod stats;
 
-pub use bm25::{bm25_search, Bm25Hit};
+pub use bm25::{bm25_search, bm25_search_with_candidates, Bm25Hit};
+pub use candidates::CandidateIndex;
 pub use concepts::{concept_cosine, concept_projection, contains_cjk, CONCEPT_DIM};
 pub use dirindex::DirIndex;
 pub use stats::{symbol_ascii_terms, symbol_cjk_phrases, IdfStats};

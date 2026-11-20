@@ -5,7 +5,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
-import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getConfig, getDesktopSettings, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getBootstrap, invalidateBootstrapCache, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, listSchedules, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
 import { mergeSessionRow, onGlobalEvent, removeSessionRows } from '../lib/globalEvents';
 import { deleteSessionCache } from '../lib/sessionCache';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
@@ -14,6 +14,7 @@ import { MsgKey, Lang, languageOptions } from '../i18n';
 import { RenameDialog, DeleteDialog } from './SessionDialogs';
 import { ConfirmDialog } from './ConfirmDialog';
 import { GitWebhookDialog } from './GitWebhookDialog';
+import { ScheduleDialog } from './ScheduleDialog';
 import { showToast } from './Toast';
 import { CwdPicker } from './CwdPicker';
 import { foldProjectSessions, mergeOptimisticSession, mergeOptimisticSessions, mergeProjectSessions, sessionIdRange, uniqueSessionsById } from '../lib/sessionList';
@@ -165,12 +166,14 @@ function FolderRailIcon() {
   );
 }
 
-/** Sparkles glyph for the Skills action. */
-function SparklesIcon() {
+/** Stacked blocks glyph for the Skills action (no sparkle). */
+function SkillIcon() {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-      <path d="M8 1.3l1.15 3.1a2 2 0 0 0 1.2 1.2L13.4 6.8l-3.05 1.15a2 2 0 0 0-1.2 1.2L8 12.2 6.85 9.15a2 2 0 0 0-1.2-1.2L2.6 6.8l3.05-1.2a2 2 0 0 0 1.2-1.2z" />
-      <path d="M12.7 10.4l.5 1.35.5-1.35 1.35-.5-1.35-.5-.5-1.35-.5 1.35-1.35.5z" />
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="2" y="2" width="5" height="5" rx="1" />
+      <rect x="9" y="2" width="5" height="5" rx="1" />
+      <rect x="2" y="9" width="5" height="5" rx="1" />
+      <rect x="9" y="9" width="5" height="5" rx="1" />
     </svg>
   );
 }
@@ -435,6 +438,16 @@ function SettingsGlyph() {
   );
 }
 
+/** Clock glyph for Scheduled Tasks menu entry and project sub-group. */
+function ClockIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <polyline points="12 7 12 12 15.5 14" />
+    </svg>
+  );
+}
+
 /** Git 自动同步 glyph（分支 + 汇合弧线）。 */
 function GitSyncGlyph() {
   return (
@@ -577,6 +590,9 @@ export function Sidebar({
   // 旧实现把它当作跨刷新记忆，导致用户点过一次后每次打开都是全量列表、
   // 而「收起」入口被顶到长列表底部，看起来就像折叠功能消失了。
   const [showAllProjects, setShowAllProjects] = useState<Set<string>>(() => new Set());
+  // 展开长项目列表时分批渐进渲染（每档 +60 条），避免数百会话一次性阻塞主线程
+  const SIDEBAR_EXPAND_STEP = 60;
+  const [expandedRenderCap, setExpandedRenderCap] = useState<Record<string, number>>({});
   const [hiddenProjectHashes, setHiddenProjectHashes] = useState<Set<string>>(
     () => new Set(initialSidebarSnapshot?.hidden ?? []),
   );
@@ -585,6 +601,9 @@ export function Sidebar({
   );
   const [removeProjectTarget, setRemoveProjectTarget] = useState<ProjectInfo | null>(null);
   const [gitWebhookProject, setGitWebhookProject] = useState<ProjectInfo | null>(null);
+  const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
+  const [activeScheduleCount, setActiveScheduleCount] = useState(0);
+  const [collapsedScheduleGroups, setCollapsedScheduleGroups] = useState<Set<string>>(() => new Set());
   const [webPickerOpen, setWebPickerOpen] = useState(false);
   const pendingHideRef = useRef<Set<string>>(new Set());
   const pendingRevealRef = useRef<Set<string>>(new Set());
@@ -739,27 +758,13 @@ export function Sidebar({
       });
   }
 
-  useEffect(() => {
-    let cancelled = false;
-    getHealth()
-      .then((info) => {
-        if (cancelled) return;
-        const running = normalizeAppVersion(info.version);
-        if (running) setAppVersion(running);
-      })
-      .catch(() => {
-        /* keep the Vite-baked fallback */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const coldBootAppliedRef = useRef(false);
 
-  // 刷新指定项目或所有展开项目的会话列表缓存
+  // 刷新指定项目或所有展开项目的会话列表缓存（读取 ref，不再因折叠展开改动回调身份导致 4 连全刷）
   const refreshProjectSessions = useCallback((targetHashes?: string[]) => {
     const hashes = new Set<string>(targetHashes ?? []);
     if (projectHash) hashes.add(projectHash);
-    expandedProjects.forEach((h) => hashes.add(h));
+    expandedProjectsRef.current.forEach((h) => hashes.add(h));
 
     hashes.forEach((hash) => {
       listProjectSessions(hash)
@@ -768,7 +773,7 @@ export function Sidebar({
         })
         .catch(() => {});
     });
-  }, [projectHash, expandedProjects]);
+  }, [projectHash]);
 
   const applySidebarView = useCallback((view: SidebarProjects) => {
     const hidden = new Set(view.hidden);
@@ -788,12 +793,49 @@ export function Sidebar({
     getSidebarProjects().then(applySidebarView).catch(() => {});
   }, [applySidebarView]);
 
-  // ── 纯事件驱动侧栏刷新机制（彻底拔除 5s 无脑定时轮询，释放 CPU 与网络 IO）──
-  // 冷启动单次拉取项目与折叠状态；之后仅在 reloadKey 变更（新建/删除/回合完成/切目录）
-  // 或切回前台时按需触发单次对齐，零定时器空转！
+  // ── 纯事件驱动侧栏刷新机制 ──
+  // 首次冷启动通过 `/api/bootstrap` 一次性喂入 health/projects/sessions/sidebar/active_chat_ids，
+  // 后续 reloadKey 变更或切回前台再按需单独校验。
   useEffect(() => {
     const refresh = () => {
       if (document.hidden) return;
+      if (!coldBootAppliedRef.current) {
+        coldBootAppliedRef.current = true;
+        getBootstrap()
+          .then((boot) => {
+            if (Array.isArray(boot.sessions)) {
+              setSessions(boot.sessions);
+              if (activeSessionId) {
+                const found = boot.sessions.find((s) => s.id === activeSessionId);
+                if (found) onActiveSessionMeta?.(found);
+              }
+              setLoading(false);
+            }
+            if (Array.isArray(boot.projects)) setProjects(boot.projects);
+            if (boot.sidebar) applySidebarView(boot.sidebar);
+            if (Array.isArray(boot.active_chat_ids)) setActiveIds(boot.active_chat_ids);
+            if (boot.health?.version) {
+              const running = normalizeAppVersion(boot.health.version);
+              if (running) setAppVersion(running);
+            }
+            refreshProjectSessions();
+          })
+          .catch(() => {
+            loadSessions(true);
+            refreshProjectSessions();
+            loadSidebar();
+            getActiveChatSessions().then(setActiveIds).catch(() => {});
+            getProjects().then(setProjects).catch(() => setProjects([]));
+            getHealth()
+              .then((info) => {
+                const running = normalizeAppVersion(info.version);
+                if (running) setAppVersion(running);
+              })
+              .catch(() => {});
+          });
+        return;
+      }
+      invalidateBootstrapCache();
       loadSessions(true);
       refreshProjectSessions();
       loadSidebar();
@@ -807,20 +849,26 @@ export function Sidebar({
     };
     document.addEventListener('visibilitychange', onVisibility);
 
-    // 当 reloadKey 变更时（例如回合结束 onTurnDone、删除会话、新建会话触发）即时核验一次
     refresh();
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey, refreshProjectSessions, loadSidebar]);
+  }, [reloadKey, refreshProjectSessions, loadSidebar, applySidebarView]);
 
   // ── 跨实例增量订阅（无轮询、无整表重拉）──
   // 服务端只推“变了什么”（带 payload），这里按 id 就地 upsert/删行并同步失效缓存；
   // 刷新后仍以同一份本地缓存恢复，与后端保持最终一致。
+  const refreshCapabilitiesRef = useRef<() => void>(() => {});
   useEffect(() => {
     return onGlobalEvent((event) => {
+      if (event.type === 'capabilities_changed') {
+        // MCP / 技能开关是持久化系统设置：远端实例改动后立即重拉面板，
+        // 而不是等用户手动展开或整页刷新才看到新状态。
+        refreshCapabilitiesRef.current();
+        return;
+      }
       if (event.type === 'session_upsert') {
         const row = event.session;
         setSessions((cur) => mergeSessionRow(cur, row));
@@ -829,6 +877,15 @@ export function Sidebar({
           if (!list) return prev; // 未展开/未加载的项目不凭空造列表
           return { ...prev, [row.project_hash]: mergeSessionRow(list, row) };
         });
+        // 若新会话激活了一个尚不在侧栏项目列表里的工作区，增量拉取一次项目列表使其即时归档展示
+        if (row.project_hash) {
+          setProjects((prev) => {
+            if (!prev.some((p) => p.hash === row.project_hash)) {
+              getProjects().then(setProjects).catch(() => {});
+            }
+            return prev;
+          });
+        }
         return;
       }
       if (event.type === 'session_mode') {
@@ -1002,6 +1059,7 @@ export function Sidebar({
   }, [activeSessionId, activeProjectHash, collapsed, loading, sessions, projectSessionsMap, expandedProjects, projectHash]);
 
   useEffect(() => {
+    if (reloadKey === 0) return;
     getProjects()
       .then(setProjects)
       .catch(() => setProjects([]));
@@ -1118,8 +1176,15 @@ export function Sidebar({
       const next = new Set(prev);
       if (next.has(hash)) {
         next.delete(hash);
+        setExpandedRenderCap((caps) => {
+          if (!(hash in caps)) return caps;
+          const copy = { ...caps };
+          delete copy[hash];
+          return copy;
+        });
       } else {
         next.add(hash);
+        setExpandedRenderCap((caps) => ({ ...caps, [hash]: SIDEBAR_EXPAND_STEP }));
         if (!projectSessionsMap[hash]) {
           listProjectSessions(hash)
             .then((list) => {
@@ -1130,6 +1195,13 @@ export function Sidebar({
       }
       return next;
     });
+  }
+
+  function showMoreWindow(hash: string) {
+    setExpandedRenderCap((caps) => ({
+      ...caps,
+      [hash]: (caps[hash] ?? SIDEBAR_EXPAND_STEP) + SIDEBAR_EXPAND_STEP,
+    }));
   }
 
   function openProjectInSidebar(hash: string) {
@@ -1662,6 +1734,17 @@ export function Sidebar({
     onOpenSettings(section);
   }
 
+  useEffect(() => {
+    const syncScheduleCount = () => {
+      listSchedules()
+        .then((list) => setActiveScheduleCount(list.filter((item) => item.enabled).length))
+        .catch(() => {});
+    };
+    syncScheduleCount();
+    window.addEventListener('jeikcode:schedules_updated', syncScheduleCount);
+    return () => window.removeEventListener('jeikcode:schedules_updated', syncScheduleCount);
+  }, []);
+
   // Fetch the unified capability list (MCP + skills) once; both menus reuse it.
   // The `/mcp/status` ride-along only feeds the silent project-trust auto-confirm.
   // The project identity of THIS fetch is recorded so a later project switch (or the
@@ -1680,6 +1763,7 @@ export function Sidebar({
       .then(maybeAutoTrustProjectMcp)
       .catch(() => {});
   }
+  refreshCapabilitiesRef.current = refreshCapabilities;
 
   // 用户偏好：项目级 MCP 的信任不做任何提示，检测到未信任就直接确认。
   // 判定规则见 `lib/mcpTrust`（只有 daemon 明确上报「未信任」且确实存在被拦截的项目级
@@ -2508,6 +2592,10 @@ export function Sidebar({
           )}
           <button
             class="sidebar-rail-btn"
+            onMouseEnter={() => {
+              void getConfig().catch(() => {});
+              void getDesktopSettings().catch(() => {});
+            }}
             onClick={() => {
               onCloseDrawer?.();
               onOpenSettings('system');
@@ -2573,7 +2661,7 @@ export function Sidebar({
             }
           }}
         >
-          <span>💬</span>
+          <ChatBubbleIcon />
           <span>{t('sidebar.chats') || '对话'}</span>
         </button>
         <button
@@ -2581,7 +2669,7 @@ export function Sidebar({
           class={'sidebar-segment-btn' + (sidebarTab === 'files' ? ' active' : '')}
           onClick={() => setSidebarTab('files')}
         >
-          <span>📁</span>
+          <FolderIcon />
           <span>{t('sidebar.files') || '资源管理'}</span>
         </button>
       </div>
@@ -2602,7 +2690,7 @@ export function Sidebar({
               aria-haspopup="menu"
               aria-expanded={skillsMenuOpen}
             >
-              <span class="sidebar-action-icon"><SparklesIcon /></span>
+              <span class="sidebar-action-icon"><SkillIcon /></span>
               <span class="sidebar-action-label">{t('sidebar.skills')}</span>
               {skillCount > 0 && <span class="sidebar-action-badge">{skillCount}</span>}
               <span class="sidebar-action-caret"><ChevronDownIcon /></span>
@@ -2618,6 +2706,17 @@ export function Sidebar({
               <span class="sidebar-action-label">{t('sidebar.mcp')}</span>
               {mcpCount > 0 && <span class="sidebar-action-badge">{mcpCount}</span>}
               <span class="sidebar-action-caret"><ChevronDownIcon /></span>
+            </button>
+            <button
+              type="button"
+              class={'sidebar-action' + (scheduleDialogOpen ? ' open' : '')}
+              onClick={() => setScheduleDialogOpen(true)}
+            >
+              <span class="sidebar-action-icon"><ClockIcon /></span>
+              <span class="sidebar-action-label">{t('schedules.menuTitle')}</span>
+              {activeScheduleCount > 0 && (
+                <span class="sidebar-action-badge">{activeScheduleCount}</span>
+              )}
             </button>
           </div>
 
@@ -2781,17 +2880,37 @@ export function Sidebar({
               const pSessions = projectOptimistics.length > 0
                 ? mergeOptimisticSessions(projectOptimistics, baseSessions)
                 : baseSessions;
-              const sorted = sortSessions(pSessions);
-              // 折叠态最少展示 5 条，并保留当前选中行与所有运行中会话；
-              // 展开态返回全量，因此“展开更多”不会漏掉任何蓝圈会话。
-              const folded = foldProjectSessions(sorted, {
+              const isScheduledSession = (s: SessionMetaWithProject) =>
+                Boolean(s.is_scheduled || s.origin === 'scheduled');
+              const toMs = (s: SessionMetaWithProject) => {
+                const ts = s.updated_at || s.created_at || 0;
+                return ts > 0 && ts < 1e11 ? ts * 1000 : ts;
+              };
+              const ownedAll = pSessions.filter((s) => projectOwnerById.get(s.id) === p.hash);
+              // 定时任务栏严格按时间降序排序；普通会话保持原有运行优先 + 时间降序排序
+              const scheduledSessions = ownedAll
+                .filter(isScheduledSession)
+                .slice()
+                .sort((a, b) => toMs(b) - toMs(a));
+              const normalSessions = sortSessions(ownedAll.filter((s) => !isScheduledSession(s)));
+              const folded = foldProjectSessions(normalSessions, {
                 showAll: isShowAll,
                 activeSessionId,
                 // 折叠态永不隐藏正在运行的会话：蓝圈优先于条数上限。
                 keepIds: activeSet,
               });
               const displayList = folded.visible;
-              const count = pSessions.length;
+              const schedRunning = scheduledSessions.some((s) => activeSet.has(s.id));
+              const schedCompleted = !schedRunning && scheduledSessions.some((s) => completedSet.has(s.id));
+              const isScheduleExpanded = !collapsedScheduleGroups.has(p.hash);
+              const toggleScheduleGroup = () => {
+                setCollapsedScheduleGroups((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(p.hash)) next.delete(p.hash);
+                  else next.add(p.hash);
+                  return next;
+                });
+              };
 
               return (
                 <div key={p.hash} class="project-group">
@@ -2864,25 +2983,85 @@ export function Sidebar({
                       {isExpanded ? '▾' : '▸'}
                     </span>
                   </div>
-                  {isExpanded && (
-                    <div class="project-sessions-list">
-                      {displayList.filter((s) => projectOwnerById.get(s.id) === p.hash).map(renderItem)}
-                      {folded.canToggle && (
-                        <button
-                          type="button"
-                          class={'project-show-more-btn' + (isShowAll ? ' is-expanded' : '')}
-                          onClick={() => toggleShowAll(p.hash)}
-                        >
-                          <span>{isShowAll ? t('sidebar.showLess') : t('sidebar.showMore')}</span>
-                        </button>
-                      )}
-                      {folded.total === 0 && (
-                        <div class="session-empty" style={{ padding: '6px 12px', fontSize: '11.5px' }}>
-                          {t('sidebar.empty')}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  {isExpanded && (() => {
+                    const ownedSessions = displayList;
+                    const cap = expandedRenderCap[p.hash] ?? SIDEBAR_EXPAND_STEP;
+                    const hasMoreWindow = isShowAll && ownedSessions.length > cap;
+                    const windowedSessions = hasMoreWindow ? ownedSessions.slice(0, cap) : ownedSessions;
+                    return (
+                      <div class="project-sessions-list">
+                        {/* 有定时任务会话才出现聚合折叠菜单，没有则完全隐藏 */}
+                        {scheduledSessions.length > 0 && (
+                          <div class="schedule-subgroup">
+                            <div
+                              role="button"
+                              tabIndex={0}
+                              class="schedule-subgroup-header"
+                              onClick={toggleScheduleGroup}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  toggleScheduleGroup();
+                                }
+                              }}
+                              aria-expanded={isScheduleExpanded}
+                            >
+                              <span class="schedule-subgroup-icon"><ClockIcon /></span>
+                              <span class="schedule-subgroup-title">{t('schedules.sidebarSubgroup')}</span>
+                              <span class="schedule-subgroup-count">{scheduledSessions.length}</span>
+                              {schedRunning ? (
+                                <span
+                                  class="session-item-running"
+                                  title={t('schedules.running')}
+                                  aria-label={t('schedules.running')}
+                                />
+                              ) : schedCompleted ? (
+                                <span
+                                  class="session-item-completed schedule-subgroup-completed"
+                                  title={t('schedules.completed')}
+                                  aria-label={t('schedules.completed')}
+                                >
+                                  <CompletedCheckIcon />
+                                </span>
+                              ) : null}
+                              <span class="schedule-subgroup-caret">
+                                {isScheduleExpanded ? '▾' : '▸'}
+                              </span>
+                            </div>
+                            {isScheduleExpanded && (
+                              <div class="schedule-subgroup-items">
+                                {scheduledSessions.map(renderItem)}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        {windowedSessions.map(renderItem)}
+                        {hasMoreWindow && (
+                          <button
+                            type="button"
+                            class="project-show-more-btn"
+                            onClick={() => showMoreWindow(p.hash)}
+                          >
+                            <span>{t('sidebar.showMore')}</span>
+                          </button>
+                        )}
+                        {folded.canToggle && (
+                          <button
+                            type="button"
+                            class={'project-show-more-btn' + (isShowAll ? ' is-expanded' : '')}
+                            onClick={() => toggleShowAll(p.hash)}
+                          >
+                            <span>{isShowAll ? t('sidebar.showLess') : t('sidebar.showMore')}</span>
+                          </button>
+                        )}
+                        {ownedAll.length === 0 && (
+                          <div class="session-empty" style={{ padding: '6px 12px', fontSize: '11.5px' }}>
+                            {t('sidebar.empty')}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}
@@ -2919,6 +3098,10 @@ export function Sidebar({
         <span class="sidebar-bottom-spacer" />
         <button
           class="sidebar-icon-btn sidebar-settings-btn"
+          onMouseEnter={() => {
+            void getConfig().catch(() => {});
+            void getDesktopSettings().catch(() => {});
+          }}
           onClick={() => {
             onCloseDrawer?.();
             onOpenSettings('system');
@@ -3066,6 +3249,14 @@ export function Sidebar({
         <GitWebhookDialog
           project={gitWebhookProject}
           onClose={() => setGitWebhookProject(null)}
+        />,
+        document.body,
+      )}
+      {scheduleDialogOpen && createPortal(
+        <ScheduleDialog
+          projects={allProjects}
+          currentCwd={cwd || ''}
+          onClose={() => setScheduleDialogOpen(false)}
         />,
         document.body,
       )}

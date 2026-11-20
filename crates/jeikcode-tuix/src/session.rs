@@ -270,7 +270,7 @@ impl TuiSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence};
+    use jeikcode_capabilities::session::{CatalogEntry, CatalogPresence, SessionOrigin};
 
     #[test]
     fn cold_summaries_extracted_from_synthetic_messages() {
@@ -445,6 +445,7 @@ mod tests {
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: SessionOrigin::Manual,
             presence: CatalogPresence::NativeOnly,
         };
 

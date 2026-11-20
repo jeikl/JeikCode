@@ -36,7 +36,6 @@ export function ConfirmDialog({
   body,
   confirmLabel,
   cancelLabel,
-  icon,
   danger = true,
   alertOnly = false,
   input,
@@ -46,7 +45,19 @@ export function ConfirmDialog({
   const t = useT();
   const effectiveConfirm = confirmLabel || t('common.confirm') || 'Confirm';
   const effectiveCancel = cancelLabel || t('common.cancel') || 'Cancel';
-  const displayIcon = icon ?? (danger ? '🗑' : '💡');
+  const modalIcon = danger ? (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M8 2.2l6 10.8H2z" />
+      <path d="M8 6v3.2" />
+      <circle cx="8" cy="11.4" r="0.6" fill="currentColor" stroke="none" />
+    </svg>
+  ) : (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 7v4" />
+      <circle cx="8" cy="4.9" r="0.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState(input?.defaultValue ?? '');
@@ -137,7 +148,7 @@ export function ConfirmDialog({
     >
       <div class="modal-card modal-card-sm" role="dialog" aria-modal="true">
         <div class="modal-header">
-          <span style="font-size: 16px;">{displayIcon}</span>
+          <span class="confirm-modal-icon" aria-hidden="true">{modalIcon}</span>
           <h3>{title}</h3>
           <button class="ghost-btn modal-close" onClick={onClose} aria-label={cancelLabel}>
             ×

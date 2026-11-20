@@ -10,7 +10,7 @@ test('landing composer starts at single-line text row and keeps shared auto-grow
   const css = readFileSync(join(root, 'src/styles/app.css'), 'utf8');
 
   assert.match(chat, /class="message-input[^"]*"\s*\n\s*rows=\{1\}/);
-  assert.match(css, /\.message-input\s*\{[^}]*min-height:\s*3em;/s);
+  assert.match(css, /\.message-input\s*\{[^}]*min-height:\s*2\.3em;/s);
   assert.doesNotMatch(css, /\.landing-inner \.message-input\s*\{[^}]*min-height:/s);
   // 高度测量必须走视口冻结的 helper：裸的 height:auto → scrollHeight 会瞬时
   // 扩大消息视口、夹走 scrollTop，并让跟随逻辑丢失底部。

@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use super::super::bilingual_nlp::SearchTokens;
-use super::super::graph::{CodeGraph, SymbolNode};
+use super::super::graph::{CodeGraph, SymbolId, SymbolNode};
 use super::stats::{symbol_ascii_terms, symbol_cjk_phrases, IdfStats};
 
 pub const BM25_K1: f64 = 1.2;
@@ -28,6 +28,20 @@ pub fn bm25_search(
     scope: Option<&std::path::Path>,
     top_k: usize,
 ) -> Vec<Bm25Hit> {
+    bm25_search_with_candidates(graph, stats, tokens, scope, top_k, None)
+}
+
+/// BM25 restricted to an optional candidate set. Large-graph queries use the
+/// candidate index to avoid scoring all symbols; `None` preserves the full-scan
+/// behavior for small graphs and recall fallbacks.
+pub fn bm25_search_with_candidates(
+    graph: &CodeGraph,
+    stats: &IdfStats,
+    tokens: &SearchTokens,
+    scope: Option<&std::path::Path>,
+    top_k: usize,
+    candidate_ids: Option<&HashSet<SymbolId>>,
+) -> Vec<Bm25Hit> {
     let mut hits: Vec<Bm25Hit> = Vec::new();
     let avgdl = stats.avgdl();
     let query_ascii: HashSet<&str> = tokens.words.iter().map(|s| s.as_str()).collect();
@@ -42,6 +56,9 @@ pub fn bm25_search(
     }
 
     for node in graph.nodes.values() {
+        if candidate_ids.is_some_and(|ids| !ids.contains(&node.id)) {
+            continue;
+        }
         if let Some(sc) = scope {
             if !super::super::path_matches_scope(&node.file, sc) {
                 continue;

@@ -9,6 +9,7 @@ import {
   ChatPendingInteractive,
   getActiveChatSessions,
   getApprovalMode,
+  getBootstrap,
   getChatPending,
   getRuntimeSessions,
   listSessions,
@@ -389,57 +390,62 @@ export function NotificationDock({
 
   useEffect(() => {
     let cancelled = false;
-    let namesLoaded = false;
 
-    // 冷启动仅拉取一次会话名称，后续绝对不周期性拉取全量会话列表
-    async function initNamesOnce() {
-      if (namesLoaded) return;
-      namesLoaded = true;
-      try {
-        const sessions = await listSessions();
-        if (cancelled) return;
-        setHints((prev) => {
-          const next = { ...prev };
-          for (const session of sessions) {
-            next[session.id] = {
-              name: session.name,
-              workingDir: session.working_dir,
-            };
-          }
-          return next;
-        });
-      } catch {
-        // Names are decorative.
-      }
-    }
+    const applySessionsHints = (sessions: Array<{ id: string; name: string; working_dir: string }>) => {
+      setHints((prev) => {
+        const next = { ...prev };
+        for (const session of sessions) {
+          next[session.id] = {
+            name: session.name,
+            workingDir: session.working_dir,
+          };
+        }
+        return next;
+      });
+    };
 
-    // 冷启动仅拉取一次审批模式初始状态，后续完全走事件广播，彻底拔除定时轮询
-    getApprovalMode()
-      .then((initMode) => {
-        if (cancelled) return;
-        setMode(initMode);
-        modeRef.current = initMode;
-      })
-      .catch(() => {});
-
-    void initNamesOnce();
-
-    async function tick() {
-      // 视口感知：前台且无活动时或在页面隐藏时，跳过空转请求，彻底释放 CPU
-      if (typeof document !== 'undefined' && document.hidden) return;
-
+    // 冷启动优先单次消费 `/api/bootstrap` 聚合响应；旧版后端降级为分接口拉取。
+    async function initColdStart() {
       let runtime: Awaited<ReturnType<typeof getRuntimeSessions>> = [];
       let active: string[] = [];
-      try {
-        const [nextRuntime, nextActive] = await Promise.all([
-          getRuntimeSessions(),
-          getActiveChatSessions(),
-        ]);
-        if (cancelled) return;
-        runtime = nextRuntime;
-        active = nextActive;
-      } catch {
-        return;
+
+      const boot = await getBootstrap().catch(() => null);
+      if (cancelled) return;
+
+      if (boot) {
+        if (Array.isArray(boot.sessions)) applySessionsHints(boot.sessions);
+        if (boot.approval_mode?.mode) {
+          setMode(boot.approval_mode.mode);
+          modeRef.current = boot.approval_mode.mode;
+        }
+        runtime = boot.runtime_sessions ?? [];
+        active = boot.active_chat_ids ?? [];
+      } else {
+        getApprovalMode()
+          .then((initMode) => {
+            if (cancelled) return;
+            setMode(initMode);
+            modeRef.current = initMode;
+          })
+          .catch(() => {});
+
+        void listSessions()
+          .then((sessions) => {
+            if (!cancelled) applySessionsHints(sessions);
+          })
+          .catch(() => {});
+
+        try {
+          const [nextRuntime, nextActive] = await Promise.all([
+            getRuntimeSessions(),
+            getActiveChatSessions(),
+          ]);
+          if (cancelled) return;
+          runtime = nextRuntime;
+          active = nextActive;
+        } catch {
+          return;
+        }
       }
 
       const ids = new Set(active);
@@ -463,6 +469,7 @@ export function NotificationDock({
         }
       }
 
+      if (ids.size === 0) return;
       const prompts = await Promise.all(
         [...ids].map(async (sessionId) => {
           try {
@@ -478,7 +485,7 @@ export function NotificationDock({
     }
 
     // 冷启动仅拉取一次初始状态，后续完全由单事件总线及卡片状态驱动，彻底拔除周期性定时轮询
-    void tick();
+    void initColdStart();
     return () => {
       cancelled = true;
     };
@@ -751,7 +758,12 @@ export function NotificationDock({
           onClick={() => setMobileExpanded(true)}
           aria-label={t('notify.action.expand')}
         >
-          <span class="mobile-notify-bell">🔔</span>
+          <span class="mobile-notify-bell" aria-hidden="true">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 6.5a4 4 0 0 1 8 0c0 3 1 4 1 4H3s1-1 1-4z" />
+              <path d="M6.5 12.5a1.5 1.5 0 0 0 3 0" />
+            </svg>
+          </span>
           <div class="mobile-notify-pill-content">
             <span class="mobile-notify-pill-session">
               {labelFor(currentCard.card.sessionId)}

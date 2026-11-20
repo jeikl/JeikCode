@@ -26,7 +26,7 @@ mod openai_compat;
 mod pricing_catalog;
 mod reasoning;
 mod responses;
-mod retry;
+pub(crate) mod retry;
 mod sign;
 mod thinking;
 mod timeouts;

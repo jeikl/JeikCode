@@ -34,7 +34,12 @@ impl TokenUsage {
 /// (auth/400/bad-request). The kernel does not retry here — it only surfaces.
 #[derive(Clone, Debug, Default)]
 pub struct ProviderError {
+    /// 可以整请求重发（尚未向用户输出任何内容）。
     pub retryable: bool,
+    /// 可以**接着已产出的内容继续生成**（中流传输失败 / 空闲超时）。
+    /// 与 `retryable` 互斥语义：`retryable` 表示「可以重放」，`resumable` 表示
+    /// 「已经出过内容，只能续写」。由 adapter 在传输类失败处置位。
+    pub resumable: bool,
     pub message: String,
     /// HTTP status code for an OPEN failure (a non-2xx response). `None` for transport
     /// or mid-stream errors that have no HTTP status. The "error code" in the HTTP sense.
@@ -245,6 +250,7 @@ mod overflow_tests {
     fn err(http: Option<u16>, code: Option<&str>, msg: &str) -> ProviderError {
         ProviderError {
             retryable: false,
+            resumable: false,
             message: msg.into(),
             http_status: http,
             code: code.map(Into::into),

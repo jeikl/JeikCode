@@ -9,7 +9,7 @@
 //!   - `usageMetadata` (incl. `thoughtsTokenCount` + cache) → [`StreamEvent::Usage`]
 //!   - tools as `functionDeclarations` / `functionCall` / `functionResponse`
 
-use super::openai_compat::{build_http_client, SwappableClient};
+use super::openai_compat::SwappableClient;
 use super::reasoning::ReasoningPolicy;
 use super::retry::{self, RetryPolicy};
 use async_trait::async_trait;
@@ -100,9 +100,12 @@ impl GeminiProvider {
         let user_agent = cfg.user_agent.clone();
         let url = stream_endpoint_url(&cfg.base_url, &cfg.model);
         let initial_tls12 = jeikcode_config::tls::should_cap_url(&url);
-        let client = std::sync::Arc::new(SwappableClient::new(initial_tls12, move |tls12| {
-            build_http_client(connect_timeout, skip_tls_verify, user_agent.clone(), tls12)
-        })?);
+        let client = std::sync::Arc::new(SwappableClient::new_shared(
+            connect_timeout,
+            skip_tls_verify,
+            user_agent,
+            initial_tls12,
+        )?);
         Ok(Self {
             cfg,
             policy,
@@ -145,10 +148,8 @@ impl LlmProvider for GeminiProvider {
         let rate_limit_retry_owner = options.rate_limit_retry_owner;
 
         let s = async_stream::stream! {
-            const MAX_STREAM_ATTEMPTS: u32 = 6;
-            let mut stream_attempt = 0u32;
-            let mut reconnect_attempts = 0u32;
-            let mut resp = match open_stream(
+            // 重试调度已统一到内核；本层只发一次流并上报失败分类。
+            let resp = match open_stream(
                 &client.get(),
                 &url,
                 &body,
@@ -165,7 +166,7 @@ impl LlmProvider for GeminiProvider {
                 }
             };
 
-            'reopen: loop {
+            loop {
                 let mut dec = GeminiSseDecoder::default();
                 let mut emitted_replay_sensitive = false;
                 let mut pending_metadata = Vec::new();
@@ -198,34 +199,15 @@ impl LlmProvider for GeminiProvider {
                             return;
                         }
                         Ok(Some(Err(e))) => {
-                            if !emitted_replay_sensitive && stream_attempt < MAX_STREAM_ATTEMPTS {
-                                reconnect_attempts += 1;
-                                tokio::time::sleep(retry::compute_backoff(stream_attempt, &policy)).await;
-                                if let Ok(fresh) = open_stream(
-                                    &client.get(),
-                                    &url,
-                                    &body,
-                                    &api_key,
-                                    &session_id,
-                                    &policy,
-                                    rate_limit_retry_owner,
-                                    open_timeout,
-                                ).await {
-                                    stream_attempt += 1;
-                                    resp = fresh;
-                                    continue 'reopen;
-                                }
-                            }
                             yield StreamEvent::Error(ProviderError {
                                 retryable: false,
+                                resumable: true,
                                 message: retry::stream_read_error_message(
                                     &e,
                                     if emitted_replay_sensitive {
                                         retry::StreamReadRecovery::PartialResponse
                                     } else {
-                                        retry::StreamReadRecovery::RetryExhausted {
-                                            attempts: reconnect_attempts,
-                                        }
+                                        retry::StreamReadRecovery::Interrupted
                                     },
                                 ),
                                 ..Default::default()
@@ -319,6 +301,7 @@ async fn open_stream(
                     let (detail, structured) = parse_gemini_error(&text);
                     return Err(ProviderError {
                         retryable: retry::is_retryable_status(code),
+                        resumable: false,
                         message: super::friendly_http_error(code, &detail),
                         http_status: Some(code),
                         code: structured,

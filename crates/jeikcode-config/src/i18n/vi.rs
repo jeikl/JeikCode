@@ -1149,7 +1149,7 @@ Msg::CmdDescBackground => "Chạy tác vụ một lần trong ngữ cảnh nền
         }
         Msg::CliAboutTelemetry => "Điều khiển đo lường".into(),
         Msg::CliAboutPlugin => "Quản lý tiện ích kỹ năng/lệnh".into(),
-        Msg::CliAboutUninstall => "Gỡ JeikCode. Không tham số thì hỏi có giữ cấu hình hay không. `simple` chỉ gỡ chương trình. `all` gỡ toàn bộ. Hướng dẫn: https://jeikcode.top/guide/updates.html".into(),
+        Msg::CliAboutUninstall => "Gỡ JeikCode. Không tham số thì hỏi có giữ cấu hình hay không. `simple` chỉ gỡ chương trình. `all` gỡ toàn bộ.".into(),
         Msg::CliAboutSetup => "Cài tệp mẫu (skills/commands/hooks/MCP) vào ~/.jeikcode/".into(),
         Msg::CliAboutHooks => "Quản lý hook (liệt kê, thử, bật/tắt)".into(),
         Msg::CliAboutHooksList => "Liệt kê mọi hook đã tải cùng trạng thái".into(),
@@ -1248,37 +1248,113 @@ Msg::CmdDescBackground => "Chạy tác vụ một lần trong ngữ cảnh nền
                 .into(),
         Msg::ServeNoTokenSecurityWarning =>
             "[CẢNH BÁO AN NINH NGHIÊM TRỌNG] Phát hiện bạn chưa sử dụng mã truy cập (Token)!\nNếu hiện tại chưa thiết lập tường lửa tương ứng, vui lòng nhờ AI của JeikCode hỗ trợ thiết lập tường lửa và danh sách IP trắng, nếu không máy chủ của bạn rất dễ bị hacker xâm nhập!".into(),
-        // Kernel liveness/retry advisories: fall back to the English catalog.
-        Msg::AgentRetryEmpty { .. }
-        | Msg::AgentRetryThinking { .. }
-        | Msg::AgentRetryMalformed { .. }
-        | Msg::AgentRetryFirstToken { .. }
-        | Msg::AgentRetryApi { .. }
-        | Msg::AgentOverWindow { .. }
-        | Msg::AgentContextOverflow { .. }
-        | Msg::AgentStreamReconnecting { .. }
-        | Msg::AgentResponseTruncated
-        | Msg::AgentUnsupportedSnapshot { .. }
-        | Msg::AgentPreRequestNotAppendOnly { .. }
+        Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
+            format!("Mô hình trả về phản hồi trống, thử lại sau {wait} giây ({attempt}/{max})...")
+        } else {
+            format!("Mô hình trả về phản hồi trống, đang thử lại ({attempt}/{max})...")
+        }.into(),
+        Msg::AgentRetryThinking { attempt, max, wait } => if wait > 0 {
+            format!("Mô hình chỉ trả về suy luận, thử lại sau {wait} giây ({attempt}/{max})...")
+        } else {
+            format!("Mô hình chỉ trả về suy luận, đang thử lại ({attempt}/{max})...")
+        }.into(),
+        Msg::AgentRetryMalformed { attempt, max, wait } => if wait > 0 {
+            format!("Phản hồi sai định dạng, thử lại sau {wait} giây ({attempt}/{max})...")
+        } else {
+            format!("Phản hồi sai định dạng, đang thử lại ({attempt}/{max})...")
+        }.into(),
+        Msg::AgentRetryFirstToken { secs, attempt, max } =>
+            format!("Mô hình phản hồi chậm: không có dữ liệu trong {secs} giây, đang thử lại ({attempt}/{max})…").into(),
+        Msg::AgentRetryApi { reason, wait, attempt, max } =>
+            format!("Lỗi API {reason}, thử lại sau {wait} giây ({attempt}/{max})...").into(),
+        Msg::AgentOverWindow { estimate_k, window_k, buffer_k } =>
+            format!(
+                "Yêu cầu khoảng {estimate_k}K tokens đã chạm ngưỡng ngữ cảnh \
+                 (cửa sổ ~{window_k}K − dự phòng {buffer_k}K): hãy rút gọn đầu vào hoặc chuyển sang mô hình có cửa sổ lớn hơn."
+            ).into(),
+        Msg::AgentContextOverflow { round, attempt } =>
+            format!("Tràn ngữ cảnh ở vòng {round} (lần thử {attempt}); đang thu gọn và thử lại").into(),
+        Msg::AgentStreamReconnecting { attempt, max } =>
+            format!("Luồng phản hồi quá thời gian chờ — đang kết nối lại ({attempt}/{max})").into(),
+        Msg::AgentResponseTruncated => "Phản hồi bị cắt ngắn: finish_reason=length".into(),
+        Msg::AgentUnsupportedSnapshot { version, supported } =>
+            format!("Không hỗ trợ phiên bản bản chụp {version} (hệ thống hỗ trợ {supported}); khởi chạy với phiên trống").into(),
+        // Model-facing nudges and internal hook invariants stay in native English.
+        Msg::AgentPreRequestNotAppendOnly { .. }
         | Msg::AgentEchoLoopNudge
-        | Msg::AgentEchoLoopWarning
-        | Msg::AgentModelHighLatencyTerminal { .. }
-        | Msg::AgentExhaustedMalformed { .. }
-        | Msg::AgentExhaustedThinkingOverWindowIntro { .. }
-        | Msg::AgentExhaustedThinkingOverWindowSize { .. }
-        | Msg::AgentExhaustedThinkingGeneric { .. }
-        | Msg::AgentExhaustedEmptyOverWindowIntro { .. }
-        | Msg::AgentExhaustedEmptyOverWindowSize { .. }
-        | Msg::AgentExhaustedEmptyGeneric { .. }
-        | Msg::AgentStatusRateLimited
-        | Msg::AgentStatusUpstreamUnavailable
-        | Msg::AgentStatusResponseTimeout
-        | Msg::AgentStatusConnectionFailed
-        | Msg::AgentStatusInsufficientBalance
-        | Msg::AgentStatusUnauthorized
-        | Msg::StreamReadRetryExhausted { .. }
-        | Msg::StreamReadPartialResponse
-        | Msg::StreamReadResetHint
-        | Msg::StreamReadDetailsPrefix => super::en::en(msg),
+        | Msg::AgentEchoLoopWarning => super::en::en(msg),
+        Msg::AgentModelHighLatencyTerminal { retries, secs } =>
+            format!("Độ trễ mô hình quá cao, vui lòng thử lại sau ({retries} lần liên tiếp không nhận được dữ liệu đầu tiên trong {secs} giây)").into(),
+        Msg::AgentExhaustedMalformed { max } =>
+            format!("Mô hình trả về phản hồi không thể phân tích {max} lần liên tiếp (sự cố tạm thời từ máy chủ). Bạn có thể thử lại ngay hoặc thử lại sau.").into(),
+        Msg::AgentExhaustedThinkingOverWindowIntro { max } =>
+            format!("Mô hình chỉ trả về suy luận mà không có văn bản hay công cụ {max} lần liên tiếp. Như đã lưu ý trước đó, yêu cầu này vượt quá cửa sổ ngữ cảnh — hãy rút gọn đầu vào hoặc dùng /compact rồi thử lại.").into(),
+        Msg::AgentExhaustedThinkingOverWindowSize { max, prompt_k, window_k } =>
+            format!("Mô hình chỉ trả về suy luận mà không có văn bản hay công cụ {max} lần liên tiếp. Yêu cầu hiện tại khoảng {prompt_k}K tokens, gần hoặc vượt cửa sổ mô hình (~{window_k}K). Hãy dùng /compact hoặc rút gọn đầu vào rồi thử lại.").into(),
+        Msg::AgentExhaustedThinkingGeneric { max } =>
+            format!("Mô hình chỉ trả về suy luận mà không có văn bản hay công cụ {max} lần liên tiếp. Bạn có thể thử lại ngay hoặc thử lại sau.").into(),
+        Msg::AgentExhaustedEmptyOverWindowIntro { max } =>
+            format!("Mô hình trả về phản hồi trống {max} lần liên tiếp. Như đã lưu ý trước đó, yêu cầu này vượt quá cửa sổ ngữ cảnh — hãy rút gọn đầu vào hoặc dùng /compact rồi thử lại.").into(),
+        Msg::AgentExhaustedEmptyOverWindowSize { max, prompt_k, window_k } =>
+            format!("Mô hình trả về phản hồi trống {max} lần liên tiếp. Yêu cầu hiện tại khoảng {prompt_k}K tokens, gần hoặc vượt cửa sổ mô hình (~{window_k}K). Hãy dùng /compact hoặc rút gọn đầu vào rồi thử lại.").into(),
+        Msg::AgentExhaustedEmptyGeneric { max } =>
+            format!("Mô hình trả về phản hồi trống {max} lần liên tiếp (sự cố tạm thời từ máy chủ, không liên quan độ dài ngữ cảnh). Bạn có thể thử lại ngay hoặc thử lại sau.").into(),
+        Msg::AgentStatusRateLimited => "Vượt quá giới hạn tần suất yêu cầu hoặc hết hạn mức".into(),
+        Msg::AgentStatusUpstreamUnavailable => "Dịch vụ máy chủ tạm thời không khả dụng".into(),
+        Msg::AgentStatusResponseTimeout => "Phản hồi của mô hình đã quá thời gian chờ".into(),
+        Msg::AgentStatusConnectionFailed => "Kết nối mạng thất bại".into(),
+        Msg::AgentStatusInsufficientBalance => "Số dư tài khoản không đủ".into(),
+        Msg::AgentStatusUnauthorized => "Khóa API chưa được cấp quyền hoặc đã hết hạn".into(),
+        Msg::StreamReadRetryExhausted { attempts } =>
+            format!("Kết nối mạng bị gián đoạn: máy chủ từ xa đã đóng hoặc đặt lại kết nối, tự động kết nối lại thất bại sau {attempts} lần. Bạn có thể thử lại.").into(),
+        Msg::StreamReadPartialResponse =>
+            "Phản hồi bị gián đoạn: phần phản hồi an toàn đã được giữ lại, bạn có thể tiếp tục.".into(),
+        Msg::StreamReadInterrupted =>
+            "Kết nối mạng bị gián đoạn: máy chủ từ xa đã đóng hoặc đặt lại kết nối. Bạn có thể thử lại.".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("Kết nối bị gián đoạn, đang tự động kết nối lại (tối đa {max} lần), đã giữ lại nội dung hiện tại…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("Kết nối bị gián đoạn, đã giữ lại nội dung hiện tại, đang thử lại {attempt}/{max}").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("Luồng phản hồi chờ quá lâu, đã giữ lại nội dung hiện tại, đang thử lại {attempt}/{max}")
+        } else {
+            format!("Luồng phản hồi chờ quá lâu, đang thử lại {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("Kết nối mạng bị gián đoạn, đã giữ lại nội dung hiện tại, đang thử lại {attempt}/{max}")
+        } else {
+            format!("Kết nối mạng bị gián đoạn, đang thử lại {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("Kết nối đã khôi phục sau {attempts} lần thử lại, đang tiếp tục").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "Luồng phản hồi vẫn quá thời gian chờ sau khi tự động kết nối lại, đã dừng lượt này".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("Đã chạm giới hạn tần suất, tự động thử lại sau {secs} giây…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "Đã chạm hạn mức tần suất và tạm dừng, vui lòng chờ đặt lại hoặc chuyển mô hình để tiếp tục".into()
+        } else {
+            format!("Đã tạm dừng do giới hạn tần suất: {detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "Luồng quá thời gian chờ sau khi đã có một phần phản hồi; nội dung đã được giữ lại để tiếp tục.".into(),
+        Msg::StreamReadResetHint =>
+            "Lỗi này thường gặp trong mạng doanh nghiệp hoặc môi trường proxy; vui lòng kiểm tra cài đặt proxy/VPN/tường lửa rồi thử lại.".into(),
+        Msg::StreamReadDetailsPrefix => "Chi tiết: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "Nghi vấn vòng lặp lặp lại: phát hiện lặp lại đầu ra và lệnh gọi công cụ giống nhau; đang yêu cầu mô hình đổi hướng trước khi dừng lượt này.".into()
+        } else {
+            "Nghi vấn vòng lặp lặp lại: phát hiện lặp lại đầu ra và lệnh gọi công cụ giống nhau; đang yêu cầu mô hình đổi hướng.".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("đã dừng: mô hình lặp lại cùng một chuỗi suy luận/văn bản và lệnh gọi công cụ trong {rounds} vòng liên tiếp").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("nghi vấn vòng lặp công cụ: cùng một lệnh gọi hoặc lô chỉ đọc đã trả về kết quả giống hệt {threshold} lần; đang yêu cầu mô hình đổi hướng").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("phát hiện vòng lặp công cụ: cùng một lệnh gọi hoặc lô chỉ đọc đã trả về kết quả giống hệt {threshold} lần; đã dừng trước yêu cầu tiếp theo").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("đã dừng: mô hình lặp lại cùng một mẫu gọi công cụ trong {rounds} vòng liên tiếp").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Đã đạt giới hạn số vòng ({cap}); đã tạm dừng gọi công cụ để tóm tắt tiến độ và đề xuất bước tiếp theo.").into(),
     }
 }
