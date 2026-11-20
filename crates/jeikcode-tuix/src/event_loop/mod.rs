@@ -131,11 +131,21 @@ pub(crate) fn request_context_stats_render(
     Ok(())
 }
 
-fn deactivate_runtime_provider(ctx: &LoopCtx) -> Result<(), jeikcode_coding::RuntimeUnavailable> {
+fn deactivate_runtime_provider_with_reason(
+    ctx: &LoopCtx,
+    reason: jeikcode_coding::ProviderUnavailableReason,
+) -> Result<(), jeikcode_coding::RuntimeUnavailable> {
     ctx.runtime.deactivate_provider(
-        jeikcode_coding::ProviderUnavailableReason::AuthenticationRequired,
+        reason,
         ctx.foreground_runtime_id,
         ctx.runtime_event_tx.clone(),
+    )
+}
+
+fn deactivate_runtime_provider(ctx: &LoopCtx) -> Result<(), jeikcode_coding::RuntimeUnavailable> {
+    deactivate_runtime_provider_with_reason(
+        ctx,
+        jeikcode_coding::ProviderUnavailableReason::AuthenticationRequired,
     )
 }
 
@@ -13702,6 +13712,32 @@ where
         ConfigReloadSelection::FollowPersisted => commit.snapshot.config.clone(),
     };
     let message = success_message(&value);
+    let had_provider = !provider_configuration_missing(&ctx.config);
+    if provider_configuration_missing(&desired) {
+        jeikcode_config::proxy::apply_process_proxy_config(&desired.network.proxy);
+        // Deleting the last provider must tear down the live runtime: treating it
+        // like a never-configured install would leave the old provider (and its
+        // in-memory credentials) serving requests until restart.
+        if had_provider {
+            match deactivate_runtime_provider_with_reason(
+                ctx,
+                jeikcode_coding::ProviderUnavailableReason::NotConfigured,
+            ) {
+                Ok(()) => ctx.pending_provider_deactivation = true,
+                Err(error) => {
+                    renderer.render(UiLine::Error(format!(
+                        "provider runtime could not be deactivated: {error}"
+                    )));
+                    renderer.flush();
+                }
+            }
+        }
+        ctx.config = desired;
+        ctx.observed_config_revision = Some(commit.snapshot.revision);
+        renderer.render(UiLine::CommandOutput(message));
+        renderer.flush();
+        return Some(value);
+    }
     stage_committed_config_reload(
         ctx,
         desired,

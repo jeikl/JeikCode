@@ -161,7 +161,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     // price table — works for ANY model, including self-integrated ones.
     Command { name: "cost",    desc: "Show this session's token cost (any model)", needs_args: false, hidden: false },
     Command { name: "context", desc: "Show context budget breakdown", needs_args: false, hidden: false },
-    Command { name: "compact", desc: "Compact conversation history", needs_args: false, hidden: false },
+    Command { name: "compact", desc: "Compact conversation history (/compact threshold ... to configure auto-compact)", needs_args: false, hidden: false },
     Command { name: "remember", desc: "Save a fact to memory (/remember --global for global)", needs_args: true, hidden: false },
     Command { name: "forget", desc: "Remove matching memories", needs_args: true, hidden: false },
     Command { name: "memory", desc: "Show all saved memories", needs_args: false, hidden: false },

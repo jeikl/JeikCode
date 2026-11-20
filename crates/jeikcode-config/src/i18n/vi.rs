@@ -861,7 +861,7 @@ Msg::CmdDescBackground => "Chạy tác vụ một lần trong ngữ cảnh nền
         Msg::CmdDescSession => "Bắt đầu phiên mới (xóa hội thoại) — dùng /new".into(),
         Msg::CmdDescCost => "Hiển thị chi phí token".into(),
         Msg::CmdDescContext => "Hiển thị phân bổ ngân sách ngữ cảnh".into(),
-        Msg::CmdDescCompact => "Thu gọn lịch sử hội thoại".into(),
+        Msg::CmdDescCompact => "Thu gọn lịch sử hội thoại (hoặc đặt ngưỡng tự động thu gọn)".into(),
         Msg::CmdDescRemember => "Lưu thông tin vào bộ nhớ (/remember --global cho toàn cục)".into(),
         Msg::CmdDescForget => "Xóa các mục bộ nhớ phù hợp".into(),
         Msg::CmdDescMemory => "Hiển thị mọi mục bộ nhớ đã lưu".into(),
@@ -1033,6 +1033,26 @@ Msg::CmdDescBackground => "Chạy tác vụ một lần trong ngữ cảnh nền
         }
         Msg::CompactMarkStub { saved } =>
             format!("Đã gấp đầu ra công cụ · tiết kiệm ~{} tok", saved).into(),
+        Msg::CompactThresholdStatus { summary, effective, path } =>
+            format!(
+                "  Ngưỡng tự động thu gọn: {summary}\n  \
+                 Áp dụng trên mô hình hiện tại: {effective}\n  \
+                 Cấu hình: {path}\n  \
+                 Cách dùng: /compact threshold <350k | 35% | 0.35 | off | default>\n"
+            )
+            .into(),
+        Msg::CompactThresholdUpdated { summary, effective, path } =>
+            format!(
+                "  Đã cập nhật ngưỡng tự động thu gọn → {summary}\n  \
+                 Áp dụng trên mô hình hiện tại: {effective}\n  \
+                 Đã lưu vào: {path}\n"
+            )
+            .into(),
+        Msg::CompactThresholdInvalid { input } =>
+            format!(
+                "Ngưỡng tự động thu gọn không hợp lệ '{input}'. Hãy dùng phần trăm (10%-100% hoặc 0.1-1.0), số token (>= 8000, ví dụ 350k), 'off' hoặc 'default'."
+            )
+            .into(),
         Msg::GoalHelp =>
             "  /goal — tự làm việc nhiều vòng để đạt điều kiện đã nêu.\n  Cách dùng:\n    /goal <condition>     đặt mục tiêu mới; tác tử lặp đến khi bộ đánh giá xác nhận đạt\n    /goal                 xem trạng thái mục tiêu hiện tại\n    /goal status          như trên\n    /goal clear           dừng mục tiêu (bí danh: stop, off, reset, none, cancel)\n    /goal help            trợ giúp này\n  Lưu ý:\n    - Mô hình nhanh đánh giá từng vòng; cấu hình bằng [providers] và\n      evaluator_provider trong ~/.jeikcode/config.toml.\n    - Không có giới hạn vòng/thời gian tích hợp — ghi ngân sách ngay trong\n      điều kiện (ví dụ \"hoặc dừng sau 20 lượt\"). /goal của CC cũng hoạt động như vậy.\n    - Esc / Ctrl+C dừng mục tiêu bất cứ lúc nào.\n".into(),
         Msg::GoalStatus { condition, round, mins, secs } =>

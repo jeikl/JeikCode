@@ -881,7 +881,7 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::CmdDescSession => "开始新会话（清除对话）——请用 /new".into(),
         Msg::CmdDescCost => "显示 Token 费用".into(),
         Msg::CmdDescContext => "显示上下文预算明细".into(),
-        Msg::CmdDescCompact => "压缩对话历史".into(),
+        Msg::CmdDescCompact => "压缩对话历史（或设置自动压缩阈值）".into(),
         Msg::CmdDescRemember => "保存记忆（/remember --global 为全局）".into(),
         Msg::CmdDescForget => "删除匹配的记忆".into(),
         Msg::CmdDescMemory => "显示所有已保存的记忆".into(),
@@ -1054,6 +1054,26 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
             format!("已压缩 · 摘要 {} 条 · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("已折叠工具输出 · 节省 ~{} tok", saved).into(),
+        Msg::CompactThresholdStatus { summary, effective, path } =>
+            format!(
+                "  自动压缩阈值：{summary}\n  \
+                 当前模型生效：{effective}\n  \
+                 配置文件：{path}\n  \
+                 用法：/compact threshold <350k | 35% | 0.35 | off | default>\n"
+            )
+            .into(),
+        Msg::CompactThresholdUpdated { summary, effective, path } =>
+            format!(
+                "  已更新自动压缩阈值 → {summary}\n  \
+                 当前模型生效：{effective}\n  \
+                 已保存到：{path}\n"
+            )
+            .into(),
+        Msg::CompactThresholdInvalid { input } =>
+            format!(
+                "无效的自动压缩阈值“{input}”。请使用百分比（10%-100% 或 0.1-1.0）、Token 数（>= 8000，例如 350k）、'off' 或 'default'。"
+            )
+            .into(),
         Msg::GoalHelp =>
             "  /goal — 朝着设定的条件自主进行多轮工作。\n  \
              用法：\n  \

@@ -776,6 +776,17 @@ fn vietnamese_dictionary_preserves_interpolation_contract() {
             after: "THAM_SO",
         },
         Msg::CompactMarkStub { saved: "THAM_SO" },
+        Msg::CompactThresholdStatus {
+            summary: "THAM_SO",
+            effective: "THAM_SO",
+            path: "THAM_SO",
+        },
+        Msg::CompactThresholdUpdated {
+            summary: "THAM_SO",
+            effective: "THAM_SO",
+            path: "THAM_SO",
+        },
+        Msg::CompactThresholdInvalid { input: "THAM_SO" },
         Msg::GoalHelp,
         Msg::GoalStatus {
             condition: "THAM_SO",

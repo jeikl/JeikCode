@@ -1353,6 +1353,22 @@ pub enum Msg<'a> {
     CompactMarkStub {
         saved: &'a str,
     },
+    /// Current auto-compaction threshold settings and config path (`/compact threshold`).
+    CompactThresholdStatus {
+        summary: &'a str,
+        effective: &'a str,
+        path: &'a str,
+    },
+    /// Confirmation after updating `/compact threshold <value>`.
+    CompactThresholdUpdated {
+        summary: &'a str,
+        effective: &'a str,
+        path: &'a str,
+    },
+    /// Error message for invalid `/compact threshold <value>` input.
+    CompactThresholdInvalid {
+        input: &'a str,
+    },
 
     // ── /goal ──
     /// The full `/goal help` usage block (header + Usage + Notes).

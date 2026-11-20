@@ -111,7 +111,7 @@ reasoning_history = "exclude"
 
 | Parameter | Type / Values | Detailed Behavior & Semantics |
 | :--- | :--- | :--- |
-| `context_window` | Integer | Total context window token budget (e.g. 64000, 128000). Compaction watermark = window − 20K fixed buffer (**output max does not participate in computation**); automatic compaction triggers at **90% of the watermark** (at task boundaries, measured against provider usage) — context grows dynamically within the window. |
+| `context_window` | Integer | Total context window token budget (e.g. 64000, 128000). Compaction watermark = window − 20K fixed buffer (**output max does not participate in computation**); automatic compaction triggers at **90% of the watermark** by default (configurable via `[coding]` `compact_threshold` / `compact_max_tokens` or `/compact threshold`) — context grows dynamically within the window. |
 | `max_tokens` | Integer | **Model output capacity declaration** (UI presets: 32K / 64K / 128K / 256K / 384K / custom; default 64K if unset), dispatched as protocol max budget to upstream models; actual output depends on generation. **Does not participate in context accounting or compaction watermark calculations**. |
 | `reasoning_model` | Boolean | Declares whether the model is a deep reasoning/thinking model (such as DeepSeek R1, o1, GLM-Zero). |
 | **`reasoning_history`** | `"exclude"` \| `"include"` | **Thinking history transmission across turns**:<br>• `"exclude"` (default): Prior `<think>` blocks are stripped in subsequent turns, drastically saving tokens and avoiding API errors on most vendors.<br>• `"include"`: Preserves and sends back reasoning history across turns. Mandatory for Gemini 2.5/3, official DeepSeek endpoints, or proxy gateways validating `thoughtSignature`. |

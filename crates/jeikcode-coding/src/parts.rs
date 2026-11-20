@@ -1629,10 +1629,7 @@ pub fn assemble(
         // →drain+LLM-summary). Stubs old tool results once utilization crosses the threshold
         // (kept full below it); the overflow tiers fire only on a typed overflow error.
         .compaction({
-            let mut strategy = jeikcode_capabilities::compaction::OverflowCompaction::new(
-                jeikcode_capabilities::compaction::StubCompaction::default(),
-                Some(summary_provider),
-            );
+            let mut strategy = cfg.build_compaction_strategy(summary_provider);
             // Session-bound runtimes archive every drained span VERBATIM into the
             // session's artifact store (watchdog-governed), so the summary can point a
             // successor at `artifact://<id>` for exact code/errors/tool output.
@@ -1645,12 +1642,14 @@ pub fn assemble(
             }
             Arc::new(strategy)
         })
-        .compact_threshold(cfg.compact_threshold)
         .timeouts(cfg.timeouts)
         .first_token_timeout_retries(cfg.first_token_timeout_retries)
         .max_continuations(cfg.max_continuations)
         // Ctrl-C semantics: false = UNDO (default), true = PRESERVE the interrupted turn.
         .keep_interrupted_context(cfg.keep_interrupted_context);
+    if let Some(threshold) = cfg.compact_threshold_option() {
+        builder = builder.compact_threshold(threshold);
+    }
     if let Some(policy) = cfg.tool_loop_policy {
         builder = builder.tool_loop_policy(policy);
     }

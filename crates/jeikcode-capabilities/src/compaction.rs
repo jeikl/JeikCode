@@ -130,14 +130,19 @@ const TRUNCATE_MARKER: &str = "\n[truncated: showing ";
 /// and prompt-cache-preserving. At/above it, gentle stubbing is no longer enough to
 /// keep context in check, so Auto summarizes old turns (accepting the one-time
 /// cache-prefix rewrite) instead of letting context climb until overflow. Auto only
-/// fires at all once `compact_threshold` (default 0.7) is crossed; this is the
+/// fires at all once `compact_threshold` (default 0.9) is crossed; this is the
 /// SECOND, higher gate that decides stub-vs-summarize.
 ///
 /// Set BELOW 0.80 on purpose: models (esp. GLM/DeepSeek) start telling the user
 /// to "开启新对话 / start a new conversation" once they perceive context as full
 /// (~80%). Draining+summarizing a bit earlier keeps real usage down BEFORE that
 /// nag zone, so the automatic compaction — not the user — manages context.
-const AUTO_DRAIN_UTILIZATION: f32 = 0.78;
+pub const AUTO_DRAIN_UTILIZATION: f32 = 0.78;
+
+/// Ratio of `recent_keep` budget to lowered `auto_drain_utilization` so proactive
+/// drains (e.g., 350K on 1M) still trim older turns instead of being blocked by a
+/// fixed 250K tail budget.
+const PROACTIVE_KEEP_TO_DRAIN_RATIO: f32 = 0.4;
 
 /// Fraction of the context window kept VERBATIM as recent turns when a drain
 /// summarizes old history — so a large-context model doesn't lose its recent
@@ -221,6 +226,9 @@ pub struct OverflowCompaction {
     /// `artifact://<id>` pointer, so a successor can recover exact details after
     /// compaction. `None` ⇒ summary-only (previous behavior).
     archive: Option<Arc<ArtifactStore>>,
+    /// High-water utilization threshold at which `CompactTrigger::Auto` escalates
+    /// from stubbing tool outputs to drain+summarization. Defaults to [`AUTO_DRAIN_UTILIZATION`].
+    auto_drain_utilization: f32,
 }
 
 impl OverflowCompaction {
@@ -229,6 +237,37 @@ impl OverflowCompaction {
             inner,
             summary_provider,
             archive: None,
+            auto_drain_utilization: AUTO_DRAIN_UTILIZATION,
+        }
+    }
+
+    /// Override the utilization threshold at which `CompactTrigger::Auto` escalates
+    /// to drain+summarization (default [`AUTO_DRAIN_UTILIZATION`] = 0.78).
+    pub fn with_auto_drain_utilization(mut self, utilization: f32) -> Self {
+        if utilization.is_finite() && utilization > 0.0 {
+            // Keep the strategy gate in lock-step with the effective config
+            // threshold. A hard 0.05 floor here would make a small token cap
+            // (e.g. 8K on a 1M window) trigger Auto but never escalate.
+            self.auto_drain_utilization = utilization.min(1.0);
+        }
+        self
+    }
+
+    /// Recent verbatim-turn token budget used for proactive drains (`manual_plan` / `Auto`).
+    /// Scales down proportionally when the user lowers `auto_drain_utilization` below
+    /// [`AUTO_DRAIN_UTILIZATION`] so a low ceiling (e.g. 350K on 1M) actually drains old turns.
+    fn keep_budget(&self, ctx_window: u32) -> usize {
+        let base = recent_keep_budget(ctx_window);
+        if self.auto_drain_utilization < AUTO_DRAIN_UTILIZATION {
+            let window = ctx_window as usize;
+            let scaled = ((window as f32
+                * self.auto_drain_utilization
+                * PROACTIVE_KEEP_TO_DRAIN_RATIO) as usize)
+                .clamp(MIN_RECENT_KEEP_TOKENS, MAX_RECENT_KEEP_TOKENS)
+                .min(window / 2);
+            base.min(scaled)
+        } else {
+            base
         }
     }
 
@@ -369,10 +408,15 @@ impl OverflowCompaction {
     /// by the summary, the kept span is left untouched (less aggressive than overflow, which
     /// also stubs the kept span). Falls back to the gentle inner stub policy only when there
     /// is nothing older than the kept-recent window to drain.
-    async fn manual_plan(&self, view: &CompactionView<'_>, focus: Option<&str>) -> CompactionPlan {
+    async fn manual_plan(
+        &self,
+        view: &CompactionView<'_>,
+        focus: Option<&str>,
+        keep_budget: usize,
+    ) -> CompactionPlan {
         let msgs = view.messages;
         let floor = view.sacred_floor;
-        let drain_to = recent_keep_boundary(msgs, recent_keep_budget(view.ctx_window), floor);
+        let drain_to = recent_keep_boundary(msgs, keep_budget, floor);
         if drain_to <= floor || !span_has_non_anchor(&msgs[floor..drain_to]) {
             // Nothing older than the active turn, OR the only drainable content is a prior
             // anchor (re-summarizing it alone is wasteful and only degrades it) — fall back
@@ -855,7 +899,12 @@ impl CompactionStrategy for OverflowCompaction {
             // Any user-typed `/compact` drains old turns into an LLM summary — matching v1,
             // where plain `/compact` is a real summarize, not just tool-output stubbing. A
             // non-empty focus only STEERS the summary; it no longer gates the drain.
-            CompactTrigger::Manual { focus } => self.manual_plan(view, focus.as_deref()).await,
+            CompactTrigger::Manual { focus } => {
+                // Manual `/compact` keeps the historical 25% (capped) budget;
+                // only Auto uses the user's lowered threshold-scaled budget.
+                self.manual_plan(view, focus.as_deref(), recent_keep_budget(view.ctx_window))
+                    .await
+            }
             // AUTO: cache-friendly stub at moderate pressure, but once utilization
             // crosses `AUTO_DRAIN_UTILIZATION` the gentle stub can't keep context in
             // check, so escalate to the SAME drain+summarize as `/compact` (falls back
@@ -867,9 +916,15 @@ impl CompactionStrategy for OverflowCompaction {
             // paste), summarizing the small drainable remainder can't cut pressure, so
             // an LLM summary + cache-bust every turn would be pure waste — stay on stub.
             CompactTrigger::Auto { .. }
-                if view.utilization >= AUTO_DRAIN_UTILIZATION && auto_drain_would_help(view) =>
+                if view.utilization >= self.auto_drain_utilization
+                    && auto_drain_would_help(
+                        view,
+                        self.auto_drain_utilization,
+                        self.keep_budget(view.ctx_window),
+                    ) =>
             {
-                self.manual_plan(view, None).await
+                self.manual_plan(view, None, self.keep_budget(view.ctx_window))
+                    .await
             }
             _ => self.inner.plan(view).await,
         }
@@ -877,12 +932,13 @@ impl CompactionStrategy for OverflowCompaction {
 
     /// True only when `plan` will DRAIN old turns into a summary (the slow path) — for
     /// a manual `/compact`, overflow tier 2, or an AUTO trigger that crossed
-    /// `AUTO_DRAIN_UTILIZATION` AND whose drain would actually reduce pressure
+    /// `self.auto_drain_utilization` AND whose drain would actually reduce pressure
     /// (`auto_drain_would_help`). When there is nothing older than the kept window to
     /// drain it falls back to the fast inner stub (drain ≤ floor) and is NOT announced.
-    /// Must predict with the SAME boundary each path actually uses: the proactive
-    /// (auto/manual) drain keeps ~25% recent (`recent_keep_boundary`); the emergency
-    /// overflow ladder keeps only the active turn (`active_turn_start(1)`).
+    /// Must predict with the SAME boundary each path actually uses: manual
+    /// `/compact` keeps the base recent-turn budget; Auto keeps the
+    /// threshold-scaled budget; the emergency overflow ladder keeps only the
+    /// active turn (`active_turn_start(1)`).
     fn will_summarize(&self, view: &CompactionView<'_>) -> bool {
         let floor = view.sacred_floor;
         // Mirror the plans' guard exactly: a summarize happens only when the drained span
@@ -898,14 +954,25 @@ impl CompactionStrategy for OverflowCompaction {
                 floor,
             ))
         };
+        let auto_drains = || {
+            drains(recent_keep_boundary(
+                view.messages,
+                self.keep_budget(view.ctx_window),
+                floor,
+            ))
+        };
         let overflow_drains = || drains(active_turn_start(view.messages, 1).max(floor));
         match &view.trigger {
             CompactTrigger::Manual { .. } => proactive_drains(),
             CompactTrigger::Overflow { attempt } => *attempt >= 2 && overflow_drains(),
             CompactTrigger::Auto { .. } => {
-                view.utilization >= AUTO_DRAIN_UTILIZATION
-                    && proactive_drains()
-                    && auto_drain_would_help(view)
+                view.utilization >= self.auto_drain_utilization
+                    && auto_drains()
+                    && auto_drain_would_help(
+                        view,
+                        self.auto_drain_utilization,
+                        self.keep_budget(view.ctx_window),
+                    )
             }
         }
     }
@@ -915,18 +982,19 @@ impl CompactionStrategy for OverflowCompaction {
 /// pre-active-turn) span plausibly bring utilization back BELOW the high-water mark?
 /// Estimates the tokens that would REMAIN after the drain (the protected prefix + the
 /// active turn) by their byte share of the provider-recorded `used_tokens`. If that
-/// remainder alone still exceeds `ctx_window * AUTO_DRAIN_UTILIZATION`, summarizing the
+/// remainder alone still exceeds `ctx_window * auto_drain_utilization`, summarizing the
 /// middle can't help — so an over-window single paste (un-drainable, in the sacred
 /// floor) does NOT trigger a futile LLM summary + cache-bust on every turn. Returns
 /// `true` (allow escalation) when there is no basis to estimate (window/usage unknown),
 /// matching the pre-guard behavior for the normal long-session case.
-fn auto_drain_would_help(view: &CompactionView<'_>) -> bool {
+fn auto_drain_would_help(
+    view: &CompactionView<'_>,
+    auto_drain_utilization: f32,
+    keep_budget_tokens: usize,
+) -> bool {
     let floor = view.sacred_floor;
-    // Estimate against the ACTUAL drain boundary the AUTO path (manual_plan) will use —
-    // it keeps ~25% recent verbatim, so the surviving remainder is larger than a
-    // keep-only-the-active-turn estimate. Using the wrong (wider) drain span here would
-    // green-light a drain that can't cut pressure → re-summarize + cache-bust every turn.
-    let drain_to = recent_keep_boundary(view.messages, recent_keep_budget(view.ctx_window), floor);
+    // Estimate against the ACTUAL drain boundary the AUTO path (manual_plan) will use.
+    let drain_to = recent_keep_boundary(view.messages, keep_budget_tokens, floor);
     if drain_to <= floor {
         return false; // nothing drainable
     }
@@ -945,7 +1013,7 @@ fn auto_drain_would_help(view: &CompactionView<'_>) -> bool {
     // Token estimate of what survives the drain, by byte share of the recorded usage.
     let remaining_tokens =
         (remaining_bytes as u64).saturating_mul(view.used_tokens as u64) / total_bytes as u64;
-    let mark = (view.ctx_window as f32 * AUTO_DRAIN_UTILIZATION) as u64;
+    let mark = (view.ctx_window as f32 * auto_drain_utilization) as u64;
     remaining_tokens < mark
 }
 
@@ -2599,6 +2667,104 @@ Dependencies verified.
             "small tool output kept verbatim"
         );
         assert!(out.contains(&big_user), "user text is never truncated");
+    }
+
+    #[tokio::test]
+    async fn custom_auto_drain_utilization_summarizes_below_default_gate() {
+        // 1M window: each turn ~200K bytes (~50K tokens). Multiple turns cross 35% (0.35),
+        // which would be skipped at default 0.78 unless `with_auto_drain_utilization` is set.
+        let chunk = |tag: &str| format!("{tag}: {}", "a".repeat(240_000));
+        let msgs = vec![
+            Message::system("sys"),
+            Message::user(chunk("u1")),
+            Message::assistant(chunk("a1"), vec![]),
+            Message::user(chunk("u2")),
+            Message::assistant(chunk("a2"), vec![]),
+            Message::user(chunk("u3")),
+            Message::assistant(chunk("a3"), vec![]),
+            Message::user("latest-turn"),
+        ];
+        let floor = 2; // system + first user
+        let view = CompactionView {
+            messages: &msgs,
+            trigger: CompactTrigger::Auto { utilization: 0.36 },
+            ctx_window: 1_000_000,
+            used_tokens: 360_000,
+            utilization: 0.36,
+            sacred_floor: floor,
+        };
+
+        let default_strat = OverflowCompaction::new(
+            StubCompaction::default(),
+            Some(Arc::new(CannedSummaryProvider)),
+        );
+        assert!(
+            !default_strat.will_summarize(&view),
+            "default 0.78 gate ignores auto compaction at 0.36"
+        );
+
+        let custom_strat = OverflowCompaction::new(
+            StubCompaction::default(),
+            Some(Arc::new(CannedSummaryProvider)),
+        )
+        .with_auto_drain_utilization(0.35);
+        assert!(
+            custom_strat.will_summarize(&view),
+            "custom 0.35 gate escalates auto compaction at 0.36 to summarize"
+        );
+        let plan = custom_strat.plan(&view).await;
+        assert!(plan.drain_to > plan.drain_from);
+        assert!(plan.summary.is_some());
+    }
+
+    #[tokio::test]
+    async fn manual_compact_ignores_the_auto_threshold_keep_scaling() {
+        let chunk = |tag: &str| format!("{tag}: {}", "a".repeat(240_000));
+        let mut msgs = vec![Message::system("sys"), Message::user("initial")];
+        for i in 1..=12 {
+            msgs.push(Message::assistant(chunk(&format!("a{i}")), vec![]));
+            msgs.push(Message::user(chunk(&format!("u{i}"))));
+        }
+        let floor = 2;
+        let view = |trigger| CompactionView {
+            messages: &msgs,
+            trigger,
+            ctx_window: 1_000_000,
+            used_tokens: 360_000,
+            utilization: 0.36,
+            sacred_floor: floor,
+        };
+
+        let custom = OverflowCompaction::new(
+            StubCompaction::default(),
+            Some(Arc::new(CannedSummaryProvider)),
+        )
+        .with_auto_drain_utilization(0.35);
+        let default = OverflowCompaction::new(
+            StubCompaction::default(),
+            Some(Arc::new(CannedSummaryProvider)),
+        );
+
+        let manual = custom
+            .plan(&view(CompactTrigger::Manual { focus: None }))
+            .await;
+        let manual_default = default
+            .plan(&view(CompactTrigger::Manual { focus: None }))
+            .await;
+        let auto = custom
+            .plan(&view(CompactTrigger::Auto { utilization: 0.36 }))
+            .await;
+
+        assert_eq!(
+            manual.drain_to, manual_default.drain_to,
+            "manual /compact must keep the historical recent-turn budget"
+        );
+        assert!(
+            auto.drain_to > manual.drain_to,
+            "Auto must drain more when the threshold is lowered (manual={}, auto={})",
+            manual.drain_to,
+            auto.drain_to
+        );
     }
 
     #[tokio::test]
