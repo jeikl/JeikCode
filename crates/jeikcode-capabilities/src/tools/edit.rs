@@ -3024,10 +3024,11 @@ impl Drop for EditOsLock {
 /// existing ancestor) off the async worker and return its shared lock key.
 pub(crate) async fn lock_key_for_write_path(path: PathBuf) -> String {
     tokio::task::spawn_blocking(move || {
-        if let Ok(canonical) = std::fs::canonicalize(&path) {
+        let normalized = crate::pathnorm::lexical_normalize(&path);
+        if let Ok(canonical) = std::fs::canonicalize(&normalized) {
             return crate::pathnorm::path_case_key(&canonical);
         }
-        let mut cursor = path.as_path();
+        let mut cursor = normalized.as_path();
         let mut suffix_parts = Vec::new();
         while !cursor.exists() {
             let Some(name) = cursor.file_name() else {

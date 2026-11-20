@@ -192,14 +192,14 @@ impl IgnorePolicy {
         }
         let path = absolute(path, &self.root);
         self.sensitive.iter().any(|m| {
-            let Ok(rel) = path.strip_prefix(&m.base) else {
+            let Some(rel) = strip_base_prefix(&path, &m.base) else {
                 return false;
             };
             if rel.as_os_str().is_empty() {
                 return false;
             }
             m.matcher
-                .matched_path_or_any_parents(rel, path.is_dir())
+                .matched_path_or_any_parents(&rel, path.is_dir())
                 .is_ignore()
         })
     }
@@ -237,12 +237,12 @@ impl IgnorePolicy {
 
     fn add_nested_ancestor_matchers(&mut self, path: &Path, root: &Path) {
         let path = absolute(path, root);
-        if !path.starts_with(root) {
+        if strip_base_prefix(&path, root).is_none() {
             return;
         }
         let mut current = path.parent();
         while let Some(dir) = current {
-            if dir == root || !dir.starts_with(root) {
+            if dir == root || strip_base_prefix(dir, root).is_none() {
                 break;
             }
             for (name, sensitive) in [
@@ -311,13 +311,13 @@ impl IgnorePolicy {
     fn best_sensitive_match(&self, path: &Path) -> Option<(bool, PathBuf)> {
         let mut best: Option<(usize, usize, bool, PathBuf)> = None;
         for m in &self.sensitive {
-            let Ok(rel) = path.strip_prefix(&m.base) else {
+            let Some(rel) = strip_base_prefix(path, &m.base) else {
                 continue;
             };
             if rel.as_os_str().is_empty() {
                 continue;
             }
-            let matched = m.matcher.matched_path_or_any_parents(rel, path.is_dir());
+            let matched = m.matcher.matched_path_or_any_parents(&rel, path.is_dir());
             if !matched.is_ignore() {
                 continue;
             }
@@ -341,13 +341,13 @@ fn best_noise_match(
     let path = absolute(path, root);
     let mut best: Option<(usize, usize, bool, PathBuf)> = None;
     for m in matchers {
-        let Ok(rel) = path.strip_prefix(&m.base) else {
+        let Some(rel) = strip_base_prefix(&path, &m.base) else {
             continue;
         };
         if rel.as_os_str().is_empty() {
             continue;
         }
-        let matched = m.matcher.matched_path_or_any_parents(rel, path.is_dir());
+        let matched = m.matcher.matched_path_or_any_parents(&rel, path.is_dir());
         if !matched.is_ignore() && !matched.is_whitelist() {
             continue;
         }
@@ -363,11 +363,26 @@ fn best_noise_match(
 }
 
 fn absolute(path: &Path, root: &Path) -> PathBuf {
-    if path.is_absolute() {
+    let raw = if path.is_absolute() {
         path.to_path_buf()
     } else {
         root.join(path)
+    };
+    crate::pathnorm::lexical_normalize(&raw)
+}
+
+fn strip_base_prefix<'a>(path: &'a Path, base: &Path) -> Option<std::borrow::Cow<'a, Path>> {
+    if let Ok(rel) = path.strip_prefix(base) {
+        return Some(std::borrow::Cow::Borrowed(rel));
     }
+    if let (Ok(c_path), Ok(c_base)) = (path.canonicalize(), base.canonicalize()) {
+        let stripped_path = crate::pathnorm::strip_verbatim_path(&c_path);
+        let stripped_base = crate::pathnorm::strip_verbatim_path(&c_base);
+        if let Ok(rel) = stripped_path.strip_prefix(&stripped_base) {
+            return Some(std::borrow::Cow::Owned(rel.to_path_buf()));
+        }
+    }
+    None
 }
 
 /// Hard credential paths shared by graph indexing, grep/glob and the explicit
@@ -440,13 +455,7 @@ fn is_env_template(name: &str) -> bool {
 }
 
 fn canonical_root(root: &Path) -> PathBuf {
-    let c = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let s = c.to_string_lossy();
-    let stripped = s
-        .strip_prefix(r"\\?\")
-        .or_else(|| s.strip_prefix("//?/"))
-        .unwrap_or(&s);
-    PathBuf::from(stripped)
+    crate::pathnorm::lexical_normalize(root)
 }
 
 fn fingerprint_file(hasher: &mut DefaultHasher, path: &Path) {
