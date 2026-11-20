@@ -21,6 +21,280 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.2-beta.1 (2026-11-20)
+
+**This beta introduces scheduled tasks with dedicated AI dialog configuration, removes main session execution round limits with graceful soft-landing summaries, supports runtime seamless model switching, enables startup global Auto mode, provides silent desktop autostart with global hotkeys, and delivers full desktop package update architecture with two-hop legacy shell upgrades, alongside critical fixes for compaction notice misplacement, semver comparison bugs, single-mux WebSocket performance, and zero-blocking async runtimes.**
+
+- **[New Feature: Scheduled Tasks] AI dialog assistant and orthogonal calendar scheduling**:
+  - Added multi-schedule syntax (`Schedule::Calendar`) supporting orthogonal dates, weekdays, and multi-time combinations with atomic temp-file configuration persistence.
+  - Implemented 15-second background scheduling engine in `jeikcode-daemon` with local timezone accuracy, `one_shot` auto-deactivation, and `isolated` vs `reuse` session modes.
+  - Added dedicated `/api/schedules/ai-dialog` mounting an isolated `set_schedule` tool to manage scheduled tasks via natural conversation without polluting workspace context.
+  - Integrated `ScheduleDialog.tsx` in WebUI with visual date picker, prompt editor, `Run Now` instant trial, active badges in the sidebar, and project-level task trees.
+
+- **[New Feature: Unbounded Rounds] Complete removal of main session round limits with soft-landing summary**:
+  - Removed execution round limits for main sessions (`max_rounds` defaults to `0` / unbounded, while subagents retain a 300-round ceiling).
+  - Replaced abrupt `StopReason::MaxRounds` terminations with an intelligent soft landing: disables tool execution for one final summary round while emitting localized warning notices.
+
+- **[New Feature: Runtime Model Swap] Hot-swapping models during active turns without context loss**:
+  - Supported hot-swapping models during active turns, applying the new model cleanly at the next round boundary without breaking stream execution or losing conversation history.
+  - Added display-only "Switch to <model>" chips bound to assistant messages, persisted to `<session>.model-switches.jsonl` and `<session>.toolmetrics.jsonl` without polluting model context.
+
+- **[New Feature: Startup Automation] Startup global Auto/Bypass mode and persistent mode memory**:
+  - Added configurable `agent_mode_policy` (`memory` vs `global`) and `agent_global_mode` (`build`, `plan`, `accept_edits`, `bypass` / Auto).
+  - Automatically loads desktop settings on daemon startup to initialize global Auto mode, and sets default `permission_mode` to `"auto"` for scheduled tasks.
+  - Added a direct gear settings button in `ModeSelector.tsx` leading to Agent Mode configurations with full 11-locale support.
+
+- **[New Feature: Full Desktop Updates] Full desktop package updates and legacy shell two-hop upgrades**:
+  - Added desktop shell compatibility metadata (`desktop/shell-compat.json` with `min_shell_version`); automatically prompts for full desktop package download if shell is below requirement or installation directory is read-only.
+  - Implemented automated two-hop upgrade continuation for legacy desktop shells: Step 1 hot-updates the core to latest, and Step 2 prompts to download and install the new desktop shell package in one click.
+
+- **[New Feature: Desktop & Shortcut] Silent-to-tray autostart and global hotkey**:
+  - Added silent-to-tray login autostart for Windows (`--minimized`) without window flashes, and ensured reliable foreground window activation.
+  - Added configurable global shortcut `Ctrl+Alt+J` with interactive keycap recording in `ShortcutRecorder.tsx`.
+
+- **[New Feature: UI Overhaul] Minimalist high-information-density UI redesign**:
+  - Replaced expansive git commit cards with concise, single-line `gitCommitBanner` summary banners showing branch name, commit hash, and line stats.
+  - Replaced cumbersome execution timer blocks with sleek, inline `ElapsedBadge` chips.
+  - Streamlined `app.css` and `theme.css` spacing, margins, and typography, boosting screen information density by ~35%.
+
+- **[Deep Fix: Compaction Anchoring] Multi-turn compaction notice misplacement and causal anchoring**:
+  - Resolved multi-turn compaction notice misplacement and drifting by introducing continuous `event_id`, `turn_id`, and `anchor_message_id` causal anchors.
+  - Bumped display ledger format to `DISPLAY_VERSION = 5` with single-writer persistence, pre-compaction flushing, and in-place notice card state convergence.
+
+- **[Deep Fix: SemVer Comparison] Numeric prerelease comparison and cross-lockfile consistency**:
+  - Fixed semver prerelease comparison algorithms in bump/release scripts, preventing `beta.10` from sorting before `beta.2` via true numeric segmentation.
+  - Aligned cross-lockfile package version extraction across `desktop/src-tauri/Cargo.lock` and root `Cargo.lock`.
+
+- **[Performance & Concurrency] Zero-blocking async runtime and HTTP/2 shared pools**:
+  - Multiplexed all global events and session watches onto a single WebSocket (`/stream/ws`), freeing HTTP/1.1 connection slots and eliminating multi-tab stalls.
+  - Lazy-loaded Terminal (saving 377KB+ initial bundle), Git, and Preview inspectors, allowing closing terminals to zero.
+  - Offloaded all disk and session I/O to dedicated blocking threads, and deployed Tokio reactor lag watchdog alerting on >100ms delays.
+  - Enabled HTTP/2 across all providers via global shared `reqwest` connection pool, and sharded session registry locks across 64 shards (raising active limit from 32 to 128).
+
+- **[Resilience & Bug Fixes] Long-session stability, decimal cursor fix, and process safety**:
+  - Fixed decimal cursor (`before_seq=0.953`) 400 errors during upward history pagination by strictly using integer `serverSeq` cursors and falling back to offset pagination.
+  - Fixed Linux TGID migration self-kill defect (#88) and added timeout error banners.
+  - Unified provider retry backoff ladders with jitter and supported interrupted stream resumption.
+  - Raised default streaming and transition timeouts to 360s for reasoning models.
+
+---
+
+**本次 beta 带来多项突破性全新功能：支持强大 AI 配置的全新定时任务系统、彻底移除主会话轮次上限并引入优雅软着陆机制、回合内运行时无缝模型热切换、开机自动全局 Auto/Bypass 模式、全量桌面端更新体系与存量旧壳两跳平滑升级、桌面端静默自启与全局热键，以及全界面极简高密度比改造；同时针对多轮对话压缩错位、SemVer 版本号数值比对缺陷、单链路 WebSocket 复用与全栈异步零阻塞架构进行了深水区根因级修复与全面升级。**
+
+- **[新增功能：定时任务] 支持强大的 AI 对话配置、指定时间多维度独立解耦配置**：
+  - 新增日历正交多时间点调度语法（`Schedule::Calendar`），支持指定日期、星期与多时间点正交组合，配置写入采用同目录原子临时文件保证安全性。
+  - 在守护进程部署 15 秒高精度后台调度循环，按本地时区精准触发，支持单次任务（`one_shot`）自动停用以及新建独立会话或复用会话模式。
+  - 推出专属 `/api/schedules/ai-dialog` 独立端点与单挂载 `set_schedule` 工具，支持纯自然语言对话配置与管理定时任务，绝不污染主编码工具池。
+  - WebUI 全面上线 `ScheduleDialog.tsx`，支持可视化日程配置、即时试跑（`Run Now`）、左侧栏激活指示徽标与项目内定时任务折叠组展示。
+
+- **[新增功能：轮次上限解锁] 彻底移除主会话执行轮次上限，支持温和优雅的软着陆总结**：
+  - 彻底解除主会话的轮次硬性上限（主会话默认 `max_rounds = 0` 不受限，子 Agent 维持 300 轮安全边界）。
+  - 将达到轮次上限的强杀逻辑改造为智能软着陆机制：禁用工具保留最后 1 轮让模型生成最终总结，并触发多语言警告通知收口。
+
+- **[新增功能：运行时切模] 运行时无缝模型热切换，回合执行中随时换模且零上下文丢失**：
+  - 支持在回合执行过程中动态更换模型，在当前小轮结束后自动切换 Provider，不打断流式生成、不丢失历史上下文。
+  - 新增绑定 Assistant 消息的仅展示 “Switch to <模型>” 状态徽标，换模耗时与工具执行指标实时写入 `<session>.model-switches.jsonl` 与 `<session>.toolmetrics.jsonl`，绝不污染模型提示词。
+
+- **[新增功能：启动自动化] 启动自动全局 Auto/Bypass 模式与智能体记忆策略**：
+  - 扩展 `agent_mode_policy`（`memory` 按会话记忆 vs `global` 全局统一）与 `agent_global_mode`（`build`、`plan`、`accept_edits`、`bypass` / Auto）。
+  - 守护进程冷启动自动读取系统设置加载全局 Auto/Bypass 模式，所有后台定时任务默认 `permission_mode = "auto"` 自动免审批执行。
+  - 深度持久化每会话审批模式，彻底解决草稿或落地页重启后回退至 `build` 确认模式的顽疾。
+
+- **[新增功能：全量更新] 全新桌面端全量更新机制，低版本外壳自动拦截与两跳平滑升级**：
+  - 新增 `desktop/shell-compat.json` 外壳兼容性判定；当检测到外壳版本低于要求或安装目录只读时，自动提示下载完整安装包。
+  - 针对存量老版本桌面客户端实现两跳升级机制：第 1 跳就地热更新核心至最新版，重启后新核心自动引导第 2 跳一键全量升级桌面外壳。
+
+- **[新增功能：桌面端体验] 桌面端无闪烁静默自启与全局呼出热键**：
+  - Windows 系统下支持通过注册表注入 `--minimized` 实现托盘静默自启（消除冷启白屏闪烁），并确保托盘唤醒即置顶聚焦。
+  - 新增默认 `Ctrl+Alt+J` 全局呼出/隐藏热键，集成 `ShortcutRecorder.tsx` 动态按键录制。
+
+- **[新增功能：界面重构] 全界面极简风与高信息密度比重构**：
+  - 新增单行极简 `gitCommitBanner` 提交成功横条，精炼呈现分支、提交哈希与变更量统计，杜绝全量文件刷屏。
+  - 引入精致内嵌的 `ElapsedBadge` 耗时徽标，优化思考过程与模型耗时排版。
+  - 全面精简 `app.css` 与 `theme.css` 内外边距及文字字阶，有效信息屏占比提升约 35%。
+
+- **[深水区架构修复：压缩错位治理] 修复多轮对话压缩消息张冠李戴错位缺陷**：
+  - 引入因果锚定（`anchor_message_id`、连续递增 `event_id` 与 `turn_id`），彻底消灭多轮压缩和转向历史中系统卡片跳跃、挂错回合与重复刷屏的严重 Bug。
+  - 升级 `DISPLAY_VERSION = 5`，支持单写账本持久化，在压缩前执行预落盘校验并在卡片状态变更时原地收敛更新。
+
+- **[深水区架构修复：版本比对修复] 修复升级版本号数值比对倒流 Bug**：
+  - 修复版本递增与发版脚本中先行版本号（Prerelease）的字符串字典序缺陷，将数字部分转为纯数值比较，彻底消灭 `beta.10` 比 `beta.2` 更小的排序错误。
+  - 对齐跨 Lockfile 独立包多版本提取规则，兼容数值型 query 参数。
+
+- **[极致性能与高并发跃升] 单链路 WebSocket 多路复用与全栈异步零阻塞**：
+  - 全面落地单 WebSocket（`/stream/ws`）多路复用，释放浏览器 6 个并发连接池槽位，多标签切换秒开不卡死。
+  - 右侧终端（省下 377KB 首屏包）、Git 与预览面板彻底改为按需懒加载，支持关闭全部终端至 0。
+  - 网络线程盘 I/O 清零，全面切离至阻塞线程池；部署自适应 Reactor 调度延迟看门狗（超调 100ms 限流报警）。
+  - 全仓开启 HTTP/2 与全局共享连接池，锁升级为 64 分片，活跃并发会话上限由 32 提升至 128。
+
+- **[稳定性与缺陷修复] 历史翻页小数游标修复与进程防自毁**：
+  - 修复向上加载历史消息时小数游标（`before_seq=0.953`）导致的 400 崩溃，严格分离整数 `serverSeq` 游标并支持 offset 降级。
+  - 修复 Linux 环境旧版环境扫描误杀当前守护进程（#88）的重大缺陷。
+  - 统一大模型供应商重试退避阶梯并支持未完成流式响应断点续传。
+  - 将流式与状态过渡超时阈值提升至 360 秒，完美适配长耗时思考模型。
+
+## v7.5.2-beta.0 (2026-11-17)
+
+**This beta eliminates WebUI multi-tab stalls, connection pool exhaustion, modal hangs, and legacy-migration daemon self-termination (#88). It multiplexes live streams over a single WebSocket, lazy-loads the right inspector and extra language packs, isolates blocking backend IO onto worker threads, and aggregates cold-start metadata loading.**
+
+- **[Stability & Issue #88] Safe legacy migration and auth recovery**:
+  - Added Linux TGID, thread-group, child-process, and executable-path guards in legacy zombie process cleanup so migration never kills the running daemon itself (#88), with timeout bounds, error banners, and dismiss/retry controls in the modal.
+  - Redirected `/token=<value>` paths to the canonical `/?token=<value>` authentication flow and guarded collection endpoints against non-OK/non-array payloads.
+  - Fixed the "Load older messages" decimal cursor (`before_seq=0.953`) 400 failure by strictly separating authentic server integer `serverSeq` cursors and falling back to offset pagination.
+
+- **[Connectivity & Responsiveness] Multiplexed streaming and instant model settings**:
+  - Added a single multiplexed `/stream/ws` channel carrying both global events and on-demand session watches (with SSE leader election and hidden-tab standby pausing as fallback), freeing HTTP/1.1 connection slots across multi-tab sessions.
+  - Made right inspector panels (Terminal, Git, Preview) genuinely lazy-mount only when opened, allowed closing all terminals to zero, and stopped unnecessary cold-start Git subprocess refreshes.
+  - Fixed model configuration dialogs disappearing and stalling on "Loading..." by rendering an immediate modal frame, preloading settings chunks when idle, adding SWR config caching, deferring unrelated settings requests, and adding a 15s default request timeout.
+
+- **[Performance & Payload] Startup aggregation, backend isolation, and lighter bundles**:
+  - Added aggregated `/api/bootstrap` startup loading, in-flight `GET` deduplication, stabilized model-selector callbacks, decoupled sidebar folder expansion from full reloads, cached update checks with lightweight `?summary=1` and ETag support, and re-enabled `tail` ETag caching.
+  - Moved Git handlers, process scans, and session resolution/detail loading into blocking worker threads, deduplicated catalog directory scans, and switched session lookup to single-bucket access.
+  - Extracted the 1-second timer out of the root chat component, memoized turn-text aggregation and user message views, skipped DOM parsing for image-free markdown blocks, windowed large expanded sidebar lists, and code-split non-default language packs.
+
+---
+
+**本次 beta 集中解决 WebUI 多标签卡顿、HTTP/1.1 连接池拥堵、弹窗失灵以及旧版环境迁移导致服务端进程自毁（#88）的问题，通过单连接 WebSocket 多路复用、检查器与多语言包按需懒加载、后端阻塞操作线程隔离及冷启动元数据聚合，大幅提升页面流畅度与稳定性。**
+
+- **[稳定性与 #88 修复] 迁移防护与鉴权/分页兜底**：
+  - 修复 Linux 下迁移扫描误杀自身线程组的缺陷（#88），保护同进程组、子进程及当前可执行文件路径，并为迁移弹窗补齐超时、错误提示与关闭/重试交互。
+  - 修复误输入 `/token=<value>` 路径后的鉴权引导并补全列表类接口状态码与数组校验，消除未登录时的页面崩溃。
+  - 修复大话窗「向上展开历史」发出小数游标导致 400 卡死的问题，严格区分后端真实整数分页游标并在异常时自动回退偏移分页。
+
+- **[连接架构与交互响应] 单链路实时复用与配置弹窗秒开**：
+  - 新增并接入统一实时复用通道，多标签页共享与会话监听不再挤占 6 条 HTTP/1.1 连接槽，降级模式下支持跨标签页选主与后台标签暂停。
+  - 将右侧 Terminal、Git 与 Preview 检查器彻底改为打开时按需挂载，允许关闭至 0 个终端，移除折叠态与落地页的冗余终端和 Git 初始化开销。
+  - 消除点击「模型配置」后弹窗空白消失与久等卡在加载中的现象，提供即时弹窗骨架、后台空闲预热、配置缓存秒开、按页签按需请求及 15 秒默认请求超时控制。
+
+- **[性能与体积优化] 首屏聚合、后端阻塞隔离与主线程瘦身**：
+  - 推出冷启动 `/api/bootstrap` 聚合接口与并发 `GET` 单飞去重，优化侧栏与模型选择器钩子依赖，为版本检查补全服务端 TTL 缓存、`?summary=1` 轻量摘要与前端冷却共享，并恢复首屏历史尾页 ETag 条件缓存。
+  - 将全线 Git 操作、进程扫描与会话检索读盘迁移至阻塞线程池，合并重复目录扫描并支持单分桶直查会话详情。
+  - 剥离顶层 1 秒计时器重渲染、缓存回复文本与用户气泡组件、对无图消息跳过解析器、对长会话列表分批渐进展开，并将扩展语种词典移出主包按需加载。
+
+## v7.5.1 (2026-11-16)
+
+**This stable release consolidates the entire 7.5.1 beta line. It aligns the OpenAI-, Responses-, and Anthropic-compatible endpoints with the WebUI session model, keeps steer and user rows stable through folds and session switches, unifies code-graph/search ignore handling, restores files that could remain missing from `code_explore`, improves Chinese/English retrieval, combines todo plan/update, and adds a permanent update kill switch.**
+
+- **[API Conversation Endpoints] Stateful compatibility with the WebUI session model**:
+  - `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` now use the same admission path as a WebUI send; the newest user message is admitted once, persisted before the model runs, and shown in the outline.
+  - Fixed the second-and-later-turn amnesia regression; API sessions now keep their context across turns.
+  - The client `user` value remains the session key; protocol sessions keep an immutable key independent of the display title, and legacy sessions are backfilled on first use.
+  - Omitting `user` creates an ephemeral per-request session instead of sharing a global default conversation.
+  - Only the newest user message is admitted; wire shapes, SSE chunks, usage, model echo, and image inputs remain compatible; API turns stay in Auto mode.
+
+- **[Message Ordering] Stable steer and user rows**:
+  - A mid-turn steer card keeps its causal position across foreground/background fold, full refresh, repeated session switches, and terminal reconciliation.
+  - Provisional window/outline indexes no longer decide transcript ordering; only persisted or server-confirmed indexes can place a row.
+
+- **[Code Search & Graph] Unified ignore policy and reliable recovery**:
+  - Global, project-root, `.jeikcode`, and nested `.codegraphignore` rules now follow one precedence model; project rules can re-open global exclusions.
+  - Sensitive credential rules remain a separate hard gate; `include_ignored` never exposes them.
+  - Subdirectory searches, new files, new subdirectories, warm indexing, and agent edits now honor the same workspace policy.
+  - Failed or empty file units are retried, and stale graph snapshots are recomposed when they do not cover every file.
+  - Zero-hit hints identify which ignore file caused the exclusion.
+
+- **[Retrieval] Better Chinese/English business-term matching**:
+  - CJK segment matching and hard/soft thesaurus expansion reduce over-expansion and false positives.
+  - Multi-intent queries retain per-intent evidence and show `INTENT HITS`.
+  - Candidate pruning and BM25 keep large workspaces responsive.
+
+- **[Todo & CLI] Combined plan/update and permanent update control**:
+  - A single `todo_write` call can carry both `plan` and `update`; `plan` is applied first, `update` references rebuilt ids, and a failed update leaves the existing checklist unchanged.
+  - Hidden `update dead` disables update paths across CLI, daemon, TUI, WebUI, and bundled config sync.
+
+- **[Verification]**:
+  - Live coverage includes global/project/nested ignores, sensitive gating, subdirectory search, new-file discovery, failed-parse retry, and missing graph units.
+  - The full `jeikcode-capabilities` lib suite reports 1243 passed and 2 ignored; three bash timing tests that timed out under parallel load pass when rerun serially.
+  - The release workflow builds all six platform targets from this tag and publishes them together.
+
+---
+
+**本次正式版汇总整个 7.5.1 beta 线：OpenAI、Responses 与 Anthropic 兼容端点对齐 WebUI 会话模型；转向与用户消息在 fold、刷新和切会话后保持因果位置；代码图谱/搜索统一 ignore 策略并修复文件可能长期缺失的问题；提升中英文业务词检索精度；支持 todo plan/update 合并；新增永久关闭更新开关。**
+
+- **[API 对话端点] 与 WebUI 会话模型一致的有状态兼容**：
+  - `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 现在与 WebUI 发送走同一准入路径；最新 user 消息只准入一次、在模型请求前落盘，并出现在右栏大纲。
+  - 修复第二轮及之后 API 提问“失忆”的回归；API 会话跨轮保留上下文。
+  - 客户端 `user` 仍是会话键；协议会话保存与显示标题解耦的不可变键，旧会话首次使用时回填。
+  - 省略 `user` 时每次请求创建临时会话，不再共享全局默认对话。
+  - 只准入最新一条 user 消息；wire 结构、SSE、usage、model 回显与图片输入保持兼容；API 回合继续强制 Auto。
+
+- **[消息顺序] 转向与用户消息稳定归位**：
+  - 回合中的转向卡在前台/后台 fold、整页刷新、反复切会话与终态对账后都保持原有因果位置。
+  - 临时的窗口/大纲下标不再决定消息顺序；只有持久化或服务端确认的下标才能决定行位置。
+
+- **[代码搜索与图谱] 统一 ignore 策略与可靠恢复**：
+  - 全局、项目根、`.jeikcode` 与嵌套 `.codegraphignore` 使用同一优先级；项目规则可以重新打开全局排除项。
+  - 敏感凭据规则保持独立硬门；`include_ignored` 永远不会打开敏感文件。
+  - 子目录搜索、新文件、新子目录、warm 索引与 agent 编辑都遵循同一工作区策略。
+  - 解析失败或为空的文件 unit 会自动重试；旧 graph 快照未覆盖全部文件时会重新组合。
+  - 零命中提示会指出是哪一条 ignore 规则导致排除。
+
+- **[检索] 改善中英文业务词匹配**：
+  - CJK segment 匹配与 Hard/Soft 词林扩展减少过度扩展与误召回。
+  - 多意图查询保留每个意图的证据并展示 `INTENT HITS`。
+  - 候选裁剪与 BM25 保持大工作区的响应速度。
+
+- **[Todo 与 CLI] plan/update 合并与永久更新控制**：
+  - 一次 `todo_write` 可以同时携带 `plan` 与 `update`；先应用 `plan`，`update` 引用重建后的 id，失败时保留原清单不变。
+  - 隐藏的 `update dead` 可关闭 CLI、daemon、TUI、WebUI 与内置配置同步的所有更新路径。
+
+- **[验证]**：
+  - 实时覆盖全局/项目/嵌套 ignore、敏感门、子目录搜索、新文件发现、解析失败重试与缺失 graph unit。
+  - `jeikcode-capabilities` 完整 lib 测试为 1243 passed、2 ignored；三个 bash 计时测试并行负载下超时，串行复跑全部通过。
+  - 发布流水线会从该 tag 构建全部六个平台目标并统一发布。
+
+## v7.5.1-beta.3 (2026-11-16)
+
+**This beta unifies code-graph and search ignore handling across global, project, and nested rules, restores files that could remain missing from `code_explore`, and improves bilingual retrieval. It also adds a permanent update kill switch and allows one `todo_write` call to combine `plan` and `update`.**
+
+- **[Code Search & Graph] One consistent ignore policy**:
+  - Global, project-root, `.jeikcode`, and nested `.codegraphignore` rules now follow one precedence order; project rules can re-open global exclusions.
+  - Sensitive credential rules remain a separate hard gate; `include_ignored` never exposes them.
+  - Subdirectory searches, new files, new subdirectories, warm indexing, and agent edits now honor the same workspace policy.
+  - Previously failed or empty file units are retried, and stale graph snapshots are recomposed when they do not cover every file.
+  - Zero-hit hints identify which ignore file caused the exclusion.
+
+- **[Retrieval] Better Chinese/English business-term matching**:
+  - CJK segment matching and hard/soft thesaurus expansion reduce over-expansion and false positives.
+  - Multi-intent queries retain per-intent evidence and show `INTENT HITS`.
+  - Candidate pruning and BM25 keep large workspaces responsive.
+
+- **[Todo] Combined plan and update**:
+  - A single `todo_write` call can carry both `plan` and `update`; `plan` is applied first, `update` references rebuilt ids, and a failed update leaves the existing checklist unchanged.
+
+- **[CLI] Permanent update kill switch**:
+  - Hidden `update dead` disables update paths across CLI, daemon, TUI, WebUI, and bundled config sync.
+
+- **[Verification]**:
+  - Relevant ignore/search/graph tests pass. The full `jeikcode-capabilities` lib suite reports 1243 passed and 2 ignored; three bash timing tests that timed out under parallel load pass when rerun serially.
+  - Live coverage includes global/project/nested ignores, sensitive gating, subdirectory search, new-file discovery, failed-parse retry, and missing graph units.
+
+---
+
+**本次 beta 统一了代码图谱与搜索在全局、项目、嵌套规则下的 ignore 行为，修复了部分文件可能长期不出现在 `code_explore` 中的问题，并提升中英文业务词检索精度。同时新增永久关闭更新的开关，并允许一次 `todo_write` 同时提交 `plan` 与 `update`。**
+
+- **[代码搜索与图谱] 统一 ignore 策略**：
+  - 全局、项目根、`.jeikcode` 与嵌套 `.codegraphignore` 使用同一优先级；项目规则可以重新打开全局排除项。
+  - 敏感凭据规则保持独立硬门；`include_ignored` 永远不会打开敏感文件。
+  - 子目录搜索、新文件、新子目录、warm 索引与 agent 编辑都遵循同一工作区策略。
+  - 曾经解析失败或为空的文件 unit 会自动重试；旧 graph 快照未覆盖全部文件时会重新组合。
+  - 零命中提示会指出是哪一条 ignore 规则导致排除。
+
+- **[检索] 改善中英文业务词匹配**：
+  - CJK segment 匹配与 Hard/Soft 词林扩展减少过度扩展与误召回。
+  - 多意图查询保留每个意图的证据并展示 `INTENT HITS`。
+  - 候选裁剪与 BM25 保持大工作区的响应速度。
+
+- **[Todo] 支持 plan 与 update 合并**：
+  - 一次 `todo_write` 可以同时携带 `plan` 与 `update`；先应用 `plan`，`update` 引用重建后的 id，失败时保留原清单不变。
+
+- **[CLI] 永久关闭更新开关**：
+  - 隐藏的 `update dead` 可关闭 CLI、daemon、TUI、WebUI 与内置配置同步的所有更新路径。
+
+- **[验证]**：
+  - 相关 ignore/搜索/图谱测试通过。`jeikcode-capabilities` 完整 lib 测试为 1243 passed、2 ignored；三个 bash 计时测试并行负载下超时，串行复跑全部通过。
+  - 实时覆盖全局/项目/嵌套 ignore、敏感门、子目录搜索、新文件发现、解析失败重试与缺失 graph unit。
+
 ## v7.5.1-beta.2 (2026-11-10)
 
 **This beta fixes a message-row ordering regression where a mid-turn steer card could jump ahead of already-streamed reasoning and tool blocks during session switches or streaming, then snap back when the turn stopped. Steer and user rows now keep their causal position across foreground/background fold, refresh, repeated session switches, and terminal reconciliation.**

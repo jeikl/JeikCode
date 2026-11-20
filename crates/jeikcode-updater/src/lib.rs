@@ -26,10 +26,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
+
+fn updates_disabled() -> bool {
+    jeikcode_config::config::runtime_state::is_dead()
+}
 
 /// Version manifest URL for self-update. A function rather than a const because
 /// the address follows the deployment profile; see `jeikcode_config::endpoints`.
@@ -210,12 +214,86 @@ impl From<anyhow::Error> for UpgradeFailure {
     }
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DesktopManifestCompat {
+    #[serde(default)]
+    pub min_shell_version: Option<String>,
+    #[serde(default)]
+    pub latest_shell_version: Option<String>,
+    #[serde(default)]
+    pub shell_changed: bool,
+    #[serde(default)]
+    pub updater_manifest: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub version: String,
     #[serde(default)]
     pub released_at: Option<String>,
     pub binaries: std::collections::BTreeMap<String, BinaryEntry>,
+    #[serde(default)]
+    pub desktop: Option<DesktopManifestCompat>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DesktopPlatformEntry {
+    pub url: String,
+    #[serde(default)]
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DesktopInstallerEntry {
+    pub url: String,
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub sha256: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DesktopUpdaterManifest {
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub pub_date: Option<String>,
+    #[serde(default)]
+    pub platforms: std::collections::BTreeMap<String, DesktopPlatformEntry>,
+    #[serde(default)]
+    pub installers: std::collections::BTreeMap<String, DesktopInstallerEntry>,
+}
+
+pub fn desktop_updater_url_for_tag(tag: &str) -> String {
+    let norm = normalize_version_tag(tag);
+    format!("{}/{}/desktop-updater.json", download_base(), norm)
+}
+
+pub fn resolve_desktop_installer_key(bundle_type: &str) -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH, bundle_type) {
+        ("windows", "x86_64", _) => Some("windows-x64"),
+        ("macos", "aarch64", "dmg") => Some("darwin-arm64-dmg"),
+        ("macos", "aarch64", _) => Some("darwin-arm64-app"),
+        ("macos", "x86_64", "dmg") => Some("darwin-x64-dmg"),
+        ("macos", "x86_64", _) => Some("darwin-x64-app"),
+        ("linux", "x86_64", "appimage") => Some("linux-x64-appimage"),
+        ("linux", "x86_64", _) => Some("linux-x64-deb"),
+        _ => None,
+    }
+}
+
+pub fn resolve_desktop_tauri_platform_key() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Some("windows-x86_64"),
+        ("macos", "aarch64") => Some("darwin-aarch64"),
+        ("macos", "x86_64") => Some("darwin-x86_64"),
+        ("linux", "x86_64") => Some("linux-x86_64"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -792,6 +870,9 @@ async fn fetch_release_pages(
 /// Full GitHub release row for one tag. Used to repair announcements that the
 /// edge cache truncated instead of downloading every release page.
 pub async fn fetch_release_by_tag(tag: &str) -> Result<ListedRelease> {
+    if updates_disabled() {
+        bail!("updates are disabled");
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         bail!("cannot fetch release notes in offline mode");
     }
@@ -828,6 +909,9 @@ async fn fetch_release_by_tag_with_client(
 /// long announcement. Truncated tags are repaired individually by tag so a
 /// long changelog does not force a full release-page download.
 pub async fn list_releases() -> Result<Vec<ListedRelease>> {
+    if updates_disabled() {
+        return Ok(vec![]);
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         return Ok(vec![]);
     }
@@ -878,6 +962,9 @@ pub async fn list_releases() -> Result<Vec<ListedRelease>> {
 
 /// Releases directly from GitHub, returning empty vec in offline mode.
 pub async fn list_releases_from_github() -> Result<Vec<ListedRelease>> {
+    if updates_disabled() {
+        return Ok(vec![]);
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         return Ok(vec![]);
     }
@@ -935,6 +1022,9 @@ pub fn channel_for_tag(tag: &str) -> UpdateChannel {
 
 /// `latest.json` published next to one tag's binaries.
 pub async fn fetch_manifest_for_tag(version: &str) -> Result<Manifest> {
+    if updates_disabled() {
+        bail!("updates are disabled");
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         bail!("cannot fetch update manifest in offline mode");
     }
@@ -953,6 +1043,9 @@ pub async fn fetch_manifest_for_tag(version: &str) -> Result<Manifest> {
 /// `releases/latest`; beta picks the highest prerelease tag and loads that
 /// tag's `latest.json` (prereleases are never `/releases/latest`).
 pub async fn fetch_manifest_for_channel(channel: UpdateChannel) -> Result<Manifest> {
+    if updates_disabled() {
+        bail!("updates are disabled");
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         bail!("cannot fetch update manifest in offline mode");
     }
@@ -1252,9 +1345,106 @@ fn parent_is_procd() -> bool {
 /// 由向导生成的服务定义统一写入此环境变量，值为服务名，
 /// 用于在重启时精确定位「正在托管自己」的那一个服务文件。
 pub const HOST_SERVICE_ENV: &str = "JEIKCODE_HOST_SERVICE";
+pub const DESKTOP_VERSION_ENV: &str = "JEIKCODE_DESKTOP_VERSION";
+pub const DESKTOP_BUNDLE_ENV: &str = "JEIKCODE_DESKTOP_BUNDLE";
+pub const DESKTOP_UPDATER_ENV: &str = "JEIKCODE_DESKTOP_UPDATER";
+pub const DESKTOP_UPDATER_SIGNED_ENV: &str = "JEIKCODE_DESKTOP_UPDATER_SIGNED";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopRuntimeInfo {
+    pub is_desktop: bool,
+    pub shell_version: Option<String>,
+    pub bundle_type: String,
+    pub updater_capable: bool,
+    pub signed_updater_ready: bool,
+    pub legacy_shell: bool,
+    pub desktop_pid: Option<u32>,
+}
 
 static DESKTOP_MANAGED_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static HOST_SERVICE_MARKER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static DESKTOP_RUNTIME_INFO: std::sync::OnceLock<DesktopRuntimeInfo> = std::sync::OnceLock::new();
+
+fn infer_default_bundle_type() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "nsis"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "app"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("APPIMAGE").is_some() {
+            "appimage"
+        } else {
+            "deb"
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        "unknown"
+    }
+}
+
+fn build_desktop_runtime_info(
+    is_desktop: bool,
+    shell_version: Option<String>,
+    bundle_type: Option<String>,
+    updater_capable: bool,
+    signed_updater_ready: bool,
+    desktop_pid: Option<u32>,
+) -> DesktopRuntimeInfo {
+    let clean_ver = shell_version
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let bundle = bundle_type
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| infer_default_bundle_type().to_string());
+    DesktopRuntimeInfo {
+        is_desktop,
+        shell_version: clean_ver,
+        bundle_type: bundle,
+        updater_capable,
+        signed_updater_ready,
+        legacy_shell: is_desktop && !updater_capable,
+        desktop_pid: desktop_pid.filter(|pid| *pid > 0),
+    }
+}
+
+/// 读取并缓存桌面壳透传的运行时元信息（随后清理敏感标记，防止 Agent 子命令继承）。
+pub fn desktop_runtime_info() -> DesktopRuntimeInfo {
+    DESKTOP_RUNTIME_INFO
+        .get_or_init(|| {
+            let is_desktop = is_desktop_managed() || std::env::var_os("JEIKCODE_DESKTOP").is_some();
+            let shell_version = std::env::var(DESKTOP_VERSION_ENV).ok();
+            let bundle_type = std::env::var(DESKTOP_BUNDLE_ENV).ok();
+            let updater_capable = std::env::var(DESKTOP_UPDATER_ENV)
+                .ok()
+                .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
+            let signed_updater_ready = std::env::var(DESKTOP_UPDATER_SIGNED_ENV)
+                .ok()
+                .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
+            let desktop_pid = std::env::var(DESKTOP_PID_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok());
+            std::env::remove_var(DESKTOP_VERSION_ENV);
+            std::env::remove_var(DESKTOP_BUNDLE_ENV);
+            std::env::remove_var(DESKTOP_UPDATER_ENV);
+            std::env::remove_var(DESKTOP_UPDATER_SIGNED_ENV);
+            build_desktop_runtime_info(
+                is_desktop,
+                shell_version,
+                bundle_type,
+                updater_capable,
+                signed_updater_ready,
+                desktop_pid,
+            )
+        })
+        .clone()
+}
 
 /// 进程启动时尽早调用（任何子进程/线程创建之前）：读取并从环境中移除
 /// `JEIKCODE_DESKTOP_MANAGED` 与 `JEIKCODE_HOST_SERVICE`，避免 Agent 在 bash 工具里
@@ -1262,6 +1452,7 @@ static HOST_SERVICE_MARKER: std::sync::OnceLock<Option<String>> = std::sync::Onc
 pub fn capture_launch_markers() {
     let _ = is_desktop_managed();
     let _ = host_service_marker();
+    let _ = desktop_runtime_info();
 }
 
 /// 当前进程是否由桌面壳直接托管。
@@ -2218,8 +2409,10 @@ pub fn restart_process_with_config(
     std::process::exit(0);
 }
 
-/// Fetch and parse `Manifest` from a specific manifest URL.
-pub async fn fetch_manifest_from_url(url: &str) -> Result<Manifest> {
+async fn fetch_json_with_retries<T: serde::de::DeserializeOwned>(url: &str) -> Result<T> {
+    if updates_disabled() {
+        bail!("updates are disabled");
+    }
     if jeikcode_config::config::offline::is_offline_active() {
         bail!("cannot fetch update manifest in offline mode");
     }
@@ -2267,6 +2460,219 @@ pub async fn fetch_manifest_from_url(url: &str) -> Result<Manifest> {
             .with_context(|| format!("parsing manifest (body: {:?})", truncate(clean_body, 200)));
     }
     Err(last_error.unwrap_or_else(|| anyhow!("failed to fetch manifest from {url}")))
+}
+
+/// Fetch and parse `Manifest` from a specific manifest URL.
+pub async fn fetch_manifest_from_url(url: &str) -> Result<Manifest> {
+    fetch_json_with_retries(url).await
+}
+
+/// 拉取并解析桌面壳清单 `desktop-updater.json`。
+pub async fn fetch_desktop_updater_manifest(url: &str) -> Result<DesktopUpdaterManifest> {
+    fetch_json_with_retries(url).await
+}
+
+pub fn staged_desktop_dir() -> PathBuf {
+    staged_dir().join("desktop")
+}
+
+/// 下载并校验桌面端安装包（用于存量旧壳或未配置 minisign 公钥时的 SHA256 兜底安装链路）。
+pub async fn download_desktop_installer_verified(
+    url: &str,
+    expected_sha256: &str,
+    expected_size: u64,
+    filename_hint: &str,
+    progress: &mpsc::UnboundedSender<UpgradeEvent>,
+) -> std::result::Result<PathBuf, UpgradeFailure> {
+    let sha = expected_sha256.trim();
+    if sha.is_empty() {
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::ChecksumMismatch,
+            anyhow!("desktop installer manifest missing sha256 checksum"),
+        ));
+    }
+    let dir = staged_desktop_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))
+        .map_err(|e| UpgradeFailure::new(UpgradeFailureKind::Other, e))?;
+
+    let safe_name = Path::new(filename_hint)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("jeikcode-desktop-installer");
+    let dest = dir.join(safe_name);
+
+    download_and_verify(url, sha, expected_size, &dest, progress).await?;
+    Ok(dest)
+}
+
+#[cfg(target_os = "macos")]
+fn find_enclosing_app_bundle(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("app"))
+        .map(Path::to_path_buf)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn dir_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".jeikcode-write-probe-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// 启动已校验通过的桌面端安装包（Windows NSIS `/P /UPDATE /R` 脱离运行，macOS 原子替换 `.app` 或打开 `.dmg`）。
+pub fn launch_desktop_installer(installer_path: &Path, desktop_pid: Option<u32>) -> Result<()> {
+    #[cfg(not(target_os = "windows"))]
+    let lower = installer_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        let _ = desktop_pid;
+        let mut cmd = std::process::Command::new(installer_path);
+        cmd.args(["/P", "/UPDATE", "/R"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+        cmd.spawn()
+            .with_context(|| format!("spawning desktop installer {}", installer_path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if lower.ends_with(".app.tar.gz") {
+            let current_exe = current_exe_path()?;
+            if let Some(app_bundle) = find_enclosing_app_bundle(&current_exe) {
+                if let Some(app_parent) = app_bundle.parent() {
+                    if dir_is_writable(app_parent) {
+                        let unpack_dir = staged_desktop_dir().join("unpack");
+                        let _ = std::fs::remove_dir_all(&unpack_dir);
+                        std::fs::create_dir_all(&unpack_dir)?;
+                        let status = std::process::Command::new("/usr/bin/tar")
+                            .args(["-xzf"])
+                            .arg(installer_path)
+                            .arg("-C")
+                            .arg(&unpack_dir)
+                            .status()
+                            .context("extracting macOS .app.tar.gz")?;
+                        if !status.success() {
+                            bail!("tar extraction failed with status {status}");
+                        }
+                        let mut extracted_app = None;
+                        if let Ok(entries) = std::fs::read_dir(&unpack_dir) {
+                            for entry in entries.flatten() {
+                                let p = entry.path();
+                                if p.extension().and_then(|e| e.to_str()) == Some("app") {
+                                    extracted_app = Some(p);
+                                    break;
+                                }
+                            }
+                        }
+                        let new_app = extracted_app
+                            .ok_or_else(|| anyhow!("no .app bundle found inside archive"))?;
+                        let pid_arg = desktop_pid.unwrap_or(0);
+                        let script = r#"
+pid="$1"
+old_app="$2"
+new_app="$3"
+bak_app="${old_app}.bak"
+if [ "$pid" -gt 0 ] 2>/dev/null; then
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ $i -lt 50 ]; do
+    sleep 0.2
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 1
+  fi
+fi
+rm -rf "$bak_app"
+if mv "$old_app" "$bak_app"; then
+  if mv "$new_app" "$old_app"; then
+    rm -rf "$bak_app"
+    open -n "$old_app"
+    exit 0
+  else
+    mv "$bak_app" "$old_app" || true
+    exit 1
+  fi
+fi
+exit 1
+"#;
+                        let mut cmd = std::process::Command::new("/bin/sh");
+                        cmd.arg("-c")
+                            .arg(script)
+                            .arg("jeikcode-macos-updater")
+                            .arg(pid_arg.to_string())
+                            .arg(&app_bundle)
+                            .arg(&new_app)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+                        cmd.spawn()
+                            .context("spawning macOS app replacement helper")?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        std::process::Command::new("open")
+            .arg(installer_path)
+            .spawn()
+            .with_context(|| format!("opening {}", installer_path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if lower.ends_with(".appimage") {
+            if let Some(target_appimage) = std::env::var_os("APPIMAGE").map(PathBuf::from) {
+                if let Some(parent) = target_appimage.parent() {
+                    if dir_is_writable(parent) {
+                        atomic_copy_replace(installer_path, &target_appimage)
+                            .context("replacing AppImage on disk")?;
+                        let _ = std::process::Command::new(&target_appimage)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn();
+                        if let Some(pid) = desktop_pid.filter(|p| *p > 0) {
+                            let _ = std::process::Command::new("kill")
+                                .args(["-TERM", &pid.to_string()])
+                                .status();
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        std::process::Command::new("xdg-open")
+            .arg(installer_path)
+            .spawn()
+            .with_context(|| format!("opening {}", installer_path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (lower, desktop_pid);
+        bail!("desktop installer launch is unsupported on this platform");
+    }
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
@@ -2673,6 +3079,12 @@ pub async fn run_upgrade_with_manifest(
             anyhow!(PACKAGE_MANAGED),
         ));
     }
+    if updates_disabled() {
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::Other,
+            anyhow!("updates are disabled"),
+        ));
+    }
     let current_version = current_version.as_str();
     let target = detect_target().ok_or_else(|| {
         UpgradeFailure::new(
@@ -2719,6 +3131,14 @@ pub async fn run_upgrade_with_manifest(
     let url = binary_url(&manifest.version, target);
     let download = download_path(&exe);
     download_and_verify(&url, &entry.sha256, entry.size, &download, &tx).await?;
+
+    if updates_disabled() {
+        let _ = std::fs::remove_file(&download);
+        return Err(UpgradeFailure::new(
+            UpgradeFailureKind::Other,
+            anyhow!("updates are disabled"),
+        ));
+    }
 
     let _ = tx.send(UpgradeEvent::Replacing);
     replace_binary(&download, &exe)
@@ -2989,7 +3409,7 @@ pub async fn prepare_deferred_upgrade(
     if is_package_managed() {
         return Ok(None);
     }
-    if jeikcode_config::config::offline::is_offline_active() {
+    if jeikcode_config::config::offline::is_offline_active() || updates_disabled() {
         return Ok(None);
     }
     let target = detect_target().ok_or_else(|| {
@@ -3039,6 +3459,11 @@ pub async fn prepare_deferred_upgrade(
     let url = binary_url(&manifest.version, target);
     download_and_verify(&url, &entry.sha256, entry.size, &staged_path, &tx).await?;
 
+    if updates_disabled() {
+        let _ = std::fs::remove_file(&staged_path);
+        return Ok(None);
+    }
+
     let pending = PendingUpgrade {
         version: manifest.version.clone(),
         staged_path: staged_path.clone(),
@@ -3068,7 +3493,7 @@ pub async fn prepare_deferred_upgrade(
 /// compared to installing a corrupted binary.
 /// In `distro-pm` builds this is a no-op returning `Ok(None)`.
 pub fn apply_pending_upgrade() -> Result<Option<AppliedUpgrade>> {
-    if is_package_managed() {
+    if is_package_managed() || updates_disabled() {
         return Ok(None);
     }
     let mut pending = match read_pending() {
@@ -3245,6 +3670,9 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
 /// toggle between last-two versions without redownloading.
 /// In `distro-pm` builds this returns immediately with an error carrying `PACKAGE_MANAGED` (upgrades are the package manager's job).
 pub fn run_rollback() -> Result<RollbackSummary> {
+    if updates_disabled() {
+        return Err(anyhow!("updates are disabled"));
+    }
     if is_package_managed() {
         return Err(anyhow!(PACKAGE_MANAGED));
     }
@@ -4494,5 +4922,56 @@ mod tests {
             1,
             "client errors must not be retried"
         );
+    }
+
+    #[test]
+    fn manifest_parses_with_and_without_desktop_compat() {
+        let legacy: Manifest =
+            serde_json::from_str(r#"{"version":"v7.5.0","binaries":{}}"#).unwrap();
+        assert!(legacy.desktop.is_none());
+
+        let modern: Manifest = serde_json::from_str(
+            r#"{
+                "version":"v7.5.3",
+                "binaries":{},
+                "desktop":{
+                    "min_shell_version":"7.5.0",
+                    "latest_shell_version":"7.5.2",
+                    "shell_changed":false,
+                    "updater_manifest":"desktop-updater.json"
+                }
+            }"#,
+        )
+        .unwrap();
+        let desktop = modern.desktop.expect("desktop compat should parse");
+        assert_eq!(desktop.min_shell_version.as_deref(), Some("7.5.0"));
+        assert_eq!(desktop.latest_shell_version.as_deref(), Some("7.5.2"));
+        assert!(!desktop.shell_changed);
+    }
+
+    #[test]
+    fn desktop_runtime_info_distinguishes_legacy_and_modern_shells() {
+        let legacy =
+            build_desktop_runtime_info(true, None, Some("nsis".into()), false, false, Some(42));
+        assert!(legacy.is_desktop);
+        assert!(legacy.legacy_shell);
+        assert!(!legacy.updater_capable);
+        assert!(!legacy.signed_updater_ready);
+        assert_eq!(legacy.desktop_pid, Some(42));
+
+        let modern = build_desktop_runtime_info(
+            true,
+            Some("7.5.3".into()),
+            Some("AppImage".into()),
+            true,
+            true,
+            Some(99),
+        );
+        assert!(modern.is_desktop);
+        assert!(!modern.legacy_shell);
+        assert_eq!(modern.shell_version.as_deref(), Some("7.5.3"));
+        assert_eq!(modern.bundle_type, "appimage");
+        assert!(modern.updater_capable);
+        assert!(modern.signed_updater_ready);
     }
 }

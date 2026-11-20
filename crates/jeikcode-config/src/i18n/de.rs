@@ -127,6 +127,109 @@ pub(super) fn de(msg: Msg<'_>) -> Cow<'static, str> {
             format!("Komprimiert · {} Nachricht(en) zusammengefasst · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("Tool-Ausgabe eingeklappt · ~{} tok gespart", saved).into(),
+        Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
+            format!("Modell lieferte eine leere Antwort, neuer Versuch in {wait}s ({attempt}/{max})…")
+        } else {
+            format!("Modell lieferte eine leere Antwort, neuer Versuch ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryThinking { attempt, max, wait } => if wait > 0 {
+            format!("Modell lieferte nur Denkprozesse, neuer Versuch in {wait}s ({attempt}/{max})…")
+        } else {
+            format!("Modell lieferte nur Denkprozesse, neuer Versuch ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryMalformed { attempt, max, wait } => if wait > 0 {
+            format!("Ungültiges Antwortformat, neuer Versuch in {wait}s ({attempt}/{max})…")
+        } else {
+            format!("Ungültiges Antwortformat, neuer Versuch ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryFirstToken { secs, attempt, max } =>
+            format!("Modell reagiert langsam: kein Token innerhalb von {secs}s, neuer Versuch ({attempt}/{max})…").into(),
+        Msg::AgentRetryApi { reason, wait, attempt, max } =>
+            format!("API-Fehler {reason}, neuer Versuch in {wait}s ({attempt}/{max})…").into(),
+        Msg::AgentOverWindow { estimate_k, window_k, buffer_k } =>
+            format!(
+                "Anfrage (~{estimate_k}K Tokens) erreicht die Kontextgrenze (Fenster ~{window_k}K − Puffer {buffer_k}K): Eingabe kürzen oder ein Modell mit größerem Fenster wählen."
+            ).into(),
+        Msg::AgentContextOverflow { round, attempt } =>
+            format!("Kontextüberlauf in Runde {round} (Versuch {attempt}); komprimiere und versuche es erneut").into(),
+        Msg::AgentStreamReconnecting { attempt, max } =>
+            format!("Stream-Zeitüberschreitung bei Leerlauf — verbinde neu ({attempt}/{max})").into(),
+        Msg::AgentResponseTruncated => "Antwort abgeschnitten: finish_reason=length".into(),
+        Msg::AgentUnsupportedSnapshot { version, supported } =>
+            format!("Nicht unterstützte Snapshot-Version {version} (unterstützt: {supported}); starte mit leerer Sitzung").into(),
+        Msg::AgentModelHighLatencyTerminal { retries, secs } =>
+            format!("Modelllatenz zu hoch, bitte später erneut versuchen ({retries} Versuche in Folge ohne erstes Token in {secs}s)").into(),
+        Msg::AgentExhaustedMalformed { max } =>
+            format!("Modell lieferte {max} Mal hintereinander unlesbare Antworten (vorübergehender Anbieterfehler). Du kannst es direkt oder später erneut versuchen.").into(),
+        Msg::AgentExhaustedThinkingOverWindowIntro { max } =>
+            format!("Modell lieferte {max} Mal hintereinander nur Denkprozesse ohne Text oder Tool-Aufrufe. Diese Anfrage überschreitet das Kontextfenster — Eingabe kürzen oder /compact ausführen.").into(),
+        Msg::AgentExhaustedThinkingOverWindowSize { max, prompt_k, window_k } =>
+            format!("Modell lieferte {max} Mal hintereinander nur Denkprozesse ohne Text oder Tool-Aufrufe. Aktuelle Anfrage ~{prompt_k}K Tokens nahe am Fenster (~{window_k}K); nutze /compact oder kürze die Eingabe.").into(),
+        Msg::AgentExhaustedThinkingGeneric { max } =>
+            format!("Modell lieferte {max} Mal hintereinander nur Denkprozesse ohne Text oder Tool-Aufrufe. Du kannst es direkt oder später erneut versuchen.").into(),
+        Msg::AgentExhaustedEmptyOverWindowIntro { max } =>
+            format!("Modell lieferte {max} Mal hintereinander leere Antworten. Diese Anfrage überschreitet das Kontextfenster — Eingabe kürzen oder /compact ausführen.").into(),
+        Msg::AgentExhaustedEmptyOverWindowSize { max, prompt_k, window_k } =>
+            format!("Modell lieferte {max} Mal hintereinander leere Antworten. Aktuelle Anfrage ~{prompt_k}K Tokens nahe am Fenster (~{window_k}K); nutze /compact oder kürze die Eingabe.").into(),
+        Msg::AgentExhaustedEmptyGeneric { max } =>
+            format!("Modell lieferte {max} Mal hintereinander leere Antworten (vorübergehender Anbieterfehler, unabhängig von der Kontextlänge). Du kannst es direkt oder später erneut versuchen.").into(),
+        Msg::AgentStatusRateLimited => "Anfragelimit überschritten oder Kontingent erschöpft".into(),
+        Msg::AgentStatusUpstreamUnavailable => "Anbieterdienst vorübergehend nicht verfügbar".into(),
+        Msg::AgentStatusResponseTimeout => "Zeitüberschreitung bei der Modellantwort".into(),
+        Msg::AgentStatusConnectionFailed => "Netzwerkverbindung fehlgeschlagen".into(),
+        Msg::AgentStatusInsufficientBalance => "Kontoguthaben nicht ausreichend".into(),
+        Msg::AgentStatusUnauthorized => "API-Schlüssel nicht autorisiert oder abgelaufen".into(),
+        Msg::StreamReadRetryExhausted { attempts } =>
+            format!("Netzwerkverbindung unterbrochen: Gegenstelle hat die Verbindung geschlossen oder zurückgesetzt, Wiederverbindung nach {attempts} Versuchen fehlgeschlagen. Du kannst es erneut versuchen.").into(),
+        Msg::StreamReadPartialResponse =>
+            "Antwort unterbrochen: der bisher sichere Teil der Antwort wurde erhalten, du kannst fortfahren.".into(),
+        Msg::StreamReadInterrupted =>
+            "Netzwerkverbindung unterbrochen: Gegenstelle hat die Verbindung geschlossen oder zurückgesetzt. Du kannst es erneut versuchen.".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("Verbindung getrennt, automatische Wiederverbindung läuft (bis zu {max} Versuche), aktuelle Ausgabe erhalten…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("Verbindung unterbrochen, aktuelle Ausgabe erhalten, Versuch {attempt}/{max}").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("Stream-Zeitüberschreitung, aktuelle Ausgabe erhalten, Versuch {attempt}/{max}")
+        } else {
+            format!("Stream-Zeitüberschreitung, Versuch {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("Netzwerkverbindung abgebrochen, aktuelle Ausgabe erhalten, Versuch {attempt}/{max}")
+        } else {
+            format!("Netzwerkverbindung abgebrochen, Versuch {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("Verbindung nach {attempts} Versuch(en) wiederhergestellt, fahre fort").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "Stream-Zeitüberschreitung auch nach automatischen Wiederverbindungen; Runde beendet".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("Ratenlimit erreicht, automatischer neuer Versuch in {secs}s…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "Ratenlimit erreicht; pausiert bis zum Zurücksetzen oder Modellwechsel".into()
+        } else {
+            format!("Wegen Ratenlimit pausiert: {detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "Stream-Zeitüberschreitung nach Teilantwort; die Teilantwort wurde erhalten und kann fortgesetzt werden.".into(),
+        Msg::StreamReadResetHint =>
+            "Dieser Fehler tritt häufig in Firmennetzen oder mit Proxy auf; bitte Proxy-, VPN- und Firewall-Einstellungen prüfen.".into(),
+        Msg::StreamReadDetailsPrefix => "Details: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "Mögliche Wiederholungsschleife: Dasselbe Ausgabe- und Werkzeugmuster wurde erneut erkannt; das Modell wird vor dem Abbruch dieser Runde zum Kurswechsel aufgefordert.".into()
+        } else {
+            "Mögliche Wiederholungsschleife: Dasselbe Ausgabe- und Werkzeugmuster wurde erkannt; das Modell wird zum Kurswechsel aufgefordert.".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("gestoppt: das Modell hat dasselbe Denk-, Text- und Werkzeugaufrufmuster {rounds} Runden in Folge wiederholt").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("mögliche Werkzeugschleife: derselbe Aufruf oder schreibgeschützte Stapel hat {threshold}-mal dasselbe Ergebnis geliefert; fordere das Modell zum Kurswechsel auf").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("Werkzeugschleife erkannt: derselbe Aufruf oder schreibgeschützte Stapel hat {threshold}-mal dasselbe Ergebnis geliefert; Abbruch vor einer weiteren Modellantfrage").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("gestoppt: das Modell hat dasselbe Werkzeugaufrufmuster {rounds} Runden in Folge wiederholt").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Rundenlimit ({cap}) erreicht; Werkzeugausführung gestoppt, um den Fortschritt und die nächsten Schritte zusammenzufassen.").into(),
         _ => super::en::en(msg),
     }
 }

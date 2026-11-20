@@ -48,6 +48,9 @@ long_bash_command_keyword = []  # 长任务关键词列表（如 ["build", "test
 - `include_logs=true`：独立打开 grep 的日志内容（默认 false，与 `include_ignored` 独立）；glob 默认包含日志路径。
 - `include_sensitive=true`：打开敏感凭据路径；Build/AcceptEdits/Plan 弹审核，Auto 自动继续。
 - `read` 的显式路径不套 ignore；敏感路径统一走 `SensitivePathGate`。
+- ignore 来源与优先级：全局 `~/.jeikcode` < 项目根 < 项目 `.jeikcode`；项目规则覆盖全局。`.codegraphignore.graph` 是独立的敏感门，`include_ignored=true` 绝不能打开它；项目噪音规则也不能用 `!` 重开敏感路径。
+- 图谱索引与 grep/glob 共用同一套 ignore policy，但 profile 不同：图谱还遵循 `.gitignore`，grep/glob 为保持全面检索**故意不应用** `.gitignore`。图谱的 warm/编辑路径同样检查 ignore；改 ignore 规则会通过指纹使图谱/查询缓存失效。
+- 嵌套 `.codegraphignore` / `.graph` 由 deep policy 加载：子目录规则覆盖父级；搜索与全量图谱索引使用 deep policy。`.env*`、密钥、`.ssh`、`.jeikcode/auth.toml` 等硬敏感基线独立于 `.graph`，`.graph` 缺失时仍生效。
 
 ---
 
@@ -106,16 +109,34 @@ eager = "auto"                  # 积极度："auto" (按需识别) | "preferred
 
 ```toml
 [coding]
-max_rounds = 230                # 单会话模型思考交互最大轮次（0 表示无限制）
+max_rounds = 0                  # 单会话模型思考交互最大轮次（0 表示无限制，默认；>0 触限时进入软着陆总结）
 connect_timeout_secs = 10       # TCP/TLS 建连
 open_timeout_secs = 180         # 等 HTTP 响应头（TTFB），不截断流式 body
 ttft_secs = 180                 # 首个思考/正文/工具 token（别名 first_token_timeout_secs）
-transition_secs = 180           # 思考结束到正文/工具首字
-streaming_sliding_secs = 120    # 相邻业务 token 滑动窗口
-first_token_timeout_retries = 3 # 首 Token 超时后自动重试次数
+transition_secs = 360           # 思考结束到正文/工具首字
+streaming_sliding_secs = 360    # 相邻业务 token 滑动窗口
+first_token_timeout_retries = 6 # 首 Token 超时后自动重试次数
 ```
 
 环境变量覆盖：`JEIKCODE_CONNECT_TIMEOUT_SECS`、`JEIKCODE_OPEN_TIMEOUT_SECS`、`JEIKCODE_TTFT_SECS`（或 `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS`）、`JEIKCODE_TRANSITION_SECS`、`JEIKCODE_STREAMING_SECS`（或 `JEIKCODE_STREAM_TIMEOUT_SECS`）。内容钟为 `0` 表示关闭该档。SSE ping / `ResponseId` / `Usage` 不重置内容滑动窗口。
+
+### 自动重试（统一阶梯）
+
+所有瞬时故障共用一条退避阶梯：`0、2、5、10、15、30、45、60、90` 秒（最多 9 次，累计 257 秒）。故障类型只决定「最多用到第几格」与「怎么重试」：
+
+| 故障 | 次数上限 | 动作 |
+| :--- | :---: | :--- |
+| 建连 / 响应头失败（5xx、408、425、传输类） | 9 | 整请求重发 |
+| 流中途断连（已出正文/思考） | 9 | 保留已输出内容，新气泡接着写 |
+| 流中途断连（工具片段未拼完） | 9 | 丢掉半成品调用，保留之前的完整内容后接着写 |
+| 流空闲超时 | 9 | 有内容则接着写，无内容则整请求重发 |
+| 首 Token 超时 | `first_token_timeout_retries`（默认 6） | 整请求重发 |
+| 空响应 / 只返回思考 / 格式异常 | 6 | 整请求重发 |
+| 限流 429 | 5 | 按服务端 reset 时间等待 |
+| 上下文溢出 | 3 | 先压缩再重发 |
+| 输出被长度截断 | 2 | 继续生成（不是失败） |
+
+同一事件只有一张卡：每次尝试原地覆写进度（重试 x/9），预算耗尽或恢复后原地改写为终态；不同事件各自成卡。401/403、400、余额/审核/模型不存在、解析失败、用户取消、策略拒绝一律不重试。
 
 ---
 
@@ -124,7 +145,7 @@ first_token_timeout_retries = 3 # 首 Token 超时后自动重试次数
 ```toml
 [subagent]
 max_concurrent = 0              # 最大并发子代理数（0 表示不限制，默认；>0 表示上限）
-max_rounds = 230                # 每个子代理最大交互轮次（0 表示无限制）
+max_rounds = 300                # 每个子代理最大交互轮次（默认 300；0 表示无限制）
 ```
 
 ---

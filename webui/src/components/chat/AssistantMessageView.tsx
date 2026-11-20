@@ -12,10 +12,37 @@ import { ReasoningBlock } from './ReasoningBlock';
 import { SessionTodoPanel } from './SessionTodoPanel';
 import { ToolGroupView } from './ToolViews';
 import { NoticeCard } from './NoticeCard';
+import { ElapsedBadge } from './ElapsedBadge';
+import { LiveElapsedText } from './LiveElapsedText';
 import { highlightText } from './highlight';
 import { messageHasTools, messageText } from './messageText';
 import type { CanvasRecord as Message } from '../../lib/canvas/records';
 import type { MsgPart } from '../../lib/toolRows';
+
+/** Modern display-only chip: this assistant round runs on a model that was
+ *  switched in at the round boundary. Never part of the model context. */
+function ModelSwitchBadge({ model }: { model: string }) {
+  const t = useT();
+  return (
+    <div class="model-switch-badge notranslate" translate={false} role="note">
+      <svg
+        class="model-switch-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M4 7h11l-3-3" />
+        <path d="M20 17H9l3 3" />
+      </svg>
+      <span class="model-switch-label">{t('chat.modelSwitch')}</span>
+      <code class="model-switch-model">{model}</code>
+    </div>
+  );
+}
 
 function assistantMessagePropsEqual(prev: any, next: any): boolean {
   return prev.msg === next.msg
@@ -26,6 +53,7 @@ function assistantMessagePropsEqual(prev: any, next: any): boolean {
     && prev.isActiveSearchMatch === next.isActiveSearchMatch
     && prev.timeLabel === next.timeLabel
     && prev.timeFull === next.timeFull
+    && prev.liveAnchorMs === next.liveAnchorMs
     && prev.liveElapsedMs === next.liveElapsedMs
     && prev.turnTotalMs === next.turnTotalMs
     && prev.search === next.search
@@ -49,6 +77,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   searchRef,
   timeLabel,
   timeFull,
+  liveAnchorMs,
   liveElapsedMs,
   turnTotalMs,
   isCompacting,
@@ -68,6 +97,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   searchRef?: (el: HTMLElement | null) => void;
   timeLabel?: string;
   timeFull?: string;
+  liveAnchorMs?: number;
   liveElapsedMs?: number;
   /** User-bubble → this final answer. Only set on the last assistant of the turn. */
   turnTotalMs?: number;
@@ -216,8 +246,18 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     (p) => (p.kind === 'text' && p.text.trim().length > 0) || p.kind === 'tool' || p.kind === 'reasoning',
   );
 
+  const showDoneTime = isLastInTurn && timeLabel && !streaming && !isError;
+  const showDoneFallbackTime =
+    isLastInTurn && !timeLabel && !streaming && turnTotalMs != null && !isError;
+  const showLiveTime =
+    isLastInTurn && streaming && (liveAnchorMs != null || liveElapsedMs != null);
+  const hasFooterRow = Boolean(
+    showDoneTime || showDoneFallbackTime || showLiveTime || msg.readOnly === true || copyBtn,
+  );
+
   return (
     <div class={cls + liveCls} ref={searchRef}>
+      {msg.switchTo ? <ModelSwitchBadge model={msg.switchTo} /> : null}
       {/* Error turns are pure injected text — render flat. */}
       {isError ? (
         <div class="error-message-content">
@@ -245,39 +285,49 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           )}
         </>
       )}
-      <div class="msg-footer-row assistant-footer-row">
-        {/* 只在本轮最后一条助手消息上显示时刻和用时。中间的工具/思考/分段正文不要时间。 */}
-        {isLastInTurn && timeLabel && !streaming && !isError && (
-          <span class="msg-time" title={timeFull}>
-            <span class="msg-clock">{timeLabel}</span>
-            {turnTotalMs != null && (
-              <span class="msg-turn-elapsed">
-                {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
+      {hasFooterRow && (
+        <div class="msg-footer-row assistant-footer-row">
+          {/* 只在本轮最后一条助手消息上显示时刻和用时。中间的工具/思考/分段正文不渲染空脚栏，避免工具块下方留白过大。 */}
+          {showDoneTime && (
+            <span class="msg-time" title={timeFull}>
+              <span class="msg-clock">{timeLabel}</span>
+              {turnTotalMs != null && (
+                <ElapsedBadge
+                  ms={turnTotalMs}
+                  label={t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
+                />
+              )}
+            </span>
+          )}
+          {showDoneFallbackTime && (
+            <span class="msg-time">
+              <ElapsedBadge
+                ms={turnTotalMs!}
+                label={t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs!) })}
+              />
+            </span>
+          )}
+          {showLiveTime && (
+            liveAnchorMs != null ? (
+              <LiveElapsedText anchorMs={liveAnchorMs} />
+            ) : (
+              <span class="msg-time is-live">
+                <ElapsedBadge
+                  ms={liveElapsedMs!}
+                  live
+                  label={t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs!) })}
+                />
               </span>
-            )}
-          </span>
-        )}
-        {isLastInTurn && !timeLabel && !streaming && turnTotalMs != null && !isError && (
-          <span class="msg-time">
-            <span class="msg-turn-elapsed">
-              {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
+            )
+          )}
+          {msg.readOnly === true && (
+            <span class="msg-readonly-badge" title={t('chat.readOnlyArchiveHint')}>
+              {t('chat.readOnlyArchive')}
             </span>
-          </span>
-        )}
-        {isLastInTurn && streaming && liveElapsedMs != null && (
-          <span class="msg-time is-live">
-            <span class="msg-turn-elapsed">
-              {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
-            </span>
-          </span>
-        )}
-        {msg.readOnly === true && (
-          <span class="msg-readonly-badge" title={t('chat.readOnlyArchiveHint')}>
-            {t('chat.readOnlyArchive')}
-          </span>
-        )}
-        {copyBtn}
-      </div>
+          )}
+          {copyBtn}
+        </div>
+      )}
     </div>
   );
 }, assistantMessagePropsEqual);
@@ -317,7 +367,14 @@ function renderAssistantParts(parts: MsgPart[], search: string, cwd?: string): V
       i++;
     } else if (p.kind === 'notice') {
       out.push(
-        <NoticeCard key={`nt-${i}`} text={p.text} search={search} />,
+        <NoticeCard
+          key={`nt-${i}`}
+          text={p.text}
+          kind={p.noticeKind}
+          severity={p.severity}
+          status={p.status}
+          search={search}
+        />,
       );
       i++;
     } else if (p.kind === 'rate_limited') {

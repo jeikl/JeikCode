@@ -797,7 +797,7 @@ export function cleanRedactedThinkingBlocks(source: string): string {
     /\[(?:Redacted Thinking|已遮挡思考)[:：]\s*([A-Za-z0-9+/=_\-\s]{20,})\s*[\]】]/g,
     (_match, data) => {
       const cleanData = String(data).replace(/\s+/g, '');
-      return `\n\n<details class="redacted-thinking-box notranslate" translate="no"><summary>💭 <i>[Redacted Thinking]</i></summary>\n\n\`\`\`text\n${cleanData}\n\`\`\`\n</details>\n\n`;
+      return `\n\n<details class="redacted-thinking-box notranslate" translate="no"><summary><i>[Redacted Thinking]</i></summary>\n\n\`\`\`text\n${cleanData}\n\`\`\`\n</details>\n\n`;
     },
   );
 }

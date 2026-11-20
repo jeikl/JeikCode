@@ -13,7 +13,8 @@
 | **`thesaurus/`** | 中英双语代码检索词林文件（`*.txt`） | **自动热生效**（下次检索自动重载） |
 | **`skills/`** | 全局用户技能目录（子目录包含 `SKILL.md`） | 需触发热生效（`jeikcode_config(action="reload")`） |
 | **`plugins/`** | 已安装插件市场与扩展 | 需触发热生效（`jeikcode_config(action="reload")`） |
-| **`sessions/`** | 会话持久化数据与状态检查点 | 历史资产 |
+| **`sessions/`** | 会话持久化数据、状态检查点与增量轨迹（`*.trace.jsonl` / `*.toolmetrics.jsonl`） | 历史资产 |
+| **`eval/`** | 按 SHA-256 去重归档的上游请求上下文包（`bundles/`，自动配额裁剪） | 可按需清理 |
 | **`datalog/`** | 结构化审计日志 | 可定期清理 |
 | **`cache/`** | AST 语法树与符号索引临时缓存 | 可安全删除（自动重建） |
 | **`image-cache/`** | 视觉模型图片预处理临时缓存 | 可安全删除 |
@@ -48,4 +49,4 @@
      - 界面输入命令：`/reload`（或 `/mcp reload`）；
      - WebUI 侧栏点击 MCP「刷新按钮」。
 3. **磁盘空间清理**：
-   - 可随时安全删除 `cache/`、`image-cache/`、`logs/`、`rewind/`，不会丢失任何配置或技能。
+   - 可随时安全删除 `cache/`、`image-cache/`、`logs/`、`rewind/`、`eval/`，不会丢失任何配置或技能。

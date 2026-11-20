@@ -1759,6 +1759,43 @@ pub enum Msg<'a> {
         attempt: u32,
         max: u32,
     },
+    /// 统一重试：一次故障只弹一次，后续重试静默。
+    AgentAutoRetry {
+        max: u32,
+    },
+    /// 重试进度（可落盘）：同一条记录按 `attempt` 原地更新。
+    AgentRetryProgress {
+        attempt: u32,
+        max: u32,
+    },
+    /// 流空闲卡死重试进度：区分连接断流与空闲超时。
+    AgentRetryStallProgress {
+        attempt: u32,
+        max: u32,
+        has_output: bool,
+    },
+    /// 连接断流/传输瞬断重试进度：区分连接断流与空闲超时。
+    AgentRetryDropProgress {
+        attempt: u32,
+        max: u32,
+        has_output: bool,
+    },
+    /// 重试成功恢复生成后的收口提示。
+    AgentRetryRecovered {
+        attempts: u32,
+    },
+    /// 自动重连耗尽后的流超时终态。
+    AgentStreamTimeoutTerminal,
+    /// 429 自动退避等待通知。
+    AgentRateLimitedWaiting {
+        secs: u64,
+    },
+    /// 429 配额/速率限制暂停终态。
+    AgentRateLimitedPaused {
+        detail: &'a str,
+    },
+    /// 已产生部分回复后流超时：保留部分内容，回合以超时结束。
+    AgentStreamTimeoutPartialResponse,
     /// Context-pressure advisory before a request that is at/over the watermark.
     AgentOverWindow {
         estimate_k: u32,
@@ -1845,8 +1882,35 @@ pub enum Msg<'a> {
     },
     /// Stream read interrupted mid-response, preserving partial output to avoid replay.
     StreamReadPartialResponse,
+    /// Stream read interrupted before any output; a neutral lead for the retry engine.
+    StreamReadInterrupted,
     /// OS error 10054 (connection reset) proxy hint.
     StreamReadResetHint,
     /// Details prefix.
     StreamReadDetailsPrefix,
+    /// User-visible warning notice when an echo loop is detected.
+    AgentEchoLoopNotice {
+        final_warning: bool,
+    },
+    /// Turn stopped due to repeated identical echo pattern.
+    AgentEchoLoopTerminal {
+        rounds: u32,
+    },
+    /// User-visible warning notice when an exact tool loop crosses the warning threshold.
+    AgentToolLoopWarning {
+        threshold: u32,
+    },
+    /// Turn stopped due to exact tool loop threshold.
+    AgentToolLoopTerminal {
+        threshold: u32,
+    },
+    /// Turn stopped due to repeated identical tool-call pattern.
+    AgentRepeatLoopTerminal {
+        rounds: u32,
+    },
+    /// User-visible warning notice when the explicit max_rounds cap is reached
+    /// and the agent enters a tool-disabled soft-landing summary round.
+    AgentMaxRoundsReached {
+        cap: u32,
+    },
 }

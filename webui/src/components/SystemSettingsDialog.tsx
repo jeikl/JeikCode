@@ -1,14 +1,23 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { getDesktopSettings, postDesktopSettings, getHealth, type DesktopSettings } from '../api';
+import {
+  getDesktopSettings,
+  postDesktopSettings,
+  getHealth,
+  invalidateBootstrapCache,
+  type ApprovalMode,
+  type DesktopSettings,
+} from '../api';
 import { bakedAppVersion, normalizeAppVersion } from '../lib/appVersion';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
 import { useSettings } from '../settings';
 import { ModelConfigView } from './SettingsDialogs';
+import { ShortcutRecorder } from './ShortcutRecorder';
 
 interface SystemSettingsDialogProps {
   onClose: () => void;
   initialTab?: TabKey;
+  focusSection?: 'agent_mode';
 }
 
 type TabKey = 'models' | 'desktop' | 'about';
@@ -20,30 +29,47 @@ interface ModuleTab {
   icon: string;
 }
 
-export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDialogProps) {
+export function SystemSettingsDialog({ onClose, initialTab, focusSection }: SystemSettingsDialogProps) {
   const { t, escUndoEnabled, setEscUndoEnabled } = useSettings();
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab || 'models');
   const [closeAction, setCloseAction] = useState<'ask' | 'tray' | 'quit'>('ask');
-  const [loading, setLoading] = useState(true);
+  const [agentModePolicy, setAgentModePolicy] = useState<'memory' | 'global'>('memory');
+  const [agentGlobalMode, setAgentGlobalMode] = useState<ApprovalMode>('build');
+  const [runtimeModelSwitch, setRuntimeModelSwitch] = useState(false);
+  const [autostart, setAutostart] = useState(false);
+  const [toggleShortcut, setToggleShortcut] = useState('Ctrl+Alt+J');
+  const [desktopLoaded, setDesktopLoaded] = useState(false);
+  const [aboutLoaded, setAboutLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [appVersion, setAppVersion] = useState(bakedAppVersion());
+  const agentModeBoxRef = useRef<HTMLDivElement>(null);
 
   // 遮罩空白处点击关闭：避免弹窗内拖拽划词时被误判为外部点击而秒关。
   const backdropDismiss = useBackdropDismiss(onClose);
 
   const tabs: ModuleTab[] = [
-    { key: 'models', labelKey: 'settings.tabModels', defaultLabel: '模型与配置', icon: '⚡' },
-    { key: 'desktop', labelKey: 'settings.tabDesktop', defaultLabel: '行为与快捷键', icon: '⌨️' },
+    { key: 'models', labelKey: 'settings.tabModels', defaultLabel: '提供商与模型', icon: '⚡' },
+    { key: 'desktop', labelKey: 'settings.tabDesktop', defaultLabel: '系统设置', icon: '⌨️' },
     { key: 'about', labelKey: 'settings.tabAbout', defaultLabel: '关于与版本', icon: 'ℹ️' },
   ];
 
+  // 仅当用户切换到桌面设置页签时再拉取，打开模型配置时零多余请求
   useEffect(() => {
+    if (activeTab !== 'desktop' || desktopLoaded) return;
     let cancelled = false;
+    setLoading(true);
     getDesktopSettings()
       .then((res) => {
-        if (!cancelled && res.close_action) {
-          setCloseAction(res.close_action);
+        if (!cancelled) {
+          if (res.close_action) setCloseAction(res.close_action);
+          if (res.agent_mode_policy) setAgentModePolicy(res.agent_mode_policy);
+          if (res.agent_global_mode) setAgentGlobalMode(res.agent_global_mode);
+          if (typeof res.runtime_model_switch === 'boolean') setRuntimeModelSwitch(res.runtime_model_switch);
+          if (typeof res.autostart === 'boolean') setAutostart(res.autostart);
+          if (typeof res.toggle_shortcut === 'string') setToggleShortcut(res.toggle_shortcut);
+          setDesktopLoaded(true);
         }
       })
       .finally(() => {
@@ -53,28 +79,52 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeTab, desktopLoaded]);
+
+  // 从模式选择器齿轮跳转过来时，加载完成后自动定位到 Agent 模式设置区块
+  useEffect(() => {
+    if (activeTab !== 'desktop' || focusSection !== 'agent_mode' || !desktopLoaded) return;
+    agentModeBoxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [activeTab, focusSection, desktopLoaded]);
 
   useEffect(() => {
+    if (activeTab !== 'about' || aboutLoaded) return;
     let cancelled = false;
     getHealth()
       .then((info) => {
         if (cancelled) return;
         const running = normalizeAppVersion(info.version);
         if (running) setAppVersion(running);
+        setAboutLoaded(true);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeTab, aboutLoaded]);
 
   async function handleSaveDesktopSettings() {
     if (saving) return;
     setSaving(true);
     setSavedSuccess(false);
     try {
-      await postDesktopSettings({ close_action: closeAction });
+      await postDesktopSettings({
+        close_action: closeAction,
+        agent_mode_policy: agentModePolicy,
+        agent_global_mode: agentGlobalMode,
+        runtime_model_switch: runtimeModelSwitch,
+        autostart,
+        toggle_shortcut: toggleShortcut,
+      });
+      invalidateBootstrapCache();
+      window.dispatchEvent(
+        new CustomEvent('jeikcode:mode_global_changed', {
+          detail: {
+            enabled: agentModePolicy === 'global',
+            mode: agentModePolicy === 'global' ? agentGlobalMode : 'build',
+          },
+        }),
+      );
       setSavedSuccess(true);
       window.setTimeout(() => setSavedSuccess(false), 2000);
     } catch {
@@ -83,6 +133,31 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
       setSaving(false);
     }
   }
+
+  // Cross-instance alignment: another WebUI may save these settings while this
+  // dialog is open. The daemon broadcasts the merged document; apply it in
+  // place so the shortcut/autostart/model-switch controls never show stale state.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onSettings = (event: Event) => {
+      const settings = (event as CustomEvent<{ settings?: DesktopSettings }>).detail
+        ?.settings;
+      if (!settings) return;
+      if (settings.close_action) setCloseAction(settings.close_action);
+      if (settings.agent_mode_policy) setAgentModePolicy(settings.agent_mode_policy);
+      if (settings.agent_global_mode) setAgentGlobalMode(settings.agent_global_mode);
+      if (typeof settings.runtime_model_switch === 'boolean') {
+        setRuntimeModelSwitch(settings.runtime_model_switch);
+      }
+      if (typeof settings.autostart === 'boolean') setAutostart(settings.autostart);
+      if (typeof settings.toggle_shortcut === 'string') {
+        setToggleShortcut(settings.toggle_shortcut);
+      }
+      setDesktopLoaded(true);
+    };
+    window.addEventListener('jeikcode:desktop_settings_changed', onSettings);
+    return () => window.removeEventListener('jeikcode:desktop_settings_changed', onSettings);
+  }, []);
 
   const modal = (
     <div
@@ -146,8 +221,41 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
             {activeTab === 'desktop' && (
               <div class="system-settings-pane">
                 <h4 class="system-settings-pane-title">
-                  {t('settings.tabDesktop') || '行为与快捷键'}
+                  {t('settings.tabDesktop') || '系统设置'}
                 </h4>
+
+                <div class="system-settings-card-box">
+                  <div class="system-settings-box-title">
+                    {t('settings.startupTitle')}
+                  </div>
+                  <div class="system-settings-box-desc">
+                    {t('settings.startupDesc')}
+                  </div>
+
+                  <label class="system-settings-radio-label system-settings-switch-row">
+                    <input
+                      type="checkbox"
+                      checked={autostart}
+                      onChange={(e) => setAutostart((e.target as HTMLInputElement).checked)}
+                    />
+                    <span class="system-settings-switch-copy">
+                      <span class="system-settings-switch-label">
+                        {t('settings.autostartLabel')}
+                      </span>
+                      <span class="system-settings-inline-hint">
+                        {t('settings.autostartHint')}
+                      </span>
+                    </span>
+                  </label>
+
+                  <div class="system-settings-subtitle">
+                    {t('settings.shortcutTitle')}
+                  </div>
+                  <div class="system-settings-box-desc system-settings-box-desc-tight">
+                    {t('settings.shortcutDesc')}
+                  </div>
+                  <ShortcutRecorder value={toggleShortcut} onChange={setToggleShortcut} />
+                </div>
 
                 <div class="system-settings-card-box">
                   <div class="system-settings-box-title">
@@ -191,6 +299,94 @@ export function SystemSettingsDialog({ onClose, initialTab }: SystemSettingsDial
                       <span>{t('settings.closeActionAsk') || '每次询问我'}</span>
                     </label>
                   </div>
+                </div>
+
+                <div
+                  ref={agentModeBoxRef}
+                  class={
+                    'system-settings-card-box' +
+                    (focusSection === 'agent_mode' ? ' system-settings-box-highlight' : '')
+                  }
+                >
+                  <div class="system-settings-box-title">
+                    {t('settings.agentModeTitle')}
+                  </div>
+                  <div class="system-settings-box-desc">
+                    {t('settings.agentModeDesc')}
+                  </div>
+
+                  <div class="system-settings-radio-group">
+                    <label
+                      class="system-settings-radio-label"
+                      title={t('settings.agentModeMemoryTooltip')}
+                    >
+                      <input
+                        type="radio"
+                        name="agent_mode_policy"
+                        value="memory"
+                        checked={agentModePolicy === 'memory'}
+                        onChange={() => setAgentModePolicy('memory')}
+                      />
+                      <span>{t('settings.agentModeMemory')}</span>
+                    </label>
+
+                    <label
+                      class="system-settings-radio-label system-settings-agent-global-row"
+                      title={t('settings.agentModeGlobalTooltip')}
+                    >
+                      <input
+                        type="radio"
+                        name="agent_mode_policy"
+                        value="global"
+                        checked={agentModePolicy === 'global'}
+                        onChange={() => setAgentModePolicy('global')}
+                      />
+                      <span>{t('settings.agentModeGlobal')}</span>
+                      <select
+                        class="system-settings-mode-select"
+                        aria-label={t('settings.agentModeGlobalSelectAria')}
+                        title={t('settings.agentModeGlobalTooltip')}
+                        value={agentGlobalMode}
+                        onMouseDown={(e) => {
+                          setAgentModePolicy('global');
+                          e.stopPropagation();
+                        }}
+                        onChange={(e) => {
+                          setAgentModePolicy('global');
+                          setAgentGlobalMode((e.target as HTMLSelectElement).value as ApprovalMode);
+                        }}
+                      >
+                        <option value="build">{t('mode.build')}</option>
+                        <option value="plan">{t('mode.plan')}</option>
+                        <option value="accept_edits">{t('mode.accept_edits')}</option>
+                        <option value="bypass">{t('mode.auto')}</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="system-settings-card-box">
+                  <div class="system-settings-box-title">
+                    {t('settings.runtimeModelSwitchTitle')}
+                  </div>
+                  <div class="system-settings-box-desc">
+                    {t('settings.runtimeModelSwitchDesc')}
+                  </div>
+                  <label class="system-settings-radio-label system-settings-switch-row">
+                    <input
+                      type="checkbox"
+                      checked={runtimeModelSwitch}
+                      onChange={(e) => setRuntimeModelSwitch((e.target as HTMLInputElement).checked)}
+                    />
+                    <span class="system-settings-switch-copy">
+                      <span class="system-settings-switch-label">
+                        {t('settings.runtimeModelSwitchLabel')}
+                      </span>
+                      <span class="system-settings-inline-hint">
+                        {t('settings.runtimeModelSwitchHint')}
+                      </span>
+                    </span>
+                  </label>
                 </div>
 
                 <div class="system-settings-card-box">

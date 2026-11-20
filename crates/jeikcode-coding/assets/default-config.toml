@@ -17,18 +17,18 @@ offline_mode = "off"
 # timeout_secs are kept only so old config files still parse.
 # max_concurrent: 0 = unbounded (no queueing) — the shipped default.
 max_concurrent = 0
-max_rounds = 230
+max_rounds = 300
 
 [loop_config]
-max_rounds = 100
+max_rounds = 0
 
 [coding]
-max_rounds = 230
+max_rounds = 0
 connect_timeout_secs = 10
 open_timeout_secs = 180
 ttft_secs = 180
-transition_secs = 180
-streaming_sliding_secs = 120
+transition_secs = 360
+streaming_sliding_secs = 360
 first_token_timeout_retries = 6
 
 [tools.todo]

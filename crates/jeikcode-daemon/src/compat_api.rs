@@ -544,6 +544,15 @@ fn list_project_sessions(working_dir: &std::path::Path) -> Vec<(String, SessionS
             preferred_model: meta.as_ref().and_then(|m| m.preferred_model.clone()),
             reasoning_effort: meta.as_ref().and_then(|m| m.reasoning_effort.clone()),
             thinking_budget: meta.as_ref().and_then(|m| m.thinking_budget),
+            origin: meta.as_ref().map(|m| match m.origin {
+                jeikcode_capabilities::session::SessionOrigin::Manual => "manual".to_string(),
+                jeikcode_capabilities::session::SessionOrigin::Scheduled => "scheduled".to_string(),
+                jeikcode_capabilities::session::SessionOrigin::Protocol => "protocol".to_string(),
+                jeikcode_capabilities::session::SessionOrigin::Subagent => "subagent".to_string(),
+            }),
+            is_scheduled: meta.as_ref().is_some_and(|m| {
+                m.origin == jeikcode_capabilities::session::SessionOrigin::Scheduled
+            }),
             protocol_key: meta.as_ref().and_then(|m| m.protocol_key.clone()),
         };
         out.push((entry.project_bucket, summary));
@@ -618,25 +627,29 @@ pub(crate) async fn list_sessions(
     let working_dir = state.bind_working_dir.clone();
     let limit = q.limit.unwrap_or(100).min(500);
     let filter = normalize_session_key(q.user.as_deref());
-    let data: Vec<CompatSession> = list_project_sessions(&working_dir)
-        .into_iter()
-        .filter(|(_, s)| {
-            filter
-                .as_ref()
-                .is_none_or(|key| s.name == *key || s.protocol_key.as_deref() == Some(key.as_str()))
-        })
-        .take(limit)
-        .map(|(project_hash, s)| CompatSession {
-            id: s.id,
-            object: "session",
-            title: s.name,
-            created: s.created_at,
-            updated: s.updated_at,
-            message_count: s.message_count,
-            project_hash,
-            working_dir: s.working_dir.display().to_string(),
-        })
-        .collect();
+    let data = crate::spawn_blocking_isolated(move || {
+        list_project_sessions(&working_dir)
+            .into_iter()
+            .filter(|(_, s)| {
+                filter.as_ref().is_none_or(|key| {
+                    s.name == *key || s.protocol_key.as_deref() == Some(key.as_str())
+                })
+            })
+            .take(limit)
+            .map(|(project_hash, s)| CompatSession {
+                id: s.id,
+                object: "session",
+                title: s.name,
+                created: s.created_at,
+                updated: s.updated_at,
+                message_count: s.message_count,
+                project_hash,
+                working_dir: s.working_dir.display().to_string(),
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
     Json(CompatSessionList {
         object: "list",
         data,
@@ -648,25 +661,31 @@ pub(crate) async fn list_sessions(
 pub(crate) async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let working_dir = state.bind_working_dir.clone();
     let key = normalize_session_key(Some(id.as_str())).unwrap_or(id.clone());
-    match list_project_sessions(&working_dir)
-        .into_iter()
-        .find(|(_, s)| {
-            s.id == key
-                || s.id.starts_with(&key)
-                || s.name == key
-                || s.protocol_key.as_deref() == Some(key.as_str())
-        }) {
-        Some((project_hash, s)) => Json(CompatSession {
-            id: s.id,
-            object: "session",
-            title: s.name,
-            created: s.created_at,
-            updated: s.updated_at,
-            message_count: s.message_count,
-            project_hash,
-            working_dir: s.working_dir.display().to_string(),
-        })
-        .into_response(),
+    let found = crate::spawn_blocking_isolated(move || {
+        list_project_sessions(&working_dir)
+            .into_iter()
+            .find(|(_, s)| {
+                s.id == key
+                    || s.id.starts_with(&key)
+                    || s.name == key
+                    || s.protocol_key.as_deref() == Some(key.as_str())
+            })
+            .map(|(project_hash, s)| CompatSession {
+                id: s.id,
+                object: "session",
+                title: s.name,
+                created: s.created_at,
+                updated: s.updated_at,
+                message_count: s.message_count,
+                project_hash,
+                working_dir: s.working_dir.display().to_string(),
+            })
+    })
+    .await
+    .ok()
+    .flatten();
+    match found {
+        Some(session) => Json(session).into_response(),
         None => api_error(
             StatusCode::NOT_FOUND,
             "session not found",
@@ -708,10 +727,15 @@ async fn resolve_image_url(url: String) -> Result<ImageInput, String> {
         });
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| e.to_string())?;
+        let spec = jeikcode_capabilities::http_pool::HttpClientSpec {
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Some(Duration::from_secs(30)),
+            pool_idle_timeout: Some(Duration::from_secs(15)),
+            skip_tls_verify: false,
+            force_tls12: false,
+            user_agent: None,
+        };
+        let client = jeikcode_capabilities::http_pool::shared_http_client(&spec)?;
         let resp = client
             .get(&url)
             .send()
@@ -963,7 +987,13 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| format!("api-{}", uuid::Uuid::new_v4()));
-    let (session_id, _) = resolve_session_for_key(&working_dir, Some(session_key_raw.as_str()));
+    let wd_for_lookup = working_dir.clone();
+    let key_for_lookup = session_key_raw.clone();
+    let (session_id, _) = crate::spawn_blocking_isolated(move || {
+        resolve_session_for_key(&wd_for_lookup, Some(key_for_lookup.as_str()))
+    })
+    .await
+    .unwrap_or((None, None));
 
     // Always Auto for OpenAI/Anthropic API; serve --yolo additionally disables
     // interactive user-input modals process-wide via AppState.yolo.
@@ -980,6 +1010,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         // On create, native runtime names the session exactly as this key
         // (`user_renamed=true`) so later lookups by `user` stay stable.
         session_title: Some(session_key_raw.clone()),
+        is_scheduled: false,
     };
 
     let occupancy = format!("compat-user:{session_key_raw}");

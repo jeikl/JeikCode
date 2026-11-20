@@ -38,10 +38,12 @@ export function ReasoningBlock({ text, search }: { text: string; search: string 
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
       >
-        <span class="reasoning-icon" aria-hidden="true">
-          ✦
-        </span>
         <span class="reasoning-label">{t('chat.thinking')}</span>
+        {!open && text.trim() && (
+          <span class="reasoning-preview" aria-hidden="true">
+            {text.replace(/\s+/g, ' ').trim()}
+          </span>
+        )}
         <span class={'reasoning-chevron' + (open ? ' expanded' : '')}>▾</span>
       </button>
       {open && (

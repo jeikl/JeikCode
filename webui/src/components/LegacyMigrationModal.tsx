@@ -10,6 +10,7 @@ export function LegacyMigrationModal() {
   const [migrating, setMigrating] = useState(false);
   const [done, setDone] = useState(false);
   const [resultMsg, setResultMsg] = useState('');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // 延迟 3.5 秒后异步检测老版本架构残留，避免与首屏加载争抢资源
   useEffect(() => {
@@ -36,6 +37,7 @@ export function LegacyMigrationModal() {
   async function handleStartMigrate() {
     if (migrating || done) return;
     setMigrating(true);
+    setErrorMsg(null);
     try {
       const res = await postMigrateLegacy(true);
       setDone(true);
@@ -49,8 +51,9 @@ export function LegacyMigrationModal() {
       window.setTimeout(() => {
         setVisible(false);
       }, 2500);
-    } catch {
-      setResultMsg(t('migration.failed') || '迁移过程中出现异常，请稍后重试');
+    } catch (err: unknown) {
+      const detail = err instanceof Error && err.message ? ` (${err.message})` : '';
+      setErrorMsg(`${t('migration.failed')}${detail}`);
     } finally {
       setMigrating(false);
     }
@@ -80,6 +83,7 @@ export function LegacyMigrationModal() {
       <div
         class="modal-card legacy-migration-card"
         style={{
+          position: 'relative',
           width: '100%',
           maxWidth: '520px',
           padding: '28px',
@@ -90,6 +94,19 @@ export function LegacyMigrationModal() {
           color: 'var(--text-color, #f3f4f6)',
         }}
       >
+        {!migrating && (
+          <button
+            type="button"
+            class="modal-close btn btn-ghost"
+            onClick={() => setVisible(false)}
+            aria-label={t('common.dismiss')}
+            style={{ position: 'absolute', top: '16px', right: '16px' }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        )}
         <div style={{ textAlign: 'center', marginBottom: '20px' }}>
           <div
             style={{
@@ -175,26 +192,55 @@ export function LegacyMigrationModal() {
           </div>
         )}
 
+        {errorMsg && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: '16px',
+              padding: '10px 12px',
+              borderRadius: '10px',
+              background: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.35)',
+              color: '#fca5a5',
+              fontSize: '13px',
+              lineHeight: '1.5',
+            }}
+          >
+            {errorMsg}
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
           {!done ? (
-            <button
-              type="button"
-              class="btn btn-primary"
-              disabled={migrating}
-              onClick={handleStartMigrate}
-              style={{
-                width: '100%',
-                padding: '12px',
-                fontSize: '14px',
-                fontWeight: 600,
-                borderRadius: '10px',
-                background: 'linear-gradient(135deg, #2563eb, #1d4ed8)',
-                boxShadow: '0 4px 16px rgba(37, 99, 235, 0.4)',
-                cursor: migrating ? 'not-allowed' : 'pointer',
-              }}
-            >
-              {migrating ? t('migration.running') : t('migration.startBtn')}
-            </button>
+            <>
+              <button
+                type="button"
+                class="btn"
+                disabled={migrating}
+                onClick={() => setVisible(false)}
+                style={{ padding: '12px 16px', borderRadius: '10px', fontSize: '14px' }}
+              >
+                {t('common.dismiss')}
+              </button>
+              <button
+                type="button"
+                class="btn btn-primary"
+                disabled={migrating}
+                onClick={handleStartMigrate}
+                style={{
+                  flex: 1,
+                  padding: '12px',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  borderRadius: '10px',
+                  background: 'linear-gradient(135deg, #2563eb, #1d4ed8)',
+                  boxShadow: '0 4px 16px rgba(37, 99, 235, 0.4)',
+                  cursor: migrating ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {migrating ? t('migration.running') : errorMsg ? t('common.retry') : t('migration.startBtn')}
+              </button>
+            </>
           ) : (
             <div style={{ color: '#10b981', fontWeight: 600, fontSize: '14px', padding: '6px 0' }}>
               ✓ {t('migration.completeNotice')}

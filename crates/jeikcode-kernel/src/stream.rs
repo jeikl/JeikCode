@@ -34,7 +34,12 @@ impl TokenUsage {
 /// (auth/400/bad-request). The kernel does not retry here — it only surfaces.
 #[derive(Clone, Debug, Default)]
 pub struct ProviderError {
+    /// 可以整请求重发（尚未向用户输出任何内容）。
     pub retryable: bool,
+    /// 可以**接着已产出的内容继续生成**（中流传输失败 / 空闲超时）。
+    /// 与 `retryable` 互斥语义：`retryable` 表示「可以重放」，`resumable` 表示
+    /// 「已经出过内容，只能续写」。由 adapter 在传输类失败处置位。
+    pub resumable: bool,
     pub message: String,
     /// HTTP status code for an OPEN failure (a non-2xx response). `None` for transport
     /// or mid-stream errors that have no HTTP status. The "error code" in the HTTP sense.
@@ -67,7 +72,7 @@ impl ProviderError {
         // 2. HTTP 400 + message signature (Anthropic "prompt is too long", others).
         if self.http_status == Some(400) {
             let m = self.message.to_ascii_lowercase();
-            const NEEDLES: [&str; 9] = [
+            const NEEDLES: [&str; 11] = [
                 "context length",
                 "context window",
                 "maximum context",
@@ -77,6 +82,11 @@ impl ProviderError {
                 "range of input length",     // Bailian / Tencent gateway
                 "maximum prompt length",     // Anthropic-style variant
                 "too large for model with ", // trailing space: don't match "...without..."
+                // Gemini / Vertex: "The input token count (N) exceeds the maximum number of
+                // tokens allowed (M)." The count sits between the words, so match the
+                // stable prefix (also covers Bedrock's "...maximum number of input tokens").
+                "input token count",
+                "exceeds the maximum number of tokens allowed",
             ];
             if NEEDLES.iter().any(|n| m.contains(n)) {
                 return true;
@@ -240,6 +250,7 @@ mod overflow_tests {
     fn err(http: Option<u16>, code: Option<&str>, msg: &str) -> ProviderError {
         ProviderError {
             retryable: false,
+            resumable: false,
             message: msg.into(),
             http_status: http,
             code: code.map(Into::into),
@@ -292,6 +303,26 @@ mod overflow_tests {
             Some(400),
             None,
             "too large for model with 8192 maximum context length"
+        )
+        .is_context_overflow());
+        // Gemini / Vertex shape (real 400 body, counts included).
+        assert!(err(
+            Some(400),
+            None,
+            "The input token count (5911388) exceeds the maximum number of tokens allowed (1048576)."
+        )
+        .is_context_overflow());
+        assert!(err(
+            Some(400),
+            None,
+            "The input token count (154364) exceeds the maximum number of tokens allowed (131072) for model 'gemini-2.5-flash'."
+        )
+        .is_context_overflow());
+        // Output-generation limits are NOT context overflow (real Vertex wording).
+        assert!(!err(
+            Some(400),
+            None,
+            "Unable to submit request because it has a maxOutputTokens value of 65536 but the supported range is from 1 (inclusive) to 65536 (exclusive). Update the value and try again."
         )
         .is_context_overflow());
         // Unrelated 400s stay false — including near-miss substrings of the tightened needles.

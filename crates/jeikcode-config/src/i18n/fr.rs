@@ -127,6 +127,109 @@ pub(super) fn fr(msg: Msg<'_>) -> Cow<'static, str> {
             format!("Compacté · {} message(s) résumé(s) · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("Sortie d'outil repliée · ~{} tok économisés", saved).into(),
+        Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
+            format!("Le modèle a renvoyé une réponse vide, nouvelle tentative dans {wait}s ({attempt}/{max})…")
+        } else {
+            format!("Le modèle a renvoyé une réponse vide, nouvelle tentative ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryThinking { attempt, max, wait } => if wait > 0 {
+            format!("Le modèle n'a renvoyé que sa réflexion, nouvelle tentative dans {wait}s ({attempt}/{max})…")
+        } else {
+            format!("Le modèle n'a renvoyé que sa réflexion, nouvelle tentative ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryMalformed { attempt, max, wait } => if wait > 0 {
+            format!("Réponse mal formée, nouvelle tentative dans {wait}s ({attempt}/{max})…")
+        } else {
+            format!("Réponse mal formée, nouvelle tentative ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryFirstToken { secs, attempt, max } =>
+            format!("Modèle lent : aucun jeton reçu en {secs}s, nouvelle tentative ({attempt}/{max})…").into(),
+        Msg::AgentRetryApi { reason, wait, attempt, max } =>
+            format!("Erreur API {reason}, nouvelle tentative dans {wait}s ({attempt}/{max})…").into(),
+        Msg::AgentOverWindow { estimate_k, window_k, buffer_k } =>
+            format!(
+                "La requête (~{estimate_k}K tokens) atteint le seuil du contexte (fenêtre ~{window_k}K − marge {buffer_k}K) : réduisez l'entrée ou changez pour un modèle à plus grande fenêtre."
+            ).into(),
+        Msg::AgentContextOverflow { round, attempt } =>
+            format!("Dépassement du contexte au tour {round} (tentative {attempt}) ; compactage et nouvelle tentative").into(),
+        Msg::AgentStreamReconnecting { attempt, max } =>
+            format!("Délai d'inactivité du flux dépassé — reconnexion ({attempt}/{max})").into(),
+        Msg::AgentResponseTruncated => "Réponse tronquée : finish_reason=length".into(),
+        Msg::AgentUnsupportedSnapshot { version, supported } =>
+            format!("Version d'instantané {version} non prise en charge (version prise en charge : {supported}) ; démarrage à vide").into(),
+        Msg::AgentModelHighLatencyTerminal { retries, secs } =>
+            format!("Latence du modèle trop élevée, veuillez réessayer plus tard ({retries} tentatives consécutives sans premier jeton en {secs}s)").into(),
+        Msg::AgentExhaustedMalformed { max } =>
+            format!("Le modèle a renvoyé une réponse illisible {max} fois de suite (incident ponctuel du fournisseur). Vous pouvez réessayer maintenant ou plus tard.").into(),
+        Msg::AgentExhaustedThinkingOverWindowIntro { max } =>
+            format!("Le modèle n'a renvoyé que sa réflexion sans texte ni outil {max} fois de suite. Cette requête dépasse la fenêtre de contexte — réduisez l'entrée ou lancez /compact puis réessayez.").into(),
+        Msg::AgentExhaustedThinkingOverWindowSize { max, prompt_k, window_k } =>
+            format!("Le modèle n'a renvoyé que sa réflexion sans texte ni outil {max} fois de suite. La requête (~{prompt_k}K tokens) approche ou dépasse la fenêtre (~{window_k}K) ; essayez /compact ou réduisez l'entrée.").into(),
+        Msg::AgentExhaustedThinkingGeneric { max } =>
+            format!("Le modèle n'a renvoyé que sa réflexion sans texte ni outil {max} fois de suite. Vous pouvez réessayer maintenant ou plus tard.").into(),
+        Msg::AgentExhaustedEmptyOverWindowIntro { max } =>
+            format!("Le modèle a renvoyé une réponse vide {max} fois de suite. Cette requête dépasse la fenêtre de contexte — réduisez l'entrée ou lancez /compact puis réessayez.").into(),
+        Msg::AgentExhaustedEmptyOverWindowSize { max, prompt_k, window_k } =>
+            format!("Le modèle a renvoyé une réponse vide {max} fois de suite. La requête (~{prompt_k}K tokens) approche ou dépasse la fenêtre (~{window_k}K) ; essayez /compact ou réduisez l'entrée.").into(),
+        Msg::AgentExhaustedEmptyGeneric { max } =>
+            format!("Le modèle a renvoyé une réponse vide {max} fois de suite (incident ponctuel indépendant de la longueur du contexte). Vous pouvez réessayer maintenant ou plus tard.").into(),
+        Msg::AgentStatusRateLimited => "Limite de débit dépassée ou quota épuisé".into(),
+        Msg::AgentStatusUpstreamUnavailable => "Service distant temporairement indisponible".into(),
+        Msg::AgentStatusResponseTimeout => "Délai de réponse du modèle dépassé".into(),
+        Msg::AgentStatusConnectionFailed => "Échec de la connexion réseau".into(),
+        Msg::AgentStatusInsufficientBalance => "Solde du compte insuffisant".into(),
+        Msg::AgentStatusUnauthorized => "Clé API non autorisée ou expirée".into(),
+        Msg::StreamReadRetryExhausted { attempts } =>
+            format!("Connexion réseau interrompue : l'hôte distant a fermé ou réinitialisé la connexion, échec après {attempts} reconnexions automatiques. Vous pouvez réessayer.").into(),
+        Msg::StreamReadPartialResponse =>
+            "Réponse interrompue : la partie exploitable de la réponse a été conservée, vous pouvez continuer.".into(),
+        Msg::StreamReadInterrupted =>
+            "Connexion réseau interrompue : l'hôte distant a fermé ou réinitialisé la connexion. Vous pouvez réessayer.".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("Connexion perdue, reconnexion automatique en cours (jusqu'à {max} tentatives), sortie actuelle conservée…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("Connexion interrompue, sortie actuelle conservée, tentative {attempt}/{max}").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("Flux figé par délai d'inactivité, sortie conservée, tentative {attempt}/{max}")
+        } else {
+            format!("Flux figé par délai d'inactivité, tentative {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("Connexion réseau perdue, sortie conservée, tentative {attempt}/{max}")
+        } else {
+            format!("Connexion réseau perdue, tentative {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("Connexion rétablie après {attempts} tentative(s), poursuite en cours").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "Délai du flux dépassé après les reconnexions automatiques ; tour interrompu".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("Limite de débit atteinte, nouvelle tentative dans {secs}s…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "Limite de débit atteinte ; mis en pause en attendant la réinitialisation ou un changement de modèle".into()
+        } else {
+            format!("Mis en pause par limite de débit : {detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "Délai du flux dépassé après une réponse partielle ; le contenu reçu a été conservé et peut être poursuivi.".into(),
+        Msg::StreamReadResetHint =>
+            "Cette erreur survient souvent sur un réseau d'entreprise ou via un proxy ; vérifiez vos réglages proxy, VPN ou pare-feu.".into(),
+        Msg::StreamReadDetailsPrefix => "Détails : ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "Boucle d'écho possible : un motif répété de sortie et d'appels d'outils a été détecté ; invitation au modèle à changer de cap avant l'arrêt du tour.".into()
+        } else {
+            "Boucle d'écho possible : un motif répété de sortie et d'appels d'outils a été détecté ; invitation au modèle à changer de cap.".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("arrêté : le modèle a rejoué le même raisonnement, texte et motif d'appels d'outils pendant {rounds} tours consécutifs").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("boucle d'outils possible : le même appel ou lot en lecture seule a renvoyé les mêmes résultats {threshold} fois ; invitation au modèle à changer de cap").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("boucle d'outils détectée : le même appel ou lot en lecture seule a renvoyé les mêmes résultats {threshold} fois ; arrêt avant une nouvelle requête").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("arrêté : le modèle a répété le même motif d'appels d'outils pendant {rounds} tours consécutifs").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Limite de tours atteinte ({cap}) ; exécution des outils arrêtée pour résumer l'avancement et les prochaines étapes.").into(),
         _ => super::en::en(msg),
     }
 }

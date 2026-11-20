@@ -208,14 +208,14 @@ pub struct CatalogLocation {
     pub project_bucket: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatalogPresence {
     LegacyOnly,
     NativeOnly,
     Both,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogEntry {
     pub id: String,
     pub name: String,
@@ -233,10 +233,12 @@ pub struct CatalogEntry {
     pub approval_mode: Option<String>,
     pub reasoning_effort: Option<String>,
     pub thinking_budget: Option<u32>,
+    #[serde(default)]
+    pub origin: SessionOrigin,
     pub presence: CatalogPresence,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatalogDiagnosticKind {
     Io,
     InvalidId,
@@ -246,7 +248,7 @@ pub enum CatalogDiagnosticKind {
     Corrupt,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogDiagnostic {
     pub project_bucket: Option<String>,
     pub path: PathBuf,
@@ -254,7 +256,7 @@ pub struct CatalogDiagnostic {
     pub message: String,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CatalogScan {
     pub entries: Vec<CatalogEntry>,
     pub diagnostics: Vec<CatalogDiagnostic>,
@@ -372,6 +374,8 @@ pub enum SessionOrigin {
     /// Started (or continued) by the OpenAI / Anthropic / Responses HTTP API.
     /// WebUI observes these in Auto; the API turn itself never opens modals.
     Protocol,
+    /// `task` 工具派生的隔离子 Agent 会话；默认从用户会话历史侧栏与 `/resume` 列表隐藏，通过父会话级联评测联查。
+    Subagent,
 }
 
 /// Persisted pending interactive permission checkpoint.
@@ -471,6 +475,12 @@ pub struct SessionMeta {
     /// Mode last chosen for this session (e.g. "build", "accept_edits", "bypass", "plan").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<String>,
+    /// 若本会话为 `task` 子 agent 会话，记录其父会话 ID（主对话溯源与级联评测用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    /// 若本会话为 `task` 子 agent 会话，记录触发它的父工具调用 `call_id`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_call_id: Option<String>,
 }
 
 impl SessionMeta {
@@ -502,6 +512,8 @@ impl SessionMeta {
             reasoning_effort: None,
             thinking_budget: None,
             approval_mode: None,
+            parent_session_id: None,
+            parent_call_id: None,
         }
     }
 
@@ -684,7 +696,7 @@ struct CatalogAggregate {
 }
 
 /// One completed turn's stats — drives a resume-time `✓ … tokens` divider.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TurnStat {
     /// Legacy mutable message-position anchor. Kept during the transition for old
     /// metadata/readers; native ownership and pruning decisions use `turn_id`.
@@ -721,6 +733,9 @@ pub struct TurnStat {
     /// total under "unattributed" rather than assigning it to the active model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_usage: Vec<ModelUsageStat>,
+    /// Terminal stop reason slug (`"stopped"`, `"max_rounds"`, `"tool_loop_detected"`, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -1129,6 +1144,10 @@ impl SessionManager {
 
     pub fn snapshot_path(&self, id: &str) -> SessionResult<PathBuf> {
         self.path_for(id, "snapshot")
+    }
+
+    pub fn trace_path(&self, id: &str) -> SessionResult<PathBuf> {
+        self.path_for(id, "trace.jsonl")
     }
 
     fn todo_board_path(&self, id: &str) -> SessionResult<PathBuf> {
@@ -3246,6 +3265,15 @@ impl SessionManager {
         scan_catalog_cached(sessions_root)
     }
 
+    /// 精确定位单个 `(project_bucket, id)` 会话条目，不扫描其他项目桶与无关会话文件。
+    pub fn scan_session_in_bucket(
+        sessions_root: &Path,
+        project_bucket: &str,
+        id: &str,
+    ) -> CatalogScan {
+        scan_single_session_in_bucket(sessions_root, project_bucket, id)
+    }
+
     /// Collapse automatic fork aggregates into one newest logical conversation
     /// row per project. Exact-ID loading and the raw catalog remain unchanged.
     pub fn collapse_fork_lineages(entries: &mut Vec<CatalogEntry>) {
@@ -3298,12 +3326,15 @@ impl SessionManager {
     }
 
     /// Sessions for normal pickers (/resume, webui sidebar): excludes scheduled-run
-    /// sessions so recurring tasks don't flood the user's manual history. Use `list()`
-    /// for the full set (e.g. a scheduled-tasks view).
+    /// sessions and subagent child sessions so background or child runs don't flood the user's manual history.
+    /// Use `list()` for the full set (e.g. scheduled tasks or cascade eval metrics).
     pub fn list_visible(&self) -> Vec<SessionMeta> {
         self.list()
             .into_iter()
-            .filter(|m| m.origin != SessionOrigin::Scheduled)
+            .filter(|m| {
+                !matches!(m.origin, SessionOrigin::Scheduled | SessionOrigin::Subagent)
+                    && m.parent_session_id.is_none()
+            })
             .collect()
     }
 
@@ -3383,6 +3414,8 @@ impl SessionManager {
             self.rewind_transaction_path(id)?,
             self.meta_path(id)?,
             self.jsonl_path(id)?,
+            self.tool_metrics_path(id)?,
+            self.model_switch_path(id)?,
             self.display_path(id)?,
             self.display_meta_path(id)?,
             self.presentation_path(id)?,
@@ -3576,6 +3609,53 @@ impl SessionManager {
 struct CachedCatalog {
     sig: u64,
     scan: Arc<CatalogScan>,
+    /// Wall-clock guard so repeated list/detail requests within the same second
+    /// don't each walk the whole sessions tree just to recompute the signature.
+    checked_at: std::time::Instant,
+}
+
+const CATALOG_DISK_VERSION: u32 = 2;
+
+/// On-disk snapshot of the same scan. It is only reused when the cheap
+/// `catalog_signature` still matches and the schema version matches, so
+/// catalog scanner upgrades or rewind/delete/edit never serve stale diagnostics.
+#[derive(Serialize, Deserialize)]
+struct DiskCatalog {
+    #[serde(default)]
+    version: u32,
+    sig: u64,
+    scan: CatalogScan,
+}
+
+fn catalog_index_path(sessions_root: &Path) -> PathBuf {
+    sessions_root.join(".catalog-index.json")
+}
+
+fn is_catalog_index_entry(name: &str) -> bool {
+    name == ".catalog-index.json" || name.starts_with(".catalog-index.")
+}
+
+fn load_disk_catalog(sessions_root: &Path, sig: u64) -> Option<CatalogScan> {
+    let bytes = fs::read(catalog_index_path(sessions_root)).ok()?;
+    let disk: DiskCatalog = serde_json::from_slice(&bytes).ok()?;
+    (disk.version == CATALOG_DISK_VERSION && disk.sig == sig).then_some(disk.scan)
+}
+
+fn save_disk_catalog(sessions_root: &Path, sig: u64, scan: &CatalogScan) {
+    let path = catalog_index_path(sessions_root);
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let Ok(bytes) = serde_json::to_vec(&DiskCatalog {
+        version: CATALOG_DISK_VERSION,
+        sig,
+        scan: scan.clone(),
+    }) else {
+        return;
+    };
+    if fs::write(&tmp, bytes).is_ok() {
+        // Windows rename does not replace an existing file.
+        let _ = fs::remove_file(&path);
+        let _ = fs::rename(&tmp, &path);
+    }
 }
 
 fn catalog_cache() -> &'static Mutex<HashMap<PathBuf, CachedCatalog>> {
@@ -3648,29 +3728,71 @@ fn catalog_signature(sessions_root: &Path) -> u64 {
 /// one cache. Callers are unchanged — this is a transparent speedup.
 ///
 /// NOTE: a hit still pays the `catalog_signature` walk (O(N `stat`s), NOT O(1))
-/// — it saves the read + JSON-parse of every `*.meta`, not the directory walk.
-/// Index-level (single-read) speed would need a persisted recency index.
+/// — it saves the read + JSON-parse of every `*.meta`, and now can also reuse a
+/// signature-validated on-disk snapshot across process restarts. Rewind/delete/
+/// edit changes mtime or size, so the snapshot self-invalidates; no TTL-only
+/// stale catalog is ever served.
 fn scan_catalog_cached(sessions_root: &Path) -> CatalogScan {
-    let sig = catalog_signature(sessions_root);
+    // Production: a very short reuse window absorbs the multi-tab/multi-request
+    // burst on session switches without hiding a new session for long. Tests use
+    // zero so writes are observed immediately.
+    #[cfg(not(test))]
+    const CACHE_REUSE: std::time::Duration = std::time::Duration::from_millis(750);
+    #[cfg(test)]
+    const CACHE_REUSE: std::time::Duration = std::time::Duration::ZERO;
+
     {
         let cache = catalog_cache()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = cache.get(sessions_root) {
-            if cached.sig == sig {
+            if cached.checked_at.elapsed() < CACHE_REUSE {
                 return (*cached.scan).clone();
             }
         }
     }
+    let sig = catalog_signature(sessions_root);
+    {
+        let mut cache = catalog_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.get_mut(sessions_root) {
+            if cached.sig == sig {
+                cached.checked_at = std::time::Instant::now();
+                return (*cached.scan).clone();
+            }
+        }
+    }
+    // Cross-process/restart reuse. Signature matching means file additions,
+    // deletions, rewind edits, or length changes all invalidate this snapshot.
+    if let Some(disk) = load_disk_catalog(sessions_root, sig) {
+        catalog_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                sessions_root.to_path_buf(),
+                CachedCatalog {
+                    sig,
+                    scan: Arc::new(disk.clone()),
+                    checked_at: std::time::Instant::now(),
+                },
+            );
+        return disk;
+    }
     // Miss: the lock is intentionally NOT held across the (slow) scan.
     let scan = scan_catalog_root(sessions_root);
+    save_disk_catalog(sessions_root, sig, &scan);
     let arc = Arc::new(scan.clone());
     catalog_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(
             sessions_root.to_path_buf(),
-            CachedCatalog { sig, scan: arc },
+            CachedCatalog {
+                sig,
+                scan: arc,
+                checked_at: std::time::Instant::now(),
+            },
         );
     scan
 }
@@ -3690,6 +3812,11 @@ fn session_auxiliary_artifact(name: &str) -> bool {
         ".display.idx.jsonl",
         ".display.jsonl",
         ".display.meta.json",
+        ".toolmetrics.jsonl",
+        ".model-switches.jsonl",
+        ".trace.jsonl",
+        ".trace.jsonl.old",
+        ".images.json",
         ".bashkw.json",
         ".pending_permission.json",
     ];
@@ -3730,6 +3857,7 @@ fn scan_catalog_root(sessions_root: &Path) -> CatalogScan {
         };
         let bucket_path = bucket_entry.path();
         let bucket = match bucket_entry.file_name().into_string() {
+            Ok(bucket) if is_catalog_index_entry(&bucket) => continue,
             Ok(bucket) if valid_project_bucket(&bucket) => bucket,
             Ok(bucket) => {
                 scan.diagnostics.push(CatalogDiagnostic {
@@ -3948,6 +4076,143 @@ fn scan_catalog_root(sessions_root: &Path) -> CatalogScan {
     scan
 }
 
+fn scan_single_session_in_bucket(
+    sessions_root: &Path,
+    project_bucket: &str,
+    id: &str,
+) -> CatalogScan {
+    let mut scan = CatalogScan::default();
+    if !valid_project_bucket(project_bucket) || validate_session_id(id).is_err() {
+        return scan;
+    }
+    let bucket_path = sessions_root.join(project_bucket);
+    match fs::symlink_metadata(&bucket_path) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => {
+            scan.diagnostics.push(CatalogDiagnostic {
+                project_bucket: Some(project_bucket.to_string()),
+                path: bucket_path,
+                kind: CatalogDiagnosticKind::UnsafeFile,
+                message: "project bucket is not a directory".into(),
+            });
+            return scan;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return scan,
+        Err(error) => {
+            scan.diagnostics.push(io_catalog_diagnostic(
+                Some(project_bucket.to_string()),
+                bucket_path,
+                error,
+            ));
+            return scan;
+        }
+    }
+
+    let manager = SessionManager::with_root(&bucket_path);
+    let mut sources = CatalogAggregate::default();
+
+    let meta_path = bucket_path.join(format!("{id}.meta"));
+    match fs::symlink_metadata(&meta_path) {
+        Ok(md) if md.file_type().is_file() => match manager.read_meta(id) {
+            Ok(meta) => sources.native = Some(meta),
+            Err(error) => scan.diagnostics.push(catalog_diagnostic_from_error(
+                Some(project_bucket.to_string()),
+                meta_path,
+                error,
+            )),
+        },
+        Ok(_) => scan.diagnostics.push(CatalogDiagnostic {
+            project_bucket: Some(project_bucket.to_string()),
+            path: meta_path,
+            kind: CatalogDiagnosticKind::UnsafeFile,
+            message: "catalog source is not a regular file".into(),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => scan.diagnostics.push(io_catalog_diagnostic(
+            Some(project_bucket.to_string()),
+            meta_path,
+            error,
+        )),
+    }
+
+    let legacy_path = bucket_path.join(format!("{id}.json"));
+    let skip_ui_presentation = id.strip_suffix(".ui").is_some_and(|presentation_id| {
+        ["meta", "snapshot", "jsonl"].iter().any(|ext| {
+            bucket_path
+                .join(format!("{presentation_id}.{ext}"))
+                .symlink_metadata()
+                .is_ok()
+        })
+    });
+    if !skip_ui_presentation {
+        match fs::symlink_metadata(&legacy_path) {
+            Ok(md) if md.file_type().is_file() => {
+                match read_legacy_catalog_meta(&legacy_path, id) {
+                    Ok(meta) => sources.legacy = Some(meta),
+                    Err(error) => scan.diagnostics.push(catalog_diagnostic_from_error(
+                        Some(project_bucket.to_string()),
+                        legacy_path,
+                        error,
+                    )),
+                }
+            }
+            Ok(_) => scan.diagnostics.push(CatalogDiagnostic {
+                project_bucket: Some(project_bucket.to_string()),
+                path: legacy_path,
+                kind: CatalogDiagnosticKind::UnsafeFile,
+                message: "catalog source is not a regular file".into(),
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => scan.diagnostics.push(io_catalog_diagnostic(
+                Some(project_bucket.to_string()),
+                legacy_path,
+                error,
+            )),
+        }
+    }
+
+    if sources.native.is_none() {
+        for suffix in [".snapshot", ".jsonl", ".rewind.txn.json", ".rewind.json"] {
+            let sidecar_path = bucket_path.join(format!("{id}{suffix}"));
+            match fs::symlink_metadata(&sidecar_path) {
+                Ok(md) if md.file_type().is_file() => {
+                    scan.diagnostics.push(CatalogDiagnostic {
+                        project_bucket: Some(project_bucket.to_string()),
+                        path: sidecar_path,
+                        kind: CatalogDiagnosticKind::Corrupt,
+                        message: format!("native session {id:?} has sidecars but no metadata"),
+                    });
+                    break;
+                }
+                Ok(_) => {
+                    scan.diagnostics.push(CatalogDiagnostic {
+                        project_bucket: Some(project_bucket.to_string()),
+                        path: sidecar_path,
+                        kind: CatalogDiagnosticKind::UnsafeFile,
+                        message: "native session sidecar is not a regular file".into(),
+                    });
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    scan.diagnostics.push(io_catalog_diagnostic(
+                        Some(project_bucket.to_string()),
+                        sidecar_path,
+                        error,
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(entry) = catalog_entry(project_bucket.to_string(), id.to_string(), sources) {
+        scan.entries.push(entry);
+    }
+    scan.diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
+    scan
+}
+
 fn valid_project_bucket(bucket: &str) -> bool {
     bucket.len() == 16 && bucket.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -4069,6 +4334,7 @@ fn catalog_entry(
             approval_mode: native.approval_mode.clone(),
             reasoning_effort: native.reasoning_effort.clone(),
             thinking_budget: native.thinking_budget,
+            origin: native.origin,
             presence: if legacy.is_some() {
                 CatalogPresence::Both
             } else {
@@ -4089,6 +4355,7 @@ fn catalog_entry(
             approval_mode: None,
             reasoning_effort: None,
             thinking_budget: None,
+            origin: SessionOrigin::Manual,
             presence: CatalogPresence::LegacyOnly,
         }),
         (None, None) => None,
@@ -4490,7 +4757,7 @@ fn deserialize<T: for<'de> Deserialize<'de>>(bytes: &[u8], kind: &'static str) -
     })
 }
 
-fn ensure_size(kind: &'static str, actual: usize, limit: usize) -> SessionResult<()> {
+pub(super) fn ensure_size(kind: &'static str, actual: usize, limit: usize) -> SessionResult<()> {
     if actual > limit {
         Err(SessionStoreError::TooLarge {
             kind,
@@ -4670,13 +4937,14 @@ fn read_regular_file_bounded(
     Ok(bytes)
 }
 
-/// Read a small optional JSON sidecar. Missing file = `None`; malformed/oversized
+/// Read an optional bounded JSON sidecar. Missing file = `None`; malformed/oversized
 /// content is an explicit corruption error (never silently defaulted).
-pub(crate) fn read_json_optional<T: for<'de> Deserialize<'de>>(
+pub(crate) fn read_json_optional_bounded<T: for<'de> Deserialize<'de>>(
     path: &Path,
     kind: &'static str,
+    limit: usize,
 ) -> SessionResult<Option<T>> {
-    match read_regular_file_bounded(path, kind, 64 * 1024) {
+    match read_regular_file_bounded(path, kind, limit) {
         Ok(bytes) => {
             serde_json::from_slice(&bytes)
                 .map(Some)
@@ -4757,7 +5025,7 @@ fn io_at(path: &Path, source: io::Error) -> SessionStoreError {
 /// power loss. A crash mid-write never leaves a half-written (corrupt) session file.
 /// The tmp's extension (`…tmp`) is ignored by [`SessionManager::list`]'s `*.meta`
 /// filter, so a leftover tmp from a crash never appears as a session.
-fn atomic_write(path: &Path, bytes: &[u8]) -> SessionResult<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> SessionResult<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -5046,6 +5314,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         }];
         mgr.write_meta(&meta).unwrap();
         mgr.write_presentation("s1", &PresentationFile::default())
@@ -5059,15 +5328,8 @@ mod tests {
             role: role.into(),
             id: Some(id.into()),
             content: content.into(),
-            reasoning: None,
-            synthetic: false,
-            internal_origin: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            is_error: false,
-            images: Vec::new(),
             created_at: Some(1),
-            elapsed_ms: None,
+            ..DisplayRecord::default()
         };
         mgr.write_display_backfill(
             "s1",
@@ -5211,6 +5473,7 @@ mod tests {
             used_tokens: 1,
             ctx_window: 10,
             model_usage: Vec::new(),
+            stop_reason: None,
         };
         meta.turn_stats = vec![stat(0, 1), stat(1, 2), stat(2, 3)];
         mgr.write_meta(&meta).unwrap();
@@ -6691,11 +6954,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let bucket = root.path().join("0123456789abcdef");
         std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(root.path().join(".catalog-index.json"), b"{}").unwrap();
+        std::fs::write(root.path().join(".catalog-index.tmp-1234"), b"{}").unwrap();
         let id = "bae75c33-b339-49cd-9e0a-f8dd3ea881a6";
         for name in [
             format!("{id}.display.jsonl"),
             format!("{id}.display.idx.jsonl"),
             format!("{id}.display.meta.json"),
+            format!("{id}.toolmetrics.jsonl"),
+            format!("{id}.model-switches.jsonl"),
+            format!("{id}.trace.jsonl"),
+            format!("{id}.trace.jsonl.old"),
+            format!("{id}.images.json"),
             format!("{id}.bashkw.json"),
             format!("{id}.pending_permission.json"),
         ] {
@@ -6707,7 +6977,42 @@ mod tests {
         assert!(scan.entries.is_empty());
         assert!(
             scan.diagnostics.is_empty(),
-            "session-owned auxiliaries must never become catalog sources: {:?}",
+            "session-owned auxiliaries and catalog index files must never become catalog sources: {:?}",
+            scan.diagnostics
+        );
+    }
+
+    #[test]
+    fn catalog_disk_cache_version_bump_invalidates_stale_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        let bucket = root.path().join("0123456789abcdef");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let trace = bucket.join("bae75c33-b339-49cd-9e0a-f8dd3ea881a6.trace.jsonl");
+        std::fs::write(&trace, b"{}").unwrap();
+
+        let sig = catalog_signature(root.path());
+        let stale_legacy_cache = serde_json::json!({
+            "sig": sig,
+            "scan": {
+                "entries": [],
+                "diagnostics": [{
+                    "project_bucket": null,
+                    "path": root.path().join(".catalog-index.json"),
+                    "kind": "InvalidId",
+                    "message": "stale false positive"
+                }]
+            }
+        });
+        std::fs::write(
+            catalog_index_path(root.path()),
+            serde_json::to_vec(&stale_legacy_cache).unwrap(),
+        )
+        .unwrap();
+
+        let scan = SessionManager::scan_catalog(root.path());
+        assert!(
+            scan.diagnostics.is_empty(),
+            "unversioned legacy disk catalog cache must not replay stale diagnostics: {:?}",
             scan.diagnostics
         );
     }
@@ -7769,6 +8074,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 10,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
             TurnStat {
                 after_message: 99,
@@ -7782,6 +8088,7 @@ mod tests {
                 used_tokens: 1,
                 ctx_window: 10,
                 model_usage: Vec::new(),
+                stop_reason: None,
             },
         ];
         mgr.write_meta(&meta).unwrap();
@@ -7969,6 +8276,7 @@ mod tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: usage,
+            stop_reason: None,
         };
         let paid = Some(ModelPricing {
             input_per_million: 1.0,
@@ -8047,6 +8355,7 @@ mod tests {
                 },
                 pricing: Some(free),
             }],
+            stop_reason: None,
         });
 
         let report = aggregate_session_cost(&meta);
@@ -8101,6 +8410,7 @@ mod tests {
                 },
                 pricing: None,
             }],
+            stop_reason: None,
         });
         meta.turn_stats.push(TurnStat {
             after_message: 4,
@@ -8114,6 +8424,7 @@ mod tests {
             used_tokens: 0,
             ctx_window: 0,
             model_usage: Vec::new(),
+            stop_reason: None,
         });
 
         let archived = meta.archive_turn_stats_where(|_| true);
@@ -8484,5 +8795,29 @@ mod tests {
         let old = r#"{"id":"x","name":"n","working_dir":"/w","created_at":0,"updated_at":0}"#;
         let parsed: SessionMeta = serde_json::from_str(old).unwrap();
         assert!(parsed.protocol_key.is_none());
+    }
+
+    #[test]
+    fn scan_session_in_bucket_locates_exact_id_without_scanning_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proj-a");
+        std::fs::create_dir_all(&project).unwrap();
+        let bucket = SessionManager::project_hash(&project);
+        let mgr = SessionManager::with_root(dir.path().join(&bucket));
+        let meta = SessionMeta::new("target-sess-1", project.to_string_lossy(), 1);
+        mgr.write_meta(&meta).unwrap();
+
+        // 在无关分桶写入坏 JSON：单桶 O(1) 定位不得触碰或因它中断
+        let bad_bucket = dir.path().join("other-bucket-ffff");
+        std::fs::create_dir_all(&bad_bucket).unwrap();
+        std::fs::write(bad_bucket.join("corrupt.meta.json"), b"{bad").unwrap();
+
+        let scan = SessionManager::scan_session_in_bucket(dir.path(), &bucket, "target-sess-1");
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].id, "target-sess-1");
+
+        // 非法路径穿越 id 必须被安全拒绝返回空结果
+        let rejected = SessionManager::scan_session_in_bucket(dir.path(), &bucket, "../escape");
+        assert!(rejected.entries.is_empty());
     }
 }

@@ -127,6 +127,109 @@ pub(super) fn ja(msg: Msg<'_>) -> Cow<'static, str> {
             format!("圧縮済み · {} 件を要約 · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("ツール出力を折りたたみました · ~{} tok 節約", saved).into(),
+        Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
+            format!("モデルが空の応答を返しました。{wait}秒後に再試行します（{attempt}/{max}）…")
+        } else {
+            format!("モデルが空の応答を返しました。再試行しています（{attempt}/{max}）…")
+        }.into(),
+        Msg::AgentRetryThinking { attempt, max, wait } => if wait > 0 {
+            format!("モデルが思考のみを返しました。{wait}秒後に再試行します（{attempt}/{max}）…")
+        } else {
+            format!("モデルが思考のみを返しました。再試行しています（{attempt}/{max}）…")
+        }.into(),
+        Msg::AgentRetryMalformed { attempt, max, wait } => if wait > 0 {
+            format!("応答形式が不正です。{wait}秒後に再試行します（{attempt}/{max}）…")
+        } else {
+            format!("応答形式が不正です。再試行しています（{attempt}/{max}）…")
+        }.into(),
+        Msg::AgentRetryFirstToken { secs, attempt, max } =>
+            format!("モデルの応答が遅延しています：{secs}秒以内に応答がないため再試行します（{attempt}/{max}）…").into(),
+        Msg::AgentRetryApi { reason, wait, attempt, max } =>
+            format!("API エラー {reason}、{wait}秒後に再試行します（{attempt}/{max}）…").into(),
+        Msg::AgentOverWindow { estimate_k, window_k, buffer_k } =>
+            format!(
+                "リクエストは約 {estimate_k}K tokens でコンテキスト上限に近づいています（上限 ~{window_k}K − 余裕 {buffer_k}K）。入力を削るか、より大きなコンテキストのモデルへ切り替えてください。"
+            ).into(),
+        Msg::AgentContextOverflow { round, attempt } =>
+            format!("第 {round} ラウンドでコンテキストが溢れました（試行 {attempt} 回目）。圧縮して再試行しています").into(),
+        Msg::AgentStreamReconnecting { attempt, max } =>
+            format!("ストリームがアイドルタイムアウトしました — 再接続中（{attempt}/{max}）").into(),
+        Msg::AgentResponseTruncated => "応答が上限で打ち切られました：finish_reason=length".into(),
+        Msg::AgentUnsupportedSnapshot { version, supported } =>
+            format!("未対応のスナップショット形式 {version}（対応形式 {supported}）のため、空のセッションで開始します").into(),
+        Msg::AgentModelHighLatencyTerminal { retries, secs } =>
+            format!("モデルの遅延が高すぎます。しばらくしてから再試行してください（{retries} 回連続で {secs} 秒以内に応答なし）").into(),
+        Msg::AgentExhaustedMalformed { max } =>
+            format!("モデルが解析不能な応答を {max} 回連続で返しました（上流の一時的な障害）。そのまま再試行するか、少し待ってからやり直してください。").into(),
+        Msg::AgentExhaustedThinkingOverWindowIntro { max } =>
+            format!("モデルが本文やツール呼び出しを返さず思考のみを {max} 回連続で返しました。リクエストがコンテキスト上限を超えているため、入力を減らすか /compact を実行して再試行してください。").into(),
+        Msg::AgentExhaustedThinkingOverWindowSize { max, prompt_k, window_k } =>
+            format!("モデルが本文やツール呼び出しを返さず思考のみを {max} 回連続で返しました。現在のリクエストは約 {prompt_k}K tokens で上限（約 {window_k}K）付近のため、/compact または入力削減をお試しください。").into(),
+        Msg::AgentExhaustedThinkingGeneric { max } =>
+            format!("モデルが本文やツール呼び出しを返さず思考のみを {max} 回連続で返しました。そのまま再試行するか、時間をおいてやり直してください。").into(),
+        Msg::AgentExhaustedEmptyOverWindowIntro { max } =>
+            format!("モデルが空の応答を {max} 回連続で返しました。リクエストがコンテキスト上限を超えているため、入力を減らすか /compact を実行して再試行してください。").into(),
+        Msg::AgentExhaustedEmptyOverWindowSize { max, prompt_k, window_k } =>
+            format!("モデルが空の応答を {max} 回連続で返しました。現在のリクエストは約 {prompt_k}K tokens で上限（約 {window_k}K）付近のため、/compact または入力削減をお試しください。").into(),
+        Msg::AgentExhaustedEmptyGeneric { max } =>
+            format!("モデルが空の応答を {max} 回連続で返しました（コンテキスト長とは無関係な上流の一時障害）。そのまま再試行するか、時間をおいてやり直してください。").into(),
+        Msg::AgentStatusRateLimited => "レート制限または利用上限に達しました".into(),
+        Msg::AgentStatusUpstreamUnavailable => "上流サービスが一時的に利用できません".into(),
+        Msg::AgentStatusResponseTimeout => "モデルの応答がタイムアウトしました".into(),
+        Msg::AgentStatusConnectionFailed => "ネットワーク接続に失敗しました".into(),
+        Msg::AgentStatusInsufficientBalance => "アカウント残高が不足しています".into(),
+        Msg::AgentStatusUnauthorized => "API キーが無効または期限切れです".into(),
+        Msg::StreamReadRetryExhausted { attempts } =>
+            format!("ネットワーク接続が切断されました：リモート側で接続が閉じられ、{attempts} 回の自動再接続に失敗しました。再試行できます。").into(),
+        Msg::StreamReadPartialResponse =>
+            "応答が途中で中断されました：安全に保存できる途中出力は保持されています。このまま続行できます。".into(),
+        Msg::StreamReadInterrupted =>
+            "ネットワーク接続が切断されました：リモート側で接続が閉じられるかリセットされました。再試行できます。".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("接続が切断されました。現在の出力を保持したまま自動再接続しています（最大 {max} 回）…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("接続が切断されました。現在の出力を保持したまま再試行しています（{attempt}/{max}）").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("ストリームがタイムアウトしました。現在の出力を保持して再試行しています（{attempt}/{max}）")
+        } else {
+            format!("ストリームがタイムアウトしました。再試行しています（{attempt}/{max}）")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("ネットワーク接続が切断されました。現在の出力を保持して再試行しています（{attempt}/{max}）")
+        } else {
+            format!("ネットワーク接続が切断されました。再試行しています（{attempt}/{max}）")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("接続が回復しました（{attempts} 回の再試行後に続行）").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "自動再接続後もストリーム応答がタイムアウトしたため、このターンを終了しました".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("レート制限に達しました。{secs} 秒後に自動再試行します…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "レート制限の上限に達したため一時停止しました。リセットを待つかモデルを切り替えて続行してください".into()
+        } else {
+            format!("レート制限により一時停止しました：{detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "一部応答の出力後にストリームがタイムアウトしました。途中までの内容は保持されているため続行できます。".into(),
+        Msg::StreamReadResetHint =>
+            "このエラーは社内ネットワークやプロキシ環境でよく発生します。プロキシ、VPN、ファイアウォール設定をご確認ください。".into(),
+        Msg::StreamReadDetailsPrefix => "詳細：".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "反復ループの可能性：同じ出力とツール呼び出しが繰り返されています。このターンを停止する前に方針変更を促しています。".into()
+        } else {
+            "反復ループの可能性：同じ出力とツール呼び出しが繰り返されています。方針変更を促しています。".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("停止しました：モデルが {rounds} ラウンド連続で同じ推論・テキストとツール呼び出しパターンを繰り返しました").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("ツールループの可能性：同じ呼び出しまたは読み取り専用バッチが {threshold} 回連続で同じ結果を返しました。方針変更を促しています").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("ツールループを検出：同じ呼び出しまたは読み取り専用バッチが {threshold} 回連続で同じ結果を返したため、次のリクエスト前に停止しました").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("停止しました：モデルが {rounds} ラウンド連続で同じツール呼び出しパターンを繰り返しました").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("最大ラウンド上限（{cap} ラウンド）に達したため、ツール呼び出しを停止して進捗と次のステップを要約します。").into(),
         _ => super::en::en(msg),
     }
 }

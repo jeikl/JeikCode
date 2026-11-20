@@ -13,7 +13,8 @@ Global root directory path: `~/.jeikcode/` (or `$JEIKCODE_HOME`).
 | **`thesaurus/`** | Bilingual code search thesaurus files (`*.txt`) | **Automatic hot-reload** (Reloaded on next code search) |
 | **`skills/`** | Global user skills directory (subdirectories containing `SKILL.md`) | Requires manual reload trigger (`jeikcode_config(action="reload")`) |
 | **`plugins/`** | Installed plugin marketplaces and extensions | Requires manual reload trigger (`jeikcode_config(action="reload")`) |
-| **`sessions/`** | Persisted session state and execution checkpoints | Historical session transcripts |
+| **`sessions/`** | Persisted session state, checkpoints, and incremental traces (`*.trace.jsonl` / `*.toolmetrics.jsonl`) | Historical session transcripts |
+| **`eval/`** | SHA-256 deduplicated upstream request context bundles (`bundles/`, auto-pruned) | Safe to prune |
 | **`datalog/`** | Structured audit logs | Can be pruned periodically |
 | **`cache/`** | AST syntax tree and symbol index temporary caches | Safe to delete (automatically rebuilt) |
 | **`image-cache/`** | Temporary image preprocessing cache for vision models | Safe to delete |
@@ -48,4 +49,4 @@ Global root directory path: `~/.jeikcode/` (or `$JEIKCODE_HOME`).
      - UI side: Enter command `/reload` (or `/mcp reload`);
      - WebUI side: Click the "Refresh button" in sidebar MCP menu.
 3. **Disk Space Cleanup**:
-   - Safely prune `cache/`, `image-cache/`, `logs/`, and `rewind/` at any time without losing configurations or skills.
+   - Safely prune `cache/`, `image-cache/`, `logs/`, `rewind/`, and `eval/` at any time without losing configurations or skills.

@@ -69,14 +69,27 @@ impl WireLogHooks {
         })))
     }
 
-    fn emit(&self, label: &str, value: &serde_json::Value) {
-        let body = if self.pretty {
-            serde_json::to_string_pretty(value)
-        } else {
-            serde_json::to_string(value)
-        }
-        .unwrap_or_else(|_| value.to_string());
-        (self.sink)(&format!("{label}\n{body}"));
+    async fn emit_async(&self, label: String, value: serde_json::Value) {
+        let sink = Arc::clone(&self.sink);
+        let pretty = self.pretty;
+        let _ = tokio::task::spawn_blocking(move || {
+            let body = if pretty {
+                serde_json::to_string_pretty(&value)
+            } else {
+                serde_json::to_string(&value)
+            }
+            .unwrap_or_else(|_| value.to_string());
+            (sink)(&format!("{label}\n{body}"));
+        })
+        .await;
+    }
+
+    async fn emit_raw_async(&self, line: String) {
+        let sink = Arc::clone(&self.sink);
+        let _ = tokio::task::spawn_blocking(move || {
+            (sink)(&line);
+        })
+        .await;
     }
 }
 
@@ -101,25 +114,25 @@ impl LifecycleHooks for WireLogHooks {
             "tools": tools,
             "options": options,
         });
-        self.emit(
-            &format!(
-                ">>> [wire] request — session={:?} turn={} round={} req={}",
-                ctx.session_id, ctx.turn_id, ctx.round, ctx.request_id
-            ),
-            &req,
+        let label = format!(
+            ">>> [wire] request — session={:?} turn={} round={} req={}",
+            ctx.session_id, ctx.turn_id, ctx.round, ctx.request_id
         );
+        self.emit_async(label, req).await;
     }
 
     async fn on_model_response(&self, response: &mut Message) {
         let resp = serde_json::to_value(&*response).unwrap_or(serde_json::Value::Null);
-        self.emit("<<< [wire] response", &resp);
+        self.emit_async("<<< [wire] response".to_string(), resp)
+            .await;
     }
 
     /// Errors (failed open / mid-stream provider error / tool error) — carries the
     /// provider's error code + reason as formatted by the adapter. Logged so failures
     /// are diagnosable alongside the request/response trail.
     async fn on_error(&self, error: &str) {
-        (self.sink)(&format!("<<< [wire] error: {error}"));
+        self.emit_raw_async(format!("<<< [wire] error: {error}"))
+            .await;
     }
 }
 

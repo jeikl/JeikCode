@@ -404,43 +404,10 @@ pub(crate) fn resolved_target_sensitivity(raw: &str, cwd: &Path) -> (bool, PathB
 /// a credential path. The matcher is rebuilt per call; the gate only runs for
 /// sensitive candidates and reads a couple of small ignore files.
 fn codegraph_sensitive_match(cwd: &Path, target: &Path) -> bool {
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(cwd);
-    let cfg = crate::paths::config_dir();
-    let mut added = false;
-    for name in [".codegraphignore.graph", ".codegraignore.graph"] {
-        for path in [
-            cwd.join(name),
-            cwd.join(".jeikcode").join(name),
-            cfg.join(name),
-        ] {
-            if path.is_file() {
-                let _ = builder.add(&path);
-                added = true;
-            }
-        }
-    }
-    if !added {
-        return false;
-    }
-    let Ok(gi) = builder.build() else {
-        return false;
-    };
-    // `target` is canonicalized by the caller, while `cwd` may still carry the
-    // non-canonical temp prefix (`/var` vs `/private/var`, Windows short paths).
-    // Never pass an absolute/out-of-root path to `ignore`: it panics instead of
-    // returning a miss.
-    let rel = target.strip_prefix(cwd).ok().or_else(|| {
-        let cwd_canon = std::fs::canonicalize(cwd).ok()?;
-        target.strip_prefix(cwd_canon).ok()
-    });
-    let Some(rel) = rel else {
-        return false;
-    };
-    if rel.as_os_str().is_empty() {
-        return false;
-    }
-    gi.matched_path_or_any_parents(rel, target.is_dir())
-        .is_ignore()
+    // ONE sensitive matcher shared with the graph index and grep/glob walker.
+    // It includes project root, `.jeikcode` and global `.codegraphignore.graph`
+    // scopes, with project rules overriding global rules.
+    crate::ignore_policy::IgnorePolicy::is_sensitive_at(cwd, target)
 }
 
 fn local_read_target_sensitivity(tool: &str, args: &str, cwd: &Path) -> Option<(bool, PathBuf)> {
@@ -710,6 +677,22 @@ mod tests {
         };
         // Ordinary path → Proceed WITHOUT awaiting the (silent) driver.
         assert!(!gate.before(&mut call, &tool, &silent_rt()).await.is_deny());
+    }
+
+    #[test]
+    fn graph_match_reads_project_jeikcode_sensitive_rule() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode")).unwrap();
+        std::fs::write(
+            d.path().join(".jeikcode").join(".codegraphignore.graph"),
+            "secret.txt\n",
+        )
+        .unwrap();
+        std::fs::write(d.path().join("secret.txt"), "x").unwrap();
+        assert!(
+            codegraph_sensitive_match(d.path(), &d.path().join("secret.txt")),
+            "read/gate must honor project .jeikcode sensitive rules"
+        );
     }
 
     #[test]

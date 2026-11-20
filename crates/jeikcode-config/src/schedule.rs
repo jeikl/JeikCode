@@ -1,14 +1,42 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Schedule {
-    Daily { time: String },               // "HH:MM"
-    Weekly { weekday: u8, time: String }, // weekday 1..=7 (1=Mon)
+    /// 复合日历规则：日期列表 × 星期多选 × 多时间点正交组合（守护进程按本地时区精确调度）
+    Calendar {
+        #[serde(default)]
+        dates: Vec<String>, // "YYYY-MM-DD" 列表
+        #[serde(default)]
+        weekdays: Vec<u8>, // 1..=7 (1=周一 .. 7=周日)
+        #[serde(default)]
+        times: Vec<String>, // "HH:MM" 列表
+    },
+    Daily {
+        time: String,
+    }, // "HH:MM"
+    Weekly {
+        weekday: u8,
+        time: String,
+    }, // weekday 1..=7 (1=Mon)
     Hourly,
-    Interval { every_minutes: u32 },
-    Cron { expr: String },
+    Interval {
+        every_minutes: u32,
+    },
+    Cron {
+        expr: String,
+    },
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self::Calendar {
+            dates: Vec::new(),
+            weekdays: Vec::new(),
+            times: vec!["09:00".to_string()],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19,11 +47,32 @@ pub struct ScheduleTask {
     pub cwd: String,
     pub schedule: Schedule,
     #[serde(default = "default_mode")]
-    pub permission_mode: String, // "plan" | "accept_edits" | "auto"
+    pub permission_mode: String, // "auto" | "accept_edits" | "plan"
     #[serde(default = "default_notify")]
     pub notify: String, // "off" | "important" | "all"
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 是否为一次性任务：触发运行一次后自动关闭 `enabled`
+    #[serde(default)]
+    pub one_shot: bool,
+    /// 会话归档模式："isolated"（每次新建带时间戳独立会话）| "reuse"（复用同一会话延续上下文）
+    #[serde(default = "default_session_mode")]
+    pub session_mode: String,
+    /// 复用会话模式下绑定的已有会话 ID
+    #[serde(default)]
+    pub reuse_session_id: Option<String>,
+    /// 最近一次触发所使用/创建的会话 ID
+    #[serde(default)]
+    pub last_session_id: Option<String>,
+    /// 可选专属模型/Provider 配置名（为空时使用系统当前默认模型）
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 防重入策略："skip"（运行中跳过本次触发）| "queue"（复用会话忙时入队）
+    #[serde(default = "default_overlap_policy")]
+    pub overlap_policy: String,
+    /// 最近已触发的分钟级槽位标记（如 "2026-11-19 09:30"），避免同槽位重复触发
+    #[serde(default)]
+    pub last_fired_slot: Option<String>,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -32,11 +81,42 @@ pub struct ScheduleTask {
     pub last_status: Option<String>,
 }
 
+impl Default for ScheduleTask {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            title: String::new(),
+            prompt: String::new(),
+            cwd: String::new(),
+            schedule: Schedule::default(),
+            permission_mode: default_mode(),
+            notify: default_notify(),
+            enabled: true,
+            one_shot: false,
+            session_mode: default_session_mode(),
+            reuse_session_id: None,
+            last_session_id: None,
+            model: None,
+            overlap_policy: default_overlap_policy(),
+            last_fired_slot: None,
+            created_at: 0,
+            last_run_at: None,
+            last_status: None,
+        }
+    }
+}
+
 fn default_mode() -> String {
-    "plan".into()
+    "auto".into()
 }
 fn default_notify() -> String {
     "important".into()
+}
+fn default_session_mode() -> String {
+    "isolated".into()
+}
+fn default_overlap_policy() -> String {
+    "skip".into()
 }
 fn default_true() -> bool {
     true
@@ -73,11 +153,16 @@ fn task_path_in(root: &std::path::Path, id: &str) -> std::io::Result<PathBuf> {
 }
 
 fn save_in(root: &std::path::Path, task: &ScheduleTask) -> std::io::Result<()> {
+    use std::io::Write;
     let path = task_path_in(root, &task.id)?;
     std::fs::create_dir_all(root)?;
     let bytes = serde_json::to_vec_pretty(task)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, bytes)
+    // 采用同目录临时文件原子替换，防止并发读写或意外中断撕裂任务配置
+    let mut tmp = tempfile::NamedTempFile::new_in(root)?;
+    tmp.write_all(&bytes)?;
+    tmp.persist(&path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 fn load_in(root: &std::path::Path, id: &str) -> std::io::Result<ScheduleTask> {
@@ -137,6 +222,25 @@ pub fn next_run(schedule: &Schedule, now_epoch_secs: i64) -> Option<i64> {
         Some((h.parse().ok()?, m.parse().ok()?))
     }
     match schedule {
+        Schedule::Calendar { times, .. } => {
+            let day = now_epoch_secs.div_euclid(86400) * 86400;
+            let mut best: Option<i64> = None;
+            for t in times {
+                if let Some((h, m)) = hhmm(t) {
+                    let target = day + h * 3600 + m * 60;
+                    let candidate = if target > now_epoch_secs {
+                        target
+                    } else {
+                        target + 86400
+                    };
+                    best = Some(match best {
+                        Some(cur) => cur.min(candidate),
+                        None => candidate,
+                    });
+                }
+            }
+            best
+        }
         Schedule::Interval { every_minutes } => {
             (*every_minutes > 0).then(|| now_epoch_secs + (*every_minutes as i64) * 60)
         }
@@ -189,6 +293,7 @@ mod tests {
             created_at: 0,
             last_run_at: None,
             last_status: None,
+            ..Default::default()
         }
     }
 
@@ -279,5 +384,24 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn default_task_uses_auto_mode_and_calendar_roundtrips() {
+        let mut t = ScheduleTask::default();
+        assert_eq!(t.permission_mode, "auto");
+        assert_eq!(t.session_mode, "isolated");
+        assert!(!t.one_shot);
+        t.id = "cal-1".into();
+        t.title = "Inspect".into();
+        t.schedule = Schedule::Calendar {
+            dates: vec!["2026-11-20".into()],
+            weekdays: vec![1, 3, 5],
+            times: vec!["09:30".into(), "18:00".into()],
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let back: ScheduleTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.permission_mode, "auto");
+        assert_eq!(back.schedule, t.schedule);
     }
 }

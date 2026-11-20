@@ -18,25 +18,8 @@ function load(file, dependencies = {}, globals = {}) {
   return exports;
 }
 const { vi } = load('./vi.ts');
-const { zhTw } = load('./locales/zh-TW.ts');
-const { ja } = load('./locales/ja.ts');
-const { ko } = load('./locales/ko.ts');
-const { ru } = load('./locales/ru.ts');
-const { fr } = load('./locales/fr.ts');
-const { es } = load('./locales/es.ts');
-const { de } = load('./locales/de.ts');
-const { ar } = load('./locales/ar.ts');
-const { messages, languageOptions } = load('./i18n.ts', {
-  './vi': { vi },
-  './locales/zh-TW': { zhTw },
-  './locales/ja': { ja },
-  './locales/ko': { ko },
-  './locales/ru': { ru },
-  './locales/fr': { fr },
-  './locales/es': { es },
-  './locales/de': { de },
-  './locales/ar': { ar },
-});
+const { messages, languageOptions } = load('./i18n.ts');
+messages.vi = vi;
 const placeholders = (text) => [...text.matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort();
 
 test('all three catalogs mirror English keys and placeholder occurrences', () => {

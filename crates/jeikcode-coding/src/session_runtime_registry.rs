@@ -5,11 +5,12 @@
 //! key — they never reconfigure another session's handle to "switch views".
 //! See `docs/plans/2026-08-27-multi-session-runtime-and-agent-efficiency-design.md`.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{OnceLock, RwLock};
 use tokio::sync::broadcast;
 
 use crate::runtime::{CodingRuntimeHandle, DriverCommand, RuntimeUnavailable, UserInput};
@@ -19,8 +20,10 @@ use jeikcode_kernel::message::SessionSnapshot;
 /// Stable session identifier (UUID string).
 pub type SessionKey = String;
 
-/// Soft cap on concurrent live runners in one process (not "background slots").
-pub const MAX_LIVE_SESSIONS: usize = 32;
+/// Soft cap on concurrent live runners in one process (LRU-evicts idle sessions when reached).
+pub const MAX_LIVE_SESSIONS: usize = 128;
+
+const REGISTRY_SHARDS: usize = 64;
 
 /// Neutral runtime activity — Driver layers project UI labels from this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +156,8 @@ struct LiveInner {
     /// Recent agent-observation fingerprints. An observer echoing the journal
     /// back (A,B,A,B…) is dropped before it can peg a core.
     recent_runtime_keys: VecDeque<String>,
+    /// Monotonic LRU access stamp updated on attach/event/command for idle eviction.
+    last_touched_seq: u64,
 }
 
 impl std::fmt::Debug for LiveInner {
@@ -168,7 +173,7 @@ impl std::fmt::Debug for LiveInner {
 }
 
 impl LiveInner {
-    fn new(session_id: SessionKey, working_dir: PathBuf) -> Self {
+    fn new(session_id: SessionKey, working_dir: PathBuf, touch_seq: u64) -> Self {
         let (event_tx, _) = broadcast::channel(BROADCAST_CAP);
         Self {
             meta: SessionRuntimeEntry {
@@ -188,6 +193,7 @@ impl LiveInner {
             event_tx,
             pending_request: None,
             recent_runtime_keys: VecDeque::new(),
+            last_touched_seq: touch_seq,
         }
     }
 
@@ -406,17 +412,37 @@ fn activity_from_runtime_event(
     }
 }
 
-/// L2 registry: one live runner per session within a process.
-#[derive(Debug, Default)]
+fn session_shard_idx(key: &str) -> usize {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    (hasher.finish() as usize) % REGISTRY_SHARDS
+}
+
+/// L2 registry: one live runner per session within a process, sharded across 64
+/// independent buckets with LRU idle eviction beyond [`MAX_LIVE_SESSIONS`].
+#[derive(Debug)]
 pub struct SessionRuntimeRegistry {
-    entries: RwLock<HashMap<SessionKey, LiveInner>>,
-    /// Provider identity fingerprints keyed by session. Updated whenever a
-    /// handle is bound or its provider is reassembled, so callers can compare
-    /// a requested provider against the bound one without reaching into the
-    /// runtime internals. Optional — absent when the bound handle was created
-    /// without going through the fingerprint-aware spawn paths (older callers
-    /// that pass `None` here).
-    provider_fingerprints: RwLock<HashMap<SessionKey, String>>,
+    entry_shards: Box<[RwLock<HashMap<SessionKey, LiveInner>>]>,
+    fingerprint_shards: Box<[RwLock<HashMap<SessionKey, String>>]>,
+    live_entry_count: AtomicUsize,
+    touch_clock: AtomicU64,
+}
+
+impl Default for SessionRuntimeRegistry {
+    fn default() -> Self {
+        Self {
+            entry_shards: (0..REGISTRY_SHARDS)
+                .map(|_| RwLock::new(HashMap::new()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            fingerprint_shards: (0..REGISTRY_SHARDS)
+                .map(|_| RwLock::new(HashMap::new()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            live_entry_count: AtomicUsize::new(0),
+            touch_clock: AtomicU64::new(1),
+        }
+    }
 }
 
 /// Process-wide registry. Drivers attach views here instead of competing for
@@ -432,8 +458,23 @@ impl SessionRuntimeRegistry {
         Self::default()
     }
 
+    #[inline]
+    fn entry_shard(&self, key: &str) -> &RwLock<HashMap<SessionKey, LiveInner>> {
+        &self.entry_shards[session_shard_idx(key)]
+    }
+
+    #[inline]
+    fn fp_shard(&self, key: &str) -> &RwLock<HashMap<SessionKey, String>> {
+        &self.fingerprint_shards[session_shard_idx(key)]
+    }
+
+    #[inline]
+    fn next_touch(&self) -> u64 {
+        self.touch_clock.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn lookup(&self, key: &SessionKey) -> Option<SessionRuntimeEntry> {
-        self.entries
+        self.entry_shard(key)
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(key)
@@ -446,74 +487,155 @@ impl SessionRuntimeRegistry {
 
     /// List sessions with live runners under `working_dir` (exact path match).
     pub fn list_activity(&self, working_dir: &Path) -> Vec<(SessionKey, RuntimeActivity)> {
-        self.entries
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .filter(|e| e.meta.working_dir == working_dir)
-            .map(|e| (e.meta.session_id.clone(), e.meta.activity))
-            .collect()
+        let mut out = Vec::new();
+        for shard in self.entry_shards.iter() {
+            let guard = shard.read().unwrap_or_else(|e| e.into_inner());
+            for inner in guard.values() {
+                if inner.meta.working_dir == working_dir {
+                    out.push((inner.meta.session_id.clone(), inner.meta.activity));
+                }
+            }
+        }
+        out
     }
 
     /// All live runners (any working directory).
     pub fn list_all(&self) -> Vec<SessionRuntimeEntry> {
-        self.entries
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .map(|e| e.meta.clone())
-            .collect()
+        let mut out = Vec::with_capacity(self.live_count());
+        for shard in self.entry_shards.iter() {
+            let guard = shard.read().unwrap_or_else(|e| e.into_inner());
+            for inner in guard.values() {
+                out.push(inner.meta.clone());
+            }
+        }
+        out
     }
 
     /// Session ids whose **bound** runner is actually in a turn.
-    ///
-    /// `open_or_attach` / `subscribe_or_empty` leave handle-less `Starting`
-    /// (or `InputAccepted` → `Running`) rows. Those are views, not occupancy.
     pub fn live_turn_session_ids(&self) -> Vec<SessionKey> {
-        self.entries
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .filter(|e| {
-                if let Some(handle) = e.handle.as_ref() {
+        let mut out = Vec::new();
+        for shard in self.entry_shards.iter() {
+            let guard = shard.read().unwrap_or_else(|e| e.into_inner());
+            for inner in guard.values() {
+                let active = if let Some(handle) = inner.handle.as_ref() {
                     !handle.is_stopped()
                         && matches!(
                             handle.status().phase,
                             crate::runtime::RuntimePhase::InTurn
                                 | crate::runtime::RuntimePhase::WaitingApproval
                         )
-                        && e.meta.activity.is_live_turn()
+                        && inner.meta.activity.is_live_turn()
                 } else {
                     false
+                };
+                if active {
+                    out.push(inner.meta.session_id.clone());
                 }
-            })
-            .map(|e| e.meta.session_id.clone())
-            .collect()
+            }
+        }
+        out
     }
 
     pub fn live_count(&self) -> usize {
-        self.entries.read().unwrap_or_else(|e| e.into_inner()).len()
+        self.live_entry_count.load(Ordering::Relaxed)
+    }
+
+    fn entry_is_evictable(inner: &LiveInner) -> bool {
+        let state_evictable = inner.meta.activity.is_idle_releasable()
+            || (inner.handle.is_none() && inner.meta.activity == RuntimeActivity::Starting);
+        if !state_evictable {
+            return false;
+        }
+        !inner.handle.as_ref().is_some_and(|handle| {
+            !handle.is_stopped()
+                && matches!(
+                    handle.status().phase,
+                    crate::runtime::RuntimePhase::InTurn
+                        | crate::runtime::RuntimePhase::WaitingApproval
+                )
+        })
+    }
+
+    fn evict_lru_idle_entry(&self) -> bool {
+        let mut victim: Option<(usize, SessionKey, u64)> = None;
+        for (idx, shard) in self.entry_shards.iter().enumerate() {
+            let guard = shard.read().unwrap_or_else(|e| e.into_inner());
+            for (k, inner) in guard.iter() {
+                if !Self::entry_is_evictable(inner) {
+                    continue;
+                }
+                match &victim {
+                    Some((_, _, best_seq)) if inner.last_touched_seq >= *best_seq => {}
+                    _ => {
+                        victim = Some((idx, k.clone(), inner.last_touched_seq));
+                    }
+                }
+            }
+        }
+        let Some((shard_idx, key, _)) = victim else {
+            return false;
+        };
+        let removed = {
+            let mut guard = self.entry_shards[shard_idx]
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if guard.get(&key).is_some_and(Self::entry_is_evictable) {
+                guard.remove(&key)
+            } else {
+                None
+            }
+        };
+        if let Some(entry) = removed {
+            self.live_entry_count.fetch_sub(1, Ordering::Relaxed);
+            if let Some(handle) = entry.handle.as_ref() {
+                let _ = handle.dispatch(DriverCommand::Shutdown);
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Register or attach to a session runner. At most one entry per `session_id`.
-    /// Does **not** spawn a CodingRuntime — drivers call [`bind_handle`] after start.
+    /// When the live pool reaches [`MAX_LIVE_SESSIONS`], evicts the least-recently-used
+    /// idle session automatically before registering a fresh slot.
     pub fn open_or_attach(
         &self,
         session_id: SessionKey,
         working_dir: PathBuf,
     ) -> Result<(OpenOutcome, SessionRuntimeEntry), RegistryError> {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = guard.get(&session_id) {
+        let touch = self.next_touch();
+        {
+            let mut guard = self
+                .entry_shard(&session_id)
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = guard.get_mut(&session_id) {
+                existing.last_touched_seq = touch;
+                return Ok((OpenOutcome::Attached, existing.meta.clone()));
+            }
+        }
+
+        while self.live_count() >= MAX_LIVE_SESSIONS {
+            if !self.evict_lru_idle_entry() {
+                return Err(RegistryError::LiveLimit {
+                    max: MAX_LIVE_SESSIONS,
+                });
+            }
+        }
+
+        let mut guard = self
+            .entry_shard(&session_id)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = guard.get_mut(&session_id) {
+            existing.last_touched_seq = touch;
             return Ok((OpenOutcome::Attached, existing.meta.clone()));
         }
-        if guard.len() >= MAX_LIVE_SESSIONS {
-            return Err(RegistryError::LiveLimit {
-                max: MAX_LIVE_SESSIONS,
-            });
-        }
-        let inner = LiveInner::new(session_id.clone(), working_dir);
+        let inner = LiveInner::new(session_id.clone(), working_dir, touch);
         let meta = inner.meta.clone();
         guard.insert(session_id, inner);
+        self.live_entry_count.fetch_add(1, Ordering::Relaxed);
         Ok((OpenOutcome::Registered, meta))
     }
 
@@ -524,19 +646,21 @@ impl SessionRuntimeRegistry {
         handle: CodingRuntimeHandle,
         runtime_id: Option<u64>,
     ) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let touch = self.next_touch();
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
+        inner.last_touched_seq = touch;
         let incoming_instance_id = handle.instance_id().to_string();
         if let Some(existing) = inner.handle.as_ref() {
             if existing.instance_id() != incoming_instance_id && !existing.is_stopped() {
                 return false;
             }
             if existing.instance_id() != incoming_instance_id {
-                // A replacement runtime is only accepted after the previous owner
-                // has stopped. Its pending request and replay window are scoped to
-                // that old owner and must never survive into the replacement.
                 inner.pending_request = None;
                 inner.journal.clear();
                 inner.recent_runtime_keys.clear();
@@ -555,15 +679,9 @@ impl SessionRuntimeRegistry {
         true
     }
 
-    /// Record the provider fingerprint currently bound to `key`. Callers
-    /// (e.g. the daemon's `/live` paths) update this whenever they spawn a
-    /// new runtime or reassemble the provider on an existing one, so the
-    /// next `/live/message` can detect a stale bound provider without
-    /// reaching into runtime internals. `None` clears the entry (e.g. when
-    /// the runner is torn down).
     pub fn set_provider_fingerprint(&self, key: &SessionKey, fingerprint: Option<String>) {
         let mut guard = self
-            .provider_fingerprints
+            .fp_shard(key)
             .write()
             .unwrap_or_else(|e| e.into_inner());
         match fingerprint {
@@ -576,34 +694,35 @@ impl SessionRuntimeRegistry {
         }
     }
 
-    /// Provider fingerprint bound to `key`, if recorded. `None` means either
-    /// the session has no bound runner or the caller never set one.
     pub fn provider_fingerprint(&self, key: &SessionKey) -> Option<String> {
-        let guard = self
-            .provider_fingerprints
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = self.fp_shard(key).read().unwrap_or_else(|e| e.into_inner());
         guard.get(key).cloned()
     }
 
     pub fn set_activity(&self, key: &SessionKey, activity: RuntimeActivity) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let touch = self.next_touch();
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
+        inner.last_touched_seq = touch;
         inner.push_activity(activity);
         true
     }
 
-    /// Record a turn outcome and park the runner at Ready.
-    ///
-    /// `terminal` is `completed`, `stopped`, or `failed`. Each call bumps
-    /// [`SessionRuntimeEntry::terminal_seq`] so a poller can notify once.
     pub fn note_terminal(&self, key: &SessionKey, terminal: &str) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let touch = self.next_touch();
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
+        inner.last_touched_seq = touch;
         inner.meta.terminal_seq = inner.meta.terminal_seq.wrapping_add(1);
         inner.meta.last_terminal = Some(terminal.to_string());
         inner.push_activity(RuntimeActivity::Ready);
@@ -611,7 +730,10 @@ impl SessionRuntimeRegistry {
     }
 
     pub fn set_snapshot(&self, key: &SessionKey, snapshot: SessionSnapshot) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
@@ -620,7 +742,7 @@ impl SessionRuntimeRegistry {
     }
 
     pub fn snapshot(&self, key: &SessionKey) -> Option<SessionSnapshot> {
-        self.entries
+        self.entry_shard(key)
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(key)
@@ -628,7 +750,7 @@ impl SessionRuntimeRegistry {
     }
 
     pub fn pending_request_id(&self, key: &SessionKey) -> Option<RequestId> {
-        self.entries
+        self.entry_shard(key)
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(key)
@@ -636,7 +758,10 @@ impl SessionRuntimeRegistry {
     }
 
     pub fn set_pending_request(&self, key: &SessionKey, id: Option<RequestId>) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
@@ -654,7 +779,10 @@ impl SessionRuntimeRegistry {
 
     /// Submit a turn to the session's bound handle.
     pub fn submit(&self, key: &SessionKey, input: UserInput) -> Result<(), RegistryError> {
-        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .entry_shard(key)
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let inner = guard.get(key).ok_or(RegistryError::UnknownSession {
             session_id: key.clone(),
         })?;
@@ -673,6 +801,7 @@ impl SessionRuntimeRegistry {
 
     pub fn cancel(&self, key: &SessionKey) -> Result<(), RegistryError> {
         let res = self.dispatch(key, DriverCommand::Cancel);
+        jeikcode_capabilities::tools::task::cancel_subagents_for_session(key);
         jeikcode_capabilities::tools::bash_runtime::cancel_foreground_live_bash_for_session(key);
         res
     }
@@ -684,7 +813,10 @@ impl SessionRuntimeRegistry {
         value: serde_json::Value,
     ) -> Result<(), RegistryError> {
         self.dispatch(key, DriverCommand::Respond { id, value })?;
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(inner) = guard.get_mut(key) {
             if inner
                 .pending_request
@@ -698,7 +830,10 @@ impl SessionRuntimeRegistry {
     }
 
     pub fn dispatch(&self, key: &SessionKey, command: DriverCommand) -> Result<(), RegistryError> {
-        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .entry_shard(key)
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let inner = guard.get(key).ok_or(RegistryError::UnknownSession {
             session_id: key.clone(),
         })?;
@@ -713,17 +848,21 @@ impl SessionRuntimeRegistry {
     }
 
     /// Append a CodingRuntime observation for multi-view fan-out.
-    /// Safe to call from sync driver paths (std `RwLock`).
     pub fn push_runtime_event(
         &self,
         key: &SessionKey,
         generation: u64,
         event: crate::runtime::CodingRuntimeEvent,
     ) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let touch = self.next_touch();
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
+        inner.last_touched_seq = touch;
         if let crate::runtime::CodingRuntimeEvent::TurnFinished(
             crate::runtime::TurnCompletion::Completed { snapshot, .. },
         ) = &event
@@ -745,9 +884,6 @@ impl SessionRuntimeRegistry {
         if let crate::runtime::CodingRuntimeEvent::TurnFinished(_) = &event {
             inner.pending_request = None;
         }
-        // Snapshot already has the completed turn. Replaying TextDelta / ToolStart
-        // on top of it duplicates the last assistant (text + tools) after a
-        // sidebar session switch reconnects `/live?session_id=`.
         if matches!(
             &event,
             crate::runtime::CodingRuntimeEvent::TurnFinished(_)
@@ -770,9 +906,6 @@ impl SessionRuntimeRegistry {
         true
     }
 
-    /// Append an observation only when it came from the concrete runtime that
-    /// still owns this session. The producer supplies its immutable instance id;
-    /// never infer it from the registry row after an async rebind.
     pub fn push_runtime_event_for_runtime(
         &self,
         key: &SessionKey,
@@ -780,10 +913,15 @@ impl SessionRuntimeRegistry {
         generation: u64,
         event: crate::runtime::CodingRuntimeEvent,
     ) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let touch = self.next_touch();
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
+        inner.last_touched_seq = touch;
         if inner.meta.runtime_instance_id.as_deref() != Some(expected_runtime_instance_id) {
             return false;
         }
@@ -836,10 +974,15 @@ impl SessionRuntimeRegistry {
 
     /// Fan out a view-layer event (InputAccepted / Steered / RequestResolved / CommandOutput).
     pub fn push_view_event(&self, key: &SessionKey, view: SessionViewEvent) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let touch = self.next_touch();
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
+        inner.last_touched_seq = touch;
         if let SessionViewEvent::RequestResolved { request_id, .. } = &view {
             if inner
                 .pending_request
@@ -853,9 +996,6 @@ impl SessionRuntimeRegistry {
         true
     }
 
-    /// Push a view event only while the same concrete runtime owner is still
-    /// bound. This prevents a response completed on an old runtime from clearing
-    /// a reused request id on a replacement runtime.
     pub fn push_view_event_for_runtime(
         &self,
         key: &SessionKey,
@@ -863,10 +1003,15 @@ impl SessionRuntimeRegistry {
         expected_generation: u64,
         view: SessionViewEvent,
     ) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let touch = self.next_touch();
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
+        inner.last_touched_seq = touch;
         if inner.meta.runtime_instance_id.as_deref() != Some(expected_runtime_instance_id) {
             return false;
         }
@@ -905,7 +1050,10 @@ impl SessionRuntimeRegistry {
         request_id: RequestId,
         kind: &str,
     ) -> bool {
-        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .entry_shard(key)
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(inner) = guard.get(key) else {
             return false;
         };
@@ -930,7 +1078,6 @@ impl SessionRuntimeRegistry {
         })
     }
 
-    /// Ensure the session exists, then push a view event.
     pub fn ensure_and_push_view(
         &self,
         key: SessionKey,
@@ -941,20 +1088,13 @@ impl SessionRuntimeRegistry {
         self.push_view_event(&key, view)
     }
 
-    /// Push by TUI transport runtime id (foreground / background runners).
     pub fn push_runtime_event_by_runtime_id(
         &self,
         runtime_id: u64,
         generation: u64,
         event: crate::runtime::CodingRuntimeEvent,
     ) -> bool {
-        let key = {
-            let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
-            guard
-                .values()
-                .find(|e| e.meta.runtime_id == Some(runtime_id))
-                .map(|e| e.meta.session_id.clone())
-        };
+        let key = self.session_id_for_runtime_id(runtime_id);
         let Some(key) = key else {
             return false;
         };
@@ -970,20 +1110,23 @@ impl SessionRuntimeRegistry {
         self.push_runtime_event(&key, generation, event)
     }
 
-    /// Bound CodingRuntime handle for a session, if ready.
     pub fn handle(&self, key: &SessionKey) -> Option<CodingRuntimeHandle> {
-        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .entry_shard(key)
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         guard.get(key).and_then(|e| e.handle.clone())
     }
 
-    /// Bound handle only when it is still the exact runtime instance named by
-    /// an external correlation token.
     pub fn handle_for_runtime_instance(
         &self,
         key: &SessionKey,
         expected_runtime_instance_id: &str,
     ) -> Option<CodingRuntimeHandle> {
-        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .entry_shard(key)
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let inner = guard.get(key)?;
         if inner.meta.runtime_instance_id.as_deref() != Some(expected_runtime_instance_id) {
             return None;
@@ -992,16 +1135,20 @@ impl SessionRuntimeRegistry {
         (handle.instance_id() == expected_runtime_instance_id).then_some(handle)
     }
 
-    /// Look up session id by TUI transport runtime id.
     pub fn session_id_for_runtime_id(&self, runtime_id: u64) -> Option<SessionKey> {
-        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
-        guard
-            .values()
-            .find(|e| e.meta.runtime_id == Some(runtime_id))
-            .map(|e| e.meta.session_id.clone())
+        for shard in self.entry_shards.iter() {
+            let guard = shard.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(found) = guard
+                .values()
+                .find(|e| e.meta.runtime_id == Some(runtime_id))
+                .map(|e| e.meta.session_id.clone())
+            {
+                return Some(found);
+            }
+        }
+        None
     }
 
-    /// Subscribe to activity events for a session (after `after_sequence`).
     pub fn subscribe(
         &self,
         key: &SessionKey,
@@ -1013,7 +1160,10 @@ impl SessionRuntimeRegistry {
         ),
         RegistryError,
     > {
-        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .entry_shard(key)
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let inner = guard.get(key).ok_or(RegistryError::UnknownSession {
             session_id: key.clone(),
         })?;
@@ -1027,9 +1177,6 @@ impl SessionRuntimeRegistry {
         Ok((replay, rx))
     }
 
-    /// Subscribe even when the session is not yet registered — returns empty
-    /// replay and a channel that will receive events after `open_or_attach`.
-    /// Prefer [`subscribe`] when the session is known live.
     pub fn subscribe_or_empty(
         &self,
         key: &SessionKey,
@@ -1053,23 +1200,30 @@ impl SessionRuntimeRegistry {
     }
 
     pub fn release_if_idle(&self, key: &SessionKey) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         match guard.get(key) {
             Some(entry) if entry.meta.activity.is_idle_releasable() => {
                 if let Some(handle) = entry.handle.as_ref() {
                     let _ = handle.dispatch(DriverCommand::Shutdown);
                 }
                 guard.remove(key);
+                self.live_entry_count.fetch_sub(1, Ordering::Relaxed);
                 true
             }
             _ => false,
         }
     }
 
-    /// Force-remove an entry (e.g. view closed an empty home draft that was registered).
     pub fn force_remove(&self, key: &SessionKey) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = guard.remove(key) {
+            self.live_entry_count.fetch_sub(1, Ordering::Relaxed);
             if let Some(handle) = entry.handle.as_ref() {
                 let _ = handle.dispatch(DriverCommand::Shutdown);
             }
@@ -1079,40 +1233,49 @@ impl SessionRuntimeRegistry {
         }
     }
 
-    /// Drop the registry row without shutting the runtime down. Used when the
-    /// bound handle has already been freshed onto a new session id.
     pub fn detach(&self, key: &SessionKey) -> bool {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        guard.remove(key).is_some()
+        let mut guard = self
+            .entry_shard(key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.remove(key).is_some() {
+            self.live_entry_count.fetch_sub(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn shutdown_all(&self) {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        for (_, entry) in guard.drain() {
-            if let Some(handle) = entry.handle.as_ref() {
-                let _ = handle.dispatch(DriverCommand::Shutdown);
+        for shard in self.entry_shards.iter() {
+            let mut guard = shard.write().unwrap_or_else(|e| e.into_inner());
+            for (_, entry) in guard.drain() {
+                self.live_entry_count.fetch_sub(1, Ordering::Relaxed);
+                if let Some(handle) = entry.handle.as_ref() {
+                    let _ = handle.dispatch(DriverCommand::Shutdown);
+                }
             }
         }
     }
 
-    /// Reconcile registry membership with the set of session ids the driver still owns.
-    /// Unlike the old slot-mirror helper, this does **not** invent entries — it only
-    /// drops idle registry rows that the driver no longer tracks.
     pub fn retain_sessions(&self, keep: &HashSet<SessionKey>) {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        let stale: Vec<SessionKey> = guard
-            .keys()
-            .filter(|id| !keep.contains(*id))
-            .cloned()
-            .collect();
-        for id in stale {
-            if guard
-                .get(&id)
-                .is_some_and(|e| e.meta.activity.is_idle_releasable())
-            {
-                if let Some(entry) = guard.remove(&id) {
-                    if let Some(handle) = entry.handle.as_ref() {
-                        let _ = handle.dispatch(DriverCommand::Shutdown);
+        for shard in self.entry_shards.iter() {
+            let mut guard = shard.write().unwrap_or_else(|e| e.into_inner());
+            let stale: Vec<SessionKey> = guard
+                .keys()
+                .filter(|id| !keep.contains(*id))
+                .cloned()
+                .collect();
+            for id in stale {
+                if guard
+                    .get(&id)
+                    .is_some_and(|e| e.meta.activity.is_idle_releasable())
+                {
+                    if let Some(entry) = guard.remove(&id) {
+                        self.live_entry_count.fetch_sub(1, Ordering::Relaxed);
+                        if let Some(handle) = entry.handle.as_ref() {
+                            let _ = handle.dispatch(DriverCommand::Shutdown);
+                        }
                     }
                 }
             }
@@ -1634,5 +1797,30 @@ mod tests {
         // bind-vs-request mismatch (e.g. when the runner is torn down).
         reg.set_provider_fingerprint(&"s".into(), None);
         assert!(reg.provider_fingerprint(&"s".into()).is_none());
+    }
+
+    #[test]
+    fn registry_supports_128_sessions_and_lru_evicts_oldest_idle_entry() {
+        let reg = SessionRuntimeRegistry::new();
+        assert_eq!(MAX_LIVE_SESSIONS, 128);
+        for i in 0..MAX_LIVE_SESSIONS {
+            let sid = format!("sess-{i}");
+            reg.open_or_attach(sid.clone(), PathBuf::from("/p"))
+                .unwrap();
+            if i == 0 {
+                // Keep sess-0 untouched longer while touching sess-1 later.
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        // Touch sess-1 so sess-0 remains the oldest LRU idle entry.
+        let _ = reg.lookup(&"sess-1".to_string());
+        // Adding session #129 must auto-evict the oldest idle session instead of failing.
+        reg.open_or_attach("sess-128".into(), PathBuf::from("/p"))
+            .expect("129th session should evict oldest idle entry");
+        assert!(
+            reg.lookup(&"sess-0".to_string()).is_none(),
+            "oldest idle session should be evicted under LRU"
+        );
+        assert!(reg.lookup(&"sess-128".to_string()).is_some());
     }
 }

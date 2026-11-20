@@ -328,6 +328,7 @@ impl jeikcode_kernel::middleware::ToolMiddleware for ArtifactMiddleware {
             || in_whitelist
             || self.threshold_bytes == 0
         {
+            crate::call_signals::record_result_size(&result.call_id, total, false);
             return jeikcode_kernel::middleware::AfterOutcome::Proceed;
         }
 
@@ -364,12 +365,14 @@ impl jeikcode_kernel::middleware::ToolMiddleware for ArtifactMiddleware {
             artifact_id.as_deref(),
         );
 
-        if streamlined.len() < result.content.len() {
+        let streamlined_shrank = streamlined.len() < result.content.len();
+        if streamlined_shrank {
             result.content = streamlined;
         }
 
         let new_total = result.content.len();
         if new_total <= threshold {
+            crate::call_signals::record_result_size(&result.call_id, total, streamlined_shrank);
             return jeikcode_kernel::middleware::AfterOutcome::Proceed;
         }
 
@@ -399,6 +402,7 @@ impl jeikcode_kernel::middleware::ToolMiddleware for ArtifactMiddleware {
                 "\n\n[{position_desc}. Full output unavailable (exceeds {GLOBAL_MAX_CAPACITY}-byte artifact ceiling).]\n\n"
             );
             result.content = format!("{head}{marker}{tail}");
+            crate::call_signals::record_result_size(&result.call_id, total, true);
             return jeikcode_kernel::middleware::AfterOutcome::Proceed;
         }
 
@@ -426,6 +430,7 @@ Prefer keyword match over sequential reading to quickly retrieve target details.
             }
         };
         result.content = format!("{head}{marker}{tail}");
+        crate::call_signals::record_result_size(&result.call_id, total, true);
         jeikcode_kernel::middleware::AfterOutcome::Proceed
     }
 }

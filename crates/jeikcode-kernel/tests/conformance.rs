@@ -434,6 +434,7 @@ async fn provider_doubles_are_conformant() {
     // A clean FAILED OPEN (Err) is conformant — the provider didn't panic.
     let err = jeikcode_kernel::stream::ProviderError {
         retryable: false,
+        resumable: false,
         message: "401 unauthorized".into(),
         http_status: Some(401),
         code: Some("auth".into()),
@@ -506,6 +507,7 @@ fn stream_wellformed_contract() {
     // Negative: a mid-stream Error carrying an HTTP status (reserved for OPEN failures).
     let bad_err = vec![StreamEvent::Error(ProviderError {
         retryable: true,
+        resumable: false,
         message: "mid-stream".into(),
         http_status: Some(500),
         code: None,

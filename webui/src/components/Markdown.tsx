@@ -127,6 +127,8 @@ function resolveTargetFile(href: string, basePath?: string, cwd?: string): strin
 
 // 在 HTML 注入 DOM 之前，统一将相对图片 src 预重写为 /fs/raw 流式接口，根治离开久了图片 404 与休眠裂图问题！
 function rewriteImageSources(html: string, basePath?: string, cwd?: string): string {
+  // 纯文本/代码块消息不含 <img> 时直接跳过 DOMParser，避免每次渲染分配整棵虚拟 DOM
+  if (!html.includes('<img')) return html;
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
   const imgNodes = doc.querySelectorAll('img');
@@ -737,7 +739,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📁 {t('preview.openDirInExplorer')}</span>
+                <span>{t('preview.openDirInExplorer')}</span>
               </button>
               <div class="context-menu-divider" />
               <button
@@ -749,7 +751,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📋 {t('explorer.copyRelativePath')}</span>
+                <span>{t('explorer.copyRelativePath')}</span>
               </button>
               <button
                 type="button"
@@ -760,7 +762,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📋 {t('explorer.copyFullPath')}</span>
+                <span>{t('explorer.copyFullPath')}</span>
               </button>
             </>
           ) : fileBadgeMenu.isSystemApp ? (
@@ -779,7 +781,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>🚀 {t('preview.openWithDefaultApp')}</span>
+                <span>{t('preview.openWithDefaultApp')}</span>
               </button>
               <button
                 type="button"
@@ -795,7 +797,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📁 {t('preview.revealFileInExplorer')}</span>
+                <span>{t('preview.revealFileInExplorer')}</span>
               </button>
               <button
                 type="button"
@@ -815,7 +817,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>👁️ {t('preview.openInRight')}</span>
+                <span>{t('preview.openInRight')}</span>
               </button>
               <button
                 type="button"
@@ -831,7 +833,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📑 {t('preview.openInMain')}</span>
+                <span>{t('preview.openInMain')}</span>
               </button>
               <div class="context-menu-divider" />
               <button
@@ -843,7 +845,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📋 {t('explorer.copyRelativePath')}</span>
+                <span>{t('explorer.copyRelativePath')}</span>
               </button>
               <button
                 type="button"
@@ -854,7 +856,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📋 {t('explorer.copyFullPath')}</span>
+                <span>{t('explorer.copyFullPath')}</span>
               </button>
             </>
           ) : (
@@ -877,7 +879,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>👁️ {t('preview.openInRight')}</span>
+                <span>{t('preview.openInRight')}</span>
               </button>
               <button
                 type="button"
@@ -893,7 +895,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📑 {t('preview.openInMain')}</span>
+                <span>{t('preview.openInMain')}</span>
               </button>
               <button
                 type="button"
@@ -909,7 +911,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>🚀 {t('preview.openWithDefaultApp')}</span>
+                <span>{t('preview.openWithDefaultApp')}</span>
               </button>
               <button
                 type="button"
@@ -925,7 +927,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📁 {t('preview.revealFileInExplorer')}</span>
+                <span>{t('preview.revealFileInExplorer')}</span>
               </button>
               <div class="context-menu-divider" />
               <button
@@ -937,7 +939,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📋 {t('explorer.copyRelativePath')}</span>
+                <span>{t('explorer.copyRelativePath')}</span>
               </button>
               <button
                 type="button"
@@ -948,7 +950,7 @@ export function Markdown({
                   setFileBadgeMenu(null);
                 }}
               >
-                <span>📋 {t('explorer.copyFullPath')}</span>
+                <span>{t('explorer.copyFullPath')}</span>
               </button>
             </>
           )}

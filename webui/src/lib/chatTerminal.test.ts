@@ -46,6 +46,9 @@ import {
   dropSnapshotDuplicates,
   userTextsMatch,
   findPendingSelfEchoIndex,
+  isTerminalNoticeAlreadyExplained,
+  noticeAlreadyPresentInMessages,
+  filterUnpersistedLocalNotices,
 } from './chatTerminal.ts';
 import { spliceAuthoritativeDiskTail } from './sessionProjection.ts';
 
@@ -1187,6 +1190,136 @@ test('长会话切换回来：缓存尾部的无下标 steer 与流式工具行�
     ['u-0', 'a-0', 'u-1645', 'a-1645', 'u-1656', 'a-1656-live'],
     '16:56 转向与流式尾巴必须保持在 16:45 之后，绝不能篡位到 16:45 上方',
   );
+});
+
+test('多语言 done 终端识别：warn-max-rounds / err-tool-loop / rl 卡片按结构化前缀抑制重复兜底卡，/loop 未发卡仍兜底', () => {
+  // 1) 中文/日文等任意语言下的 warn-max-rounds Settled 警告卡，detail 仍是英文 slug "max_rounds"
+  const localizedWarnMsgs = [
+    {
+      id: 'warn-max-rounds:3',
+      role: 'assistant',
+      parts: [
+        {
+          kind: 'notice',
+          eventId: 'warn-max-rounds:3',
+          severity: 'warning',
+          status: 'settled',
+          anchorMessageId: 'a-anchor-3',
+          text: '已达到最大轮次上限（300 轮）；已停止调用工具并生成进度总结与后续建议。',
+        },
+      ],
+    },
+  ];
+  assert.equal(
+    isTerminalNoticeAlreadyExplained(localizedWarnMsgs, {
+      stopReason: 'max_rounds',
+      detail: 'max_rounds',
+      noticeAnchor: 'a-anchor-3',
+    }),
+    true,
+  );
+  // 锚点属于旧回合时不得误抑制当前新锚点的兜底提示
+  assert.equal(
+    isTerminalNoticeAlreadyExplained(localizedWarnMsgs, {
+      stopReason: 'max_rounds',
+      detail: 'max_rounds',
+      noticeAnchor: 'a-anchor-4',
+    }),
+    false,
+  );
+
+  // 2) err-tool-loop Warning 卡同样抑制 ToolLoopDetected 的红色兜底重复卡
+  assert.equal(
+    isTerminalNoticeAlreadyExplained(
+      [
+        {
+          id: 'err-tool-loop:2',
+          role: 'assistant',
+          parts: [
+            {
+              kind: 'notice',
+              eventId: 'err-tool-loop:2',
+              severity: 'warning',
+              status: 'settled',
+              text: 'ツールループを検出しました',
+            },
+          ],
+        },
+      ],
+      { stopReason: 'tool_loop_detected', detail: 'tool_loop_detected' },
+    ),
+    true,
+  );
+
+  // 3) rate_limited 卡片已存在时抑制重复兜底
+  assert.equal(
+    isTerminalNoticeAlreadyExplained(
+      [
+        {
+          id: 'rl:5',
+          role: 'assistant',
+          parts: [{ kind: 'rate_limited', text: '限流中', eventId: 'rl:5:r1' }],
+        },
+      ],
+      { stopReason: 'rate_limited', detail: 'rate_limited' },
+    ),
+    true,
+  );
+
+  // 4) /loop 或 /goal 未发射 SystemNotice 触限停机：仍允许 chat.incomplete 兜底提示
+  assert.equal(
+    isTerminalNoticeAlreadyExplained([], { stopReason: 'max_rounds', detail: 'max_rounds' }),
+    false,
+  );
+});
+
+test('adoptAuthoritativeDiskTail 兜底去重：按 eventId 与归一化文案拦截历史双卡', () => {
+  const localNotes = [
+    {
+      id: 'local-random-uuid',
+      role: 'system',
+      parts: [
+        {
+          kind: 'notice',
+          eventId: 'warn-max-rounds:2',
+          text: '已达到最大轮次上限（300 轮）',
+        },
+      ],
+    },
+    {
+      id: 'local-text-only-uuid',
+      role: 'system',
+      parts: [{ kind: 'text', text: '  max rounds (230)   reached  ' }],
+    },
+    {
+      id: 'compact-local-1',
+      role: 'system',
+      parts: [{ kind: 'notice', eventId: 'compact:local:1', text: '本地压缩完成' }],
+    },
+  ];
+  const diskTail = [
+    {
+      id: 'warn-max-rounds:2',
+      role: 'assistant',
+      parts: [
+        {
+          kind: 'notice',
+          eventId: 'warn-max-rounds:2',
+          text: '已达到最大轮次上限（300 轮）',
+        },
+      ],
+    },
+    {
+      id: 'm-legacy-uuid',
+      role: 'assistant',
+      parts: [{ kind: 'notice', text: 'max rounds (230) reached' }],
+    },
+  ];
+  const filtered = filterUnpersistedLocalNotices(localNotes, diskTail);
+  assert.deepEqual(filtered.map((n) => n.id), ['compact-local-1']);
+  assert.equal(noticeAlreadyPresentInMessages(diskTail, localNotes[0]), true);
+  assert.equal(noticeAlreadyPresentInMessages(diskTail, localNotes[1]), true);
+  assert.equal(noticeAlreadyPresentInMessages(diskTail, localNotes[2]), false);
 });
 
 

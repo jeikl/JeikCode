@@ -23,8 +23,14 @@ export type RecordKind = 'user' | 'model' | 'system';
 export interface CanvasRecord {
   /** 记录类型。旧行可能缺失，由 `normalizeCanvas` 从 role 派生后写回。 */
   kind?: RecordKind;
+  /** 账本行（display 通知）：跨刷新保留，按 seq 归位。 */
+  persistent?: boolean;
+  /** 仅当前连接可见的瞬时行：不分配 seq，不参与磁盘合并。 */
+  transient?: boolean;
   /** 会话内单调顺序号。旧行可能缺失，由 `normalizeCanvas` 从 sourceIndex 派生。 */
   seq?: number;
+  /** 后端真实下发的整数 Display seq（仅作 `before_seq` 分页游标，绝不写入本地插值小数）。 */
+  serverSeq?: number;
 
   role: 'user' | 'assistant' | 'system';
   parts: MsgPart[];
@@ -52,6 +58,8 @@ export interface CanvasRecord {
   turnId?: number;
   /** 客户端关联键（`client_input_id`）：新契约下与 `id` 同值。 */
   clientInputId?: string;
+  /** Display-only runtime model-switch marker (`Switch to <model>`). */
+  switchTo?: string;
   /** Rebuilt from the append-only JSONL after compaction: edit/delete disabled. */
   readOnly?: boolean;
 }

@@ -227,6 +227,8 @@ pub struct CodingParts {
     /// per-turn cost attribution without rebuilding session-owned hooks.
     snapshot_hook: Option<Arc<SnapshotHook>>,
     snapshot_persistence_status: Option<SnapshotPersistenceStatus>,
+    /// 统一会话追踪与工具指标落盘钩子；在 `/model` 热切换重装时保留并同步更新模型归属。
+    trace_hook: Option<Arc<jeikcode_capabilities::session::SessionTraceHook>>,
     pub session: Option<SessionBinding>,
     /// Runtime-owned resume for sessionless drivers during an in-process reassembly.
     /// Persistent sessions reload their canonical snapshot through `SessionBinding` instead.
@@ -278,6 +280,10 @@ pub struct CodingParts {
     /// [`CodingAgentConfig`].
     /// `None` when the `JEIKCODE_SUBAGENT` env gate is off.
     pub subagent_provider: Option<SharedReviewProvider>,
+    /// Hot-swap slot for the PRIMARY provider. Reused across `assemble`/respawn so
+    /// the runtime can queue a provider change for the next kernel round without
+    /// stopping the in-flight turn (`runtime model switch` setting).
+    pub(crate) primary_provider_swap: Option<Arc<crate::provider_swap::SwappableProvider>>,
     /// User/project CC external hooks (`$JEIKCODE_HOME/hooks.json` + `<root>/.hooks.json`).
     /// ONE instance is registered as BOTH a [`LifecycleHooks`] (already pushed into `hooks`)
     /// and a [`ToolMiddleware`](jeikcode_kernel::middleware::ToolMiddleware) (registered by
@@ -393,6 +399,8 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // `task` subagent tool (env-gated, default ON; opt out with JEIKCODE_SUBAGENT=0). Configured fast/capable tiers use
     // runtime-owned provider cells; missing/same-as-host tiers reuse the host slot.
     // Child tools: read-only `explore` vs edit-capable `worker`.
+    let subagent_parent_session: Arc<std::sync::OnceLock<(Arc<SessionManager>, String)>> =
+        Arc::new(std::sync::OnceLock::new());
     let subagent_provider: Option<SharedReviewProvider> =
         if subagent_enabled_from_env(std::env::var("JEIKCODE_SUBAGENT").ok().as_deref()) {
             use jeikcode_capabilities::tools::TaskTool;
@@ -491,7 +499,8 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 .with_max_concurrent(max_concurrent)
                 .with_max_rounds(max_rounds)
                 .with_tool_loop_policy(cfg.tool_loop_policy)
-                .with_worker_middleware(turn_execution_policy.clone()),
+                .with_worker_middleware(turn_execution_policy.clone())
+                .with_parent_session_slot(subagent_parent_session.clone()),
             ));
             names.push("task".to_string());
             Some(slot)
@@ -643,6 +652,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     };
 
     if let Some(b) = &session {
+        let _ = subagent_parent_session.set((b.manager.clone(), b.id.clone()));
         // Bind the runtime state to this session so every live bash task it registers
         // is attributable to (and cancellable only by) this session.
         bash_runtime.bind_session(b.id.as_str());
@@ -688,6 +698,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     let mut compaction_checkpoint: Option<Arc<dyn CompactionCheckpoint>> = None;
     let mut snapshot_hook_handle = None;
     let mut snapshot_persistence_status = None;
+    let mut trace_hook_handle = None;
     // Env / project-instructions / git context — unconditional (v1 parity: always present).
     // Optional client system append (OpenAI/Anthropic compat) lands after AGENTS/glossary/db.
     hooks.push(Arc::new(
@@ -757,6 +768,14 @@ async fn prepare_with_plugin_hooks_reusing_lease(
             TranscriptHook::new(b.manager.clone(), &b.id)
                 .with_persistence_status(snapshot_hook.persistence_status()),
         ));
+        let trace_hook = Arc::new(jeikcode_capabilities::session::SessionTraceHook::new(
+            b.manager.clone(),
+            &b.id,
+            &cfg.provider_name,
+            &cfg.model,
+        ));
+        trace_hook_handle = Some(trace_hook.clone());
+        hooks.push(trace_hook);
     }
     // Status awareness is UNCONDITIONAL: a per-turn <system-reminder> with the calendar
     // date (NO context-usage gauge — pressure is handled silently by auto-compaction).
@@ -860,12 +879,14 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         compaction_checkpoint,
         snapshot_hook: snapshot_hook_handle,
         snapshot_persistence_status,
+        trace_hook: trace_hook_handle,
         session,
         runtime_resume: None,
         mcp_registry,
         session_mcp_registry,
         review_provider,
         subagent_provider,
+        primary_provider_swap: None,
         cc_external_hooks: cc_external,
         rate_limit_source: opts.rate_limit_source,
     })
@@ -934,6 +955,15 @@ fn apply_pinned_session_display_name(meta: &mut SessionMeta, display_name: Optio
 }
 
 impl CodingParts {
+    pub(crate) fn clone_attribution_hooks(
+        &self,
+    ) -> (
+        Option<Arc<SnapshotHook>>,
+        Option<Arc<jeikcode_capabilities::session::SessionTraceHook>>,
+    ) {
+        (self.snapshot_hook.clone(), self.trace_hook.clone())
+    }
+
     /// The host-owned CodingPlan quota source, if any. Used at `/goal` start to
     /// size the round budget from the live request quota.
     pub(crate) fn rate_limit_source(&self) -> Option<&Arc<dyn RateLimitWindowSource>> {
@@ -1322,6 +1352,27 @@ pub fn assemble(
         .registry
         .register(Arc::new(ReadFileTool::new(cfg.supports_vision)));
 
+    // Runtime model switch: the primary provider lives in a stable hot-swap slot.
+    // A normal `/model` reassembly replaces the inner provider immediately; a
+    // mid-turn switch queues it and the next kernel `chat_stream` applies it,
+    // keeping the SAME conversation/context. The wrapper itself is reused across
+    // respawns so a queued switch is not lost by a transient reassembly.
+    let provider: Arc<dyn LlmProvider> = match parts.primary_provider_swap.clone() {
+        Some(swap) => {
+            // A full reassembly is an explicit authority: it clears any stale
+            // queued next-round switch and installs this provider immediately.
+            swap.replace_now(provider, &cfg.model);
+            swap
+        }
+        None => {
+            let swap = Arc::new(crate::provider_swap::SwappableProvider::new(
+                provider, &cfg.model,
+            ));
+            parts.primary_provider_swap = Some(swap.clone());
+            swap
+        }
+    };
+
     // Session-bound: reload the complete canonical aggregate. Only a fresh
     // runtime intentionally staged in memory is allowed to assemble before its
     // first aggregate publication.
@@ -1464,6 +1515,10 @@ pub fn assemble(
         // Repair model-produced arguments before any observer or policy gate reads them.
         // Approval must inspect the same bytes that the tool executes.
         .middleware(Arc::new(RepairToolArgsMiddleware));
+    if let Some(trace_hook) = &parts.trace_hook {
+        // 开始计量工具耗时、切换间隔与脱敏目标摘要：置于修复后、策略与审批门前以捕获所有调用。
+        builder = builder.middleware(Arc::new(trace_hook.start_middleware()));
+    }
     // Tool telemetry is the first observation middleware. It never rewrites or blocks.
     // Its `before` always stamps the call, including a call that approval later denies.
     if let Some(tel) = &cfg.telemetry {
@@ -1732,12 +1787,19 @@ pub fn assemble(
     // After artifact folding so a wander reminder is not trimmed off a large
     // grep/glob/read_file payload. Per-session meter lives on this shared handle.
     builder = builder.middleware(parts.code_tools_first.clone());
+    if let Some(trace_hook) = &parts.trace_hook {
+        // 落在产物折叠之后：汇总原始结果字节数、截断标志、审批等待耗时与最终结果。
+        builder = builder.middleware(Arc::new(trace_hook.end_middleware()));
+    }
     let agent = builder.build();
     // Commit model attribution only after every fallible assembly step has
     // succeeded. ReassembleProvider stops the old agent before entering here,
     // so no accepted turn can observe a half-switched attribution.
     if let Some(snapshot_hook) = &parts.snapshot_hook {
         snapshot_hook.set_model_attribution(&cfg.provider_name, &cfg.model, cfg.pricing);
+    }
+    if let Some(trace_hook) = &parts.trace_hook {
+        trace_hook.set_model_attribution(&cfg.provider_name, &cfg.model);
     }
     Ok(agent)
 }
@@ -2011,7 +2073,7 @@ mod tests {
         };
         let (mc, rounds) = subagent_runtime_knobs(&cfg, None);
         assert_eq!(mc, 0, "zero is passed through and means unbounded");
-        assert_eq!(rounds, 230);
+        assert_eq!(rounds, 300);
     }
 
     #[test]
@@ -2020,7 +2082,7 @@ mod tests {
         use jeikcode_config::config::SubAgentConfig;
         let (mc, rounds) = subagent_runtime_knobs(&SubAgentConfig::default(), None);
         assert_eq!(mc, 0, "default is unbounded — a fan-out never queues");
-        assert_eq!(rounds, 230, "default child round high-water unchanged");
+        assert_eq!(rounds, 300, "default child round high-water is 300");
     }
 
     #[test]

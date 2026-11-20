@@ -470,9 +470,9 @@ pub fn systemd_calendar(s: &Schedule) -> anyhow::Result<OnCalendar> {
         }
         Schedule::Hourly => OnCalendar::Calendar("hourly".into()),
         Schedule::Interval { every_minutes } => OnCalendar::Interval(format!("{every_minutes}min")),
-        Schedule::Cron { .. } => {
+        Schedule::Calendar { .. } | Schedule::Cron { .. } => {
             anyhow::bail!(
-                "cron schedules are not supported on systemd timers; use a simple frequency"
+                "calendar/cron schedules are managed by jeikcode daemon rather than systemd timers"
             )
         }
     })
@@ -529,9 +529,9 @@ pub fn launchd_calendar(s: &Schedule) -> anyhow::Result<LaunchdTrigger> {
         Schedule::Interval { every_minutes } => {
             LaunchdTrigger::Interval(*every_minutes as u64 * 60)
         }
-        Schedule::Cron { .. } => {
+        Schedule::Calendar { .. } | Schedule::Cron { .. } => {
             anyhow::bail!(
-                "cron schedules are not supported on macOS launchd; use a simple frequency"
+                "calendar/cron schedules are managed by jeikcode daemon rather than macOS launchd"
             )
         }
     })
@@ -566,9 +566,9 @@ pub fn schtasks_args(s: &Schedule) -> anyhow::Result<Vec<String>> {
             .into_iter()
             .chain([every_minutes.to_string()])
             .collect(),
-        Schedule::Cron { .. } => {
+        Schedule::Calendar { .. } | Schedule::Cron { .. } => {
             anyhow::bail!(
-                "cron schedules are not supported on Windows Task Scheduler; use a simple frequency"
+                "calendar/cron schedules are managed by jeikcode daemon rather than Windows Task Scheduler"
             )
         }
     })
@@ -786,6 +786,7 @@ mod tests {
             created_at: 0,
             last_run_at: None,
             last_status: None,
+            ..Default::default()
         }
     }
 

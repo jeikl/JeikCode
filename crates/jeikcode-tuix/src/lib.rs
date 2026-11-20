@@ -599,13 +599,17 @@ pub async fn run(
     // Seed the hint from any prior-session staged upgrade so the user
     // sees the pending status on the very first frame rather than
     // waiting for the next poll to rediscover it.
-    if let Ok(Some(pending)) = jeikcode_updater::read_pending() {
-        if let Ok(mut g) = update_hint.lock() {
-            *g = Some(pending.version);
+    if !jeikcode_config::config::runtime_state::is_dead() {
+        if let Ok(Some(pending)) = jeikcode_updater::read_pending() {
+            if let Ok(mut g) = update_hint.lock() {
+                *g = Some(pending.version);
+            }
         }
     }
 
-    if !jeikcode_config::config::offline::is_offline_active() {
+    if !jeikcode_config::config::offline::is_offline_active()
+        && !jeikcode_config::config::runtime_state::is_dead()
+    {
         let slot = update_hint.clone();
         let wake = wake_tx.clone();
         tokio::spawn(async move {

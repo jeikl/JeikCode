@@ -53,6 +53,52 @@ test('parseTodoPlan accepts full list shape', () => {
   assert.equal(items?.[1]?.status, 'in_progress');
 });
 
+test('parseTodoPlan applies update after plan (plan is the baseline)', () => {
+  const items = parseTodoPlan(
+    JSON.stringify({
+      plan: ['A', 'B', 'C'],
+      update: [
+        { content: 'B', status: 'completed' },
+        { id: 1, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.equal(items?.length, 3);
+  assert.equal(items?.[0]?.status, 'in_progress');
+  assert.equal(items?.[1]?.status, 'completed');
+  assert.equal(items?.[2]?.status, 'pending');
+});
+
+test('parseTodoPlan ignores JSON key order (update before plan)', () => {
+  const items = parseTodoPlan(
+    JSON.stringify({
+      update: [{ id: 1, status: 'completed' }],
+      plan: ['A', 'B'],
+    }),
+  );
+  assert.equal(items?.length, 2);
+  assert.equal(items?.[0]?.status, 'completed');
+  assert.equal(items?.[1]?.status, 'pending');
+});
+
+test('foldTodoToolCall applies a combined plan + update once', () => {
+  const cur = foldTodoToolCall(
+    null,
+    'todo_write',
+    JSON.stringify({ plan: ['A', 'B'], update: [{ id: 2, status: 'in_progress' }] }),
+  );
+  assert.equal(cur?.length, 2);
+  assert.equal(cur?.[0]?.status, 'pending');
+  assert.equal(cur?.[1]?.status, 'in_progress');
+});
+
+test('foldTodoToolCall applies a top-level update patch', () => {
+  let cur = foldTodoToolCall(null, 'todo_write', JSON.stringify({ plan: ['A', 'B'] }));
+  cur = foldTodoToolCall(cur, 'todo_write', JSON.stringify({ update: [{ id: 1, status: 'completed' }] }));
+  assert.equal(cur?.[0]?.status, 'completed');
+  assert.equal(cur?.[1]?.status, 'pending');
+});
+
 test('applyTodoAction handles batch actions[] payload', () => {
   let list = applyTodoAction([], JSON.stringify({
     actions: [

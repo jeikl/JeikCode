@@ -100,11 +100,15 @@ pub async fn ensure_models_dev_catalog() {
         return;
     }
     let _refresh_guard = RefreshGuard;
-    let builder = crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
-        .connect_timeout(FETCH_TIMEOUT)
-        .timeout(FETCH_TIMEOUT)
-        .user_agent("jeikcode");
-    let Ok(client) = builder.build() else {
+    let spec = crate::http_pool::HttpClientSpec {
+        connect_timeout: FETCH_TIMEOUT,
+        request_timeout: Some(FETCH_TIMEOUT),
+        pool_idle_timeout: Some(std::time::Duration::from_secs(15)),
+        skip_tls_verify: false,
+        force_tls12: jeikcode_config::tls::should_cap_url(MODELS_DEV_URL),
+        user_agent: Some("jeikcode".to_string()),
+    };
+    let Ok(client) = crate::http_pool::shared_http_client(&spec) else {
         return;
     };
     let Ok(response) = client.get(MODELS_DEV_URL).send().await else {

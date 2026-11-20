@@ -7,7 +7,6 @@ import {
   foldLiveTodo,
   hydrateSession,
   identifiedAssistantIndex,
-  isTransientAdvisoryText,
   paintAssistantReasoning,
   paintAssistantText,
   paintAssistantNotice,
@@ -1099,7 +1098,7 @@ test('spliceAuthoritativeDiskTail 丢弃无 seq 的旧缓存通知行，不再�
   assert.deepEqual(spliced.map((m) => m.id ?? 'notice'), ['u-2', 'a-2', 'u-3', 'a-3']);
 });
 
-test('stripTransientNoticeRows 剔除瞬态提示，只保留持久化边界通知', () => {
+test('stripTransientNoticeRows 剔除瞬态提示，只保留持久化与结构化边界通知', () => {
   const rows = [
     { role: 'assistant', id: 'a-1', seq: 1, parts: [{ kind: 'text' as const, text: '回答' }] },
     {
@@ -1120,18 +1119,44 @@ test('stripTransientNoticeRows 剔除瞬态提示，只保留持久化边界通�
       id: 'notice-compact',
       seq: 3,
       persistent: true,
-      parts: [{ kind: 'notice' as const, text: '已压缩 · 摘要 12 条 · ~48.2K→~9.1K tok' }],
+      parts: [{ kind: 'notice' as const, text: '已压缩 · 摘要 12 条 · ~48.2K→~9.1K tok', noticeKind: 'compaction' as const }],
     },
-    // Legacy transient notice: id+seq but no durability marker.
+    // Legacy notice without persistent marker or v5 eventId: dropped across cache reads.
     {
       role: 'system',
       id: 'notice-legacy-warning',
       seq: 4,
       parts: [{ kind: 'notice' as const, text: 'stream idle timeout — reconnecting' }],
     },
+    // Structured v5 eventId notice survives cache roundtrip cleanly.
+    {
+      role: 'system',
+      id: 'retry-inc-2',
+      parts: [{ kind: 'notice' as const, text: 'stream idle timeout (retrying 2/9)', eventId: 'retry-inc-2', status: 'settled' as const }],
+    },
   ];
   const out = stripTransientNoticeRows(rows as any);
-  assert.deepEqual(out.map((row) => row.id), ['a-1', 'notice-compact']);
+  assert.deepEqual(out.map((row) => row.id), ['a-1', 'notice-compact', 'retry-inc-2']);
+});
+
+test('stripTransientNoticeRows 保留带有 persistent 标记的持久账本通知即便含重试/超时词', () => {
+  const rows = [
+    {
+      role: 'system',
+      id: 'm-1:retry',
+      seq: 5,
+      persistent: true,
+      parts: [{ kind: 'notice' as const, text: 'stream idle timeout (retrying 2/9)', id: 'm-1:retry:1:notice' }],
+    },
+    {
+      role: 'system',
+      id: 'transient-1',
+      transient: true,
+      parts: [{ kind: 'notice' as const, text: '模型只返回了思考，正在重试(1/6)...' }],
+    },
+  ];
+  const out = stripTransientNoticeRows(rows as any);
+  assert.deepEqual(out.map((row) => row.id), ['m-1:retry']);
 });
 
 test('stripTransientNoticeRows 从 assistant 行中剔除 rate_limited 部件', () => {
@@ -1154,21 +1179,6 @@ test('stripTransientNoticeRows 从 assistant 行中剔除 rate_limited 部件', 
   assert.equal(out.length, 1);
   assert.equal(out[0]!.id, 'a-1');
   assert.deepEqual(out[0]!.parts.map((p: any) => p.kind), ['text']);
-});
-
-test('isTransientAdvisoryText 区分重试提示与压缩边界', () => {
-  assert.equal(
-    isTransientAdvisoryText('模型只返回了思考，正在重试(1/6)...'),
-    true,
-  );
-  assert.equal(
-    isTransientAdvisoryText('Model returned only reasoning, retrying (1/6)...'),
-    true,
-  );
-  assert.equal(
-    isTransientAdvisoryText('已压缩 · 摘要 12 条 · ~48.2K→~9.1K tok'),
-    false,
-  );
 });
 
 test('spliceAuthoritativeDiskTail 用权威行替换同一身份时保留本地 notice 部件', () => {
@@ -1317,17 +1327,18 @@ test('rate_limited 目标轮不在画布时不落到最终答案后面', () => {
   assert.equal(out[2]!.id, 'a-final');
 });
 
-test('paintAssistantNotice 目标轮不在画布时落到当前提问之后，而不是整段末尾', () => {
+test('paintAssistantNotice 目标轮不在画布时落到末尾，且不占用持久坐标', () => {
   const canvas = [
     { role: 'user', id: 'u-1', parts: [{ kind: 'text' as const, text: '本轮提问' }] },
     { role: 'assistant', id: 'a-final', parts: [{ kind: 'text' as const, text: '最终答案' }] },
   ];
-  // 目标轮（只返回思考的那一轮）已不在当前窗口，不能把提示挂到最终答案下面。
-  const out = paintAssistantNotice(canvas, '模型只返回了思考，正在重试(1/6)...', 'a-thinking');
+  // 目标行不在画布：提示只能当作当前连接的瞬时反馈放在末尾，
+  // 绝不回退到提问之后（那会在对账时被重排到回答上方）。
+  const out = paintAssistantNotice(canvas, '连接中断，已保留当前输出，重试 1/9 次', 'a-thinking');
   assert.equal(out.length, 3);
-  assert.equal(out[1]!.role, 'system');
-  assert.equal(out[2]!.id, 'a-final');
-  assert.equal((out[1] as any).transient, true);
+  assert.equal(out[2]!.role, 'system');
+  assert.equal((out[2] as any).transient, true);
+  assert.equal((out[2] as any).seq, undefined);
 });
 
 test('placeRecoveredTurnUsers 用绝对下标把被折叠线切掉的提问放回原位置', () => {

@@ -72,7 +72,6 @@ export function ConfigSyncModal({ diffs, onDone, onSkip }: ConfigSyncModalProps)
         aria-labelledby="config-sync-title"
       >
         <div class="modal-header">
-          <span style="font-size: 16px;">⚙️</span>
           <h3 id="config-sync-title">{t('configSync.dialogTitle')}</h3>
         </div>
 

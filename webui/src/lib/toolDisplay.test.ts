@@ -18,6 +18,7 @@ import {
   isViewOnlyShellDiff,
   formatToolCompactJson,
   formatToolDetail,
+  compactToolDetail,
   colorizeInlineJson,
 } from './toolDisplay.ts';
 
@@ -36,6 +37,29 @@ test('tool glyphs match OpenCode classes', () => {
 test('jsonArgString reads a string field', () => {
   assert.equal(jsonArgString('{"command":"ls -la"}', 'command'), 'ls -la');
   assert.equal(jsonArgString('not-json', 'command'), '');
+});
+
+test('compactToolDetail uses the last path segment and keeps read ranges / grep pairs', () => {
+  assert.equal(
+    compactToolDetail('edit', JSON.stringify({ path: 'xx/xxx/xxx.rs', edits: [] })),
+    'xxx.rs',
+  );
+  assert.equal(
+    compactToolDetail('read', JSON.stringify({ path: 'webui/src/styles/app.css', offset: 4808, limit: 150 })),
+    'app.css 4808-4957',
+  );
+  assert.equal(
+    compactToolDetail('read', JSON.stringify({ path: String.raw`C:\foo\bar.rs`, start_line: 123, end_line: 567 })),
+    'bar.rs 123-567',
+  );
+  assert.equal(
+    compactToolDetail('read', JSON.stringify({ path: 'artifacts/run_42/output.json' })),
+    'output.json',
+  );
+  assert.equal(
+    compactToolDetail('grep', JSON.stringify({ pattern: 'TODO', path: 'webui/src/components' })),
+    'components · TODO',
+  );
 });
 
 test('formatToolDetail puts summary then command ahead of shell', () => {

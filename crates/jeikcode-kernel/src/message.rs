@@ -135,6 +135,44 @@ pub struct MessageMeta {
     /// string for older snapshots).
     #[serde(default)]
     pub finish_reason: String,
+    /// Time to first content token (thinking / text / tool chunk) in ms from request open.
+    /// `None` if unavailable or from an older snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+}
+
+/// 持久化到会话消息上的结构化系统通知元数据，使快照回放、`DisplayHook` 与实时事件
+/// 共用同一身份（`event_id`）、因果锚点（`anchor_message_id`）、严重级别与收敛状态。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageNoticeMeta {
+    pub kind: crate::event::NoticeKind,
+    pub severity: crate::event::NoticeSeverity,
+    pub status: crate::event::NoticeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_part_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u32>,
+}
+
+impl From<&crate::event::SystemNotice> for MessageNoticeMeta {
+    fn from(notice: &crate::event::SystemNotice) -> Self {
+        Self {
+            kind: notice.kind,
+            severity: notice.severity,
+            status: notice.status,
+            event_id: Some(notice.event_id.clone()),
+            part_id: Some(notice.part_id.clone()),
+            anchor_message_id: notice.anchor_message_id.clone(),
+            anchor_part_id: notice.anchor_part_id.clone(),
+            revision: Some(notice.revision),
+        }
+    }
 }
 
 /// Provider-neutral message.
@@ -165,6 +203,12 @@ pub struct Message {
     /// precedes the real prompt is never mistaken for the sacred task anchor.
     #[serde(default)]
     pub synthetic: bool,
+    /// True iff this synthetic `Role::User` message starts a distinct autonomous turn
+    /// (e.g., `/goal` continuation or scheduled wakeup). Compaction treats it as a turn
+    /// boundary while `sacred_floor` still skips all `synthetic` messages to anchor on the
+    /// first real user prompt, and session replay continues to treat it as synthetic.
+    #[serde(default)]
+    pub autonomous_turn: bool,
     /// Internal provenance for assistant messages produced by kernel-driven control rounds.
     /// Empty for normal user/model messages. Example: "verify_cadence".
     /// [`TURN_DIAGNOSTIC_ORIGIN`] is display-only: persisted for WebUI/TUI replay,
@@ -240,6 +284,9 @@ pub struct Message {
     /// (`m-<uuid>`) when absent so a stored message carries its identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// 结构化系统通知元数据（仅 `turn_diagnostic` 等展示型消息携带，绝不进入模型上下文）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<MessageNoticeMeta>,
 }
 
 impl Message {
@@ -252,12 +299,14 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     pub fn user(text: impl Into<String>) -> Self {
@@ -269,12 +318,14 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     pub fn assistant(text: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
@@ -286,12 +337,14 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     /// A tool RESULT. `is_error` is now STORED (a real adapter must echo it to the
@@ -309,12 +362,14 @@ impl Message {
             is_error,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     /// A KERNEL-INJECTED synthetic `Role::User` message (compaction cold summary or
@@ -333,13 +388,24 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: true,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
+    }
+    /// A KERNEL-INJECTED synthetic `Role::User` message that opens a new autonomous
+    /// turn (e.g., `/goal` continuation). Unlike plain `synthetic_user` anchors or
+    /// frozen prefix blocks, compaction treats it as a turn boundary so multi-round
+    /// `/goal` loops remain drainable instead of masquerading as a single active turn.
+    pub fn synthetic_turn(text: impl Into<String>) -> Self {
+        let mut msg = Self::synthetic_user(text);
+        msg.autonomous_turn = true;
+        msg
     }
     /// A user message carrying inline `images` (multimodal input). Identical to
     /// [`Message::user`] when `images` is empty.
@@ -352,12 +418,14 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images,
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
     /// A KERNEL-INJECTED `Role::User` message carrying `images` — used by the agent
@@ -374,12 +442,14 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: true,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images,
             reasoning_blocks: vec![],
             created_at_ms: 0,
             id: None,
+            notice: None,
         }
     }
 
@@ -453,6 +523,12 @@ impl Message {
     /// Stored for WebUI/TUI replay only — never forwarded on the provider wire.
     pub fn is_display_only(&self) -> bool {
         self.internal_origin.as_deref() == Some(TURN_DIAGNOSTIC_ORIGIN)
+    }
+
+    /// True iff this message starts a real or autonomous (`/goal`) user turn for
+    /// compaction turn-boundary alignment, excluding synthetic cold anchors/blocks.
+    pub fn is_compaction_turn_start(&self) -> bool {
+        self.role == Role::User && (!self.synthetic || self.autonomous_turn)
     }
 }
 
@@ -833,6 +909,7 @@ impl Conversation {
         while i < self.messages.len()
             && self.messages[i].role == Role::User
             && self.messages[i].synthetic
+            && !self.messages[i].autonomous_turn
         {
             i += 1;
         }
@@ -1887,6 +1964,7 @@ mod tests {
             provider_model: Some("deepseek-v4-flash".into()),
             session_id: Some("sess-1".into()),
             finish_reason: "stop".into(),
+            ttft_ms: Some(42),
         });
         with_meta.reasoning = Some("thinking…".to_string());
         c.push(with_meta);

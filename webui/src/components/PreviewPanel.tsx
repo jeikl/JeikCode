@@ -4,6 +4,8 @@ import { modalConfirm } from './ConfirmDialog';
 import { CodeEditorTab } from './CodeEditorTab';
 import { showToast } from './Toast';
 import { parseFilePathAndLines } from '../lib/displayPath';
+import { getSavedPreviewCount, registerPreviewOpenHandler } from '../lib/previewStorage';
+export { getSavedPreviewCount };
 import {
   bumpReloadToken,
   dropEditorTabSnapshot,
@@ -27,20 +29,6 @@ export interface PreviewPanelProps {
   onTabsCountChange?: (count: number) => void;
   /** 面板整体是否可见（折叠 / 切到其它面板标签）：隐藏时不抢焦点，恢复可见时还原滚动。 */
   surfaceActive?: boolean;
-}
-
-export function getSavedPreviewCount(projectCwd?: string): number {
-  if (typeof window === 'undefined' || !window.localStorage) return 0;
-  try {
-    const normCwd = (projectCwd || 'default').replace(/\\/g, '/').toLowerCase();
-    const storageKeyTabs = `jeikcode:right_preview_tabs:${normCwd}`;
-    const saved = localStorage.getItem(storageKeyTabs);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) return parsed.length;
-    }
-  } catch {}
-  return 0;
 }
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp']);
@@ -252,25 +240,14 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
     [cwd],
   );
 
-  // 监听全局打开预览事件
+  // 监听全局打开预览事件并消费懒加载前暂存的打开请求
   useEffect(() => {
-    const handleOpenFileEvent = (
-      e: CustomEvent<{
-        filePath: string;
-        fileName?: string;
-        fileStatus?: string;
-        startLine?: number;
-        endLine?: number;
-      }>,
-    ) => {
-      if (e.detail?.filePath) {
-        openTab(e.detail);
+    const unregister = registerPreviewOpenHandler((detail) => {
+      if (detail?.filePath) {
+        openTab(detail);
       }
-    };
-    window.addEventListener('jeikcode:preview:open_file', handleOpenFileEvent as EventListener);
-    return () => {
-      window.removeEventListener('jeikcode:preview:open_file', handleOpenFileEvent as EventListener);
-    };
+    });
+    return unregister;
   }, [openTab]);
 
   // 关闭标签：有未保存修改时先确认，避免静默丢草稿。
@@ -465,7 +442,7 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
     } catch {}
   };
 
-  // 获取文件图标或徽章
+  // 获取文件类型图标（保留资源管理器的识别度）
   const getTabIcon = (filePath: string) => {
     const ext = (filePath.split('.').pop() || '').toLowerCase();
     if (IMAGE_EXTS.has(ext)) return '🖼️';
@@ -602,7 +579,10 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
               title={t('preview.refresh')}
               aria-label={t('preview.refresh')}
             >
-              🔄
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+                <path d="M13.5 2.5V6h-3.5" />
+              </svg>
             </button>
           )}
 
@@ -620,7 +600,9 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
               }
               aria-label={t('preview.toggleMode')}
             >
-              {activeViewMode === 'edit' ? '📖' : '✏️'}
+              <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: '10px', letterSpacing: 0 }}>
+                {activeViewMode === 'edit' ? 'P' : 'E'}
+              </span>
             </button>
           )}
 
@@ -634,7 +616,11 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
               title={`${t('editor.save')} (Ctrl+S)`}
               aria-label={t('editor.save')}
             >
-              💾
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M2.5 2.5h8l3 3v8h-11z" />
+                <path d="M4.5 2.5v4h6v-4" />
+                <path d="M4.5 9h7v4.5h-7z" />
+              </svg>
             </button>
           )}
 
@@ -690,7 +676,7 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
         {tabs.length === 0 || !activeTab ? (
           <div class="preview-empty-stage">
             <div class="preview-empty-box">
-              <div class="preview-empty-icon">👁️</div>
+              <div class="preview-empty-icon" aria-hidden="true">👁️</div>
               <div class="preview-empty-title">
                 {t('preview.emptyTitle')}
               </div>

@@ -45,8 +45,12 @@ pub(crate) fn ttfb_timeout_error(open_timeout: Duration) -> ProviderError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamReadRecovery {
-    RetryExhausted { attempts: u32 },
+    RetryExhausted {
+        attempts: u32,
+    },
     PartialResponse,
+    /// 中断时尚无任何输出：中性的“连接中断”叙述，具体重试由内核统一调度。
+    Interrupted,
 }
 
 /// Whether replaying the whole provider request could duplicate user-visible output
@@ -92,10 +96,12 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Default: 6 attempts, 500ms base, 16s cap.
+    /// Default: single attempt — the KERNEL owns retry scheduling on the unified
+    /// ladder (`jeikcode_kernel::retry`); the transport layer must not add its own
+    /// sleeps/attempts on top (that used to stack 6 × 6 attempts for one outage).
     pub fn default_policy() -> Self {
         Self {
-            max_attempts: 6,
+            max_attempts: 1,
             base_delay: Duration::from_millis(500),
             max_delay: Duration::from_secs(16),
         }
@@ -297,6 +303,9 @@ pub(crate) fn stream_read_error_message(
             }
             StreamReadRecovery::PartialResponse => {
                 jeikcode_config::i18n::format_stream_read_partial_response()
+            }
+            StreamReadRecovery::Interrupted => {
+                jeikcode_config::i18n::format_stream_read_interrupted()
             }
         };
         let hint = connection_reset_hint(err);
@@ -802,7 +811,6 @@ mod tests {
         );
 
         let partial = stream_read_error_message(&e, StreamReadRecovery::PartialResponse);
-        assert!(partial.contains("为避免重复输出或工具执行"));
         assert!(partial.contains("已保留可安全保存的部分回复"));
         assert!(!partial.contains("自动重连仍失败"));
         // The PartialResponse lead is self-contained — no "网络连接中断" double-中断.
@@ -818,7 +826,7 @@ mod tests {
             "english partial response lead: {partial_en}"
         );
         assert!(
-            partial_en.contains("not auto-replayed"),
+            partial_en.contains("safe partial response was preserved"),
             "english partial response reason: {partial_en}"
         );
         assert!(

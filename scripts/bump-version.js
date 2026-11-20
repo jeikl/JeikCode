@@ -19,15 +19,45 @@ const { execSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
 
+function comparePrerelease(p1, p2) {
+  if (!p1 && !p2) return 0;
+  if (!p1 && p2) return 1;
+  if (p1 && !p2) return -1;
+
+  const id1 = p1.split('.');
+  const id2 = p2.split('.');
+  const len = Math.max(id1.length, id2.length);
+  for (let i = 0; i < len; i++) {
+    if (id1[i] === undefined) return -1;
+    if (id2[i] === undefined) return 1;
+    if (id1[i] === id2[i]) continue;
+
+    const isNum1 = /^\d+$/.test(id1[i]);
+    const isNum2 = /^\d+$/.test(id2[i]);
+
+    if (isNum1 && isNum2) {
+      const n1 = parseInt(id1[i], 10);
+      const n2 = parseInt(id2[i], 10);
+      if (n1 !== n2) return n1 > n2 ? 1 : -1;
+    } else if (isNum1) {
+      return -1;
+    } else if (isNum2) {
+      return 1;
+    } else {
+      const cmp = id1[i].localeCompare(id2[i]);
+      if (cmp !== 0) return cmp;
+    }
+  }
+  return 0;
+}
+
 function compareSemVer(a, b) {
   const pa = parseSemVer(a);
   const pb = parseSemVer(b);
   if (pa.major !== pb.major) return pa.major - pb.major;
   if (pa.minor !== pb.minor) return pa.minor - pb.minor;
   if (pa.patch !== pb.patch) return pa.patch - pb.patch;
-  if (!pa.pre && pb.pre) return 1;
-  if (pa.pre && !pb.pre) return -1;
-  return pa.raw.localeCompare(pb.raw);
+  return comparePrerelease(pa.pre, pb.pre);
 }
 
 function getCurrentVersion() {
@@ -98,6 +128,76 @@ function computeNextVersion(currentStr, targetType) {
   throw new Error(`Unknown bump mode or invalid version: ${targetType}`);
 }
 
+function skipJsonWhitespace(text, pos) {
+  let i = pos;
+  while (i < text.length && /\s/.test(text[i])) i++;
+  return i;
+}
+
+function scanJsonStringEnd(text, startQuote) {
+  let i = startQuote + 1;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\\') {
+      i += 2;
+      continue;
+    }
+    if (ch === '"') return i + 1;
+    i++;
+  }
+  return -1;
+}
+
+/**
+ * 仅替换 JSON 顶层对象的 `version` 字段，保留原始缩进、单行数组与换行风格，
+ * 避免嵌套子节点（如插件/依赖配置）中的同名 `version` 字段被正则误替换。
+ */
+function replaceTopLevelJsonVersion(text, newVersion) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.version !== 'string') {
+    return text;
+  }
+
+  let depth = 0;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      const end = scanJsonStringEnd(text, i);
+      if (end === -1) break;
+      if (depth === 1) {
+        let key;
+        try {
+          key = JSON.parse(text.slice(i, end));
+        } catch {
+          key = null;
+        }
+        const afterKey = skipJsonWhitespace(text, end);
+        if (key === 'version' && text[afterKey] === ':') {
+          const valStart = skipJsonWhitespace(text, afterKey + 1);
+          if (text[valStart] === '"') {
+            const valEnd = scanJsonStringEnd(text, valStart);
+            if (valEnd !== -1) {
+              return text.slice(0, valStart) + JSON.stringify(newVersion) + text.slice(valEnd);
+            }
+          }
+        }
+      }
+      i = end;
+      continue;
+    }
+    if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') depth--;
+    i++;
+  }
+  return text;
+}
+
 function updateFile(filePath, updater) {
   if (!fs.existsSync(filePath)) return false;
   const original = fs.readFileSync(filePath, 'utf8');
@@ -109,46 +209,46 @@ function updateFile(filePath, updater) {
   return false;
 }
 
-function bumpAllFiles(newVersion) {
+function bumpAllFiles(newVersion, targetRoot = root) {
   const updatedFiles = [];
 
   // 1. Cargo.toml
-  if (updateFile(path.join(root, 'Cargo.toml'), text => {
+  if (updateFile(path.join(targetRoot, 'Cargo.toml'), text => {
     return text.replace(/^version = ".*?"/m, `version = "${newVersion}"`);
   })) updatedFiles.push('Cargo.toml');
 
   // 2. webui/package.json
-  if (updateFile(path.join(root, 'webui', 'package.json'), text => {
-    return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
+  if (updateFile(path.join(targetRoot, 'webui', 'package.json'), text => {
+    return replaceTopLevelJsonVersion(text, newVersion);
   })) updatedFiles.push('webui/package.json');
 
   // 3. desktop/package.json
-  if (updateFile(path.join(root, 'desktop', 'package.json'), text => {
-    return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
+  if (updateFile(path.join(targetRoot, 'desktop', 'package.json'), text => {
+    return replaceTopLevelJsonVersion(text, newVersion);
   })) updatedFiles.push('desktop/package.json');
 
   // 4. desktop/src-tauri/tauri.conf.json
-  if (updateFile(path.join(root, 'desktop', 'src-tauri', 'tauri.conf.json'), text => {
-    return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
+  if (updateFile(path.join(targetRoot, 'desktop', 'src-tauri', 'tauri.conf.json'), text => {
+    return replaceTopLevelJsonVersion(text, newVersion);
   })) updatedFiles.push('desktop/src-tauri/tauri.conf.json');
 
   // 5. desktop/src-tauri/Cargo.toml
-  if (updateFile(path.join(root, 'desktop', 'src-tauri', 'Cargo.toml'), text => {
+  if (updateFile(path.join(targetRoot, 'desktop', 'src-tauri', 'Cargo.toml'), text => {
     return text.replace(/^version = ".*?"/m, `version = "${newVersion}"`);
   })) updatedFiles.push('desktop/src-tauri/Cargo.toml');
 
   // 6. packages/npm/package.json
-  if (updateFile(path.join(root, 'packages', 'npm', 'package.json'), text => {
-    return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
+  if (updateFile(path.join(targetRoot, 'packages', 'npm', 'package.json'), text => {
+    return replaceTopLevelJsonVersion(text, newVersion);
   })) updatedFiles.push('packages/npm/package.json');
 
   // 7. root package.json
-  if (updateFile(path.join(root, 'package.json'), text => {
-    return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
+  if (updateFile(path.join(targetRoot, 'package.json'), text => {
+    return replaceTopLevelJsonVersion(text, newVersion);
   })) updatedFiles.push('package.json');
 
   // 8. docs-site/.vitepress/theme/HeroImageWithVersion.vue
-  if (updateFile(path.join(root, 'docs-site', '.vitepress', 'theme', 'HeroImageWithVersion.vue'), text => {
+  if (updateFile(path.join(targetRoot, 'docs-site', '.vitepress', 'theme', 'HeroImageWithVersion.vue'), text => {
     if (newVersion.includes('-')) {
       return text.replace(/const betaVersion = ref\('v.*?'\)/, `const betaVersion = ref('v${newVersion}')`);
     } else {
@@ -157,15 +257,15 @@ function bumpAllFiles(newVersion) {
   })) updatedFiles.push('docs-site/.vitepress/theme/HeroImageWithVersion.vue');
 
   // 9. docs-site/package.json
-  if (updateFile(path.join(root, 'docs-site', 'package.json'), text => {
-    return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
+  if (updateFile(path.join(targetRoot, 'docs-site', 'package.json'), text => {
+    return replaceTopLevelJsonVersion(text, newVersion);
   })) updatedFiles.push('docs-site/package.json');
 
   // 10. package-lock.json files
   const lockFiles = [
-    path.join(root, 'webui', 'package-lock.json'),
-    path.join(root, 'desktop', 'package-lock.json'),
-    path.join(root, 'docs-site', 'package-lock.json'),
+    path.join(targetRoot, 'webui', 'package-lock.json'),
+    path.join(targetRoot, 'desktop', 'package-lock.json'),
+    path.join(targetRoot, 'docs-site', 'package-lock.json'),
   ];
   for (const lockPath of lockFiles) {
     if (updateFile(lockPath, text => {
@@ -180,7 +280,7 @@ function bumpAllFiles(newVersion) {
         return text;
       }
     })) {
-      updatedFiles.push(path.relative(root, lockPath).replace(/\\/g, '/'));
+      updatedFiles.push(path.relative(targetRoot, lockPath).replace(/\\/g, '/'));
     }
   }
 
@@ -199,7 +299,7 @@ function bumpAllFiles(newVersion) {
     'jeikcode-tuix',
     'jeikcode-updater',
   ];
-  if (updateFile(path.join(root, 'Cargo.lock'), text => {
+  if (updateFile(path.join(targetRoot, 'Cargo.lock'), text => {
     let updated = text;
     for (const crate of workspaceCrates) {
       const regex = new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${crate}"\\r?\\nversion = )"[^"]+"`, 'g');
@@ -211,7 +311,7 @@ function bumpAllFiles(newVersion) {
   }
 
   // 12. desktop/src-tauri/Cargo.lock (jeikcode-desktop package)
-  if (updateFile(path.join(root, 'desktop', 'src-tauri', 'Cargo.lock'), text => {
+  if (updateFile(path.join(targetRoot, 'desktop', 'src-tauri', 'Cargo.lock'), text => {
     const regex = /(\[\[package\]\]\r?\nname = "jeikcode-desktop"\r?\nversion = )"[^"]+"/g;
     return text.replace(regex, `$1"${newVersion}"`);
   })) {
@@ -255,6 +355,15 @@ function main() {
   }
   console.log('');
 }
+
+module.exports = {
+  comparePrerelease,
+  compareSemVer,
+  parseSemVer,
+  computeNextVersion,
+  replaceTopLevelJsonVersion,
+  bumpAllFiles,
+};
 
 if (require.main === module) {
   main();

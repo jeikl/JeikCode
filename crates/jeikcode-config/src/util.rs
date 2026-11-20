@@ -11,7 +11,16 @@ pub fn stable_project_hash(path: &Path) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    let mut normalized = path.to_string_lossy().replace('\\', "/");
+    // The same project can arrive as `E:\\code\\x`, `E:/code/x`, or
+    // `\\\\?\\E:\\code\\x` (std::fs::canonicalize on Windows). The verbatim
+    // prefix is an IO namespace marker, not project identity; strip it before
+    // hashing or every window creates a second empty project bucket.
+    let raw = path.to_string_lossy();
+    let raw = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(&raw);
+    let mut normalized = raw.replace('\\', "/");
     if normalized.len() > 1 && normalized.ends_with('/') {
         normalized.pop();
     }
@@ -111,6 +120,18 @@ mod tests {
         assert_eq!(
             stable_project_hash(Path::new("/tmp/jeikcode-trust-golden")),
             "8b6a67e0b2c06dae"
+        );
+    }
+
+    #[test]
+    fn verbatim_prefix_does_not_change_project_hash() {
+        assert_eq!(
+            stable_project_hash(Path::new(r"\\?\E:\code\jeikcode")),
+            stable_project_hash(Path::new(r"E:\code\jeikcode"))
+        );
+        assert_eq!(
+            stable_project_hash(Path::new("//?/E:/code/jeikcode")),
+            stable_project_hash(Path::new("E:/code/jeikcode"))
         );
     }
 }

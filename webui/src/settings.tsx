@@ -4,7 +4,7 @@
 
 import { createContext, ComponentChildren } from 'preact';
 import { useContext, useEffect, useRef, useState } from 'preact/hooks';
-import { messages, Lang, MsgKey } from './i18n';
+import { messages, ensureLocaleLoaded, Lang, MsgKey } from './i18n';
 import { getConfig, postLanguage, postAutoGitSync } from './api';
 import { Theme, EffectiveTheme, resolveEffectiveTheme } from './lib/theme';
 
@@ -12,7 +12,7 @@ export type { Theme, EffectiveTheme };
 export { resolveEffectiveTheme };
 
 /** Which settings dialog to open from the sidebar settings menu. */
-export type SettingsSection = 'theme' | 'language' | 'model' | 'system';
+export type SettingsSection = 'theme' | 'language' | 'model' | 'system' | 'agent_mode';
 
 export type TParams = Record<string, string | number>;
 
@@ -24,6 +24,7 @@ interface SettingsCtx {
   setLang: (l: Lang) => Promise<void>;
   t: (key: MsgKey, params?: TParams) => string;
   githubLogo: boolean;
+  updateDead: boolean;
   /** Agent 执行 git 变更命令后是否自动同步/刷新（来自 /config，默认开启）。 */
   autoGitSync: boolean;
   setAutoGitSync: (v: boolean) => Promise<void>;
@@ -123,8 +124,25 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
   const [effectiveTheme, setEffectiveTheme] = useState<EffectiveTheme>(() => resolveEffectiveTheme(readTheme()));
   const [lang, setLangState] = useState<Lang>(readLang);
   const [githubLogo, setGithubLogo] = useState<boolean>(true);
+  const [updateDead, setUpdateDead] = useState<boolean>(false);
   const [autoGitSync, setAutoGitSyncState] = useState<boolean>(true);
   const [escUndoEnabled, setEscUndoEnabledState] = useState<boolean>(readEscUndo);
+  const [, setLocaleRevision] = useState<number>(0);
+
+  // 若选用按需拆分的非默认语种，后台拉取对应分包并在到达后平滑刷新文案
+  useEffect(() => {
+    let active = true;
+    if (typeof ensureLocaleLoaded === 'function') {
+      ensureLocaleLoaded(lang)
+        .then((loaded) => {
+          if (active && loaded) setLocaleRevision((n) => n + 1);
+        })
+        .catch(() => {});
+    }
+    return () => {
+      active = false;
+    };
+  }, [lang]);
 
   const selectionVersion = useRef(0);
   const pendingSave = useRef(Promise.resolve());
@@ -140,6 +158,9 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
         if (next) setLangState(next);
         if (typeof cfg.github_logo === 'boolean') {
           setGithubLogo(cfg.github_logo);
+        }
+        if (typeof cfg.update_dead === 'boolean') {
+          setUpdateDead(cfg.update_dead);
         }
         if (typeof cfg.auto_git_sync === 'boolean') {
           setAutoGitSyncState(cfg.auto_git_sync);
@@ -157,6 +178,9 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
         }
         if (typeof cfg.github_logo === 'boolean') {
           setGithubLogo(cfg.github_logo);
+        }
+        if (typeof cfg.update_dead === 'boolean') {
+          setUpdateDead(cfg.update_dead);
         }
         if (typeof cfg.auto_git_sync === 'boolean') {
           setAutoGitSyncState(cfg.auto_git_sync);
@@ -199,6 +223,26 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
     const onStorage = (event: StorageEvent) => {
       if (event.key !== ESC_UNDO_KEY) return;
       setEscUndoEnabledState(readEscUndo());
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  // Theme / language are browser-local mirrors of global preferences. A sibling
+  // tab changing either must apply here immediately instead of waiting for a
+  // reload (the server config broadcast covers cross-instance language, but a
+  // local-only fallback keeps offline/daemon-down tabs consistent too).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === THEME_KEY) {
+        setThemeState(readTheme());
+        return;
+      }
+      if (event.key === LANG_KEY) {
+        const next = readLang();
+        if (next) setLangState(next);
+      }
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -264,7 +308,8 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
   }, [lang]);
 
   function t(key: MsgKey, params?: TParams): string {
-    const table = messages[lang] ?? messages.en;
+    const fallback = lang === 'zh-TW' ? messages.zh : messages.en;
+    const table = messages[lang] ?? fallback;
     let s = table[key] ?? messages.en[key] ?? key;
     if (params) {
       for (const k of Object.keys(params)) {
@@ -276,7 +321,7 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
 
   return (
     <Ctx.Provider
-      value={{ theme, effectiveTheme, setTheme: setThemeState, lang, setLang, t, githubLogo, autoGitSync, setAutoGitSync, escUndoEnabled, setEscUndoEnabled }}
+      value={{ theme, effectiveTheme, setTheme: setThemeState, lang, setLang, t, githubLogo, updateDead, autoGitSync, setAutoGitSync, escUndoEnabled, setEscUndoEnabled }}
     >
       {children}
     </Ctx.Provider>

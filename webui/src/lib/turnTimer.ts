@@ -144,10 +144,17 @@ export function rootTurnUserTs<
   },
 ): number | undefined {
   const penetrate = opts?.penetrateSteers !== false;
-  const users = msgs.slice(0, idx).filter((m) => m.role === 'user');
+  const userIndices: number[] = [];
+  for (let i = 0; i < idx && i < msgs.length; i++) {
+    if (msgs[i]!.role === 'user') {
+      userIndices.push(i);
+    }
+  }
   let fallbackTs: number | undefined = undefined;
-  for (let k = users.length - 1; k >= 0; k--) {
-    const m = users[k]!;
+  let afterTurnId: number | undefined = msgs[idx]?.turnId;
+  for (let k = userIndices.length - 1; k >= 0; k--) {
+    const uIdx = userIndices[k]!;
+    const m = msgs[uIdx]!;
     if (fallbackTs === undefined && m.ts != null) {
       fallbackTs = m.ts;
     }
@@ -158,9 +165,25 @@ export function rootTurnUserTs<
     // differs from the user row BELOW it belongs to a NEW turn — the previous
     // task stopped, so do not penetrate to the old root. A mid-turn steer shares
     // the turn id with the turn's root and continues the continuous timer.
-    const below = users[k - 1];
+    const prevIdx = k > 0 ? userIndices[k - 1]! : undefined;
+    const below = prevIdx !== undefined ? msgs[prevIdx] : undefined;
     if (m.turnId != null && below?.turnId != null && m.turnId !== below.turnId) {
       return m.ts ?? fallbackTs;
+    }
+    const targetTurnId = m.turnId ?? afterTurnId;
+    if (prevIdx !== undefined && targetTurnId != null) {
+      for (let p = uIdx - 1; p > prevIdx; p--) {
+        const between = msgs[p];
+        if (between?.role === 'assistant' && between.turnId != null) {
+          if (between.turnId !== targetTurnId) {
+            return m.ts ?? fallbackTs;
+          }
+          afterTurnId = between.turnId;
+        }
+      }
+    }
+    if (m.turnId != null) {
+      afterTurnId = m.turnId;
     }
   }
   return fallbackTs;

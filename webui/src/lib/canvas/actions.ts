@@ -5,7 +5,7 @@
  * has a stable shape and a single pure reducer. UI-only mutations (optimistic
  * send, cache hydration, edit/rewind) may still use base `CanvasAction`s.
  */
-import type { ImageData } from '../../api.ts';
+import type { ImageData, NoticeKind, NoticeSeverity, NoticeStatus } from '../../api.ts';
 import {
   normalizeCanvas,
   type CanvasRowLike,
@@ -35,6 +35,7 @@ import {
   finalizeToolsAfterTurn,
   replaceToolOutput,
   settleToolRow,
+  shouldAcceptNoticeUpdate,
   toolResultStatus,
   updateToolProgress,
   upsertToolPart,
@@ -105,7 +106,24 @@ export type CanvasEventAction =
       seq: number;
       text: string;
       ts?: number;
+      anchorMessageId?: string;
     }
+  | {
+      /** Unified structured v5 system notice (`SystemNotice`). Updated in place by
+       *  `eventId` with monotonic status/revision rules and causal anchoring. */
+      type: 'system_notice';
+      eventId: string;
+      partId?: string;
+      kind: NoticeKind;
+      severity: NoticeSeverity;
+      status: NoticeStatus;
+      revision: number;
+      text: string;
+      anchorMessageId?: string;
+      anchorPartId?: string;
+      ts?: number;
+    }
+  | { type: 'settle_active_notices' }
   | {
       type: 'tool_start';
       tool: ToolRow;
@@ -120,6 +138,8 @@ export type CanvasEventAction =
       derive?: (tool: ToolRow) => Partial<ToolRow> | undefined;
     }
   | { type: 'tool_finished'; id: string; success: boolean }
+  /** Display-only runtime model-switch marker bound to the assistant round. */
+  | { type: 'model_switch'; messageId: string; model: string }
   | {
       type: 'tool_output';
       id: string;
@@ -152,7 +172,7 @@ export type CanvasEventAction =
       requestId: string;
     }
   | { type: 'notice_row'; row: ProjectionMessage }
-  | { type: 'rate_limited'; text: string; targetId?: string; id?: string }
+  | { type: 'rate_limited'; text: string; targetId?: string; id?: string; eventId?: string }
   | {
       type: 'replace_match';
       match: (row: any) => boolean;
@@ -176,9 +196,12 @@ export function isCanvasEventAction(
     || action.type === 'notice'
     || action.type === 'system'
     || action.type === 'authoritative_notice'
+    || action.type === 'system_notice'
+    || action.type === 'settle_active_notices'
     || action.type === 'tool_start'
     || action.type === 'tool_update'
     || action.type === 'tool_finished'
+    || action.type === 'model_switch'
     || action.type === 'tool_output'
     || action.type === 'tool_progress'
     || action.type === 'tool_result'
@@ -366,6 +389,259 @@ function updateToolProgressRow<T extends CanvasRowLike & ProjectionMessage>(
   return rows;
 }
 
+export interface SystemNoticeWire {
+  event_id: string;
+  part_id?: string;
+  kind: NoticeKind;
+  severity: NoticeSeverity;
+  status: NoticeStatus;
+  revision: number;
+  text: string;
+  anchor_message_id?: string;
+  anchor_part_id?: string;
+  created_at?: number;
+}
+
+export type SystemNoticeAction = Extract<CanvasEventAction, { type: 'system_notice' }>;
+
+export function systemNoticeActionFromWire(event: SystemNoticeWire): SystemNoticeAction {
+  return {
+    type: 'system_notice',
+    eventId: event.event_id,
+    partId: event.part_id,
+    kind: event.kind,
+    severity: event.severity,
+    status: event.status,
+    revision: event.revision,
+    text: event.text,
+    anchorMessageId: event.anchor_message_id,
+    anchorPartId: event.anchor_part_id,
+    ts: event.created_at,
+  };
+}
+
+function rowMatchesAnchorId<T extends CanvasRowLike & ProjectionMessage>(
+  row: T,
+  anchorId: string,
+): boolean {
+  if (row.id === anchorId || row.clientInputId === anchorId) return true;
+  if (row.role !== 'assistant') return false;
+  return (row.parts ?? []).some(
+    (p) => 'id' in p && typeof p.id === 'string' && p.id.startsWith(`${anchorId}:`),
+  );
+}
+
+/** Whether `anchorMessageId` already exists on canvas (or no anchor is needed). */
+export function hasNoticeAnchorInRows<T extends CanvasRowLike & ProjectionMessage>(
+  rows: T[],
+  anchorMessageId?: string,
+): boolean {
+  if (!anchorMessageId) return true;
+  return rows.some((row) => rowMatchesAnchorId(row, anchorMessageId));
+}
+
+function findAnchorInsertionIndex<T extends CanvasRowLike & ProjectionMessage>(
+  rows: T[],
+  anchorMessageId: string,
+): number {
+  const anchorIdx = rows.findIndex((row) => rowMatchesAnchorId(row, anchorMessageId));
+  if (anchorIdx < 0) return -1;
+  let at = anchorIdx + 1;
+  while (
+    at < rows.length &&
+    rows[at]?.role === 'system' &&
+    (rows[at]?.parts ?? []).some(
+      (p) => p.kind === 'notice' && p.anchorMessageId === anchorMessageId,
+    )
+  ) {
+    at += 1;
+  }
+  return at;
+}
+
+/** Coalesce a delayed system_notice event into `queue` keyed by `event_id` while
+ *  its anchor is outside the loaded window (respecting settled/revision order). */
+export function enqueuePendingAnchoredNotice(
+  queue: SystemNoticeWire[],
+  incoming: SystemNoticeWire,
+): SystemNoticeWire[] {
+  const idx = queue.findIndex((item) => item.event_id === incoming.event_id);
+  if (idx < 0) return [...queue, incoming];
+  const prev = queue[idx]!;
+  if (!shouldAcceptNoticeUpdate({ status: prev.status, revision: prev.revision }, incoming)) {
+    return queue;
+  }
+  const next = queue.slice();
+  next[idx] = {
+    ...incoming,
+    anchor_message_id: incoming.anchor_message_id ?? prev.anchor_message_id,
+    anchor_part_id: incoming.anchor_part_id ?? prev.anchor_part_id,
+    created_at: prev.created_at ?? incoming.created_at,
+  };
+  return next;
+}
+
+/** Partition queued notices into those whose anchor now exists on `rows` and
+ *  the ones still waiting for an older page or message identity. */
+export function drainPendingAnchoredNotices<T extends CanvasRowLike & ProjectionMessage>(
+  queue: SystemNoticeWire[],
+  rows: T[],
+): { ready: SystemNoticeAction[]; remaining: SystemNoticeWire[] } {
+  if (queue.length === 0) return { ready: [], remaining: queue };
+  const ready: SystemNoticeAction[] = [];
+  const remaining: SystemNoticeWire[] = [];
+  for (const item of queue) {
+    const alreadyOnCanvas = rows.some(
+      (row) =>
+        row.role === 'system' &&
+        (row.id === item.event_id ||
+          (row.parts ?? []).some((p) => p.kind === 'notice' && p.eventId === item.event_id)),
+    );
+    if (alreadyOnCanvas || hasNoticeAnchorInRows(rows, item.anchor_message_id)) {
+      ready.push(systemNoticeActionFromWire(item));
+    } else {
+      remaining.push(item);
+    }
+  }
+  return { ready, remaining };
+}
+
+function upsertSystemNoticeRow<T extends CanvasRowLike & ProjectionMessage>(
+  rows: T[],
+  spec: {
+    eventId: string;
+    partId?: string;
+    kind?: NoticeKind;
+    severity?: NoticeSeverity;
+    status?: NoticeStatus;
+    revision?: number;
+    text: string;
+    anchorMessageId?: string;
+    anchorPartId?: string;
+    ts?: number;
+    seq?: number;
+  },
+): T[] {
+  const text = spec.text.trim();
+  if (!text) return rows;
+  const noticeId = spec.eventId;
+  const existingAt = rows.findIndex(
+    (row) =>
+      row.id === noticeId ||
+      (row.role === 'system' &&
+        (row.parts ?? []).some((p) => p.kind === 'notice' && p.eventId === noticeId)),
+  );
+  if (existingAt >= 0) {
+    const existing = rows[existingAt]!;
+    const existingPart = (existing.parts ?? []).find(
+      (part): part is Extract<MsgPart, { kind: 'notice' }> => part.kind === 'notice',
+    );
+    if (
+      spec.status &&
+      !shouldAcceptNoticeUpdate(existingPart, { status: spec.status, revision: spec.revision })
+    ) {
+      return rows;
+    }
+    const resolvedPartId = spec.partId || existingPart?.partId || existingPart?.id || `${noticeId}:1:notice`;
+    const nextPart: MsgPart = {
+      kind: 'notice',
+      text,
+      id: resolvedPartId,
+      ...(spec.eventId ? { eventId: spec.eventId } : existingPart?.eventId ? { eventId: existingPart.eventId } : {}),
+      partId: resolvedPartId,
+      ...(spec.kind ?? existingPart?.noticeKind ? { noticeKind: spec.kind ?? existingPart?.noticeKind } : {}),
+      ...(spec.severity ?? existingPart?.severity ? { severity: spec.severity ?? existingPart?.severity } : {}),
+      ...(spec.status ?? existingPart?.status ? { status: spec.status ?? existingPart?.status } : {}),
+      ...(typeof (spec.revision ?? existingPart?.revision) === 'number'
+        ? { revision: spec.revision ?? existingPart?.revision }
+        : {}),
+      ...(spec.anchorMessageId ?? existingPart?.anchorMessageId
+        ? { anchorMessageId: spec.anchorMessageId ?? existingPart?.anchorMessageId }
+        : {}),
+      ...(spec.anchorPartId ?? existingPart?.anchorPartId
+        ? { anchorPartId: spec.anchorPartId ?? existingPart?.anchorPartId }
+        : {}),
+    };
+    const unchanged =
+      (existing as { persistent?: boolean }).persistent === true &&
+      existingPart?.text === nextPart.text &&
+      existingPart?.noticeKind === nextPart.noticeKind &&
+      existingPart?.severity === nextPart.severity &&
+      existingPart?.status === nextPart.status &&
+      existingPart?.revision === nextPart.revision &&
+      existingPart?.anchorMessageId === nextPart.anchorMessageId;
+    if (unchanged) return rows;
+    const next = rows.slice();
+    const updated: Record<string, unknown> = {
+      ...(existing as unknown as Record<string, unknown>),
+      persistent: true,
+      parts: [nextPart],
+      ...(typeof spec.seq === 'number' && typeof existing.seq !== 'number' ? { seq: spec.seq } : {}),
+    };
+    delete updated.transient;
+    next[existingAt] = updated as unknown as T;
+    return next;
+  }
+
+  const partId = spec.partId || `${noticeId}:1:notice`;
+  const notePart: MsgPart = {
+    kind: 'notice',
+    text,
+    id: partId,
+    eventId: noticeId,
+    partId,
+    ...(spec.kind ? { noticeKind: spec.kind } : {}),
+    ...(spec.severity ? { severity: spec.severity } : {}),
+    ...(spec.status ? { status: spec.status } : {}),
+    ...(typeof spec.revision === 'number' ? { revision: spec.revision } : {}),
+    ...(spec.anchorMessageId ? { anchorMessageId: spec.anchorMessageId } : {}),
+    ...(spec.anchorPartId ? { anchorPartId: spec.anchorPartId } : {}),
+  };
+  const note = {
+    role: 'system',
+    id: noticeId,
+    persistent: true,
+    parts: [notePart],
+    ts: spec.ts ?? Date.now(),
+    ...(typeof spec.seq === 'number' ? { seq: spec.seq } : {}),
+  } as unknown as T;
+
+  if (spec.anchorMessageId) {
+    const anchorAt = findAnchorInsertionIndex(rows, spec.anchorMessageId);
+    if (anchorAt >= 0) {
+      return [...rows.slice(0, anchorAt), note, ...rows.slice(anchorAt)];
+    }
+  }
+  if (typeof spec.seq === 'number') {
+    const insertAt = rows.findIndex(
+      (row) => typeof row.seq === 'number' && row.seq > spec.seq!,
+    );
+    return insertAt >= 0
+      ? [...rows.slice(0, insertAt), note, ...rows.slice(insertAt)]
+      : [...rows, note];
+  }
+  return [...rows, note];
+}
+
+function settleActiveNoticeRows<T extends CanvasRowLike & ProjectionMessage>(rows: T[]): T[] {
+  let changed = false;
+  const next = rows.map((row) => {
+    if (row.role !== 'system') return row;
+    let rowChanged = false;
+    const nextParts = (row.parts ?? []).map((part) => {
+      if (part.kind === 'notice' && part.status === 'active') {
+        rowChanged = true;
+        return { ...part, status: 'settled' as const };
+      }
+      return part;
+    });
+    if (!rowChanged) return row;
+    changed = true;
+    return { ...row, persistent: true, parts: nextParts } as unknown as T;
+  });
+  return changed ? next : rows;
+}
+
 export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
   rows: T[],
   action: CanvasEventAction,
@@ -468,29 +744,32 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
       break;
     }
     case 'authoritative_notice': {
-      const text = action.text.trim();
-      if (!text) break;
-      const noticeId = action.id || ('notice-' + action.seq);
-      // 同一条显示记录可能先由 `display_notice` 实时送达、再由磁盘重拉返回：按 id 去重。
-      if (rows.some((row) => row.id === noticeId)) break;
-      const note = {
-        role: 'system',
-        id: noticeId,
-        // Authoritative display-log notice (e.g. compaction boundary): durable.
-        persistent: true,
-        parts: [{ kind: 'notice', text }],
-        ts: action.ts ?? Date.now(),
+      next = upsertSystemNoticeRow(rows, {
+        eventId: action.id || ('notice-' + action.seq),
+        text: action.text,
+        anchorMessageId: action.anchorMessageId,
+        ts: action.ts,
         seq: action.seq,
-      } as unknown as T;
-      // 按权威 `seq` 摆放：找到第一条 `seq > action.seq` 的已编号行插到它前面，
-      // 保证实时送达与冷启动重放落在同一个位置；未编号或都在它之前则排在末尾。
-      const insertAt = rows.findIndex(
-        (row) => typeof row.seq === 'number' && row.seq > action.seq,
-      );
-      next =
-        insertAt >= 0
-          ? [...rows.slice(0, insertAt), note, ...rows.slice(insertAt)]
-          : [...rows, note];
+      });
+      break;
+    }
+    case 'system_notice': {
+      next = upsertSystemNoticeRow(rows, {
+        eventId: action.eventId,
+        partId: action.partId,
+        kind: action.kind,
+        severity: action.severity,
+        status: action.status,
+        revision: action.revision,
+        text: action.text,
+        anchorMessageId: action.anchorMessageId,
+        anchorPartId: action.anchorPartId,
+        ts: action.ts,
+      });
+      break;
+    }
+    case 'settle_active_notices': {
+      next = settleActiveNoticeRows(rows);
       break;
     }
     case 'tool_start':
@@ -503,6 +782,43 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
     case 'tool_finished':
       next = updateToolRow(rows, action.id, {}, (tool) => settleToolRow(tool, action.success));
       break;
+    case 'model_switch': {
+      let target = -1;
+      for (let i = rows.length - 1; i >= 0; i -= 1) {
+        const row = rows[i];
+        if (row.role !== 'assistant') continue;
+        const owned = row.id === action.messageId
+          || (row.parts ?? []).some(
+            (part) =>
+              'id' in part
+              && typeof part.id === 'string'
+              && part.id.startsWith(`${action.messageId}:`),
+          );
+        if (owned) {
+          target = i;
+          break;
+        }
+      }
+      // Artifact-first rounds may create the row before the message identity is
+      // stamped; only then fall back to the newest assistant row. A different
+      // concrete id means this marker belongs to a row that has not arrived yet —
+      // never mislabel the previous round.
+      if (target < 0) {
+        for (let i = rows.length - 1; i >= 0; i -= 1) {
+          const row = rows[i];
+          if (row.role !== 'assistant') continue;
+          if (!row.id || row.id === action.messageId) target = i;
+          break;
+        }
+      }
+      if (target < 0) {
+        next = rows;
+      } else {
+        next = rows.slice();
+        next[target] = { ...next[target], switchTo: action.model } as T;
+      }
+      break;
+    }
     case 'tool_output':
       next = updateToolOutputRow(
         rows,
@@ -586,6 +902,31 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
       next = [...rows, action.row as unknown as T];
       break;
     case 'rate_limited': {
+      if (action.eventId) {
+        const existingAt = rows.findIndex(
+          (row) =>
+            row.id === action.eventId ||
+            (row.parts ?? []).some((p) => p.kind === 'rate_limited' && p.eventId === action.eventId),
+        );
+        if (existingAt >= 0) {
+          const row = rows[existingAt]!;
+          const already = (row.parts ?? []).some(
+            (part) => part.kind === 'rate_limited' && part.text === action.text && part.eventId === action.eventId,
+          );
+          if (!already) {
+            next = rows.slice();
+            next[existingAt] = {
+              ...row,
+              parts: (row.parts ?? []).map((part) =>
+                part.kind === 'rate_limited'
+                  ? { kind: 'rate_limited' as const, text: action.text, eventId: action.eventId }
+                  : part,
+              ),
+            };
+          }
+          break;
+        }
+      }
       const target = action.targetId
         ? identifiedAssistantIndex(rows, action.targetId)
         : (() => {
@@ -597,13 +938,22 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
       if (target >= 0) {
         const row = rows[target]!;
         const already = (row.parts ?? []).some(
-          (part) => part.kind === 'rate_limited' && part.text === action.text,
+          (part) =>
+            part.kind === 'rate_limited' &&
+            ((action.eventId && part.eventId === action.eventId) || part.text === action.text),
         );
         if (!already) {
           next = rows.slice();
           next[target] = {
             ...row,
-            parts: [...(row.parts ?? []), { kind: 'rate_limited', text: action.text }],
+            parts: [
+              ...(row.parts ?? []),
+              {
+                kind: 'rate_limited',
+                text: action.text,
+                ...(action.eventId ? { eventId: action.eventId } : {}),
+              },
+            ],
           };
         }
       } else {
@@ -620,8 +970,14 @@ export function reduceCanvasEvent<T extends CanvasRowLike & ProjectionMessage>(
           ...rows.slice(0, insertAt),
           {
             role: 'assistant',
-            id: action.id ?? ('rl-' + Date.now()),
-            parts: [{ kind: 'rate_limited', text: action.text }],
+            id: action.eventId ?? action.id ?? ('rl-' + Date.now()),
+            parts: [
+              {
+                kind: 'rate_limited',
+                text: action.text,
+                ...(action.eventId ? { eventId: action.eventId } : {}),
+              },
+            ],
           } as unknown as T,
           ...rows.slice(insertAt),
         ];

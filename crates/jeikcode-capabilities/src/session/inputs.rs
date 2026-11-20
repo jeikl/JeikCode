@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use jeikcode_kernel::message::ImageContent;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInput {
     pub id: String,
     #[serde(default)]
@@ -54,6 +54,12 @@ pub struct SessionInput {
     /// Client correlation id of the owning turn (terminal attribution).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    /// 因果锚点：Steer 折叠前紧邻的上一条助手/消息 id，供补偿投影原地插槽正位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_message_id: Option<String>,
+    /// 所属内核回合号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<u64>,
 }
 
 fn lock() -> std::sync::MutexGuard<'static, ()> {
@@ -300,6 +306,16 @@ pub fn mark_promoted(
     session_id: &str,
     pairs: &[(Option<String>, Option<String>)],
 ) -> std::io::Result<()> {
+    mark_promoted_with_anchor(root, session_id, pairs, None)
+}
+
+/// 标记 Steer 已折叠为正式消息，并记录折叠时的因果锚点消息 id（`anchor_message_id`）。
+pub fn mark_promoted_with_anchor(
+    root: &Path,
+    session_id: &str,
+    pairs: &[(Option<String>, Option<String>)],
+    anchor_message_id: Option<&str>,
+) -> std::io::Result<()> {
     let pairs: Vec<(String, Option<String>)> = pairs
         .iter()
         .filter_map(|(client, message)| client.clone().map(|client| (client, message.clone())))
@@ -307,6 +323,10 @@ pub fn mark_promoted(
     if pairs.is_empty() {
         return Ok(());
     }
+    let anchor = anchor_message_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let _guard = lock();
     with_file_lock(root, session_id, || {
         let path = path_for(root, session_id);
@@ -326,6 +346,9 @@ pub fn mark_promoted(
             if message_id.is_some() {
                 rows[index].message_id = message_id;
             }
+            if rows[index].anchor_message_id.is_none() {
+                rows[index].anchor_message_id = anchor.clone();
+            }
             out.push(rows[index].clone());
         }
         if out.is_empty() {
@@ -344,6 +367,14 @@ pub fn mark_promoted_global(
     pairs: &[(Option<String>, Option<String>)],
 ) -> std::io::Result<()> {
     mark_promoted(&global_root(), session_id, pairs)
+}
+
+pub fn mark_promoted_with_anchor_global(
+    session_id: &str,
+    pairs: &[(Option<String>, Option<String>)],
+    anchor_message_id: Option<&str>,
+) -> std::io::Result<()> {
+    mark_promoted_with_anchor(&global_root(), session_id, pairs, anchor_message_id)
 }
 
 fn mark_status(
@@ -759,6 +790,8 @@ mod tests {
             created_at: 1,
             message_id: None,
             operation_id: Some("op-1".into()),
+            anchor_message_id: None,
+            turn_id: None,
         }
     }
 
@@ -1042,5 +1075,27 @@ mod tests {
         let short = rows.iter().find(|row| row.id == "short").unwrap();
         assert_eq!(long.status, "admitted");
         assert_eq!(short.status, "cancelled");
+    }
+
+    #[test]
+    fn mark_promoted_with_anchor_records_causal_anchor_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut steer = input("s1", "steer-1", "改一下样式");
+        append(root, &mut steer).unwrap();
+
+        mark_promoted_with_anchor(
+            root,
+            "s1",
+            &[(Some("steer-1".into()), Some("m-steer-1".into()))],
+            Some("m-asst-prev"),
+        )
+        .unwrap();
+
+        let rows = list(root, "s1");
+        let promoted = rows.iter().find(|row| row.id == "steer-1").unwrap();
+        assert_eq!(promoted.status, "promoted");
+        assert_eq!(promoted.message_id.as_deref(), Some("m-steer-1"));
+        assert_eq!(promoted.anchor_message_id.as_deref(), Some("m-asst-prev"));
     }
 }

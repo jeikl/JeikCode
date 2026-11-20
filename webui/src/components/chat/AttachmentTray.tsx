@@ -19,7 +19,7 @@ export function AttachmentTray({
             <MsgImage img={item.image} />
           ) : (
             <>
-              <span class="input-thumb-file-icon" aria-hidden="true">📄</span>
+              <span class="input-thumb-file-icon" aria-hidden="true">file</span>
               <span class="input-thumb-file-name" title={item.name}>{item.name}</span>
             </>
           )}

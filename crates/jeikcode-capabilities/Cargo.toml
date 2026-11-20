@@ -43,7 +43,7 @@ tokio-util = "0.7"
 # ("zero valid certificates …") on a bad SSL_CERT_FILE or empty store, which
 # cascades into panics at every `.build()` site. This is the DEFAULT v2 provider
 # path; the whole-workspace feature must stay `rustls-tls`. See issue #514.
-reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false, optional = true }
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls", "http2"], default-features = false, optional = true }
 # OS native root store loader for corporate MITM-proxy CAs. Best-effort. #514.
 rustls-native-certs = { version = "0.8", optional = true }
 # rustls (parser only, no crypto provider) to PRE-VALIDATE each OS root before we
@@ -207,7 +207,7 @@ mcp = [
 # coexist) — a per-turn compacted <id>.snapshot for RESUME + an append-only,
 # never-compacted <id>.jsonl transcript for RECALL — plus the SnapshotHook /
 # TranscriptHook / recall tool / current-date hook that drive it. Opt-in (NOT default).
-session = ["dep:chrono", "dep:fs2", "dep:uuid", "dep:jeikcode-config"]
+session = ["dep:chrono", "dep:fs2", "dep:sha2", "dep:uuid", "dep:jeikcode-config"]
 # User-driven persistent memory: the production memory.md store (global
 # $JEIKCODE_HOME/memory.md + per-project <root>/.jeikcode/memory.md, same files so
 # old/new coexist) + a MemoryHook that injects the merged entries at session_start.

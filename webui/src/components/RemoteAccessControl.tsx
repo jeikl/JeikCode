@@ -287,7 +287,6 @@ export function RemoteAccessControl() {
       >
         <div class="modal-header remote-streamlined-header">
           <div class="modal-title-row">
-            <span class="modal-title-icon">🌐</span>
             <span class="modal-title-text">{t('remote.bindTitle')}</span>
           </div>
           <button

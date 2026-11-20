@@ -193,6 +193,7 @@ pub fn build_task(
         created_at,
         last_run_at: None,
         last_status: None,
+        ..Default::default()
     }
 }
 
@@ -869,6 +870,7 @@ mod tests {
             created_at: 0,
             last_run_at: None,
             last_status: None,
+            ..Default::default()
         }
     }
 

@@ -240,7 +240,10 @@ impl WriteApprovalGate {
             args: call.arguments.clone(),
         })
         .unwrap_or(serde_json::Value::Null);
-        PermissionDecision::from_value(&rt.request(&self.kind, payload).await)
+        let wait_started = std::time::Instant::now();
+        let response = rt.request(&self.kind, payload).await;
+        crate::call_signals::add_approval_wait(&call.id, wait_started.elapsed().as_millis() as u64);
+        PermissionDecision::from_value(&response)
     }
 
     /// Prompt for a sensitive write and NEVER remember it — every call re-prompts (v1's

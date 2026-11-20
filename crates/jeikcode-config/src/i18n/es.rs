@@ -127,6 +127,109 @@ pub(super) fn es(msg: Msg<'_>) -> Cow<'static, str> {
             format!("Compactado · {} mensaje(s) resumido(s) · ~{}→~{} tok", messages, before, after).into(),
         Msg::CompactMarkStub { saved } =>
             format!("Salida de herramienta plegada · ~{} tok ahorrados", saved).into(),
+        Msg::AgentRetryEmpty { attempt, max, wait } => if wait > 0 {
+            format!("El modelo devolvió una respuesta vacía, reintentando en {wait}s ({attempt}/{max})…")
+        } else {
+            format!("El modelo devolvió una respuesta vacía, reintentando ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryThinking { attempt, max, wait } => if wait > 0 {
+            format!("El modelo solo devolvió razonamiento, reintentando en {wait}s ({attempt}/{max})…")
+        } else {
+            format!("El modelo solo devolvió razonamiento, reintentando ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryMalformed { attempt, max, wait } => if wait > 0 {
+            format!("Respuesta con formato inválido, reintentando en {wait}s ({attempt}/{max})…")
+        } else {
+            format!("Respuesta con formato inválido, reintentando ({attempt}/{max})…")
+        }.into(),
+        Msg::AgentRetryFirstToken { secs, attempt, max } =>
+            format!("Modelo lento: sin respuesta en {secs}s, reintentando ({attempt}/{max})…").into(),
+        Msg::AgentRetryApi { reason, wait, attempt, max } =>
+            format!("Error de API {reason}, reintentando en {wait}s ({attempt}/{max})…").into(),
+        Msg::AgentOverWindow { estimate_k, window_k, buffer_k } =>
+            format!(
+                "La solicitud (~{estimate_k}K tokens) alcanzó el límite de contexto (ventana ~{window_k}K − margen {buffer_k}K): reduce la entrada o cambia a un modelo con mayor ventana."
+            ).into(),
+        Msg::AgentContextOverflow { round, attempt } =>
+            format!("Desbordamiento de contexto en la ronda {round} (intento {attempt}); compactando y reintentando").into(),
+        Msg::AgentStreamReconnecting { attempt, max } =>
+            format!("Tiempo de espera inactivo del flujo — reconectando ({attempt}/{max})").into(),
+        Msg::AgentResponseTruncated => "Respuesta truncada: finish_reason=length".into(),
+        Msg::AgentUnsupportedSnapshot { version, supported } =>
+            format!("Versión de instantánea {version} no compatible (compatible: {supported}); iniciando sesión vacía").into(),
+        Msg::AgentModelHighLatencyTerminal { retries, secs } =>
+            format!("La latencia del modelo es demasiado alta, inténtalo más tarde ({retries} intentos consecutivos sin respuesta inicial en {secs}s)").into(),
+        Msg::AgentExhaustedMalformed { max } =>
+            format!("El modelo devolvió respuestas no analizables {max} veces seguidas (fallo puntual del proveedor). Puedes reintentar ahora o más tarde.").into(),
+        Msg::AgentExhaustedThinkingOverWindowIntro { max } =>
+            format!("El modelo solo devolvió razonamiento sin texto ni herramientas {max} veces seguidas. Esta solicitud supera la ventana de contexto; reduce la entrada o usa /compact y reintenta.").into(),
+        Msg::AgentExhaustedThinkingOverWindowSize { max, prompt_k, window_k } =>
+            format!("El modelo solo devolvió razonamiento sin texto ni herramientas {max} veces seguidas. La solicitud (~{prompt_k}K tokens) se acerca o supera la ventana (~{window_k}K); prueba /compact o reduce la entrada.").into(),
+        Msg::AgentExhaustedThinkingGeneric { max } =>
+            format!("El modelo solo devolvió razonamiento sin texto ni herramientas {max} veces seguidas. Puedes reintentar ahora o más tarde.").into(),
+        Msg::AgentExhaustedEmptyOverWindowIntro { max } =>
+            format!("El modelo devolvió respuestas vacías {max} veces seguidas. Esta solicitud supera la ventana de contexto; reduce la entrada o usa /compact y reintenta.").into(),
+        Msg::AgentExhaustedEmptyOverWindowSize { max, prompt_k, window_k } =>
+            format!("El modelo devolvió respuestas vacías {max} veces seguidas. La solicitud (~{prompt_k}K tokens) se acerca o supera la ventana (~{window_k}K); prueba /compact o reduce la entrada.").into(),
+        Msg::AgentExhaustedEmptyGeneric { max } =>
+            format!("El modelo devolvió respuestas vacías {max} veces seguidas (fallo puntual del proveedor, sin relación con la longitud del contexto). Puedes reintentar ahora o más tarde.").into(),
+        Msg::AgentStatusRateLimited => "Límite de frecuencia superado o cuota agotada".into(),
+        Msg::AgentStatusUpstreamUnavailable => "Servicio remoto temporalmente no disponible".into(),
+        Msg::AgentStatusResponseTimeout => "Tiempo de espera de respuesta del modelo agotado".into(),
+        Msg::AgentStatusConnectionFailed => "Error de conexión de red".into(),
+        Msg::AgentStatusInsufficientBalance => "Saldo de cuenta insuficiente".into(),
+        Msg::AgentStatusUnauthorized => "Clave API no autorizada o caducada".into(),
+        Msg::StreamReadRetryExhausted { attempts } =>
+            format!("Conexión de red interrumpida: el servidor remoto cerró o reinició la conexión y falló tras {attempts} reconexiones automáticas. Puedes reintentar.").into(),
+        Msg::StreamReadPartialResponse =>
+            "Respuesta interrumpida: se conservó la parte segura de la respuesta, puedes continuar.".into(),
+        Msg::StreamReadInterrupted =>
+            "Conexión de red interrumpida: el servidor remoto cerró o reinició la conexión. Puedes reintentar.".into(),
+        Msg::AgentAutoRetry { max } =>
+            format!("Conexión perdida, reconectando automáticamente (hasta {max} intentos), salida actual conservada…").into(),
+        Msg::AgentRetryProgress { attempt, max } =>
+            format!("Conexión interrumpida, salida actual conservada, reintento {attempt}/{max}").into(),
+        Msg::AgentRetryStallProgress { attempt, max, has_output } => if has_output {
+            format!("Flujo detenido por inactividad, salida conservada, reintento {attempt}/{max}")
+        } else {
+            format!("Flujo detenido por inactividad, reintento {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryDropProgress { attempt, max, has_output } => if has_output {
+            format!("Conexión de red caída, salida conservada, reintento {attempt}/{max}")
+        } else {
+            format!("Conexión de red caída, reintento {attempt}/{max}")
+        }.into(),
+        Msg::AgentRetryRecovered { attempts } =>
+            format!("Conexión restablecida tras {attempts} reintento(s), continuando").into(),
+        Msg::AgentStreamTimeoutTerminal =>
+            "El flujo volvió a agotar el tiempo de espera tras las reconexiones automáticas; turno detenido".into(),
+        Msg::AgentRateLimitedWaiting { secs } =>
+            format!("Límite de velocidad alcanzado, reintento automático en {secs}s…").into(),
+        Msg::AgentRateLimitedPaused { detail } => if detail.trim().is_empty() {
+            "Límite de velocidad alcanzado; en pausa hasta que se restablezca o cambies de modelo".into()
+        } else {
+            format!("En pausa por límite de velocidad: {detail}").into()
+        },
+        Msg::AgentStreamTimeoutPartialResponse =>
+            "Tiempo de espera del flujo agotado tras respuesta parcial; se conservó lo recibido y puedes continuar.".into(),
+        Msg::StreamReadResetHint =>
+            "Este error es común en redes corporativas o con proxy; revisa la configuración de proxy, VPN y cortafuegos.".into(),
+        Msg::StreamReadDetailsPrefix => "Detalles: ".into(),
+        Msg::AgentEchoLoopNotice { final_warning } => if final_warning {
+            "Posible bucle de repetición: se detectó el mismo patrón de salida y llamadas a herramientas; pidiendo al modelo que cambie de rumbo antes de detener el turno.".into()
+        } else {
+            "Posible bucle de repetición: se detectó el mismo patrón de salida y llamadas a herramientas; pidiendo al modelo que cambie de rumbo.".into()
+        },
+        Msg::AgentEchoLoopTerminal { rounds } =>
+            format!("detenido: el modelo reprodujo el mismo patrón de razonamiento, texto y llamadas a herramientas durante {rounds} rondas consecutivas").into(),
+        Msg::AgentToolLoopWarning { threshold } =>
+            format!("posible bucle de herramientas: la misma llamada o lote de solo lectura devolvió los mismos resultados {threshold} veces; pidiendo al modelo que cambie de rumbo").into(),
+        Msg::AgentToolLoopTerminal { threshold } =>
+            format!("bucle de herramientas detectado: la misma llamada o lote de solo lectura devolvió los mismos resultados {threshold} veces; deteniendo antes de otra solicitud").into(),
+        Msg::AgentRepeatLoopTerminal { rounds } =>
+            format!("detenido: el modelo repitió el mismo patrón de llamadas a herramientas durante {rounds} rondas consecutivas").into(),
+        Msg::AgentMaxRoundsReached { cap } =>
+            format!("Se alcanzó el límite de rondas ({cap}); se detuvo la ejecución de herramientas para resumir el progreso y los siguientes pasos.").into(),
         _ => super::en::en(msg),
     }
 }

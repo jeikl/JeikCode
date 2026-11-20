@@ -335,6 +335,44 @@ impl LifecycleHooks for DatalogHook {
         self.append_markdown(format!("**Error:** {error}\n\n"));
     }
 
+    async fn on_system_notice(
+        &self,
+        notice: &jeikcode_kernel::event::SystemNotice,
+        _convo: &Conversation,
+        ctx: &TurnCtx,
+    ) {
+        if !self.initialize_turn(ctx).await {
+            return;
+        }
+        let state = self.lock();
+        if !state.active {
+            return;
+        }
+        let record = serde_json::json!({
+            "type": "system_notice",
+            "session_id": ctx.session_id.as_deref().unwrap_or(""),
+            "turn_id": ctx.turn_id,
+            "round": ctx.round,
+            "request_id": ctx.request_id,
+            "event_id": notice.event_id,
+            "kind": notice.kind,
+            "severity": notice.severity,
+            "status": notice.status,
+            "revision": notice.revision,
+            "persist": notice.persist,
+            "anchor_message_id": notice.anchor_message_id,
+            "text": notice.text,
+        });
+        if let (Some(path), Ok(line)) = (&state.jsonl_path, serde_json::to_string(&record)) {
+            self.writer.append(path.clone(), format!("{line}\n"));
+        }
+        drop(state);
+        self.append_markdown(format!(
+            "> **Notice [{:?}/{:?}]:** {} (`{}`)\n\n",
+            notice.kind, notice.severity, notice.text, notice.event_id
+        ));
+    }
+
     async fn turn_complete(&self, _convo: &Conversation, reason: &StopReason, _ctx: &TurnCtx) {
         let markdown = {
             let mut state = self.lock();

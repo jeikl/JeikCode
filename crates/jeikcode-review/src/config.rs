@@ -132,8 +132,11 @@ pub(crate) fn resolve_tool_loop_policy(
     if requested_stop == Some(0) {
         return None;
     }
-    let stop = requested_stop.filter(|value| *value >= 3).unwrap_or(4);
-    let fallback_warning = 3.min(stop - 1).max(2);
+    let default_policy = ToolLoopPolicy::default();
+    let stop = requested_stop
+        .filter(|value| *value >= 3)
+        .unwrap_or(default_policy.stop_threshold());
+    let fallback_warning = default_policy.warning_threshold().min(stop - 1).max(2);
     let warning = warning_env
         .and_then(|value| value.trim().parse::<u32>().ok())
         .filter(|value| *value >= 2 && *value < stop)
@@ -155,7 +158,11 @@ mod tests {
         assert_eq!(custom.stop_threshold(), 12);
         assert!(resolve_tool_loop_policy(Some("10"), Some("0")).is_none());
 
-        let fallback = resolve_tool_loop_policy(Some("99"), Some("4")).unwrap();
+        let fallback = resolve_tool_loop_policy(Some("99"), Some("1")).unwrap();
         assert_eq!(fallback, ToolLoopPolicy::default());
+        assert_eq!(
+            resolve_tool_loop_policy(None, None).unwrap(),
+            ToolLoopPolicy::default()
+        );
     }
 }

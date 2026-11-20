@@ -62,9 +62,10 @@ pub use types::*;
 /// call this on host exit; `OnceLock` globals do not run `Drop` on process
 /// teardown, and session stdio children otherwise become orphans.
 pub async fn shutdown_all_mcp_pools() {
-    GlobalMcpPool::global().shutdown_all().await;
+    // 先关闭项目池与会话池以取消后台连接循环，再回收全局进程池，避免重连竞态重新拉起进程。
     ProjectMcpPool::global().shutdown_all().await;
     SessionMcpPool::global().shutdown_all().await;
+    GlobalMcpPool::global().shutdown_all().await;
     kill_all_mcp_children_now();
 }
 

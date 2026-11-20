@@ -1,3 +1,4 @@
+import type { NoticeKind, NoticeSeverity, NoticeStatus } from '../../api';
 import { highlightText } from './highlight';
 
 export interface NoticeCardProps {
@@ -5,77 +6,52 @@ export interface NoticeCardProps {
   search?: string;
   className?: string;
   id?: string;
+  kind?: NoticeKind;
+  severity?: NoticeSeverity;
+  status?: NoticeStatus;
   searchRef?: (el: HTMLElement | null) => void;
-}
-
-/** 压缩完成/无需压缩的提示文案（覆盖全部 UI 语言）。
- *  导出给画布去重与边界标记渲染使用：同一次压缩的本地兜底提示与
- *  服务端持久标记不能叠两份。 */
-export function isCompactionDoneNotice(text: string): boolean {
-  if (typeof text !== 'string' || !text) return false;
-  return [
-    '已压缩',
-    '已壓縮',
-    '无需压缩',
-    '無需壓縮',
-    'Compacted',
-    'Nothing to compact',
-    'Đã thu gọn',
-    'không có gì để thu gọn',
-    '圧縮済み',
-    '圧縮不要',
-    '압축됨',
-    '압축할 필요',
-    'Сжато',
-    'нечего сжимать',
-    'Komprimiert',
-    'nichts zu komprimieren',
-    'Compacté',
-    'rien à compacter',
-    'Compactado',
-    'nada que compactar',
-    'تم الضغط',
-    'لا شيء لضغطه',
-  ].some((marker) => text.includes(marker));
 }
 
 /**
  * 现代高质感系统/命令通知卡片（Notice Card）。
- * 兼容深色/浅色主题，采用简约微卡片与毛玻璃柔和微投影质感，
- * 彻底替换原先简陋的单色等宽框框。
+ * 优先按后端下发的结构化 `kind` / `severity` / `status` 决定配色与图标，
+ * 仅在兼容旧版命令输出无结构化元数据时回退到轻量状态样式。
  */
 export function NoticeCard({
   text,
   search = '',
   className = '',
   id,
+  kind,
+  severity,
+  status,
   searchRef,
 }: NoticeCardProps) {
-  const isCompactDone = isCompactionDoneNotice(text);
-  const isErrorOrWarn =
-    text.includes('失败') ||
-    text.includes('Error') ||
-    text.includes('failed') ||
-    text.includes('未找到') ||
-    text.includes('Blocked') ||
-    text.includes('connError');
-  const isSuccess =
-    isCompactDone ||
-    text.includes('成功') ||
-    text.includes('已保存') ||
-    text.includes('已切换') ||
-    text.includes('Done') ||
-    text.includes('已清空');
+  const isCompactDone = kind === 'compaction';
+  const isError = severity === 'error' || kind === 'error';
+  const isWarning =
+    !isError &&
+    (severity === 'warning' ||
+      kind === 'warning' ||
+      kind === 'retry' ||
+      kind === 'timeout' ||
+      kind === 'rate_limit' ||
+      kind === 'truncation');
+  const isActive = status === 'active';
+  const isSuccess = isCompactDone;
 
-  const variantClass = isErrorOrWarn
-    ? 'is-warning'
-    : isCompactDone
-      ? 'is-compact'
-      : isSuccess
-        ? 'is-success'
-        : 'is-info';
+  const variantClass = isError
+    ? 'is-error'
+    : isWarning
+      ? 'is-warning'
+      : isCompactDone
+        ? 'is-compact'
+        : isSuccess
+          ? 'is-success'
+          : 'is-info';
+  const activeClass = isActive ? 'is-active' : '';
 
-  const sysCls = `msg-notice-card ${variantClass} ${className}`.trim();
+  const sysCls = `msg-notice-card ${variantClass} ${activeClass} ${className}`.trim();
 
   return (
     <div class={sysCls} id={id} ref={searchRef} role="note">
@@ -90,7 +66,7 @@ export function NoticeCard({
               strokeLinejoin="round"
             />
           </svg>
-        ) : isErrorOrWarn ? (
+        ) : isError || isWarning ? (
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" class="msg-notice-svg">
             <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3" />
             <path d="M8 5v3.5M8 11v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />

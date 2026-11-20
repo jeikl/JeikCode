@@ -123,6 +123,8 @@ pub fn prewarm_code_index(root: &Path) {
             let _ = index.get(&root_buf);
             let _ = index.get_idf_stats(&root_buf);
             let _ = index.get_dirindex(&root_buf);
+            // Large graphs: build the postings index off the first query's hot path.
+            let _ = index.get_candidate_index(&root_buf);
         })
         .ok();
 }
