@@ -5,16 +5,10 @@
 use std::path::{Path, PathBuf};
 
 /// Stable bucket key shared by session storage and project-scoped trust data.
-/// The `PathBuf` hash layout is part of the existing on-disk format and must not
-/// be replaced with a plain string hash.
-///
-/// The hasher is pinned to SipHash-1-3 with fixed keys: `DefaultHasher` is
-/// explicitly NOT stable across Rust releases, and the 1.93 upgrade silently
-/// moved every project bucket (the golden below changed). The `PathBuf` Hash
-/// layout remains the on-disk contract; the explicit hasher freezes the part
-/// that drifted.
+/// The `PathBuf` hash is part of the existing on-disk format and must not be
+/// replaced with a plain string hash.
 pub fn stable_project_hash(path: &Path) -> String {
-    use siphasher::sip::SipHasher13;
+    use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     // The same project can arrive as `E:\\code\\x`, `E:/code/x`, or
@@ -33,7 +27,7 @@ pub fn stable_project_hash(path: &Path) -> String {
     #[cfg(windows)]
     let normalized = normalized.to_lowercase();
 
-    let mut hasher = SipHasher13::new_with_keys(0, 0);
+    let mut hasher = DefaultHasher::new();
     PathBuf::from(normalized).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -123,13 +117,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stable_project_hash_keeps_existing_disk_key() {
-        // 1.93 `PathBuf` layout + explicit SipHash-1-3. Pre-1.93 std produced
-        // 8b6a67e0b2c06dae; that layout/value is no longer reproducible, and
-        // 1.93 users already moved to this key. Freezing it here prevents
-        // another silent move on a future compiler upgrade.
+        // This fixture literal is part of the on-disk key contract: intentionally
+        // renaming it MUST update the golden in the same commit. The previous
+        // atomcode -> jeikcode rename left the golden stale and was initially
+        // misread as a Rust 1.93 hash change.
         assert_eq!(
-            stable_project_hash(Path::new("/tmp/jeikcode-trust-golden")),
-            "dbfd3a693a3f2b18"
+            stable_project_hash(Path::new("/tmp/stable-project-hash-fixture")),
+            "6d9c2b29f6bff579"
         );
     }
 
