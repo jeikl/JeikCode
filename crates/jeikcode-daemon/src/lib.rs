@@ -527,8 +527,15 @@ fn read_display_tail_view(
     let is_visible_user = |row: &jeikcode_capabilities::session::DisplayIndexRow| {
         row.role.eq_ignore_ascii_case("user") && !row.synthetic
     };
-    if start > 0 && !is_visible_user(&index[start]) {
-        if let Some(position) = index[..start].iter().rposition(is_visible_user) {
+    let is_visible_turn_root = |row: &jeikcode_capabilities::session::DisplayIndexRow| {
+        is_visible_user_turn_start_content(&row.role, row.synthetic, &row.content)
+    };
+    if start > 0 && !is_visible_turn_root(&index[start]) {
+        if let Some(position) = index[..start]
+            .iter()
+            .rposition(is_visible_turn_root)
+            .or_else(|| index[..start].iter().rposition(is_visible_user))
+        {
             start = position;
         }
     }
@@ -30915,6 +30922,64 @@ mod v4_coverage_tests {
         assert_eq!(view.turns.len(), 50);
         assert_eq!(view.messages[0].content, "row 90");
         assert_eq!(view.turns.last().unwrap().index, 98);
+    }
+
+    #[test]
+    fn v4_tail_view_snaps_past_mid_turn_steers_to_turn_root() {
+        use jeikcode_capabilities::session::{
+            DisplayRecord, PresentationFile, SessionMeta, StorageOwner,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = NativeSessionManager::with_root(dir.path());
+        let id = "tail-view-steer-root";
+        let make = |idx: u32, turn_id: u64, role: &str, content: &str| DisplayRecord {
+            v: jeikcode_capabilities::session::DISPLAY_VERSION,
+            session_id: id.into(),
+            turn_id,
+            index: idx,
+            seq: 0,
+            role: role.into(),
+            id: Some(format!("m-{idx}")),
+            content: content.into(),
+            created_at: Some((idx as u64 + 1) * 1_000),
+            ..Default::default()
+        };
+        let rows = vec![
+            make(0, 1, "user", "第1轮根提问"),
+            make(1, 1, "assistant", "第1轮回答"),
+            make(2, 2, "user", "第2轮根提问"),
+            make(3, 2, "assistant", "第2轮阶段回答"),
+            make(
+                4,
+                2,
+                "user",
+                "<user-query>\n中途 steer 1\n</user-query>\n\n[jeikcode-steer]",
+            ),
+            make(5, 2, "assistant", "steer1后回答"),
+            make(
+                6,
+                2,
+                "user",
+                "<user-query>\n中途 steer 2\n</user-query>\n\n[jeikcode-steer]",
+            ),
+            make(7, 2, "assistant", "第2轮最终回答"),
+        ];
+        manager.write_display_backfill(id, &rows, 2).unwrap();
+        let mut meta = SessionMeta::new(id, "/p", 1);
+        meta.owner = StorageOwner::Native;
+        let session = crate::legacy_convert::CatalogSessionView {
+            snapshot: jeikcode_kernel::message::SessionSnapshot::new(Vec::new()),
+            meta,
+            presentation: PresentationFile::default(),
+        };
+        // tail = 3 -> 原本落在 index 5 (assistant), 向前回退若停在 index 4 (steer 1) 会把第2轮拦腰切开；
+        // 必须一直回退到第2轮根提问 index 2，同时右侧大纲仍包含所有 steer 条目。
+        let view = read_display_tail_view(&manager, &session, 3, None, false, 0).unwrap();
+        assert_eq!(view.offset, 2);
+        assert_eq!(view.messages.len(), 6);
+        assert_eq!(view.messages[0].id.as_deref(), Some("m-2"));
+        assert_eq!(view.turns.len(), 4);
     }
 
     fn prompt(text: &str, id: &str) -> Message {
