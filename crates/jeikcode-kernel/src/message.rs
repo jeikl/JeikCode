@@ -203,6 +203,12 @@ pub struct Message {
     /// precedes the real prompt is never mistaken for the sacred task anchor.
     #[serde(default)]
     pub synthetic: bool,
+    /// True iff this synthetic `Role::User` message starts a distinct autonomous turn
+    /// (e.g., `/goal` continuation or scheduled wakeup). Compaction treats it as a turn
+    /// boundary while `sacred_floor` still skips all `synthetic` messages to anchor on the
+    /// first real user prompt, and session replay continues to treat it as synthetic.
+    #[serde(default)]
+    pub autonomous_turn: bool,
     /// Internal provenance for assistant messages produced by kernel-driven control rounds.
     /// Empty for normal user/model messages. Example: "verify_cadence".
     /// [`TURN_DIAGNOSTIC_ORIGIN`] is display-only: persisted for WebUI/TUI replay,
@@ -293,6 +299,7 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
@@ -311,6 +318,7 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
@@ -329,6 +337,7 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
@@ -353,6 +362,7 @@ impl Message {
             is_error,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
@@ -378,6 +388,7 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: true,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images: vec![],
@@ -386,6 +397,15 @@ impl Message {
             id: None,
             notice: None,
         }
+    }
+    /// A KERNEL-INJECTED synthetic `Role::User` message that opens a new autonomous
+    /// turn (e.g., `/goal` continuation). Unlike plain `synthetic_user` anchors or
+    /// frozen prefix blocks, compaction treats it as a turn boundary so multi-round
+    /// `/goal` loops remain drainable instead of masquerading as a single active turn.
+    pub fn synthetic_turn(text: impl Into<String>) -> Self {
+        let mut msg = Self::synthetic_user(text);
+        msg.autonomous_turn = true;
+        msg
     }
     /// A user message carrying inline `images` (multimodal input). Identical to
     /// [`Message::user`] when `images` is empty.
@@ -398,6 +418,7 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: false,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images,
@@ -421,6 +442,7 @@ impl Message {
             is_error: false,
             meta: None,
             synthetic: true,
+            autonomous_turn: false,
             internal_origin: None,
             reasoning: None,
             images,
@@ -501,6 +523,12 @@ impl Message {
     /// Stored for WebUI/TUI replay only — never forwarded on the provider wire.
     pub fn is_display_only(&self) -> bool {
         self.internal_origin.as_deref() == Some(TURN_DIAGNOSTIC_ORIGIN)
+    }
+
+    /// True iff this message starts a real or autonomous (`/goal`) user turn for
+    /// compaction turn-boundary alignment, excluding synthetic cold anchors/blocks.
+    pub fn is_compaction_turn_start(&self) -> bool {
+        self.role == Role::User && (!self.synthetic || self.autonomous_turn)
     }
 }
 
@@ -881,6 +909,7 @@ impl Conversation {
         while i < self.messages.len()
             && self.messages[i].role == Role::User
             && self.messages[i].synthetic
+            && !self.messages[i].autonomous_turn
         {
             i += 1;
         }

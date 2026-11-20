@@ -72,7 +72,7 @@ impl ProviderError {
         // 2. HTTP 400 + message signature (Anthropic "prompt is too long", others).
         if self.http_status == Some(400) {
             let m = self.message.to_ascii_lowercase();
-            const NEEDLES: [&str; 9] = [
+            const NEEDLES: [&str; 11] = [
                 "context length",
                 "context window",
                 "maximum context",
@@ -82,6 +82,11 @@ impl ProviderError {
                 "range of input length",     // Bailian / Tencent gateway
                 "maximum prompt length",     // Anthropic-style variant
                 "too large for model with ", // trailing space: don't match "...without..."
+                // Gemini / Vertex: "The input token count (N) exceeds the maximum number of
+                // tokens allowed (M)." The count sits between the words, so match the
+                // stable prefix (also covers Bedrock's "...maximum number of input tokens").
+                "input token count",
+                "exceeds the maximum number of tokens allowed",
             ];
             if NEEDLES.iter().any(|n| m.contains(n)) {
                 return true;
@@ -298,6 +303,26 @@ mod overflow_tests {
             Some(400),
             None,
             "too large for model with 8192 maximum context length"
+        )
+        .is_context_overflow());
+        // Gemini / Vertex shape (real 400 body, counts included).
+        assert!(err(
+            Some(400),
+            None,
+            "The input token count (5911388) exceeds the maximum number of tokens allowed (1048576)."
+        )
+        .is_context_overflow());
+        assert!(err(
+            Some(400),
+            None,
+            "The input token count (154364) exceeds the maximum number of tokens allowed (131072) for model 'gemini-2.5-flash'."
+        )
+        .is_context_overflow());
+        // Output-generation limits are NOT context overflow (real Vertex wording).
+        assert!(!err(
+            Some(400),
+            None,
+            "Unable to submit request because it has a maxOutputTokens value of 65536 but the supported range is from 1 (inclusive) to 65536 (exclusive). Update the value and try again."
         )
         .is_context_overflow());
         // Unrelated 400s stay false — including near-miss substrings of the tightened needles.
