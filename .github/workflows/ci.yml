@@ -114,6 +114,10 @@ jobs:
         run: cargo check --workspace --all-targets --locked
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Test config lib (project key contract)
+        run: cargo test -p jeikcode-config --lib --locked
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Test updater distribution gates
         run: cargo test -p jeikcode-updater --lib --features distro-pm --locked
         env:

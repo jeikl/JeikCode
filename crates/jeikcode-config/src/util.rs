@@ -117,9 +117,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stable_project_hash_keeps_existing_disk_key() {
+        // This fixture literal is part of the on-disk key contract: intentionally
+        // renaming it MUST update the golden in the same commit. The previous
+        // atomcode -> jeikcode rename left the golden stale and was initially
+        // misread as a Rust 1.93 hash change.
         assert_eq!(
-            stable_project_hash(Path::new("/tmp/jeikcode-trust-golden")),
-            "8b6a67e0b2c06dae"
+            stable_project_hash(Path::new("/tmp/stable-project-hash-fixture")),
+            "6d9c2b29f6bff579"
         );
     }
 
