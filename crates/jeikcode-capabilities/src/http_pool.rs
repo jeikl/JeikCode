@@ -51,6 +51,11 @@ impl HttpClientSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct HttpClientKey {
+    /// Tokio runtime that owns this client's pooled connections. Reqwest's
+    /// dispatch tasks live on the runtime that created them; reusing a cached
+    /// client after that runtime shuts down fails with "dispatch task is gone".
+    /// `None` when the client is built outside a runtime.
+    runtime_id: Option<tokio::runtime::Id>,
     proxy_fingerprint: u64,
     ssl_cert_file: Option<String>,
     skip_tls_verify: bool,
@@ -64,6 +69,9 @@ struct HttpClientKey {
 impl HttpClientKey {
     fn from_spec(spec: &HttpClientSpec) -> Self {
         Self {
+            runtime_id: tokio::runtime::Handle::try_current()
+                .ok()
+                .map(|handle| handle.id()),
             proxy_fingerprint: proxy_env_fingerprint(),
             ssl_cert_file: std::env::var("SSL_CERT_FILE")
                 .ok()
@@ -346,6 +354,38 @@ fn add_trusted_roots(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuil
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_key_is_scoped_to_the_current_tokio_runtime() {
+        let spec = HttpClientSpec::provider(
+            Duration::from_secs(7),
+            false,
+            Some("jeikcode-pool-test/1.0".into()),
+            false,
+        );
+        let new_runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+        };
+        let rt_a = new_runtime();
+        let key_a = rt_a.block_on(async { HttpClientKey::from_spec(&spec) });
+        let rt_b = new_runtime();
+        let key_b = rt_b.block_on(async { HttpClientKey::from_spec(&spec) });
+
+        assert!(key_a.runtime_id.is_some());
+        assert!(key_b.runtime_id.is_some());
+        assert_ne!(
+            key_a, key_b,
+            "a cached client must not be reused across Tokio runtimes"
+        );
+        assert_eq!(
+            HttpClientKey::from_spec(&spec).runtime_id,
+            None,
+            "outside a runtime there is no dispatch owner to key on"
+        );
+    }
 
     #[test]
     fn shared_http_client_reuses_same_key_and_dedups_rapid_rebuild() {
