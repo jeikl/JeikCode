@@ -803,6 +803,15 @@ impl CodingAgentConfig {
         )
     }
 
+    /// `Some(fraction)` only when auto-compaction is enabled. An effective
+    /// threshold `>= 1.0` (user chose `off` and set no token cap) disables the
+    /// mid-turn/task-boundary trigger entirely instead of firing once the
+    /// prompt crosses the watermark.
+    pub fn compact_threshold_option(&self) -> Option<f32> {
+        let eff = self.effective_compact_threshold();
+        (eff < 1.0).then_some(eff)
+    }
+
     /// Build the shared `OverflowCompaction` strategy configured for this agent's
     /// effective auto-compaction threshold.
     pub(crate) fn build_compaction_strategy(
@@ -1261,6 +1270,19 @@ mod tests {
             Some("parent-sess-123"),
             "the tier provider must bind the parent session id when built"
         );
+    }
+
+    #[test]
+    fn compact_threshold_off_disables_the_trigger() {
+        let mut cfg = CodingAgentConfig::new("k", "https://x/v1", "m", "/tmp");
+        cfg.context_window = 1_000_000;
+        cfg.compact_threshold = 1.0;
+        cfg.compact_max_tokens = None;
+        assert_eq!(cfg.compact_threshold_option(), None);
+
+        // An explicit cap still re-enables compaction even with the ratio off.
+        cfg.compact_max_tokens = Some(350_000);
+        assert!(cfg.compact_threshold_option().is_some());
     }
 
     #[test]

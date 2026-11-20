@@ -244,8 +244,11 @@ impl OverflowCompaction {
     /// Override the utilization threshold at which `CompactTrigger::Auto` escalates
     /// to drain+summarization (default [`AUTO_DRAIN_UTILIZATION`] = 0.78).
     pub fn with_auto_drain_utilization(mut self, utilization: f32) -> Self {
-        if utilization.is_finite() {
-            self.auto_drain_utilization = utilization.clamp(0.05, 1.0);
+        if utilization.is_finite() && utilization > 0.0 {
+            // Keep the strategy gate in lock-step with the effective config
+            // threshold. A hard 0.05 floor here would make a small token cap
+            // (e.g. 8K on a 1M window) trigger Auto but never escalate.
+            self.auto_drain_utilization = utilization.min(1.0);
         }
         self
     }
@@ -405,10 +408,15 @@ impl OverflowCompaction {
     /// by the summary, the kept span is left untouched (less aggressive than overflow, which
     /// also stubs the kept span). Falls back to the gentle inner stub policy only when there
     /// is nothing older than the kept-recent window to drain.
-    async fn manual_plan(&self, view: &CompactionView<'_>, focus: Option<&str>) -> CompactionPlan {
+    async fn manual_plan(
+        &self,
+        view: &CompactionView<'_>,
+        focus: Option<&str>,
+        keep_budget: usize,
+    ) -> CompactionPlan {
         let msgs = view.messages;
         let floor = view.sacred_floor;
-        let drain_to = recent_keep_boundary(msgs, self.keep_budget(view.ctx_window), floor);
+        let drain_to = recent_keep_boundary(msgs, keep_budget, floor);
         if drain_to <= floor || !span_has_non_anchor(&msgs[floor..drain_to]) {
             // Nothing older than the active turn, OR the only drainable content is a prior
             // anchor (re-summarizing it alone is wasteful and only degrades it) — fall back
@@ -891,7 +899,12 @@ impl CompactionStrategy for OverflowCompaction {
             // Any user-typed `/compact` drains old turns into an LLM summary — matching v1,
             // where plain `/compact` is a real summarize, not just tool-output stubbing. A
             // non-empty focus only STEERS the summary; it no longer gates the drain.
-            CompactTrigger::Manual { focus } => self.manual_plan(view, focus.as_deref()).await,
+            CompactTrigger::Manual { focus } => {
+                // Manual `/compact` keeps the historical 25% (capped) budget;
+                // only Auto uses the user's lowered threshold-scaled budget.
+                self.manual_plan(view, focus.as_deref(), recent_keep_budget(view.ctx_window))
+                    .await
+            }
             // AUTO: cache-friendly stub at moderate pressure, but once utilization
             // crosses `AUTO_DRAIN_UTILIZATION` the gentle stub can't keep context in
             // check, so escalate to the SAME drain+summarize as `/compact` (falls back
@@ -910,7 +923,8 @@ impl CompactionStrategy for OverflowCompaction {
                         self.keep_budget(view.ctx_window),
                     ) =>
             {
-                self.manual_plan(view, None).await
+                self.manual_plan(view, None, self.keep_budget(view.ctx_window))
+                    .await
             }
             _ => self.inner.plan(view).await,
         }
@@ -921,9 +935,10 @@ impl CompactionStrategy for OverflowCompaction {
     /// `self.auto_drain_utilization` AND whose drain would actually reduce pressure
     /// (`auto_drain_would_help`). When there is nothing older than the kept window to
     /// drain it falls back to the fast inner stub (drain ≤ floor) and is NOT announced.
-    /// Must predict with the SAME boundary each path actually uses: the proactive
-    /// (auto/manual) drain keeps recent turns (`self.keep_budget`); the emergency
-    /// overflow ladder keeps only the active turn (`active_turn_start(1)`).
+    /// Must predict with the SAME boundary each path actually uses: manual
+    /// `/compact` keeps the base recent-turn budget; Auto keeps the
+    /// threshold-scaled budget; the emergency overflow ladder keeps only the
+    /// active turn (`active_turn_start(1)`).
     fn will_summarize(&self, view: &CompactionView<'_>) -> bool {
         let floor = view.sacred_floor;
         // Mirror the plans' guard exactly: a summarize happens only when the drained span
@@ -933,6 +948,13 @@ impl CompactionStrategy for OverflowCompaction {
             drain_to > floor && span_has_non_anchor(&view.messages[floor..drain_to])
         };
         let proactive_drains = || {
+            drains(recent_keep_boundary(
+                view.messages,
+                recent_keep_budget(view.ctx_window),
+                floor,
+            ))
+        };
+        let auto_drains = || {
             drains(recent_keep_boundary(
                 view.messages,
                 self.keep_budget(view.ctx_window),
@@ -945,7 +967,7 @@ impl CompactionStrategy for OverflowCompaction {
             CompactTrigger::Overflow { attempt } => *attempt >= 2 && overflow_drains(),
             CompactTrigger::Auto { .. } => {
                 view.utilization >= self.auto_drain_utilization
-                    && proactive_drains()
+                    && auto_drains()
                     && auto_drain_would_help(
                         view,
                         self.auto_drain_utilization,
@@ -2693,6 +2715,56 @@ Dependencies verified.
         let plan = custom_strat.plan(&view).await;
         assert!(plan.drain_to > plan.drain_from);
         assert!(plan.summary.is_some());
+    }
+
+    #[tokio::test]
+    async fn manual_compact_ignores_the_auto_threshold_keep_scaling() {
+        let chunk = |tag: &str| format!("{tag}: {}", "a".repeat(240_000));
+        let mut msgs = vec![Message::system("sys"), Message::user("initial")];
+        for i in 1..=12 {
+            msgs.push(Message::assistant(chunk(&format!("a{i}")), vec![]));
+            msgs.push(Message::user(chunk(&format!("u{i}"))));
+        }
+        let floor = 2;
+        let view = |trigger| CompactionView {
+            messages: &msgs,
+            trigger,
+            ctx_window: 1_000_000,
+            used_tokens: 360_000,
+            utilization: 0.36,
+            sacred_floor: floor,
+        };
+
+        let custom = OverflowCompaction::new(
+            StubCompaction::default(),
+            Some(Arc::new(CannedSummaryProvider)),
+        )
+        .with_auto_drain_utilization(0.35);
+        let default = OverflowCompaction::new(
+            StubCompaction::default(),
+            Some(Arc::new(CannedSummaryProvider)),
+        );
+
+        let manual = custom
+            .plan(&view(CompactTrigger::Manual { focus: None }))
+            .await;
+        let manual_default = default
+            .plan(&view(CompactTrigger::Manual { focus: None }))
+            .await;
+        let auto = custom
+            .plan(&view(CompactTrigger::Auto { utilization: 0.36 }))
+            .await;
+
+        assert_eq!(
+            manual.drain_to, manual_default.drain_to,
+            "manual /compact must keep the historical recent-turn budget"
+        );
+        assert!(
+            auto.drain_to > manual.drain_to,
+            "Auto must drain more when the threshold is lowered (manual={}, auto={})",
+            manual.drain_to,
+            auto.drain_to
+        );
     }
 
     #[tokio::test]

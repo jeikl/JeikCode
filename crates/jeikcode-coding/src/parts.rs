@@ -1642,12 +1642,14 @@ pub fn assemble(
             }
             Arc::new(strategy)
         })
-        .compact_threshold(cfg.effective_compact_threshold())
         .timeouts(cfg.timeouts)
         .first_token_timeout_retries(cfg.first_token_timeout_retries)
         .max_continuations(cfg.max_continuations)
         // Ctrl-C semantics: false = UNDO (default), true = PRESERVE the interrupted turn.
         .keep_interrupted_context(cfg.keep_interrupted_context);
+    if let Some(threshold) = cfg.compact_threshold_option() {
+        builder = builder.compact_threshold(threshold);
+    }
     if let Some(policy) = cfg.tool_loop_policy {
         builder = builder.tool_loop_policy(policy);
     }
