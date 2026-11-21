@@ -21,6 +21,38 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.2-beta.3 (2026-11-21)
+
+**This beta makes the desktop shell follow the app theme, adds an optional taskbar-icon toggle for supported platforms, and fixes Windows installer shortcut behavior.**
+
+- **[Desktop Theme] Native title bar follows the app theme**:
+  - The title bar now matches light/dark mode, follows the system theme when no preference is set, and updates immediately when the user switches themes.
+  - New installs follow the system theme by default instead of forcing dark mode.
+
+- **[Desktop Settings] Optional taskbar icon hiding**:
+  - Added a persisted "Hide taskbar icon" switch on Windows/Linux; the tray and global shortcut remain available to reopen the window.
+  - The option is hidden on macOS, where the platform has no taskbar.
+  - Desktop settings now include an inline explanation, available in all supported languages.
+
+- **[Windows Installer] Shortcut creation respects the checkbox**:
+  - The desktop shortcut is no longer created when the finish-page checkbox is cleared.
+  - Existing shortcuts keep their icon and taskbar identity after an upgrade, and the shell icon cache is refreshed.
+
+---
+
+- **[桌面主题] 原生标题栏跟随应用主题**:
+  - 标题栏现在与浅色/深色模式一致；未设置偏好时跟随系统，切换主题后立即更新。
+  - 新安装默认跟随系统主题，不再强制深色。
+
+- **[桌面设置] 可选隐藏任务栏图标**:
+  - 在 Windows/Linux 新增持久化的“隐藏任务栏图标”开关，系统托盘与全局快捷键仍可随时唤回窗口。
+  - macOS 无任务栏概念，自动隐藏该选项。
+  - 桌面设置补充说明文案，覆盖全部支持语言。
+
+- **[Windows 安装器] 快捷方式遵循勾选结果**:
+  - 取消完成页勾选后不再创建桌面快捷方式。
+  - 覆盖升级时已有快捷方式保留图标与任务栏身份，并刷新 shell 图标缓存。
+
 ## v7.5.2-beta.2 (2026-11-20)
 
 **This beta makes multi-round `/goal` autonomous sessions compactable, adds a configurable auto-compaction threshold with a `/compact threshold` command, turns `/context` into an accurate native breakdown, and hardens provider/config reliability across Tokio runtimes, Gemini overflow responses, project-key tests, and macOS/Windows edge cases.**
