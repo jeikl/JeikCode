@@ -75,11 +75,12 @@ function deferred() {
   const promise = new Promise(r => { resolve = r; });
   return { promise, resolve };
 }
-function harness(stored, blocked = false, navigatorLang = undefined, navigatorLangs = undefined) {
+function harness(stored, blocked = false, navigatorLang = undefined, navigatorLangs = undefined, theme = undefined) {
   const config = deferred();
   const writes = [];
   const attrs = {};
   const storage = new Map(stored ? [['jeikcode.lang', stored]] : []);
+  if (theme) storage.set('jeikcode.theme', theme);
   const states = [], refs = [], effects = [], dependencies = [];
   let stateIndex = 0, refIndex = 0, effectIndex = 0, context;
   const hooks = {
@@ -166,6 +167,21 @@ test('legacy and regional persisted values normalize on reload', () => {
     assert.equal(h.attrs.lang, expected === 'zh' ? 'zh-CN' : expected);
     assert.equal(h.context().t('sidebar.mcpTools', { n: 3 }), messages[expected]['sidebar.mcpTools'].replace('{n}', '3'));
   }
+});
+
+test('unconfigured theme follows the system until the user picks one', () => {
+  const fresh = harness();
+  assert.equal(fresh.attrs['data-theme-preference'], 'system');
+
+  fresh.context().setTheme('light');
+  fresh.render();
+  assert.equal(fresh.attrs['data-theme-preference'], 'light');
+  assert.equal(fresh.attrs['data-theme'], 'light');
+  assert.equal(fresh.storage.get('jeikcode.theme'), 'light');
+
+  const saved = harness(undefined, false, undefined, undefined, 'dark');
+  assert.equal(saved.attrs['data-theme-preference'], 'dark');
+  assert.equal(saved.attrs['data-theme'], 'dark');
 });
 
 test('server config round-trips all supported locales', async () => {

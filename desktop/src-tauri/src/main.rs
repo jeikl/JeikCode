@@ -948,17 +948,6 @@ fn watch_desktop_shell_settings(app: tauri::AppHandle) {
     });
 }
 
-#[tauri::command]
-fn sync_titlebar_theme(window: tauri::WebviewWindow, theme: &str) -> Result<(), String> {
-    let theme = match theme {
-        "light" => Some(tauri::Theme::Light),
-        "dark" => Some(tauri::Theme::Dark),
-        "system" => None,
-        _ => return Err("invalid theme".into()),
-    };
-    window.set_theme(theme).map_err(|e| e.to_string())
-}
-
 fn main() {
     #[cfg(target_os = "windows")]
     if ensure_single_instance_windows() {
@@ -988,7 +977,6 @@ fn main() {
         .manage(WebuiOriginSlot(Arc::clone(&webui_origin_slot)))
         .manage(PendingDesktopUpdate(tokio::sync::Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
-            sync_titlebar_theme,
             desktop_shell_info,
             start_desktop_shell_update,
             install_desktop_shell_update,
@@ -1011,15 +999,23 @@ fn main() {
                         if (!root) return;
                         let last;
                         const sync = () => {
-                            const theme = root.getAttribute('data-theme-preference') === 'system'
-                                ? 'system' : root.getAttribute('data-theme');
-                            if (!['light', 'dark', 'system'].includes(theme) || theme === last) return;
+                            // No persisted choice yet => follow the OS. An explicit
+                            // light/dark/system preference always wins.
+                            const preference = root.getAttribute('data-theme-preference');
+                            const theme = ['light', 'dark', 'system'].includes(preference)
+                                ? preference : 'system';
+                            if (theme === last) return;
                             last = theme;
-                            window.__TAURI_INTERNALS__?.invoke('sync_titlebar_theme', { theme }).catch(() => {
+                            // The WebUI (webui/src/settings.tsx) owns the `data-theme-preference`
+                            // contract. Use the built-in window command so the capability's
+                            // `core:window:allow-set-theme` permission covers remote origins too.
+                            const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke;
+                            if (!invoke) return;
+                            invoke('plugin:window|set_theme', { value: theme === 'system' ? null : theme }).catch(() => {
                                 if (last === theme) last = undefined;
                             });
                         };
-                        new MutationObserver(sync).observe(root, { attributes: true, attributeFilter: ['data-theme', 'data-theme-preference'] });
+                        new MutationObserver(sync).observe(root, { attributes: true, attributeFilter: ['data-theme-preference'] });
                         sync();
                     };
                     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
