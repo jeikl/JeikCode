@@ -589,6 +589,7 @@ export const vi: Record<keyof typeof en, string> = {
   'settings.startupDesc': 'Khởi động ẩn vào khay hệ thống, không nhấp nháy cửa sổ; nhấp khay hoặc dùng phím tắt để mở nóng bảng Web đã tải.',
   'settings.autostartLabel': 'Tự khởi động khi đăng nhập (ẩn vào khay)',
   'settings.hideTaskbarIconLabel': 'Ẩn biểu tượng trên thanh tác vụ',
+  'settings.hideTaskbarIconHint': 'Cửa sổ sẽ rời thanh tác vụ; dùng khay hệ thống hoặc phím tắt để mở lại.',
   'settings.autostartHint': 'Chạy nền sau khi đăng nhập, không mở cửa sổ chính.',
   'settings.shortcutTitle': 'Phím tắt hiện / ẩn',
   'settings.shortcutDesc': 'Mặc định Ctrl+Alt+J; nhấp rồi nhấn tổ hợp, Backspace xóa, Esc hủy.',

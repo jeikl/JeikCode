@@ -776,6 +776,7 @@ export const ja: Record<keyof typeof en, string> = {
   'settings.startupDesc': 'ログイン時にウィンドウを点滅させずトレイへ静かに起動します。トレイまたはショートカットで、読み込み済みの Web パネルを即座に開けます。',
   'settings.autostartLabel': 'ログイン時に自動起動（トレイへ静かに）',
   'settings.hideTaskbarIconLabel': 'タスクバーのアイコンを非表示',
+  'settings.hideTaskbarIconHint': 'オンにするとウィンドウはタスクバーに表示されず、トレイまたはショートカットからのみ呼び出せます。',
   'settings.autostartHint': 'サインイン後にバックグラウンドで起動し、メインウィンドウは開きません。',
   'settings.shortcutTitle': '表示 / 非表示ショートカット',
   'settings.shortcutDesc': '既定は Ctrl+Alt+J。クリックして組み合わせを押します。Backspace で消去、Esc でキャンセル。',

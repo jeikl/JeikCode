@@ -38,6 +38,7 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
   const [runtimeModelSwitch, setRuntimeModelSwitch] = useState(false);
   const [autostart, setAutostart] = useState(false);
   const [hideTaskbarIcon, setHideTaskbarIcon] = useState(false);
+  const [hideTaskbarIconSupported, setHideTaskbarIconSupported] = useState(true);
   const [toggleShortcut, setToggleShortcut] = useState('Ctrl+Alt+J');
   const [desktopLoaded, setDesktopLoaded] = useState(false);
   const [aboutLoaded, setAboutLoaded] = useState(false);
@@ -70,6 +71,9 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
           if (typeof res.runtime_model_switch === 'boolean') setRuntimeModelSwitch(res.runtime_model_switch);
           if (typeof res.autostart === 'boolean') setAutostart(res.autostart);
           if (typeof res.hide_taskbar_icon === 'boolean') setHideTaskbarIcon(res.hide_taskbar_icon);
+          if (typeof res.hide_taskbar_icon_supported === 'boolean') {
+            setHideTaskbarIconSupported(res.hide_taskbar_icon_supported);
+          }
           if (typeof res.toggle_shortcut === 'string') setToggleShortcut(res.toggle_shortcut);
           setDesktopLoaded(true);
         }
@@ -154,6 +158,9 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
       }
       if (typeof settings.autostart === 'boolean') setAutostart(settings.autostart);
       if (typeof settings.hide_taskbar_icon === 'boolean') setHideTaskbarIcon(settings.hide_taskbar_icon);
+      if (typeof settings.hide_taskbar_icon_supported === 'boolean') {
+        setHideTaskbarIconSupported(settings.hide_taskbar_icon_supported);
+      }
       if (typeof settings.toggle_shortcut === 'string') {
         setToggleShortcut(settings.toggle_shortcut);
       }
@@ -252,16 +259,19 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
                     </span>
                   </label>
 
-                  <label class="system-settings-radio-label system-settings-switch-row">
-                    <input
-                      type="checkbox"
-                      checked={hideTaskbarIcon}
-                      onChange={(e) => setHideTaskbarIcon((e.target as HTMLInputElement).checked)}
-                    />
-                    <span class="system-settings-switch-copy">
-                      <span class="system-settings-switch-label">{t('settings.hideTaskbarIconLabel')}</span>
-                    </span>
-                  </label>
+                  {hideTaskbarIconSupported && (
+                    <label class="system-settings-radio-label system-settings-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={hideTaskbarIcon}
+                        onChange={(e) => setHideTaskbarIcon((e.target as HTMLInputElement).checked)}
+                      />
+                      <span class="system-settings-switch-copy">
+                        <span class="system-settings-switch-label">{t('settings.hideTaskbarIconLabel')}</span>
+                        <span class="system-settings-inline-hint">{t('settings.hideTaskbarIconHint')}</span>
+                      </span>
+                    </label>
+                  )}
 
                   <div class="system-settings-subtitle">
                     {t('settings.shortcutTitle')}

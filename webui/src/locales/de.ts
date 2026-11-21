@@ -776,6 +776,7 @@ export const de: Record<keyof typeof en, string> = {
   'settings.startupDesc': 'Startet bei der Anmeldung still im Tray, ohne Fensterblitz; Tray-Klick oder Tastenkürzel öffnet das bereits geladene Web-Panel warm.',
   'settings.autostartLabel': 'Bei Anmeldung starten (still im Tray)',
   'settings.hideTaskbarIconLabel': 'Taskleistensymbol ausblenden',
+  'settings.hideTaskbarIconHint': 'Das Fenster verschwindet aus der Taskleiste; über Tray oder Tastenkürzel zurückholen.',
   'settings.autostartHint': 'Läuft nach der Anmeldung im Hintergrund, ohne das Hauptfenster zu öffnen.',
   'settings.shortcutTitle': 'Tastenkürzel zum Ein-/Ausblenden',
   'settings.shortcutDesc': 'Standard Ctrl+Alt+J. Klicken, dann Kombination drücken; Backspace löscht, Esc bricht ab.',

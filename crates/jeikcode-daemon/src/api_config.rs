@@ -1773,6 +1773,10 @@ pub struct DesktopSettingsPayload {
     /// 隐藏任务栏图标。
     #[serde(default)]
     pub hide_taskbar_icon: bool,
+    /// 当前宿主平台是否支持隐藏任务栏图标（Windows/Linux）；macOS 无任务栏概念。
+    /// 只作为 API 能力标志返回，不写入 `desktop-settings.json`。
+    #[serde(default)]
+    pub hide_taskbar_icon_supported: bool,
     /// 唤起/隐藏桌面窗口的全局快捷键；空串 = 禁用。
     #[serde(default = "default_toggle_shortcut")]
     pub toggle_shortcut: String,
@@ -1787,6 +1791,7 @@ impl Default for DesktopSettingsPayload {
             runtime_model_switch: false,
             autostart: false,
             hide_taskbar_icon: false,
+            hide_taskbar_icon_supported: hide_taskbar_icon_supported(),
             toggle_shortcut: default_toggle_shortcut(),
         }
     }
@@ -1810,9 +1815,16 @@ pub struct DesktopSettingsUpdate {
     pub toggle_shortcut: Option<String>,
 }
 
+/// Windows/Linux expose a taskbar the shell can hide; macOS does not.
+fn hide_taskbar_icon_supported() -> bool {
+    cfg!(any(target_os = "windows", target_os = "linux"))
+}
+
 pub(crate) fn normalize_desktop_settings(
     mut payload: DesktopSettingsPayload,
 ) -> DesktopSettingsPayload {
+    // The capability is derived from the host, never from disk.
+    payload.hide_taskbar_icon_supported = hide_taskbar_icon_supported();
     payload.close_action = match payload.close_action.trim().to_ascii_lowercase().as_str() {
         "tray" => "tray".to_string(),
         "quit" => "quit".to_string(),
@@ -1904,6 +1916,7 @@ fn desktop_settings_from_object(
             .get("hide_taskbar_icon")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        hide_taskbar_icon_supported: hide_taskbar_icon_supported(),
         toggle_shortcut: root
             .get("toggle_shortcut")
             .and_then(serde_json::Value::as_str)
@@ -2715,6 +2728,10 @@ mod tests {
             },
         );
         assert!(saved.hide_taskbar_icon);
+        assert_eq!(
+            saved.hide_taskbar_icon_supported,
+            cfg!(any(target_os = "windows", target_os = "linux"))
+        );
         super::merge_desktop_settings_at(
             &path,
             &super::DesktopSettingsUpdate {
