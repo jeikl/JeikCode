@@ -21,6 +21,70 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.2-beta.6 (2026-11-21)
+
+**This beta resolves follow-up UI regressions: desktop scheduled-task Effort is restored, refresh buttons perform a real F5 reload, image lightbox prev/next navigation works again for virtualized history, mobile Bash summaries are never truncated, the scheduled-task AI composer reuses the project workspace picker, and English settings tabs stay on one line.**
+
+- **[Scheduled Tasks] Desktop Effort restored**:
+  - The schedule AI composer now hides Effort only on phones; desktop keeps the model's Effort selector beside the model picker.
+  - Send remains on the same row, while mobile keeps the compact layout.
+
+- **[WebUI: Refresh] Toolbar refresh is a real F5**:
+  - The top-bar refresh button and the overflow-menu refresh item now reload the page instead of dispatching a soft-refresh event.
+  - This restores the expected behavior when the session canvas is stale.
+
+- **[WebUI: Image Lightbox] Prev/next restored for virtualized history**:
+  - The gallery now merges image attachments from the message store with rendered DOM images.
+  - Collapsed or virtualized messages no longer leave a one-image gallery; left/right buttons appear whenever the session has multiple images.
+
+- **[Mobile: Tool Rows] Bash summary has priority**:
+  - Every tool row stays on one line.
+  - The Bash human-readable summary takes its full natural width; the raw command uses the remainder and ellipsizes at the edge.
+  - Summaries are no longer cut in half.
+
+- **[Scheduled Tasks: Workspace] AI mode reuses the project picker**:
+  - The AI composer now uses the same project/session workspace dropdown as manual schedule modes.
+  - Existing workspaces can be selected directly; the folder button remains available for a new directory.
+
+- **[Settings: English Labels] One-line navigation**:
+  - The desktop Settings rail is wider and tabs no longer wrap.
+  - "Providers & Models" stays on one line; longer locales ellipsize only when necessary.
+
+- **[Security] Console noindex remains active**:
+  - The robots.txt, robots/googlebot meta and X-Robots-Tag protections from beta.5 are preserved.
+
+---
+
+**本次 beta 修复多项前端回归：桌面定时任务恢复 Effort；刷新按钮恢复真正的 F5；图片灯箱在虚拟化历史下恢复左右切换；手机 Bash 说明永不截断；定时任务 AI 工作区复用项目下拉；英文设置标签保持单行。**
+
+- **[定时任务] 桌面 Effort 恢复**：
+  - 定时任务 AI 输入区只在手机隐藏 Effort；桌面继续在模型选择器旁显示 Effort。
+  - 发送按钮保持同排，手机端继续使用紧凑布局。
+
+- **[WebUI：刷新] 顶栏刷新恢复为 F5**：
+  - 顶栏刷新按钮与更多菜单刷新项现在直接重载页面，不再只发送软刷新事件。
+  - 会话画布状态陈旧时恢复预期行为。
+
+- **[WebUI：图片灯箱] 虚拟化历史恢复左右切换**：
+  - 画廊现在合并消息状态里的图片附件与已渲染 DOM 图片。
+  - 折叠/虚拟化消息不再导致只剩一张图；会话有多张图片时恢复左右切换按钮。
+
+- **[手机：工具行] Bash 说明优先完整显示**：
+  - 所有工具行保持单行。
+  - Bash 的人类可读说明优先占满自然宽度；原始命令使用剩余空间并在边缘省略。
+  - 不再把说明截一半。
+
+- **[定时任务：工作区] AI 模式复用项目下拉**：
+  - AI 输入区改用与手动模式相同的项目/会话工作区下拉。
+  - 可直接选择已有工作区；新建目录仍可使用文件夹按钮。
+
+- **[设置：英文标签] 单行导航**：
+  - 桌面 Settings 侧栏加宽，标签不再换行。
+  - “Providers & Models” 保持单行；更长语言仅在必要时省略。
+
+- **[安全] 控制台 noindex 继续保持**：
+  - beta.5 的 robots.txt、robots/googlebot meta 与 X-Robots-Tag 防护继续生效。
+
 ## v7.5.2-beta.5 (2026-11-21)
 
 **This beta closes a serious exposure risk: console WebUI instances can no longer be indexed by search engines. Older builds exposed on public networks could be discovered by Google and other crawlers, and some deployments were found without an access token. Public exposure is still supported when chosen deliberately; it now requires token authentication and should use TLS. This release also restores the 7.2.x tool-row hierarchy, applies the Atelier parameter palette, and polishes mobile settings and scheduled-task conversations.**
