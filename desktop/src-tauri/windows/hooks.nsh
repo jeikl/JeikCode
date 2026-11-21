@@ -51,11 +51,6 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  ; Re-create desktop shortcut explicitly with executable icon index 0
-  CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe" "" "$INSTDIR\${MAINBINARYNAME}.exe" 0
-  ; Refresh shell icon cache so existing cached placeholders/icons are cleared
-  System::Call 'shell32.dll::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
-
   ; Register $INSTDIR and $INSTDIR\resources into user PATH environment variable
   ReadRegStr $0 HKCU "Environment" "Path"
   StrCpy $2 0 ; $2 tracks whether PATH was modified
