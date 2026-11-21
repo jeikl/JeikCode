@@ -76,7 +76,7 @@ import { useT, useSettings, SettingsSection } from './settings';
 import { setStreamEpoch } from './lib/streamCursor';
 import { sessionMessagesToMarkdownLines } from './lib/historyMessages';
 import { onSoftRefresh, requestSoftRefresh } from './lib/appRefresh';
-import { hasEffectiveUpdate } from './lib/updateRouting';
+import { hasCoreUpdate, hasEffectiveUpdate } from './lib/updateRouting';
 import {
   buildRestoreCandidates,
   forgetRememberedSession,
@@ -1810,9 +1810,9 @@ export function App() {
             {!updateDead && (
               <button
                 type="button"
-                class={`top-nav-btn top-nav-desktop-action top-nav-update-btn ${hasEffectiveUpdate(updateInfo) ? 'has-update' : ''}`}
+                class={`top-nav-btn top-nav-desktop-action top-nav-update-btn ${hasCoreUpdate(updateInfo) ? 'has-update' : ''}`}
                 onClick={openUpdateDialogWithFreshCheck}
-                title={hasEffectiveUpdate(updateInfo) ? t('update.hasUpdate', { version: !updateInfo?.has_update && updateInfo?.desktop_host?.latest_shell_version ? `v${updateInfo.desktop_host.latest_shell_version}` : (updateInfo?.latest_version ?? '') }) : t('update.modalTitle')}
+                title={hasCoreUpdate(updateInfo) ? t('update.hasUpdate', { version: !updateInfo?.has_update && updateInfo?.desktop_host?.latest_shell_version ? `v${updateInfo.desktop_host.latest_shell_version}` : (updateInfo?.latest_version ?? '') }) : t('update.modalTitle')}
                 aria-label={t('update.modalTitle')}
               >
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1922,7 +1922,7 @@ export function App() {
             <div class="top-nav-more-wrap" ref={topNavMoreRef}>
               <button
                 type="button"
-                class={'top-nav-btn top-nav-more-btn' + (!updateDead && hasEffectiveUpdate(updateInfo) ? ' has-update-dot' : '')}
+                class={'top-nav-btn top-nav-more-btn' + (!updateDead && hasCoreUpdate(updateInfo) ? ' has-update-dot' : '')}
                 onClick={() => setTopNavMoreOpen((o) => !o)}
                 title={t('sidebar.itemMenu')}
                 aria-label={t('sidebar.itemMenu')}
@@ -1970,8 +1970,8 @@ export function App() {
                         <line x1="12" y1="19" x2="12" y2="5" />
                         <polyline points="5 12 12 5 19 12" />
                       </svg>
-                      <span>{hasEffectiveUpdate(updateInfo) ? t('update.hasUpdate', { version: !updateInfo?.has_update && updateInfo?.desktop_host?.latest_shell_version ? `v${updateInfo.desktop_host.latest_shell_version}` : (updateInfo?.latest_version ?? '') }) : t('update.modalTitle')}</span>
-                      {hasEffectiveUpdate(updateInfo) && <span class="update-more-badge">NEW</span>}
+                      <span>{hasCoreUpdate(updateInfo) ? t('update.hasUpdate', { version: !updateInfo?.has_update && updateInfo?.desktop_host?.latest_shell_version ? `v${updateInfo.desktop_host.latest_shell_version}` : (updateInfo?.latest_version ?? '') }) : t('update.modalTitle')}</span>
+                      {hasCoreUpdate(updateInfo) && <span class="update-more-badge">NEW</span>}
                     </button>
                   )}
 

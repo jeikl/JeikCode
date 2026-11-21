@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DesktopHostUpdateInfo, UpdateCheckResponse } from '../api';
-import { compareUpdateSemver, resolveUpdatePlan } from './updateRouting.ts';
+import { compareUpdateSemver, hasCoreUpdate, resolveUpdatePlan } from './updateRouting.ts';
 
 function makeDesktopHost(overrides: Partial<DesktopHostUpdateInfo> = {}): DesktopHostUpdateInfo {
   return {
@@ -41,6 +41,21 @@ test('compareUpdateSemver compares beta numbers numerically', () => {
   assert.equal(compareUpdateSemver('v7.5.2-beta.10', '7.5.2-beta.2'), true);
   assert.equal(compareUpdateSemver('v7.5.2-beta.2', '7.5.2-beta.10'), false);
   assert.equal(compareUpdateSemver('7.5.2', '7.5.2-beta.10'), true);
+});
+
+test('top-bar green badge only follows core updates, not shell-only updates', () => {
+  const shellOnly = makeInfo({
+    current_version: 'v7.5.2-beta.4',
+    latest_version: 'v7.5.2-beta.4',
+    has_update: false,
+    desktop_host: makeDesktopHost({
+      shell_version: '7.5.2-beta.0',
+      latest_shell_version: '7.5.2-beta.4',
+      shell_has_update: true,
+    }),
+  });
+  assert.equal(hasCoreUpdate(shellOnly), false);
+  assert.equal(hasCoreUpdate(makeInfo({ has_update: true })), true);
 });
 
 test('remote browser always routes to Path A and ignores desktop shell updates', () => {

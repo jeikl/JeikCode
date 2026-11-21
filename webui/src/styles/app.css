@@ -5009,11 +5009,17 @@ body {
 .tool-glyph {
   flex-shrink: 0;
   width: 1.1em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
   text-align: center;
   font-family: var(--app-monospace-font-family);
   font-size: 12px;
   font-weight: 500;
   color: var(--app-tool-name-color, var(--app-link-color));
+  position: relative;
+  top: 2px;
 }
 :root[data-theme='light'] .tool-glyph {
   color: #1d4ed8 !important;
@@ -12469,27 +12475,35 @@ html[data-keyboard-open] .chat-landing {
     margin-bottom: 10px;
   }
   .provider-group-header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-    padding: 12px;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: 9px 10px;
   }
   .provider-group-info {
-    width: 100%;
-    flex-wrap: wrap;
+    width: auto;
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
     gap: 8px;
     justify-content: flex-start;
   }
+  .provider-group-title {
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
   .provider-group-meta-actions {
-    width: 100%;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 6px;
+    width: auto;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    gap: 4px;
   }
   .provider-group-actions {
     display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
+    gap: 2px;
+    flex-wrap: nowrap;
   }
   .provider-group-actions .provider-group-btn {
     min-height: 34px;
@@ -19897,6 +19911,10 @@ select option {
   gap: 10px;
   min-width: 0;
 }
+.schedule-ai-bottom-bar .model-capsule-provider-badge,
+.schedule-ai-bottom-bar .effort-selector {
+  display: none !important;
+}
 
 .schedule-ai-bottom-bar .git-model-selector-wrapper {
   display: flex;
@@ -20061,13 +20079,20 @@ select option {
 
   .schedule-ai-pane {
     padding: 10px;
-    /* 极矮视口下列表/输入区整体可滚，避免提交按钮溢出到页脚 */
-    overflow-y: auto;
+    /* AI 模式由弹窗主体约束高度，消息区优先吃掉剩余空间。 */
+    overflow: hidden;
   }
 
-  /* 兜底最小高度：极矮视口下也保证对话可读，溢出交给弹窗主体滚动 */
-  .schedule-ai-messages {
-    min-height: clamp(72px, 14dvh, 220px);
+  .schedule-modal-body.schedule-ai-mode {
+    overflow: hidden !important;
+  }
+
+  .schedule-modal-body.schedule-ai-mode .schedule-sidebar {
+    max-height: 112px;
+  }
+
+  .schedule-modal-body.schedule-ai-mode .schedule-ai-messages {
+    min-height: 140px;
   }
 
   /* AI 模式说明与页脚重复，移动端隐藏提示文字 */
@@ -20076,15 +20101,17 @@ select option {
   }
 
   .schedule-ai-bottom-bar {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    gap: 8px;
   }
 
   .schedule-ai-bottom-bar .git-model-selector-wrapper {
-    flex: 1 1 100%;
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .schedule-ai-send-btn {
-    margin-left: auto;
+    margin-left: 0;
   }
 }
 
@@ -20478,28 +20505,68 @@ select option {
 }
 
 /* === Tool row v2: one line, description first, colored key parameter === */
+/* JeikCode "Atelier": structural parameters use petrol/teal, content values
+   use rose/coral, and MCP uses rose gold. Blue is reserved for the brand and
+   tool alias, not for parameters. */
 :root {
-  --app-tool-param-path: #7dd3fc;
-  --app-tool-param-range: #a5b4fc;
-  --app-tool-param-pattern: #fbbf24;
-  --app-tool-param-command: #86efac;
-  --app-tool-param-url: #67e8f9;
-  --app-tool-param-priority: #fbbf24;
+  /* One ink family for structural values; warm accents only where they carry
+     meaning. This keeps the row closer to 7.2.x's calm hierarchy. */
+  --app-tool-param-path: #6fd6ca;
+  --app-tool-param-range: #a9cdc8;
+  --app-tool-param-command: #7fd0d6;
+  --app-tool-param-url: #7fd4e2;
+  --app-tool-param-pattern: #f09ab7;
+  --app-tool-param-priority: #f28b7d;
+  --app-tool-param-count: #ffa08f;
+  --app-mcp-color: #67e8f9;
 }
 :root[data-theme='light'] {
-  --app-tool-param-path: #2563eb;
-  --app-tool-param-range: #4f46e5;
-  --app-tool-param-pattern: #b45309;
-  --app-tool-param-command: #15803d;
-  --app-tool-param-url: #0e7490;
-  --app-tool-param-priority: #b45309;
+  --app-tool-param-path: #1f7a74;
+  --app-tool-param-range: #6b8c88;
+  --app-tool-param-command: #2a6f78;
+  --app-tool-param-url: #1f7a8c;
+  --app-tool-param-pattern: #a84e68;
+  --app-tool-param-priority: #9e4438;
+  --app-tool-param-count: #b85c4a;
+  --app-mcp-color: #0e7490;
 }
 
 .tool-header {
   flex-wrap: nowrap !important;
   align-items: center !important;
   min-width: 0 !important;
+  min-height: 28px !important;
   row-gap: 0 !important;
+}
+
+/* Every text segment shares one 12px / 20px row box, so Bash summaries,
+   commands, diffs, status marks and timers sit on the same baseline. */
+.tool-header .tool-name,
+.tool-header .tool-key-param,
+.tool-header .tool-status-time,
+.tool-header .diff-stat-badge,
+.tool-header .tool-status-time-value,
+.tool-header .tool-status-mark,
+.tool-header .tool-glyph,
+.tool-header .tool-chevron {
+  font-size: 12px !important;
+  line-height: 20px !important;
+  height: 20px !important;
+  align-items: center !important;
+}
+.tool-header .tool-name,
+.tool-header .tool-key-param {
+  display: block !important;
+  /* sans and mono have different vertical metrics; align the actual glyph
+     baselines, not just the 20px boxes. */
+  align-self: baseline !important;
+}
+.tool-header .tool-status-time,
+.tool-header .diff-stat-badge { display: inline-flex !important; }
+.tool-header .diff-stat-badge {
+  font-family: inherit !important;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
 }
 .tool-header .tool-name {
   display: block !important;
@@ -20509,8 +20576,8 @@ select option {
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   white-space: nowrap !important;
-  font-size: 12.5px !important;
-  line-height: 1.35 !important;
+  font-size: 13px !important;
+  font-weight: 650 !important;
 }
 .tool-header .tool-key-param {
   display: block !important;
@@ -20519,11 +20586,14 @@ select option {
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   white-space: nowrap !important;
-  font-family: var(--app-monospace-font-family) !important;
-  font-size: 11.5px !important;
-  line-height: 1.35 !important;
+  /* Same family and metrics as the alias: collapsed metadata should share one
+     baseline. Expanded code/output still uses the mono stack. */
+  font-family: inherit !important;
+  font-size: 12.5px !important;
+  font-weight: 400 !important;
   color: var(--app-secondary-foreground) !important;
   font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
 }
 .tool-header .tool-status-time {
   flex: 0 0 auto !important;
@@ -20535,25 +20605,31 @@ select option {
 .tool-header .tool-glyph {
   flex: 0 0 auto !important;
 }
+.tool-header .tool-glyph {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+}
 
 .tool-tone-name { color: var(--app-link-color); }
 .tool-tone-summary { color: var(--app-primary-foreground); font-weight: 500; }
-.tool-tone-path { color: var(--app-tool-param-path); }
-.tool-tone-range { color: var(--app-tool-param-range); }
-.tool-tone-pattern { color: var(--app-tool-param-pattern); }
-.tool-tone-command { color: var(--app-tool-param-command); }
-.tool-tone-url { color: var(--app-tool-param-url); }
-.tool-tone-count { color: var(--app-brand); font-weight: 600; }
+.tool-tone-path { color: var(--app-tool-param-path); font-weight: 600; }
+.tool-tone-range { color: var(--app-tool-param-range); font-weight: 500; opacity: 0.9; }
+.tool-tone-pattern { color: var(--app-tool-param-pattern); font-weight: 500; }
+.tool-tone-command { color: var(--app-tool-param-command); font-weight: 500; }
+.tool-tone-url { color: var(--app-tool-param-url); font-weight: 500; }
+.tool-tone-count { color: var(--app-tool-param-count); font-weight: 600; }
 .tool-tone-priority { color: var(--app-tool-param-priority); font-weight: 600; }
 .tool-tone-title { color: var(--app-primary-foreground); }
 .tool-tone-meta { color: var(--app-secondary-foreground); }
+.tool-tone-mcp { color: var(--app-mcp-color); font-weight: 600; }
+.tool-body.kind-mcp .tool-glyph { color: var(--app-mcp-color) !important; }
 .tool-tone-punct { color: var(--app-secondary-foreground); opacity: 0.55; }
 .tool-tone-danger { color: var(--app-error-foreground); }
 
 @media (max-width: 768px) {
   .tool-header { align-items: center !important; row-gap: 0 !important; }
   .tool-header .tool-name { max-width: 42% !important; font-size: 12px !important; }
-  .tool-header .tool-key-param { font-size: 11px !important; }
+  .tool-header .tool-key-param { font-size: 11.5px !important; }
 }
 
 /* Version readouts: quiet mono annotations, not chips. */
@@ -20786,6 +20862,43 @@ select option {
   color: var(--app-primary-foreground);
 }
 .model-card-meta-item .pv.mono { color: var(--app-secondary-foreground); }
+
+/* Model cards: a fixed action column. Long names and aliases truncate on the
+   left instead of pushing the edit/delete/default controls onto another row. */
+.model-card-head {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: center !important;
+  gap: 8px !important;
+  flex-wrap: initial !important;
+}
+.model-card-name-row {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  flex-wrap: nowrap !important;
+}
+.model-card-name {
+  flex: 0 1 auto !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+.model-card-id {
+  flex: 0 1 auto !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+.model-card-default-star { flex-shrink: 0 !important; }
+.model-card-actions {
+  width: auto !important;
+  margin-top: 0 !important;
+  justify-content: flex-end !important;
+  flex-wrap: nowrap !important;
+  flex: 0 0 auto !important;
+}
 
 @media (max-width: 640px) {
   .model-config-overview { padding: 10px 12px !important; }

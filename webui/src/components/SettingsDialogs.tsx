@@ -750,9 +750,6 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
                             {tag.label}
                           </span>
                         )}
-                      </div>
-
-                      <div class="provider-group-meta-actions" onClick={(e) => e.stopPropagation()}>
                         <span
                           class="provider-group-count"
                           title={t('settings.modelsCount', { n: models.length })}
@@ -760,7 +757,9 @@ export function ModelConfigView({ onDone }: { onDone?: () => void }) {
                         >
                           {models.length}
                         </span>
+                      </div>
 
+                      <div class="provider-group-meta-actions" onClick={(e) => e.stopPropagation()}>
                         <div class="provider-group-actions">
                           <button
                             class="provider-group-icon-btn btn-accent"

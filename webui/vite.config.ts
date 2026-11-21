@@ -46,5 +46,11 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(getAppVersion()),
   },
   build: { outDir: 'dist', emptyOutDir: true },
-  server: { host: '0.0.0.0', port: 5173 },
+  server: {
+    host: '0.0.0.0',
+    port: 5173,
+    // The console is private even when deliberately exposed on a LAN/public
+    // gateway. Never let crawlers index it.
+    headers: { 'X-Robots-Tag': 'noindex, nofollow, noarchive, nosnippet' },
+  },
 });

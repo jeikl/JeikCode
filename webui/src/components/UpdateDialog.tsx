@@ -532,8 +532,9 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
       : (!hasUpdate && isDesktopShellUpgrade && plan.desktopHost?.latest_shell_version
         ? `v${plan.desktopHost.latest_shell_version.replace(/^v/i, '')}`
         : (targetVersion || info?.latest_version || '...'));
-  const hasDisplayVersionDiff =
-    hasUpdate || !isLatestPick || (plan.inDesktopWindow && Boolean(plan.desktopHost?.shell_has_update || plan.desktopHost?.legacy_shell));
+  // A shell-only upgrade must not paint the core "latest version" green when
+  // current_version and latest_version are identical.
+  const hasDisplayVersionDiff = hasUpdate || !isLatestPick;
 
   return (
     <>

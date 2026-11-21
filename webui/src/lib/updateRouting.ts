@@ -47,6 +47,12 @@ export function hasEffectiveUpdate(info?: UpdateCheckResponse | null): boolean {
   return isLocalDesktopWindow() && Boolean(info.desktop_host?.shell_has_update);
 }
 
+/** Top-bar badge: only a newer core/app version turns green. A desktop-shell
+ *  update stays available in the update dialog but must not mimic a core update. */
+export function hasCoreUpdate(info?: UpdateCheckResponse | null): boolean {
+  return Boolean(info?.has_update);
+}
+
 export function compareUpdateSemver(latest?: string | null, current?: string | null): boolean {
   const parse = (raw?: string | null) => {
     const clean = normalizeUpgradeVersion(raw);

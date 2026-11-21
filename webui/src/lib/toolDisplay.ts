@@ -803,6 +803,7 @@ export type ToolTone =
   | 'priority'
   | 'title'
   | 'meta'
+  | 'mcp'
   | 'danger'
   | 'punct';
 
@@ -884,9 +885,9 @@ function mcpDescription(name: string): ToolTextPart[] {
   const parts = rest.split('__');
   if (parts.length >= 2) {
     return [
-      { text: parts[0]!, tone: 'meta' },
+      { text: parts[0]!, tone: 'mcp' },
       { text: ' / ', tone: 'punct' },
-      { text: parts.slice(1).join('__'), tone: 'name' },
+      { text: parts.slice(1).join('__'), tone: 'mcp' },
     ];
   }
   return [{ text: rest || 'MCP', tone: 'name' }];
@@ -952,6 +953,31 @@ function objectArray(value: unknown): Record<string, unknown>[] {
   );
 }
 
+/** Todo payloads may arrive as arrays or as one stringified array layer. */
+function todoArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // fall through
+    }
+  }
+  return [];
+}
+
+function todoItemLabel(item: unknown): string {
+  if (typeof item === 'string') return item.trim();
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return '';
+  const row = item as Record<string, unknown>;
+  for (const key of ['content', 'title', 'task', 'new_content', 'new_title', 'add']) {
+    const value = row[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
 function separator(text = ' · '): ToolTextPart {
   return { text, tone: 'punct' };
 }
@@ -973,7 +999,8 @@ export function compactToolDisplay(
     // Task rows can be rendered from SubtaskPanel data alone (no raw args).
     if (name.trim().toLowerCase() === 'task') {
       if (opts.firstSubtaskDescription) {
-        description.splice(0, 1, { text: opts.firstSubtaskDescription, tone: 'summary' });
+        description.push(separator());
+        description.push({ text: opts.firstSubtaskDescription, tone: 'summary' });
       }
       if ((opts.subtaskCount ?? 0) > 1) {
         params.push({ text: `×${opts.subtaskCount}`, tone: 'count' });
@@ -1030,7 +1057,10 @@ export function compactToolDisplay(
 
   if (norm === 'bash' || norm === 'runcommand') {
     const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
-    if (summary) description.splice(0, 1, { text: summary, tone: 'summary' });
+    if (summary) {
+      description.push(separator());
+      description.push({ text: summary, tone: 'summary' });
+    }
     const command = args.command ?? args.cmd ?? args.script;
     if (typeof command === 'string' && command.trim()) {
       params.push({ text: firstLine(command), tone: 'command' });
@@ -1093,14 +1123,26 @@ export function compactToolDisplay(
   }
 
   if (norm === 'todo' || norm === 'todowrite') {
-    const rows = Array.isArray(args.todos)
-      ? args.todos
-      : Array.isArray(args.plan)
-        ? args.plan
-        : objectArray(args.actions);
-    if (rows.length) params.push({ text: `×${rows.length}`, tone: 'count' });
-    else if (typeof args.action === 'string' && args.action.trim()) {
+    const plan = todoArray(args.plan);
+    const todos = todoArray(args.todos);
+    const update = todoArray(args.update).length ? todoArray(args.update) : todoArray(args.updates);
+    const actions = todoArray(args.actions);
+    const rows = plan.length ? plan : todos.length ? todos : update.length ? update : actions;
+    const labels = rows.map(todoItemLabel).filter(Boolean);
+    if (labels[0]) {
+      params.push({ text: firstLine(labels[0], 90), tone: 'title' });
+    } else if (args.list === true || args.action === 'list') {
+      params.push({ text: 'list', tone: 'command' });
+    } else if (args.clear === true || args.action === 'clear') {
+      params.push({ text: 'clear', tone: 'danger' });
+    } else if (typeof args.action === 'string' && args.action.trim()) {
       params.push({ text: args.action.trim(), tone: 'command' });
+    } else if (typeof args.content === 'string' && args.content.trim()) {
+      params.push({ text: firstLine(args.content.trim(), 90), tone: 'title' });
+    }
+    if (rows.length > 1) {
+      if (params.length) params.push(separator());
+      params.push({ text: `×${rows.length}`, tone: 'count' });
     }
     return { description, params };
   }
@@ -1128,7 +1170,10 @@ export function compactToolDisplay(
     const taskDescription = typeof firstDescription === 'string' && firstDescription.trim()
       ? firstDescription.trim()
       : (opts.firstSubtaskDescription || '').trim();
-    if (taskDescription) description.splice(0, 1, { text: taskDescription, tone: 'summary' });
+    if (taskDescription) {
+      description.push(separator());
+      description.push({ text: taskDescription, tone: 'summary' });
+    }
     const count = tasks.length || opts.subtaskCount || 0;
     if (count > 1) params.push({ text: `×${count}`, tone: 'count' });
     return { description, params };

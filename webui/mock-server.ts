@@ -3,7 +3,25 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import pathMod from 'node:path';
 
-type MockMsg = { role: 'user' | 'assistant'; content: string; created_at: number };
+type MockToolCall = {
+  id: string;
+  name: string;
+  arguments: string;
+  display?: string;
+  started_at?: number;
+  finished_at?: number;
+  duration_ms?: number;
+  switch_ms?: number;
+  status?: 'running' | 'done' | 'error' | 'incomplete';
+};
+type MockMsg = {
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: number;
+  reasoning?: string;
+  tool_calls?: MockToolCall[];
+  elapsed_ms?: number;
+};
 type MockSession = {
   id: string;
   name: string;
@@ -216,7 +234,242 @@ export function mockApiPlugin(): Plugin {
     created_at: number;
     last_updated: number;
   }> = [];
+  const mockShowcaseNow = mockNow();
+  const showcaseTools: MockToolCall[] = [
+    {
+      id: 'mock_read',
+      name: 'read',
+      arguments: JSON.stringify({ path: 'webui/src/styles/app.css', offset: 20480, limit: 120 }),
+      status: 'done',
+      started_at: mockShowcaseNow - 15200,
+      finished_at: mockShowcaseNow - 15080,
+      duration_ms: 120,
+    },
+    {
+      id: 'mock_edit',
+      name: 'edit',
+      arguments: JSON.stringify({
+        path: 'webui/src/lib/toolDisplay.ts',
+        edits: [{
+          old_string:
+            'function compactToolDisplay(name: string) {\n  return name;\n}\n\nconst alias = name;\n\nreturn alias;',
+          new_string:
+            'function compactToolDisplay(name: string, args: string) {\n  const alias = frontendToolAlias(name);\n  const description = [{ text: alias, tone: \'name\' }];\n  const params = parseKeyParams(args);\n  return { description, params };\n}\n\nconst alias = name;\nconst description = [];\nconst params = [];\nconst first = params[0];\nconst rest = params.slice(1);\nreturn { alias, description, params, first, rest };',
+        }],
+      }),
+      status: 'done',
+      started_at: mockShowcaseNow - 14800,
+      finished_at: mockShowcaseNow - 14300,
+      duration_ms: 500,
+      switch_ms: 180,
+    },
+    {
+      id: 'mock_write',
+      name: 'write',
+      arguments: JSON.stringify({
+        path: 'webui/src/styles/tool-row-tokens.css',
+        content: ':root {\n  --tool-row-height: 28px;\n  --tool-row-line: 20px;\n}\n.tool-row {\n  height: var(--tool-row-height);\n  line-height: var(--tool-row-line);\n}\n.tool-row__name {\n  font-size: 12px;\n}\n.tool-row__param {\n  font-size: 12px;\n}\n.tool-row__status {\n  margin-left: auto;\n}\n',
+      }),
+      status: 'done',
+      started_at: mockShowcaseNow - 14100,
+      finished_at: mockShowcaseNow - 13900,
+      duration_ms: 200,
+    },
+    {
+      id: 'mock_bash',
+      name: 'run_command',
+      arguments: JSON.stringify({
+        summary: '校验工作区并运行前端测试',
+        command: 'git status --short && npm run typecheck && npm test -- --test-name-pattern=toolDisplay',
+        shell: 'default',
+        background: false,
+        settle_secs: 3,
+      }),
+      status: 'done',
+      started_at: mockShowcaseNow - 13700,
+      finished_at: mockShowcaseNow - 4900,
+      duration_ms: 8800,
+      switch_ms: 240,
+    },
+    {
+      id: 'mock_grep',
+      name: 'grep',
+      arguments: JSON.stringify({
+        pattern: 'onOptimisticSession|onSessionId|onSessionId2|onSessionId3|onSessionId4',
+        path: 'webui/src/components',
+        include: '*.tsx',
+        max_results: 200,
+        context: 2,
+        case_insensitive: true,
+      }),
+      status: 'done',
+      started_at: mockShowcaseNow - 4700,
+      finished_at: mockShowcaseNow - 4640,
+      duration_ms: 60,
+    },
+    {
+      id: 'mock_glob',
+      name: 'glob',
+      arguments: JSON.stringify({ pattern: '**/*.{tsx,ts,css}', path: 'webui/src', limit: 300 }),
+      status: 'done',
+      started_at: mockShowcaseNow - 4600,
+      finished_at: mockShowcaseNow - 4550,
+      duration_ms: 50,
+    },
+    {
+      id: 'mock_explore',
+      name: 'code_explore',
+      arguments: JSON.stringify({
+        query: 'tool row alias, parameter tone and mode hydration',
+        path: 'webui/src/components/chat',
+        max_files: 8,
+      }),
+      status: 'done',
+      started_at: mockShowcaseNow - 4500,
+      finished_at: mockShowcaseNow - 4050,
+      duration_ms: 450,
+    },
+    {
+      id: 'mock_todo',
+      name: 'todo_write',
+      arguments: JSON.stringify({
+        plan: [
+          { content: '对齐工具行文字基线', status: 'completed' },
+          { content: '补齐 Todo 参数摘要', status: 'completed' },
+          { content: '检查亮色主题对比度', status: 'in_progress' },
+          { content: '运行 typecheck / test / build', status: 'pending' },
+        ],
+      }),
+      status: 'done',
+      started_at: mockShowcaseNow - 4000,
+      finished_at: mockShowcaseNow - 3990,
+      duration_ms: 10,
+    },
+    {
+      id: 'mock_config',
+      name: 'jeikcode_config',
+      arguments: JSON.stringify({ action: 'guide', topic: 'models', lang: 'zh' }),
+      status: 'done',
+      started_at: mockShowcaseNow - 3900,
+      finished_at: mockShowcaseNow - 3800,
+      duration_ms: 100,
+    },
+    {
+      id: 'mock_ask',
+      name: 'request_user_input',
+      arguments: JSON.stringify({
+        questions: [
+          { header: 'Theme', question: '亮色主题还要继续压低饱和吗?', mode: 'single', options: [{ label: '继续' }, { label: '保持' }] },
+          { header: 'Scope', question: '需要同步检查手机端吗?', mode: 'single', options: [{ label: '需要' }, { label: '不用' }] },
+        ],
+      }),
+      status: 'done',
+      started_at: mockShowcaseNow - 3750,
+      finished_at: mockShowcaseNow - 3700,
+      duration_ms: 50,
+    },
+    {
+      id: 'mock_task',
+      name: 'task',
+      arguments: JSON.stringify({
+        tasks: [
+          { description: '审查工具行', subagent_type: 'explore', prompt: '检查工具行的别名、参数和状态对齐。' },
+          { description: '补测试', subagent_type: 'worker', prompt: '为 compactToolDisplay 增加覆盖测试。', scope: ['webui/src/**'] },
+        ],
+      }),
+      status: 'done',
+      started_at: mockShowcaseNow - 3600,
+      finished_at: mockShowcaseNow - 1200,
+      duration_ms: 2400,
+    },
+    {
+      id: 'mock_skill',
+      name: 'use_skill',
+      arguments: JSON.stringify({ name: 'unslop' }),
+      status: 'done',
+      started_at: mockShowcaseNow - 1100,
+      finished_at: mockShowcaseNow - 1080,
+      duration_ms: 20,
+    },
+    {
+      id: 'mock_fetch',
+      name: 'web_fetch',
+      arguments: JSON.stringify({ url: 'https://example.com/docs/tooling/typography' }),
+      status: 'done',
+      started_at: mockShowcaseNow - 1000,
+      finished_at: mockShowcaseNow - 880,
+      duration_ms: 120,
+    },
+    {
+      id: 'mock_search',
+      name: 'web_search',
+      arguments: JSON.stringify({ query: 'CSS text baseline alignment monospace sans', max_results: 5 }),
+      status: 'done',
+      started_at: mockShowcaseNow - 800,
+      finished_at: mockShowcaseNow - 560,
+      duration_ms: 240,
+    },
+    {
+      id: 'mock_finding',
+      name: 'report_finding',
+      arguments: JSON.stringify({
+        title: 'fix: stale Build closure overwrites global mode',
+        priority: 'P1',
+        confidence: 0.92,
+        file_path: 'webui/src/components/Chat.tsx',
+        line_start: 4780,
+        line_end: 4800,
+        body: 'Session hydration reads the captured modeState instead of the live ref.',
+      }),
+      status: 'done',
+      started_at: mockShowcaseNow - 500,
+      finished_at: mockShowcaseNow - 480,
+      duration_ms: 20,
+    },
+    {
+      id: 'mock_keywords',
+      name: 'long_bash_keyword_actions',
+      arguments: JSON.stringify({ action: 'add', keyword: 'cargo', global: false }),
+      status: 'running',
+      started_at: mockShowcaseNow - 400,
+      switch_ms: 90,
+    },
+    {
+      id: 'mock_mcp',
+      name: 'mcp__chrome-devtools__navigate_page',
+      arguments: JSON.stringify({ url: 'http://localhost:5173/', type: 'url' }),
+      status: 'error',
+      started_at: mockShowcaseNow - 300,
+      finished_at: mockShowcaseNow - 120,
+      duration_ms: 180,
+      switch_ms: 70,
+    },
+  ];
+
   const mockSessions: MockSession[] = [
+    {
+      id: 'sess_tool_showcase',
+      name: '工具行参数展示',
+      working_dir: 'E:/code/jeikcode',
+      project_hash: 'proj_jeikcode',
+      created_at: mockShowcaseNow - 600000,
+      updated_at: mockShowcaseNow - 1000,
+      messages: [
+        {
+          role: 'user',
+          content: '把所有工具的关键参数、颜色、截断和对齐都展示一下。',
+          created_at: mockShowcaseNow - 600000,
+        },
+        {
+          role: 'assistant',
+          reasoning: '准备一组覆盖全部工具族的 mock calls，重点展示长参数截断和右侧状态对齐。',
+          content: '下面是一条覆盖全部工具族的前端展示；展开任意一行可以看到完整参数、输出和 switch 延迟。',
+          created_at: mockShowcaseNow - 5000,
+          elapsed_ms: 18300,
+          tool_calls: showcaseTools,
+        },
+      ],
+    },
     {
       id: 'sess_input_anomaly',
       name: '输入框布局异常排查',

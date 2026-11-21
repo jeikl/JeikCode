@@ -701,7 +701,7 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
         </div>
 
         {/* 主体双栏内容 */}
-        <div class="modal-body git-webhook-body schedule-modal-body">
+        <div class={`modal-body git-webhook-body schedule-modal-body${form.mode === 'ai' ? ' schedule-ai-mode' : ''}`}>
           {/* 左侧：独立定时任务列表 */}
           <aside class="schedule-sidebar">
             <div class="schedule-sidebar-head">

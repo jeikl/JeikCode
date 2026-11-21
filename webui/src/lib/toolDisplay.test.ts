@@ -103,7 +103,11 @@ test('bash summary is the description; command is the key parameter', () => {
     'run_command',
     JSON.stringify({ summary: '运行测试', command: 'npm test' }),
   );
-  assert.deepEqual(display.description, [{ text: '运行测试', tone: 'summary' }]);
+  assert.deepEqual(display.description, [
+    { text: 'Bash', tone: 'name' },
+    { text: ' · ', tone: 'punct' },
+    { text: '运行测试', tone: 'summary' },
+  ]);
   assert.deepEqual(display.params, [{ text: 'npm test', tone: 'command' }]);
 
   const noSummary = compactToolDisplay('bash', JSON.stringify({ command: 'git status' }));
@@ -117,17 +121,36 @@ test('MCP display uses the real server/tool and task uses its first label', () =
     JSON.stringify({ query: 'rust async' }),
   );
   assert.deepEqual(mcp.description, [
-    { text: 'brave-search', tone: 'meta' },
+    { text: 'brave-search', tone: 'mcp' },
     { text: ' / ', tone: 'punct' },
-    { text: 'brave_web_search', tone: 'name' },
+    { text: 'brave_web_search', tone: 'mcp' },
   ]);
   assert.deepEqual(mcp.params, [{ text: 'rust async', tone: 'pattern' }]);
+
+  const todoPlan = compactToolDisplay(
+    'todo_write',
+    JSON.stringify({ plan: [{ content: '修复登录' }, { content: '补测试' }] }),
+  );
+  assert.deepEqual(todoPlan.params, [
+    { text: '修复登录', tone: 'title' },
+    { text: ' · ', tone: 'punct' },
+    { text: '×2', tone: 'count' },
+  ]);
+  const todoActions = compactToolDisplay(
+    'todo_write',
+    JSON.stringify({ actions: [{ action: 'add', content: '检查发布资产' }] }),
+  );
+  assert.deepEqual(todoActions.params, [{ text: '检查发布资产', tone: 'title' }]);
 
   const task = compactToolDisplay(
     'task',
     JSON.stringify({ tasks: [{ description: 'Fix parser' }, { description: 'Add tests' }] }),
   );
-  assert.deepEqual(task.description, [{ text: 'Fix parser', tone: 'summary' }]);
+  assert.deepEqual(task.description, [
+    { text: 'Task', tone: 'name' },
+    { text: ' · ', tone: 'punct' },
+    { text: 'Fix parser', tone: 'summary' },
+  ]);
   assert.deepEqual(task.params, [{ text: '×2', tone: 'count' }]);
 });
 

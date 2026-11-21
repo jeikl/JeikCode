@@ -8581,6 +8581,35 @@ async fn serve_webui_index(
     webui::serve_webui(uri).await
 }
 
+/// The console is private even when deliberately exposed on a LAN or a public
+/// gateway. Keep crawlers out independently of auth.
+const WEBUI_NOINDEX: &str = "noindex, nofollow, noarchive, nosnippet";
+
+/// Every console/API response carries a noindex header. `robots.txt` and the
+/// HTML meta tags are defense in depth; they are not an auth boundary.
+async fn add_noindex_header(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        HeaderName::from_static("x-robots-tag"),
+        HeaderValue::from_static(WEBUI_NOINDEX),
+    );
+    response
+}
+
+/// Serve a robots policy that disallows the entire console surface.
+async fn robots_txt() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (HeaderName::from_static("x-robots-tag"), WEBUI_NOINDEX),
+        ],
+        "User-agent: *\nDisallow: /\n",
+    )
+}
+
 /// SPA 静态资源回退：同时纠正用户误输入的 `/token=<value>` 路径，重定向为 `/?token=<value>` 触发正常交接鉴权。
 async fn serve_webui_fallback(uri: axum::http::Uri) -> axum::response::Response {
     if let Some(raw_token) = uri.path().strip_prefix("/token=") {
@@ -25228,6 +25257,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         // does the one-time-token → HttpOnly-cookie handoff (CWE-598); the
         // fallback serves SPA routes/assets and never carries a token.
         .route("/", axum::routing::get(serve_webui_index))
+        .route("/robots.txt", get(robots_txt))
         .fallback(serve_webui_fallback);
 
     // 受保护路由：所有数据/API 端点。仅 webui 模式（enforce_token=true）强制 token 鉴权；
@@ -25552,6 +25582,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             legacy_live_deprecation_middleware,
         ))
         .layer(axum::middleware::from_fn(activity_tracker_middleware))
+        .layer(axum::middleware::from_fn(add_noindex_header))
         .layer(axum::Extension(last_activity.clone()))
         .layer(cors_layer())
         .layer(compression_layer());
@@ -31606,6 +31637,25 @@ mod client_identity_tests {
         annotate_client_input_ids_with(&mut rows, &map);
         assert_eq!(rows[0].client_input_id.as_deref(), Some("client-steer-1"));
         assert_eq!(rows[1].client_input_id, None);
+    }
+
+    #[tokio::test]
+    async fn robots_txt_blocks_crawlers_with_noindex_headers() {
+        let response = robots_txt().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-robots-tag")
+                .and_then(|v| v.to_str().ok()),
+            Some(WEBUI_NOINDEX)
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("robots body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("User-agent: *"));
+        assert!(body.contains("Disallow: /"));
     }
 
     #[tokio::test]
