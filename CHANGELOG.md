@@ -21,6 +21,76 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.2-beta.5 (2026-11-21)
+
+**This beta closes a serious exposure risk: console WebUI instances can no longer be indexed by search engines. Older builds exposed on public networks could be discovered by Google and other crawlers, and some deployments were found without an access token. Public exposure is still supported when chosen deliberately; it now requires token authentication and should use TLS. This release also restores the 7.2.x tool-row hierarchy, applies the Atelier parameter palette, and polishes mobile settings and scheduled-task conversations.**
+
+- **[Security: Console Indexing] Console WebUI is now noindex everywhere**:
+  - Added robots/googlebot `noindex, nofollow, noarchive, nosnippet` meta tags, a Disallow-all `/robots.txt`, and `X-Robots-Tag` on every daemon and Vite response.
+  - **Upgrade warning**: if you exposed an older JeikCode WebUI to the public internet, set a strong access token immediately and upgrade. Several community deployments have already been indexed by search engines, and some publicly exposed instances had no token, which is extremely dangerous. noindex prevents discovery; it is not a substitute for authentication or TLS.
+  - docs-site and GitHub remain indexable. Public exposure behavior is unchanged.
+
+- **[WebUI: Tool Rows] Restored the 7.2.x hierarchy with a complete tool-row cleanup**:
+  - Tool names are back to 13px/650, glyphs to 13px/600 and parameters to 12.5px/400, giving the row a clear primary/secondary hierarchy again.
+  - Descriptions, Bash commands, parameters, diff totals, status marks and timings now share one 20px baseline; icons are optically centered with the tool name.
+  - Long parameter values ellipsize before the fixed right-side status/time; full arguments, output and switch latency remain available in the expanded body.
+  - Bash keeps both its summary and command; Todo shows the first plan item plus its count; task rows keep the subtask summary; MCP rows show the real server/tool instead of a generic label.
+  - Structural values use teal, patterns use rose, counts use coral, priority uses brick and MCP uses electric cyan. Blue is reserved for the brand and tool alias; no parameter uses a comment-green, pale-yellow or purple hue.
+
+- **[WebUI: Model & Provider Management] Stable model-card and provider-header layout**:
+  - Model cards use a fixed two-column header: names and aliases truncate on the left, while default/edit/delete actions always stay in one right-aligned column.
+  - The model count now sits beside the provider identity and protocol badge instead of being stranded in the action row.
+  - Mobile provider headers keep title, protocol, count and actions on one compact row; long provider names truncate safely.
+  - Model-card controls keep the same alignment and spacing across desktop and mobile.
+
+- **[WebUI: Scheduled Tasks] Tighter mobile AI composer**:
+  - Removed the redundant default provider badge and Effort selector from the scheduled-task AI composer.
+  - Send now sits on the same row as the model picker instead of occupying its own line.
+  - AI mode gives the conversation more height: the task strip is capped, the message area has a larger minimum height and the composer no longer creates an empty action row.
+
+- **[WebUI: Updates & Version Status] Core and shell updates are separated**:
+  - The top-bar green upgrade affordance, NEW badge and update dot now only follow a newer core/app version.
+  - A desktop-shell-only update remains available inside the update dialog and no longer paints the core Latest version green when current and latest are equal.
+
+- **[Developer Tooling] 17-tool showcase session**:
+  - Added a dev-only mock session covering file, edit, write, shell, grep, glob, explore, todo, config, ask, task, skill, web, finding, keyword and MCP calls.
+  - Fixtures include long paths, regexes and commands, multi-line diffs, timings, switch latency and done/error/incomplete states for visual regression checks.
+
+---
+
+**本次 beta 修复一项高风险暴露问题：控制台 WebUI 不再允许被搜索引擎收录。旧版本一旦开放到公网，可能被 Google 等搜索引擎发现；目前已经发现多位用户的站点被收录，并且有部分实例在公网暴露时没有设置 token，风险极高。公网开放策略不变，但必须设置 token 并建议使用 TLS。本版同时恢复 7.2.x 工具行层级，采用 Atelier 参数色谱，并优化移动端设置与定时任务对话。**
+
+- **[安全：控制台收录] 控制台 WebUI 已全站 noindex**：
+  - 增加 robots/googlebot noindex meta、全站 Disallow 的 robots.txt，以及 daemon 与 Vite 全响应的 X-Robots-Tag。
+  - **升级警告**：如果你曾用旧版本把 WebUI 开放到公网，请立即设置强 token 并升级。目前已发现多位用户的站点被搜索引擎收录，部分公网实例未设置 token，极为危险。noindex 只能阻止被发现，不能替代认证与 TLS。
+  - docs-site 与 GitHub 不受影响；公网开放策略不变。
+
+- **[WebUI：工具行] 恢复 7.2.x 层级并完成工具行清理**：
+  - 工具名回到 13px/650，图标 13px/600，参数 12.5px/400，重新建立清晰的“工具名强、参数弱”层级。
+  - 描述、Bash 命令、参数、diff 统计、状态勾选与耗时共用同一 20px 基线；图标与工具名视觉中心对齐。
+  - 超长参数在右侧固定状态区前省略；完整参数、输出与 switch 延迟仍保留在展开区。
+  - Bash 同时保留摘要与命令；Todo 显示首条计划内容和数量；Task 保留子代理摘要；MCP 显示真实 server/tool 而非泛化标签。
+  - 结构参数使用 teal，pattern 使用 rose，数量使用 coral，优先级使用 brick，MCP 使用 electric cyan。蓝色只留给品牌和工具别名，参数不再使用注释绿、淡黄或紫色。
+
+- **[WebUI：模型与 Provider] 模型卡片和 Provider 头部布局稳定化**：
+  - 模型卡片改为固定两列头部：名称和 alias 在左侧安全省略，默认/编辑/删除操作始终固定在右侧同一列。
+  - 模型数量移到 provider 身份与 protocol 标签旁边，不再孤零零留在操作行左侧。
+  - 移动端 provider 头部把标题、协议、数量和操作收进同一行；超长 provider 名称安全截断。
+  - 桌面端与移动端的模型卡片按钮保持一致的排列、间距和对齐。
+
+- **[WebUI：定时任务] 移动端 AI 输入区收口**：
+  - 定时任务 AI 输入区移除冗余的 default provider 标签和 Effort 选择器。
+  - 发送按钮与模型选择器同排，不再单独占用一行。
+  - AI 模式加大对话区：限制任务列表高度、提高消息区最小高度，消除空操作行。
+
+- **[WebUI：更新与版本] 内核更新与桌面壳更新分离**：
+  - 顶栏绿色升级按钮、NEW 角标和更新圆点只响应内核/应用新版本。
+  - 仅桌面壳可更新时仍保留在更新弹窗中；内核 current/latest 相等时，Latest version 不再显示绿色。
+
+- **[开发工具] 17 工具展示会话**：
+  - 新增开发用 mock 会话，覆盖文件、编辑、写入、Shell、Grep、Glob、Explore、Todo、Config、Ask、Task、Skill、Web、Finding、Keywords 与 MCP 调用。
+  - 夹具包含长路径、正则、命令、多行 diff、耗时、switch 延迟以及 done/error/incomplete 状态，用于视觉回归检查。
+
 ## v7.5.2-beta.4 (2026-11-21)
 
 **This beta delivers the additional fixes that were not part of v7.5.2-beta.3: process-lifetime approval-mode consistency, compact semantic tool rows, schedule and session-title polish, and removal of obsolete tool and display paths.**
