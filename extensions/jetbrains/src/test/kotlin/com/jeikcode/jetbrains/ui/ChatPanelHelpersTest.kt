@@ -55,25 +55,6 @@ and suggest improvements."""
     }
 
     @Test
-    fun `summarizeToolArguments extracts list_directory target_directory`() {
-        assertEquals(
-            "crates/jeikcode-capabilities/assets/teaches",
-            summarizeToolArguments(
-                "list_directory",
-                """{"target_directory":"crates/jeikcode-capabilities/assets/teaches"}""",
-            ),
-        )
-    }
-
-    @Test
-    fun `summarizeToolArguments falls back to list_directory path alias`() {
-        assertEquals(
-            "crates/foo",
-            summarizeToolArguments("list_directory", """{"path":"crates/foo"}"""),
-        )
-    }
-
-    @Test
     fun `summarizeToolArguments collapses command whitespace`() {
         assertEquals(
             "git status --short",

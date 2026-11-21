@@ -37,7 +37,7 @@ eager = "auto"
 
 [tools.bash]
 # Shared hard lifetime for every tool that waits on a spawned command
-# (bash, ast_grep, git clone, web_fetch curl fallback, parallel_edit build probe).
+# (bash, git clone, web_fetch curl fallback, parallel_edit build probe).
 # Agent bash has no timeout argument. default_timeout is !cmd only.
 # silent_kill_secs: short-command recheck interval (default 60).
 # Pager/REPL/TUI fingerprints and foreground resident servers are killed;

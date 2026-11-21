@@ -684,7 +684,6 @@ daemon 聊天模式下可用的工具：
 | `bash` | 执行 Shell 命令 |
 | `grep` | 搜索文件内容 |
 | `glob` | 按模式匹配文件 |
-| `list_directory` | 列出目录内容 |
 | `web_search` | 网页搜索 |
 | `web_fetch` | 获取网页内容 |
 | `search_replace` | 搜索替换文件内容 |

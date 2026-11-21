@@ -333,8 +333,6 @@ internal fun summarizeToolArguments(name: String, arguments: String): String {
         "bash", "execute_command" -> string("command", "cmd")
         "read_file", "create_file", "edit_file", "write_to_file", "replace_in_file" ->
             string("file_path", "path")
-        // Schema primary key is `target_directory`; `path` is a serde alias for older calls.
-        "list_directory" -> string("target_directory", "path").ifBlank { "." }
         "grep", "search_files" -> listOf(string("pattern", "query"), string("path"))
             .filter { it.isNotBlank() }
             .joinToString("  ·  ")

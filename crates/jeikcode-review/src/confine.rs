@@ -18,9 +18,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 /// JSON arg fields that carry a filesystem path across the review toolset
-/// (read/grep/glob/ast_grep). `paths` (ast_grep)
-/// is the only array-valued one.
-const PATH_KEYS: &[&str] = &["path", "file_path", "file", "dir", "paths"];
+/// (read/grep/glob).
+const PATH_KEYS: &[&str] = &["path", "file_path", "file", "dir"];
 
 /// Blocks any review tool call whose path argument escapes the repo root.
 pub struct PathConfineMiddleware {
@@ -70,13 +69,6 @@ fn check_arguments(root: &Path, args: &str) -> Result<(), String> {
     for key in PATH_KEYS {
         match v.get(key) {
             Some(serde_json::Value::String(s)) => check_one(root, s)?,
-            Some(serde_json::Value::Array(items)) => {
-                for it in items {
-                    if let Some(s) = it.as_str() {
-                        check_one(root, s)?;
-                    }
-                }
-            }
             _ => {}
         }
     }
@@ -191,13 +183,6 @@ mod tests {
         // grep with no `path` field: a regex pattern containing '/' must NOT be
         // mistaken for a path argument.
         assert!(check_arguments(&root(), r#"{"pattern":"a/b/c"}"#).is_ok());
-    }
-
-    #[test]
-    fn array_paths_any_escape_blocks() {
-        // ast_grep `paths`: one inside, one escaping → blocked; all inside → ok.
-        assert!(check_arguments(&root(), r#"{"paths":["src","/etc"]}"#).is_err());
-        assert!(check_arguments(&root(), r#"{"paths":["src","lib"]}"#).is_ok());
     }
 
     #[test]

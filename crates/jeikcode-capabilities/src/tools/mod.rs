@@ -38,7 +38,6 @@ const DEFAULT_CHILD_MAX_ROUNDS: u32 = 300;
 
 pub mod approval;
 pub mod artifact_watchdog;
-pub mod ast_grep;
 pub mod bash;
 pub mod bash_ctl;
 pub mod bash_log;
@@ -77,7 +76,6 @@ pub use approval::{
     ApprovalResponse, InMemoryPermissionStore, PermissionDecision, PermissionStore, APPROVAL_KIND,
 };
 pub use artifact_watchdog::{ArtifactWatchdog, GLOBAL_MAX_CAPACITY, GLOBAL_TARGET_CAPACITY};
-pub use ast_grep::AstGrepTool;
 pub use bash::{
     bash_invocations, normalize_command_for_grant, run_shell, BashInvocation, BashTool, ShellExit,
     ShellOutcome,
@@ -228,7 +226,7 @@ pub(crate) enum CappedCommandOutput {
 
 /// Run `cmd.output()` with `kill_on_drop` and the shared command hard-cap
 /// (`[tools.bash] max_timeout_secs`). Every tool that waits on a spawned process
-/// (`bash`, `ast_grep`, `git clone`, `web_fetch` curl fallback,
+/// (`bash`, `git clone`, `web_fetch` curl fallback,
 /// `parallel_edit` build probe) must go through this or `bash`'s own execute
 /// loop, which reads the same config.
 pub(crate) async fn output_with_max_timeout(cmd: tokio::process::Command) -> CappedCommandOutput {

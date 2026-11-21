@@ -51,8 +51,8 @@ pub(crate) fn resolve_bash_timeout_config() -> jeikcode_config::config::BashTool
 }
 
 /// Hard wall-clock seconds for any tool that waits on a spawned command
-/// (`bash`, `ast_grep`, `git clone`, `web_fetch` curl fallback,
-/// `parallel_edit` build probe). Also the ceiling for user `!cmd` / `run_shell`.
+/// (`bash`, `git clone`, `web_fetch` curl fallback, `parallel_edit` build probe).
+/// Also the ceiling for user `!cmd` / `run_shell`.
 pub(crate) fn command_max_timeout_secs() -> u64 {
     resolve_bash_timeout_config().max_timeout_secs.max(1)
 }
@@ -7091,7 +7091,7 @@ mod tests {
             "schema must steer file work to dedicated tools: {desc}"
         );
         assert!(
-            !desc.contains("list_directory") && !desc.contains("read_file"),
+            !desc.contains("read_file"),
             "schema must not advertise purged/legacy tool names: {desc}"
         );
         assert!(
@@ -7824,7 +7824,7 @@ mod tests {
             );
         }
         assert!(
-            !unix.contains("read_file") && !unix.contains("list_directory"),
+            !unix.contains("read_file"),
             "unix desc must not advertise purged/legacy tool names: {unix}"
         );
         let lc = unix.to_lowercase();

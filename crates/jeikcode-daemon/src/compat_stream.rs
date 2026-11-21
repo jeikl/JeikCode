@@ -487,7 +487,7 @@ impl CompatProjector {
     /// other). Instead we keep N fixed rows and rewrite the whole block in place:
     ///
     /// ```text
-    /// 子代理 explore#1: 正在执行 list_directory
+    /// 子代理 explore#1: 正在执行 read
     /// 子代理 worker#2:  正在执行 bash find …
     /// 子代理 worker#3:  完成
     /// ```
@@ -1670,7 +1670,7 @@ mod tests {
         for (id, msg) in [
             ("explore#1", "排队中 · 搜目录"),
             ("worker#2", "排队中 · 找 py"),
-            ("explore#1", "正在执行 list_directory"),
+            ("explore#1", "正在执行 read"),
             ("worker#2", "正在执行 bash find"),
             // content dump must NOT become a new stacked status
             ("explore#1", "## E:/Desktop 目录树\n├── a.lnk"),

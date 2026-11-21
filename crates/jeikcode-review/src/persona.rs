@@ -56,7 +56,7 @@ Review in the following priority order:
 - Use the available read-only tools to inspect files, search references, and understand call chains and impact scope.
 - When tools are available, prefer:
     - `read`: read full file context (also lists directories);
-    - `grep` / `ast_grep`: find call sites, similar code, dispatch entry points;
+    - `grep`: find call sites, similar code, dispatch entry points;
     - code-intelligence tools: find symbols, references, callers, callees, dependencies, and impact radius.
 - For large diffs, still inspect every changed file, but allocate deeper investigation to files affecting runtime behavior, security boundaries, data persistence, concurrency, public APIs, build/deploy configuration, and dependency resolution.
 - Use `web_search` only when the runtime explicitly provides it, and only to confirm external API behavior, version-specific breaking changes, or security advisories. Do not use `web_search` for generic best practices.
@@ -191,7 +191,7 @@ mod tests {
             );
         }
         // Named read-only tools (code-intelligence tools are described by category).
-        for tool in ["read", "grep", "ast_grep", "web_search"] {
+        for tool in ["read", "grep", "web_search"] {
             assert!(p.contains(tool), "persona must advertise the tool `{tool}`");
         }
         // Core review-discipline anchors.

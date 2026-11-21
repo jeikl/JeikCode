@@ -195,7 +195,7 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
             parse_candidate(raw).map_err(|e| e.to_string())
         };
         let Ok(decoded) = decoded else {
-            // `string[]` fields (ast_grep `paths`, …): a bare path is a 1-element list.
+            // `string[]` fields (custom search `paths`, …): a bare path is a 1-element list.
             if wants_array && schema_items_are_strings(property_schema) && !raw.trim().is_empty() {
                 arguments.insert(name.clone(), serde_json::Value::Array(vec![raw.into()]));
                 changed = true;
@@ -3346,8 +3346,8 @@ mod middleware_tests {
             }
         });
         let mw = RepairToolArgsMiddleware;
-        let mut c = call("ast_grep", r#"{"paths":"src/main.rs"}"#);
-        mw.repair_call("ast_grep", &paths_schema, &mut c);
+        let mut c = call("custom_search", r#"{"paths":"src/main.rs"}"#);
+        mw.repair_call("custom_search", &paths_schema, &mut c);
         let value: serde_json::Value = serde_json::from_str(&c.arguments).unwrap();
         assert_eq!(
             value["paths"],

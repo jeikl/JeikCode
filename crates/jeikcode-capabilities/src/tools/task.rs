@@ -1298,7 +1298,7 @@ impl ActionReceiptLedger {
         failed
     }
 
-    /// Chronological list of search queries executed (from grep, glob, code_explore, ast_grep)
+    /// Chronological list of search queries executed (from grep, glob, code_explore)
     /// and their success status.
     pub fn executed_searches(&self) -> Vec<(String, bool)> {
         let mut searches = Vec::new();
@@ -1451,7 +1451,7 @@ fn extract_read_path(tool: &str, args_json: &str) -> Option<String> {
 
 fn extract_search_query(tool: &str, args_json: &str) -> Option<String> {
     let t = tool.to_ascii_lowercase();
-    if t == "grep" || t == "search" || t == "glob" || t == "find_files" || t == "ast_grep" {
+    if t == "grep" || t == "search" || t == "glob" || t == "find_files" {
         let val = serde_json::from_str::<serde_json::Value>(args_json)
             .or_else(|_| {
                 serde_json::from_str::<serde_json::Value>(&super::repair::repair_json(args_json))
@@ -3290,15 +3290,6 @@ mod tests {
             images: vec![],
         });
 
-        // 5. ast_grep with pattern
-        ledger.record_call("6", "ast_grep", r#"{"pattern":"fn login($$$)"}"#);
-        ledger.record_tool_result(&ToolResult {
-            call_id: "6".into(),
-            content: "ok".into(),
-            is_error: false,
-            images: vec![],
-        });
-
         let queried = ledger.queried_files();
         assert_eq!(
             queried,
@@ -3309,12 +3300,11 @@ mod tests {
         );
 
         let searches = ledger.executed_searches();
-        assert_eq!(searches.len(), 5);
+        assert_eq!(searches.len(), 4);
         assert_eq!(searches[0], ("TaskTool".to_string(), true));
         assert_eq!(searches[1], ("ActionReceipt".to_string(), true));
         assert_eq!(searches[2], ("TokenClaims".to_string(), true));
         assert_eq!(searches[3], ("*.toml".to_string(), true));
-        assert_eq!(searches[4], ("fn login($$$)".to_string(), true));
     }
 
     #[test]

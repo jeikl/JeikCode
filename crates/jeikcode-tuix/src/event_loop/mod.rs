@@ -6829,7 +6829,6 @@ mod tool_format_tests {
         assert_eq!(display_tool_name_short("write_file"), "Write");
         assert_eq!(display_tool_name_short("edit_file"), "Edit");
         assert_eq!(display_tool_name_short("create_file"), "Create");
-        assert_eq!(display_tool_name_short("list_directory"), "List");
         assert_eq!(
             display_tool_name_short("parallel_edit_files"),
             "ParallelEdit"
@@ -6885,26 +6884,6 @@ mod tool_format_tests {
         assert_eq!(format_tool_detail("write", args), "out.rs"); // canonical
         assert_eq!(format_tool_detail("write_file", args), "out.rs"); // legacy alias
         assert_eq!(format_tool_detail("create_file", args), "out.rs"); // legacy-only
-    }
-
-    #[test]
-    fn format_tool_detail_list_directory_prefers_target_directory() {
-        let args = r#"{"target_directory":"crates/jeikcode-capabilities/assets/teaches"}"#;
-        assert_eq!(
-            format_tool_detail("list_directory", args),
-            "crates/jeikcode-capabilities/assets/teaches"
-        );
-    }
-
-    #[test]
-    fn format_tool_detail_list_directory_falls_back_to_path_alias() {
-        let args = r#"{"path":"crates/foo"}"#;
-        assert_eq!(format_tool_detail("list_directory", args), "crates/foo");
-    }
-
-    #[test]
-    fn format_tool_detail_list_directory_defaults_to_dot() {
-        assert_eq!(format_tool_detail("list_directory", "{}"), ".");
     }
 
     #[test]
@@ -24047,11 +24026,6 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
             .map(|p| crate::width::truncate_with_ellipsis(&p, 100))
             .unwrap_or_default(),
         "bash" | "run_command" => format_run_command_detail(&get_str),
-        // Schema primary key is `target_directory`; `path` is a serde alias for older calls.
-        "list_directory" => get_str("target_directory")
-            .or_else(|| get_str("path"))
-            .unwrap_or_else(|| ".".into()),
-        "change_dir" => get_str("path").unwrap_or_else(|| ".".into()),
         "code_review" => {
             if let Some(scope) = v.get("scope") {
                 return match scope.get("kind").and_then(|kind| kind.as_str()) {

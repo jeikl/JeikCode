@@ -13612,7 +13612,7 @@ mod tests {
         let mut vterm = crate::test_term::VirtualTerminal::new(80, 24);
         let status = status_basic();
         r.render(UiLine::ToolCall {
-            name: "ListDirectory".into(),
+            name: "Read".into(),
             detail: ".".into(),
         });
         r.render(UiLine::ToolResult {
@@ -13669,7 +13669,7 @@ mod tests {
         // name's prominent tier (`tool_bullet_style` = `style_bold(Role::ToolName)`),
         // anchoring the tool-call row as a single bold glyph + name.
         let hdr_idx = (0..vterm.height() as usize)
-            .find(|&i| vterm.row_text(i).contains("ListDirectory"))
+            .find(|&i| vterm.row_text(i).contains("Read"))
             .unwrap_or_else(|| panic!("header row missing\ndump:\n{}", vterm.dump()));
         let bullet_col = vterm.row_text(hdr_idx).find('●').unwrap();
         let bullet_cell = vterm.cell_at(hdr_idx, bullet_col);
@@ -13678,7 +13678,7 @@ mod tests {
             "`●` bullet must be bold (prominent tier) in dark theme, got {:?}",
             bullet_cell,
         );
-        let name_col = vterm.row_text(hdr_idx).find("ListDirectory").unwrap();
+        let name_col = vterm.row_text(hdr_idx).find("Read").unwrap();
         let name_cell = vterm.cell_at(hdr_idx, name_col);
         assert!(
             name_cell.bold,

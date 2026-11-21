@@ -2,8 +2,8 @@
 //! construction, UTF-8 locale, admin check). Consumed here plus by the CLI/TUI drivers.
 //!
 //! On Windows, a GUI / **console-less** parent (the jeikcode-daemon behind
-//! clawbot/OpenClaw) that spawns a console program (cmd.exe, git, ast-grep, a
-//! language server, …) makes Windows allocate a *fresh* console window for the
+//! clawbot/OpenClaw) that spawns a console program (cmd.exe, git, a language
+//! server, …) makes Windows allocate a *fresh* console window for the
 //! child — it flashes on the desktop every turn. A TUI parent does NOT show
 //! this because the child inherits the TUI's existing console. `CREATE_NO_WINDOW`
 //! tells Windows not to allocate one at all, fixing the daemon case without

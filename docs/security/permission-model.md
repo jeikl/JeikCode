@@ -171,7 +171,6 @@ Current mappings are:
 | `grep` | `Read` |
 | `code_explore` | `Read` |
 | `diagnostics` with `file_path` | `Read` |
-| `list_directory` | `Enumerate` |
 | `glob` | `Enumerate` |
 | `cd` | `Enumerate` |
 | `repo_map` | `Enumerate` |

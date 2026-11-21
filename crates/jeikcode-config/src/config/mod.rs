@@ -142,8 +142,8 @@ pub struct BashToolConfig {
     /// Default wall-clock for user `!cmd` when that path omits a timeout. Agent `bash` ignores this.
     pub default_timeout_secs: u64,
     /// Hard process lifetime from spawn, in seconds, for every tool that waits
-    /// on a spawned command (`bash`, `ast_grep`, `git clone`,
-    /// `web_fetch` curl fallback, `parallel_edit` build probe). Also the ceiling
+    /// on a spawned command (`bash`, `git clone`, `web_fetch` curl fallback,
+    /// `parallel_edit` build probe). Also the ceiling
     /// for user `!cmd` / `run_shell`. Agent `bash` has no per-call timeout arg.
     pub max_timeout_secs: u64,
     /// Idle kill for short commands on agent `bash` and user `!cmd`: no new

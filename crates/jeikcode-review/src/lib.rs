@@ -6,7 +6,7 @@
 //!
 //! L2 owns:
 //! 1. **Assembly** — [`build_review_agent`]: wires provider + the read-only review toolset
-//!    (read/grep/glob/ast_grep/codeintel/web_search) + the `report_finding` sink + the
+//!    (read/grep/glob/codeintel/web_search) + the `report_finding` sink + the
 //!    reviewer persona into a kernel [`Agent`](jeikcode_kernel::agent::Agent). It returns
 //!    a [`ReportFindingTool`] HANDLE so the caller collects findings after the run.
 //! 2. **Persona** — [`persona::review_persona`]: the reviewer system prompt.

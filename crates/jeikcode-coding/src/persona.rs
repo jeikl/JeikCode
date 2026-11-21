@@ -1370,14 +1370,6 @@ mod tests {
     fn context_routing_skips_repo_map_for_concrete_targets() {
         let p = coding_persona("m", true, false);
         assert!(
-            !p.contains("1x list_directory + 1x repo_map"),
-            "must not force pairing list_directory with repo_map: {p}"
-        );
-        assert!(
-            !p.contains("call `list_directory` (depth"),
-            "must not tell the model to list_directory depth 2-3 on round 1: {p}"
-        );
-        assert!(
             !p.contains("repo_map"),
             "persona must not mention legacy repo_map: {p}"
         );

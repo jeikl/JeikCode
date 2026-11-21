@@ -246,7 +246,7 @@ eager = "auto"
 # 内核工具结果上限默认 256 KiB。
 # 设为 0 完全禁用折叠（所有工具输出原样进入上下文，超大输出会占用上下文窗口）。
 # 环境变量 JEIKCODE_TOOL_OUTPUT_THRESHOLD_BYTES 可覆盖本项（env 优先）。
-# 命令类工具共用硬寿命：bash / ast_grep / git clone / web_fetch curl 回退 / parallel_edit 构建探测。
+# 命令类工具共用硬寿命：bash / git clone / web_fetch curl 回退 / parallel_edit 构建探测。
 # 模型 bash 不传 timeout。max_timeout_secs = 从启动算子进程最长活多久，到点才杀（bash 保留已有输出）。
 # default_timeout 只给用户 !cmd。silent_kill_secs 是短命令复查间隔（默认 60）：
 # 到点只体检，pager/REPL/TUI 与前台常驻服务才杀；安静等待一直跑到退出或 max_timeout_secs。
@@ -283,7 +283,7 @@ no_fold_tools = [
     "web_search",
 ]
 
-# 同一回合里只读工具（read_file / grep / glob / list_directory）最多同时跑几个。
+# 同一回合里只读工具（read_file / grep / glob）最多同时跑几个。
 # 默认 16，硬上限 256。write_file / edit_file 走独占写锁，不受这个数字限制
 # （它们本来就不能并行，避免读写交叉看到半成品）。
 # 环境变量 JEIKCODE_MAX_PARALLEL_TOOLS 覆盖此项（重启 runtime 后生效）。

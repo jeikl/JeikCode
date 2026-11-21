@@ -114,7 +114,7 @@ cat reviewer.md | jeikcodex review --system-prompt-file -
 ```
 
 > 全量覆盖会**丢弃内置的工具清单 + `report_finding` 用法说明**。你的自定义提示词里必须告诉模型
-> 有哪些工具(`read_file`/`grep`/`ast_grep`/codeintel/`web_search`),以及"逐条用
+> 有哪些工具(`read_file`/`grep`/codeintel/`web_search`),以及"逐条用
 > `report_finding` 上报问题",否则 findings 会是空的。
 
 ---

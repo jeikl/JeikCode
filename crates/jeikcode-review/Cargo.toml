@@ -6,7 +6,7 @@ description = "L2 review specialization: assembles the neutral kernel + capabili
 
 [dependencies]
 jeikcode-kernel = { path = "../jeikcode-kernel" }
-# Read-only review toolset: fs read/grep/glob + ast_grep + report_finding (in `tools`),
+# Read-only review toolset: fs read/grep/glob + report_finding (in `tools`),
 # code-intelligence (`codeintel`), and web_search (`web`). NO write/edit/bash mounted.
 jeikcode-capabilities = { path = "../jeikcode-capabilities", features = ["provider", "tools", "codeintel", "web", "skills"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

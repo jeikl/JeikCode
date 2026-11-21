@@ -38,9 +38,7 @@ fn count_indexed_sources(working_dir: &Path) -> usize {
         .count()
 }
 use jeikcode_capabilities::provider::{OpenAiCompatConfig, OpenAiCompatProvider};
-use jeikcode_capabilities::tools::{
-    register_coding_tools, AstGrepTool, ReportFindingTool, WebSearchTool,
-};
+use jeikcode_capabilities::tools::{register_coding_tools, ReportFindingTool, WebSearchTool};
 use jeikcode_kernel::agent::Agent;
 use jeikcode_kernel::provider::LlmProvider;
 use jeikcode_kernel::tool::{MountedTools, ToolRegistry};
@@ -50,7 +48,7 @@ use std::sync::Arc;
 /// reviewer investigates and reports, it never mutates. (The diff itself is injected as
 /// the task by the caller, so the agent needs no shell to obtain it.)
 fn review_tool_names(no_web: bool, mount_graph: bool) -> Vec<&'static str> {
-    let mut names = vec!["read", "grep", "glob", "ast_grep", "report_finding"];
+    let mut names = vec!["read", "grep", "glob", "report_finding"];
     // web_search is mounted by default; `no_web` drops it (the tool stays registered but
     // unmounted), so a blocked/unreachable web egress can't make the model's web_search
     // call abort the whole review.
@@ -211,7 +209,6 @@ fn mount_review_tools(
     let mut reg = ToolRegistry::new();
     register_coding_tools(&mut reg); // read/grep/glob (+ write/edit/run_command, unmounted)
     register_codeintel_tools(&mut reg); // registered always; mounted only when `mount_graph`
-    reg.register(Arc::new(AstGrepTool));
     reg.register(Arc::new(WebSearchTool::new())); // registered always; mounted only when !no_web
     reg.register(Arc::new(report.clone())); // shares state with the returned handle
                                             // Skills: opt-in via --skill-dir (empty ⇒ no skill tools, bare-CLI behavior).
@@ -500,11 +497,7 @@ mod tests {
     fn review_mounts_readonly_set_only() {
         // The mounted names are read-only — no mutation tools.
         let names = review_tool_names(false, true);
-        assert!(
-            names.contains(&"read")
-                && names.contains(&"report_finding")
-                && names.contains(&"ast_grep")
-        );
+        assert!(names.contains(&"read") && names.contains(&"report_finding"));
         for forbidden in [
             "write",
             "write_file",
@@ -536,7 +529,7 @@ mod tests {
             "no_web 应去掉 web_search"
         );
         // 其它只读工具仍在
-        for keep in ["read", "grep", "glob", "ast_grep", "report_finding"] {
+        for keep in ["read", "grep", "glob", "report_finding"] {
             assert!(without_web.contains(&keep), "no_web 不应误伤 `{keep}`");
         }
     }
