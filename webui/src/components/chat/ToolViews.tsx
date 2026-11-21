@@ -3,7 +3,7 @@ import { useT } from '../../settings';
 import { toolMatchesSearch } from '../../lib/canvasSearch';
 import { copyTextToClipboard } from '../../lib/clipboard';
 import {
-  compactToolDetail,
+  compactToolDisplay,
   computeToolDiffStats,
   formatToolDetail,
   formatToolPayload,
@@ -23,8 +23,7 @@ import { formatToolTiming, resolveToolCostMs } from '../../lib/toolTiming';
 import type { ToolRow } from '../../lib/toolRows';
 import { showToast } from '../Toast';
 import { highlightText } from './highlight';
-import { DiffStatBadge, ToolArgPreview, ToolStatusIcon } from './ToolBits';
-import { displayToolName } from './toolName';
+import { DiffStatBadge, ToolStatusIcon } from './ToolBits';
 
 export function ToolGroupView({ tools, search }: { tools: ToolRow[]; search: string }) {
   const t = useT();
@@ -282,7 +281,11 @@ export function ToolRowView({
         failed: String(counts.failed),
       })
     : formatToolDetail(tool.name, tool.args);
-  const compactDetail = counts ? headerDetail : compactToolDetail(tool.name, tool.args);
+  const compactDisplay = compactToolDisplay(tool.name, tool.args, {
+    subtaskCount: counts?.total,
+    firstSubtaskDescription:
+      tool.subtasks?.[0]?.description || tool.subtasks?.[0]?.label,
+  });
 
   return (
     <div class={'tool-body kind-' + category + ' notranslate'} translate={false}>
@@ -300,11 +303,22 @@ export function ToolRowView({
         }}
       >
         <span class="tool-glyph" aria-hidden="true">{glyph}</span>
-        <span class="tool-name notranslate" translate={false}>{displayToolName(tool.name)}</span>
-        {compactDetail && (
-          <span class="tool-compact-detail" title={headerDetail}>{compactDetail}</span>
+        <span class="tool-name notranslate" translate={false} title={tool.name}>
+          {compactDisplay.description.map((part, i) => (
+            <span key={i} class={'tool-tone-' + part.tone}>
+              {highlightText(part.text, search)}
+            </span>
+          ))}
+        </span>
+        {compactDisplay.params.length > 0 && (
+          <span class="tool-key-param notranslate" translate={false} title={headerDetail}>
+            {compactDisplay.params.map((part, i) => (
+              <span key={i} class={'tool-tone-' + part.tone}>
+                {highlightText(part.text, search)}
+              </span>
+            ))}
+          </span>
         )}
-        <ToolArgPreview text={headerDetail} search={search} />
         {diffStats && (
           <DiffStatBadge additions={diffStats.additions} deletions={diffStats.deletions} />
         )}

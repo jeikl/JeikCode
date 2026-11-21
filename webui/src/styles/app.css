@@ -20228,21 +20228,9 @@ select option {
     line-height: 1.35;
   }
   .tool-annotation { margin-left: auto; align-self: flex-start; }
-  /* Mobile collapsed rows: tool name + key argument + diff stats + status time.
+  /* Mobile collapsed rows: description + key parameter + diff + status time.
      Full JSON and switch latency appear after tapping the row. */
   .tool-name-secondary { display: none !important; }
-  .tool-compact-detail {
-    display: inline-flex !important;
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--app-secondary-foreground);
-    font-family: var(--app-monospace-font-family);
-    font-size: 11.5px;
-    line-height: 1.35;
-  }
   .diff-stat-badge { display: inline-flex !important; margin-left: 2px; margin-right: 0; }
   .tool-timing { display: none !important; }
   .tool-group-header { row-gap: 2px; }
@@ -20310,9 +20298,6 @@ select option {
   .composer-compact-tokens { font-size: 10px !important; }
   .input-footer { min-height: 30px; }
 }
-
-/* Desktop keeps the full inline argument preview; mobile uses this compact one. */
-.tool-compact-detail { display: none; }
 
 /* Collapsed tool row: duration + status glyph only. */
 .tool-status-time {
@@ -20490,6 +20475,85 @@ select option {
 :root:not([data-theme='light']) .top-nav-model-slot .effort-capsule-trigger .model-selector-chevron {
   opacity: 0.8 !important;
   color: #a1a7b3 !important;
+}
+
+/* === Tool row v2: one line, description first, colored key parameter === */
+:root {
+  --app-tool-param-path: #7dd3fc;
+  --app-tool-param-range: #a5b4fc;
+  --app-tool-param-pattern: #fbbf24;
+  --app-tool-param-command: #86efac;
+  --app-tool-param-url: #67e8f9;
+  --app-tool-param-priority: #fbbf24;
+}
+:root[data-theme='light'] {
+  --app-tool-param-path: #2563eb;
+  --app-tool-param-range: #4f46e5;
+  --app-tool-param-pattern: #b45309;
+  --app-tool-param-command: #15803d;
+  --app-tool-param-url: #0e7490;
+  --app-tool-param-priority: #b45309;
+}
+
+.tool-header {
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  min-width: 0 !important;
+  row-gap: 0 !important;
+}
+.tool-header .tool-name {
+  display: block !important;
+  flex: 0 1 auto !important;
+  min-width: 0 !important;
+  max-width: 38% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  font-size: 12.5px !important;
+  line-height: 1.35 !important;
+}
+.tool-header .tool-key-param {
+  display: block !important;
+  flex: 1 1 0 !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  font-family: var(--app-monospace-font-family) !important;
+  font-size: 11.5px !important;
+  line-height: 1.35 !important;
+  color: var(--app-secondary-foreground) !important;
+  font-variant-numeric: tabular-nums;
+}
+.tool-header .tool-status-time {
+  flex: 0 0 auto !important;
+  margin-left: auto !important;
+  white-space: nowrap !important;
+}
+.tool-header .diff-stat-badge,
+.tool-header .tool-chevron,
+.tool-header .tool-glyph {
+  flex: 0 0 auto !important;
+}
+
+.tool-tone-name { color: var(--app-link-color); }
+.tool-tone-summary { color: var(--app-primary-foreground); font-weight: 500; }
+.tool-tone-path { color: var(--app-tool-param-path); }
+.tool-tone-range { color: var(--app-tool-param-range); }
+.tool-tone-pattern { color: var(--app-tool-param-pattern); }
+.tool-tone-command { color: var(--app-tool-param-command); }
+.tool-tone-url { color: var(--app-tool-param-url); }
+.tool-tone-count { color: var(--app-brand); font-weight: 600; }
+.tool-tone-priority { color: var(--app-tool-param-priority); font-weight: 600; }
+.tool-tone-title { color: var(--app-primary-foreground); }
+.tool-tone-meta { color: var(--app-secondary-foreground); }
+.tool-tone-punct { color: var(--app-secondary-foreground); opacity: 0.55; }
+.tool-tone-danger { color: var(--app-error-foreground); }
+
+@media (max-width: 768px) {
+  .tool-header { align-items: center !important; row-gap: 0 !important; }
+  .tool-header .tool-name { max-width: 42% !important; font-size: 12px !important; }
+  .tool-header .tool-key-param { font-size: 11px !important; }
 }
 
 /* Version readouts: quiet mono annotations, not chips. */

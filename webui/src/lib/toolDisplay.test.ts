@@ -19,6 +19,8 @@ import {
   formatToolCompactJson,
   formatToolDetail,
   compactToolDetail,
+  compactToolDisplay,
+  frontendToolAlias,
   colorizeInlineJson,
 } from './toolDisplay.ts';
 
@@ -60,6 +62,73 @@ test('compactToolDetail uses the last path segment and keeps read ranges / grep 
     compactToolDetail('grep', JSON.stringify({ pattern: 'TODO', path: 'webui/src/components' })),
     'components · TODO',
   );
+});
+
+test('frontend aliases shorten long tool names without touching backend names', () => {
+  assert.equal(frontendToolAlias('run_command'), 'Bash');
+  assert.equal(frontendToolAlias('bash'), 'Bash');
+  assert.equal(frontendToolAlias('code_explore'), 'Explore');
+  assert.equal(frontendToolAlias('long_bash_keyword_actions'), 'Keywords');
+  assert.equal(frontendToolAlias('request_user_input'), 'Ask');
+  assert.equal(frontendToolAlias('todo_write'), 'Todo');
+  assert.equal(frontendToolAlias('jeikcode_config'), 'Config');
+  assert.equal(
+    frontendToolAlias('mcp__brave-search__brave_web_search'),
+    'brave-search / brave_web_search',
+  );
+  assert.equal(frontendToolAlias('mcp__lonely'), 'lonely');
+});
+
+test('compactToolDisplay puts description first and tones the key parameter', () => {
+  const read = compactToolDisplay(
+    'read',
+    JSON.stringify({ path: 'webui/src/styles/app.css', offset: 4808, limit: 150 }),
+  );
+  assert.deepEqual(read.description, [{ text: 'Read', tone: 'name' }]);
+  assert.deepEqual(read.params, [
+    { text: 'app.css', tone: 'path' },
+    { text: ' ', tone: 'punct' },
+    { text: '4808-4957', tone: 'range' },
+  ]);
+
+  const grep = compactToolDisplay('grep', JSON.stringify({ pattern: 'TODO', path: '.' }));
+  assert.deepEqual(grep.params, [{ text: 'TODO', tone: 'pattern' }]);
+
+  const edit = compactToolDisplay('edit', JSON.stringify({ path: 'a/b/app.tsx' }));
+  assert.deepEqual(edit.params, [{ text: 'app.tsx', tone: 'path' }]);
+});
+
+test('bash summary is the description; command is the key parameter', () => {
+  const display = compactToolDisplay(
+    'run_command',
+    JSON.stringify({ summary: '运行测试', command: 'npm test' }),
+  );
+  assert.deepEqual(display.description, [{ text: '运行测试', tone: 'summary' }]);
+  assert.deepEqual(display.params, [{ text: 'npm test', tone: 'command' }]);
+
+  const noSummary = compactToolDisplay('bash', JSON.stringify({ command: 'git status' }));
+  assert.deepEqual(noSummary.description, [{ text: 'Bash', tone: 'name' }]);
+  assert.deepEqual(noSummary.params, [{ text: 'git status', tone: 'command' }]);
+});
+
+test('MCP display uses the real server/tool and task uses its first label', () => {
+  const mcp = compactToolDisplay(
+    'mcp__brave-search__brave_web_search',
+    JSON.stringify({ query: 'rust async' }),
+  );
+  assert.deepEqual(mcp.description, [
+    { text: 'brave-search', tone: 'meta' },
+    { text: ' / ', tone: 'punct' },
+    { text: 'brave_web_search', tone: 'name' },
+  ]);
+  assert.deepEqual(mcp.params, [{ text: 'rust async', tone: 'pattern' }]);
+
+  const task = compactToolDisplay(
+    'task',
+    JSON.stringify({ tasks: [{ description: 'Fix parser' }, { description: 'Add tests' }] }),
+  );
+  assert.deepEqual(task.description, [{ text: 'Fix parser', tone: 'summary' }]);
+  assert.deepEqual(task.params, [{ text: '×2', tone: 'count' }]);
 });
 
 test('formatToolDetail puts summary then command ahead of shell', () => {

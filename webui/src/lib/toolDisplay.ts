@@ -40,9 +40,6 @@ export function toolCategory(name: string): ToolCategory {
     case 'web_fetch':
     case 'web_search':
       return 'globe';
-    case 'list_directory':
-    case 'change_dir':
-      return 'folder';
     case 'use_skill':
       return 'skill';
     default:
@@ -707,7 +704,7 @@ function finiteNumber(value: unknown): number | null {
 /**
  * Mobile / compact tool-row summary: only the parameter a developer needs at a glance.
  * - Read: `app.css 123-567` (file name + requested line range)
- * - Edit / Write / list_directory: `app.css` (last path segment)
+ * - Edit / Write: `app.css` (last path segment)
  * - Shell: the first command line
  * - Other tools: path/query/url if present, else a short compact JSON preview.
  * The expanded body still renders the complete argument payload.
@@ -765,7 +762,7 @@ export function compactToolDetail(name: string, argsJson: string): string {
 
   if (base && [
     'edit', 'editfile', 'write', 'writefile', 'createfile',
-    'searchreplace', 'paralleleditfiles', 'listdirectory', 'changedir',
+    'searchreplace', 'paralleleditfiles',
   ].includes(norm)) {
     return base;
   }
@@ -791,5 +788,390 @@ export function compactToolDetail(name: string, argsJson: string): string {
 
   if (base) return base;
   return formatToolDetail(name, argsJson).slice(0, 100);
+}
+
+/** Semantic tones for the one-line tool header. Only the key value is tinted. */
+export type ToolTone =
+  | 'name'
+  | 'summary'
+  | 'path'
+  | 'range'
+  | 'pattern'
+  | 'command'
+  | 'url'
+  | 'count'
+  | 'priority'
+  | 'title'
+  | 'meta'
+  | 'danger'
+  | 'punct';
+
+export interface ToolTextPart {
+  text: string;
+  tone: ToolTone;
+}
+
+export interface ToolDisplay {
+  /** Description first: front-end alias, bash summary, or first task label. */
+  description: ToolTextPart[];
+  /** Key parameter second; long values are ellipsized by the container. */
+  params: ToolTextPart[];
+}
+
+export interface CompactToolDisplayOptions {
+  /** Task rows may only have SubtaskPanel data, not the raw `tasks` args. */
+  subtaskCount?: number;
+  firstSubtaskDescription?: string;
+}
+
+/** Front-end-only aliases. Backend tool names are never rewritten. */
+const FRONTEND_TOOL_ALIASES: Record<string, string> = {
+  read: 'Read',
+  read_file: 'Read',
+  edit: 'Edit',
+  edit_file: 'Edit',
+  write: 'Write',
+  write_file: 'Write',
+  create_file: 'Write',
+  bash: 'Bash',
+  run_command: 'Bash',
+  long_bash_keyword_actions: 'Keywords',
+  grep: 'Grep',
+  glob: 'Glob',
+  code_explore: 'Explore',
+  todo_write: 'Todo',
+  todowrite: 'Todo',
+  todo: 'Todo',
+  jeikcode_config: 'Config',
+  jeikcode_config_guide: 'Config',
+  request_user_input: 'Ask',
+  task: 'Task',
+  use_skill: 'Skill',
+  web_fetch: 'Fetch',
+  web_search: 'Search',
+  report_finding: 'Finding',
+};
+
+function pascalToolName(name: string): string {
+  const trimmed = name.trim();
+  return trimmed
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join('') || trimmed;
+}
+
+/**
+ * Display identity for a tool. MCP names become the real `server / tool`
+ * instead of a dead "MCP" string. Unknown names fall back to PascalCase.
+ */
+export function frontendToolAlias(name: string): string {
+  const trimmed = name.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('mcp__')) {
+    const rest = trimmed.slice('mcp__'.length);
+    const parts = rest.split('__');
+    if (parts.length >= 2) {
+      return `${parts[0]} / ${parts.slice(1).join('__')}`;
+    }
+    return rest || 'MCP';
+  }
+  return FRONTEND_TOOL_ALIASES[lower] ?? pascalToolName(trimmed);
+}
+
+function mcpDescription(name: string): ToolTextPart[] {
+  const rest = name.trim().slice('mcp__'.length);
+  const parts = rest.split('__');
+  if (parts.length >= 2) {
+    return [
+      { text: parts[0]!, tone: 'meta' },
+      { text: ' / ', tone: 'punct' },
+      { text: parts.slice(1).join('__'), tone: 'name' },
+    ];
+  }
+  return [{ text: rest || 'MCP', tone: 'name' }];
+}
+
+function firstLine(text: string, max = 120): string {
+  const line = text.trim().split(/\r?\n/, 1)[0] ?? '';
+  return line.length > max ? line.slice(0, max - 1) + '…' : line;
+}
+
+function displayFetchUrl(raw: string): string {
+  return raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+}
+
+function toneForKey(key: string): ToolTone {
+  switch (key) {
+    case 'path':
+    case 'file_path':
+    case 'filepath':
+    case 'filePath':
+    case 'file':
+    case 'target_file':
+    case 'targetFile':
+    case 'filename':
+    case 'fileName':
+    case 'dir':
+    case 'directory':
+      return 'path';
+    case 'url':
+      return 'url';
+    case 'command':
+    case 'cmd':
+      return 'command';
+    case 'query':
+    case 'pattern':
+    case 'glob':
+    case 'expression':
+    case 'name':
+    case 'prompt':
+      return 'pattern';
+    default:
+      return 'meta';
+  }
+}
+
+function firstMappedString(
+  args: Record<string, unknown>,
+  keys: string[],
+): { key: string; value: string } | null {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) {
+      return { key, value };
+    }
+  }
+  return null;
+}
+
+function objectArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> =>
+    Boolean(item) && typeof item === 'object' && !Array.isArray(item),
+  );
+}
+
+function separator(text = ' · '): ToolTextPart {
+  return { text, tone: 'punct' };
+}
+
+/**
+ * Collapsed-row display: description first, key parameter second. The returned
+ * parts carry semantic tones; CSS ellipsizes the parameter container as a whole,
+ * so the right-side status/time never wrap to another line.
+ */
+export function compactToolDisplay(
+  name: string,
+  argsJson: string,
+  opts: CompactToolDisplayOptions = {},
+): ToolDisplay {
+  const description: ToolTextPart[] = [{ text: frontendToolAlias(name), tone: 'name' }];
+  const params: ToolTextPart[] = [];
+  const trimmed = (argsJson ?? '').trim();
+  if (!trimmed) {
+    // Task rows can be rendered from SubtaskPanel data alone (no raw args).
+    if (name.trim().toLowerCase() === 'task') {
+      if (opts.firstSubtaskDescription) {
+        description.splice(0, 1, { text: opts.firstSubtaskDescription, tone: 'summary' });
+      }
+      if ((opts.subtaskCount ?? 0) > 1) {
+        params.push({ text: `×${opts.subtaskCount}`, tone: 'count' });
+      }
+    }
+    return { description, params };
+  }
+
+  let args: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { description, params };
+    }
+    args = parsed as Record<string, unknown>;
+  } catch {
+    return { description, params };
+  }
+
+  const norm = name.trim().toLowerCase().replace(/[-_]/g, '');
+  if (name.trim().toLowerCase().startsWith('mcp__')) {
+    description.splice(0, description.length, ...mcpDescription(name));
+    const arg = firstMappedString(args, [
+      'query', 'pattern', 'url', 'path', 'file_path', 'file', 'name', 'prompt', 'command',
+    ]);
+    if (arg) {
+      params.push({
+        text: arg.key === 'url' ? displayFetchUrl(arg.value) : arg.value,
+        tone: toneForKey(arg.key),
+      });
+    }
+    return { description, params };
+  }
+
+  const pathKeys = [
+    'path', 'file_path', 'filepath', 'filePath', 'file', 'target_file', 'targetFile',
+    'filename', 'fileName', 'dir', 'directory', 'cwd', 'artifact_id', 'artifactid', 'artifact',
+  ];
+  let path = '';
+  for (const key of pathKeys) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) { path = value; break; }
+  }
+  if (!path && Array.isArray(args.edits)) {
+    for (const edit of args.edits) {
+      if (edit && typeof edit === 'object') {
+        const row = edit as Record<string, unknown>;
+        const value = row.path ?? row.file_path ?? row.filePath ?? row.file;
+        if (typeof value === 'string' && value.trim()) { path = value; break; }
+      }
+    }
+  }
+  const base = path ? basenameOfPath(path) : '';
+
+  if (norm === 'bash' || norm === 'runcommand') {
+    const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+    if (summary) description.splice(0, 1, { text: summary, tone: 'summary' });
+    const command = args.command ?? args.cmd ?? args.script;
+    if (typeof command === 'string' && command.trim()) {
+      params.push({ text: firstLine(command), tone: 'command' });
+    }
+    return { description, params };
+  }
+
+  if (norm === 'longbashkeywordactions') {
+    const action = typeof args.action === 'string' ? args.action.toLowerCase() : '';
+    const keyword = args.keyword;
+    const mark = action === 'delete' ? '−' : action === 'add' ? '+' : (action || '');
+    if (mark) params.push({ text: mark, tone: action === 'delete' ? 'danger' : 'command' });
+    if (typeof keyword === 'string' && keyword.trim()) {
+      if (params.length) params.push({ text: ' ', tone: 'punct' });
+      params.push({ text: keyword.trim(), tone: 'pattern' });
+    }
+    if (args.global === true) {
+      params.push(separator());
+      params.push({ text: 'global', tone: 'meta' });
+    }
+    return { description, params };
+  }
+
+  if (norm === 'read' || norm === 'readfile') {
+    if (base) params.push({ text: base, tone: 'path' });
+    const offset =
+      finiteNumber(args.offset) ?? finiteNumber(args.start_line) ?? finiteNumber(args.start) ?? finiteNumber(args.line_start);
+    const limit = finiteNumber(args.limit);
+    const end =
+      finiteNumber(args.end_line) ?? finiteNumber(args.end) ?? finiteNumber(args.line_end) ??
+      (offset != null && limit != null ? offset + limit - 1 : null);
+    const range = offset != null && end != null ? `${offset}-${end}` : offset != null ? `${offset}+` : limit != null ? `1-${limit}` : '';
+    if (range) {
+      if (params.length) params.push({ text: ' ', tone: 'punct' });
+      params.push({ text: range, tone: 'range' });
+    }
+    return { description, params };
+  }
+
+  if (['edit', 'editfile', 'write', 'writefile', 'createfile', 'searchreplace', 'paralleleditfiles'].includes(norm)) {
+    if (base) params.push({ text: base, tone: 'path' });
+    const edits = objectArray(args.edits);
+    if (edits.length > 1) {
+      if (params.length) params.push({ text: ' ', tone: 'punct' });
+      params.push({ text: `×${edits.length}`, tone: 'count' });
+    }
+    return { description, params };
+  }
+
+  if (['grep', 'glob', 'codeexplore', 'codesearch', 'search'].includes(norm)) {
+    const matcher = args.pattern ?? args.query ?? args.glob ?? args.expression;
+    const matcherText = typeof matcher === 'string' ? firstLine(matcher.trim(), 160) : '';
+    const showPath = base && path.trim() !== '.' && path.trim() !== './';
+    if (showPath) params.push({ text: base, tone: 'path' });
+    if (matcherText) {
+      if (params.length) params.push(separator());
+      params.push({ text: matcherText, tone: 'pattern' });
+    }
+    return { description, params };
+  }
+
+  if (norm === 'todo' || norm === 'todowrite') {
+    const rows = Array.isArray(args.todos)
+      ? args.todos
+      : Array.isArray(args.plan)
+        ? args.plan
+        : objectArray(args.actions);
+    if (rows.length) params.push({ text: `×${rows.length}`, tone: 'count' });
+    else if (typeof args.action === 'string' && args.action.trim()) {
+      params.push({ text: args.action.trim(), tone: 'command' });
+    }
+    return { description, params };
+  }
+
+  if (norm === 'jeikcodeconfig' || norm === 'jeikcodeconfigguide') {
+    const action = typeof args.action === 'string' ? args.action.trim() : args.topic ? 'guide' : '';
+    const topic = typeof args.topic === 'string' ? args.topic.trim() : '';
+    if (action) params.push({ text: action, tone: 'command' });
+    if (topic) {
+      if (params.length) params.push({ text: ' ', tone: 'punct' });
+      params.push({ text: topic, tone: 'meta' });
+    }
+    return { description, params };
+  }
+
+  if (norm === 'requestuserinput') {
+    const questions = Array.isArray(args.questions) ? args.questions : [];
+    if (questions.length) params.push({ text: `×${questions.length}`, tone: 'count' });
+    return { description, params };
+  }
+
+  if (norm === 'task') {
+    const tasks = objectArray(args.tasks);
+    const firstDescription = tasks[0]?.description;
+    const taskDescription = typeof firstDescription === 'string' && firstDescription.trim()
+      ? firstDescription.trim()
+      : (opts.firstSubtaskDescription || '').trim();
+    if (taskDescription) description.splice(0, 1, { text: taskDescription, tone: 'summary' });
+    const count = tasks.length || opts.subtaskCount || 0;
+    if (count > 1) params.push({ text: `×${count}`, tone: 'count' });
+    return { description, params };
+  }
+
+  if (norm === 'useskill') {
+    const skill = args.name;
+    if (typeof skill === 'string' && skill.trim()) params.push({ text: skill.trim(), tone: 'pattern' });
+    return { description, params };
+  }
+
+  if (norm === 'webfetch') {
+    const url = args.url;
+    if (typeof url === 'string' && url.trim()) params.push({ text: displayFetchUrl(url.trim()), tone: 'url' });
+    return { description, params };
+  }
+
+  if (norm === 'websearch') {
+    const query = args.query;
+    if (typeof query === 'string' && query.trim()) params.push({ text: firstLine(query.trim(), 120), tone: 'pattern' });
+    return { description, params };
+  }
+
+  if (norm === 'reportfinding') {
+    const priority = typeof args.priority === 'string' ? args.priority.trim() : '';
+    const title = typeof args.title === 'string' ? args.title.trim() : '';
+    if (priority) params.push({ text: priority, tone: 'priority' });
+    if (title) {
+      if (params.length) params.push(separator());
+      params.push({ text: title, tone: 'title' });
+    }
+    return { description, params };
+  }
+
+  const fallback = firstMappedString(args, [
+    'query', 'pattern', 'url', 'command', 'path', 'file_path', 'name',
+  ]);
+  if (fallback) {
+    params.push({
+      text: fallback.key === 'url' ? displayFetchUrl(fallback.value) : firstLine(fallback.value),
+      tone: toneForKey(fallback.key),
+    });
+  }
+  return { description, params };
 }
 

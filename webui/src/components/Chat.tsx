@@ -4352,7 +4352,7 @@ export function Chat({
       if (prevId && provider) {
         providerCacheRef.current.set(prevId, provider);
       }
-      if (prevId) {
+      if (prevId && !globalModeRef.current) {
         modeCacheRef.current.set(prevId, modeState.confirmedMode);
       }
       if (pendingSteersRef.current.length > 0 && prevId) {
@@ -4485,8 +4485,10 @@ export function Chat({
       // 全局开关开启时，所有会话共用同一个模式：不把临时全局值写进会话级缓存，
       // 避免关闭全局后误把全局值当成该会话自己的记忆模式。
       if (globalModeRef.current) {
-        nativeModeRef.current = modeState.confirmedMode;
-        setModeState(initModeState(modeState.confirmedMode));
+        // Use the live ref: this effect can resolve after the async global-mode
+        // fetch, while its captured modeState closure still says 'build'.
+        const globalMode = nativeModeRef.current;
+        setModeState(initModeState(globalMode));
       } else {
         restoreModeForSession(
           sessionId,
@@ -4779,8 +4781,8 @@ export function Chat({
         (activeSession?.id === sessionId ? (activeSession.approval_mode as ApprovalMode) : null);
       if (globalModeRef.current) {
         // 全局开关开启：所有会话共用同一模式，忽略会话级残留。
-        nativeModeRef.current = modeState.confirmedMode;
-        setModeState(initModeState(modeState.confirmedMode));
+        // 读 live ref，不能读 effect 捕获的旧 modeState。
+        setModeState(initModeState(nativeModeRef.current));
       } else if (cachedMode) {
         nativeModeRef.current = cachedMode;
         setModeState(initModeState(cachedMode));
@@ -5296,8 +5298,8 @@ export function Chat({
           const sessionMode = sessionResult.value.approval_mode;
           if (!modeState.pendingMode && globalModeRef.current) {
             // 全局开关开启：不读会话级记录，统一沿用当前全局模式。
-            nativeModeRef.current = modeState.confirmedMode;
-            setModeState(initModeState(modeState.confirmedMode));
+            // nativeModeRef is updated synchronously by the global-mode fetch.
+            setModeState(initModeState(nativeModeRef.current));
           } else if (!modeState.pendingMode) {
             const targetMode = sessionMode
               ? sessionMode
@@ -5321,7 +5323,11 @@ export function Chat({
           loadedForRef.current = isEmptyNew ? loadId : null;
           if (isEmptyNew) {
             protocolSessionRef.current = false;
-            if (!globalModeRef.current) {
+            if (globalModeRef.current) {
+              // New empty sessions must inherit the live global mode immediately,
+              // not the 'build' initial state captured before the fetch landed.
+              setModeState(initModeState(nativeModeRef.current));
+            } else {
               getApprovalMode(loadId)
                 .then((current) => {
                   if (activeIdRef.current === loadId && !globalModeRef.current) {
@@ -5576,6 +5582,7 @@ export function Chat({
     getApprovalModeState(initialSid || undefined)
       .then((current) => {
         if (cancelled) return;
+        globalModeRef.current = current.global;
         setGlobalModeEnabled(current.global);
         if (protocolSessionRef.current) return;
         if (current.global) {
@@ -5635,6 +5642,7 @@ export function Chat({
     const handleGlobalModeSwitch = (e: Event) => {
       const detail = (e as CustomEvent<{ enabled: boolean; mode: ApprovalMode }>).detail;
       if (!detail) return;
+      globalModeRef.current = !!detail.enabled;
       setGlobalModeEnabled(!!detail.enabled);
       if (detail.enabled) {
         if (detail.mode) applyIncomingMode(detail.mode);
@@ -5661,6 +5669,7 @@ export function Chat({
         bc.onmessage = (ev) => {
           if (ev.data?.type === 'mode' && ev.data.mode) {
             if (typeof ev.data.global === 'boolean') {
+              globalModeRef.current = ev.data.global;
               setGlobalModeEnabled(ev.data.global);
             }
             persistRemoteMode(ev.data.session_id, ev.data.mode);
@@ -5712,6 +5721,7 @@ export function Chat({
         getApprovalModeState(activeIdRef.current ?? undefined)
           .then((current) => {
             if (cancelled) return;
+            globalModeRef.current = current.global;
             setGlobalModeEnabled(current.global);
             applyIncomingMode(current.mode);
           })
@@ -8402,6 +8412,7 @@ export function Chat({
   function toggleGlobalMode(enabled: boolean) {
     const previous = globalModeRef.current;
     if (previous === enabled) return;
+    globalModeRef.current = enabled;
     setGlobalModeEnabled(enabled);
     const targetSid = sessionId ?? null;
     const requested = modeState.confirmedMode;
@@ -8414,6 +8425,7 @@ export function Chat({
         if (targetSid) applyOwnSessionMode(targetSid);
       })
       .catch(() => {
+        globalModeRef.current = previous;
         setGlobalModeEnabled(previous);
         showToast(t('cmd.mode.failed'), 'error');
       });
