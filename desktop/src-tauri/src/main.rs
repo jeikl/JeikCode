@@ -650,6 +650,7 @@ fn load_close_action() -> String {
 struct ShellSettings {
     autostart: bool,
     toggle_shortcut: String,
+    hide_taskbar_icon: bool,
 }
 
 impl Default for ShellSettings {
@@ -657,20 +658,27 @@ impl Default for ShellSettings {
         Self {
             autostart: false,
             toggle_shortcut: "Ctrl+Alt+J".to_string(),
+            hide_taskbar_icon: false,
         }
     }
 }
 
-/// Read only the two OS-level fields; a missing/blank shortcut means "disabled".
-fn load_shell_settings() -> ShellSettings {
-    let Ok(text) = std::fs::read_to_string(desktop_settings_path()) else {
-        return ShellSettings::default();
+/// Read the OS-level fields; a missing/blank shortcut means "disabled".
+///
+/// A missing file is a meaningful "defaults" state, but a transient read or
+/// parse failure is not: the watcher must keep the last applied snapshot
+/// instead of flapping autostart/shortcut/taskbar on one bad tick.
+fn load_shell_settings_opt() -> Option<ShellSettings> {
+    let text = match std::fs::read_to_string(desktop_settings_path()) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(ShellSettings::default());
+        }
+        Err(_) => return None,
     };
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return ShellSettings::default();
-    };
+    let root = serde_json::from_str::<serde_json::Value>(&text).ok()?;
     let defaults = ShellSettings::default();
-    ShellSettings {
+    Some(ShellSettings {
         autostart: root
             .get("autostart")
             .and_then(serde_json::Value::as_bool)
@@ -681,7 +689,15 @@ fn load_shell_settings() -> ShellSettings {
             .map(str::trim)
             .unwrap_or(defaults.toggle_shortcut.as_str())
             .to_string(),
-    }
+        hide_taskbar_icon: root
+            .get("hide_taskbar_icon")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(defaults.hide_taskbar_icon),
+    })
+}
+
+fn load_shell_settings() -> ShellSettings {
+    load_shell_settings_opt().unwrap_or_default()
 }
 
 /// 生成 Windows 注册表自启命令行：可执行文件路径加双引号并固定附带 `--minimized`。
@@ -918,10 +934,12 @@ fn apply_toggle_shortcut(app: &tauri::AppHandle, accelerator: &str) {
 /// Poll the shared settings file (saved by ANY WebUI instance via the daemon)
 /// and apply OS-level changes on the UI thread. One-second cadence, one small
 /// file — no busy loop and no cross-instance event plumbing needed.
-fn watch_desktop_shell_settings(app: tauri::AppHandle) {
+fn watch_desktop_shell_settings(app: tauri::AppHandle, mut applied: ShellSettings) {
     std::thread::spawn(move || {
         let path = desktop_settings_path();
-        let mut applied = load_shell_settings();
+        // Skip the JSON read unless the watcher actually saw a write. The
+        // daemon replaces the file atomically, so a changed mtime is a
+        // reliable trigger and an idle app stays off the disk.
         let mut last = std::fs::metadata(&path)
             .and_then(|meta| meta.modified())
             .ok();
@@ -934,15 +952,30 @@ fn watch_desktop_shell_settings(app: tauri::AppHandle) {
                 continue;
             }
             last = current;
-            let settings = load_shell_settings();
+            let Some(settings) = load_shell_settings_opt() else {
+                // Transient read/parse failure: keep the last applied snapshot.
+                continue;
+            };
             if settings == applied {
                 continue;
             }
+            let previous = applied.clone();
             applied = settings.clone();
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || {
-                apply_autostart(&handle, settings.autostart);
-                apply_toggle_shortcut(&handle, &settings.toggle_shortcut);
+                if settings.autostart != previous.autostart {
+                    apply_autostart(&handle, settings.autostart);
+                }
+                if settings.toggle_shortcut != previous.toggle_shortcut {
+                    apply_toggle_shortcut(&handle, &settings.toggle_shortcut);
+                }
+                if settings.hide_taskbar_icon != previous.hide_taskbar_icon {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        if let Err(error) = window.set_skip_taskbar(settings.hide_taskbar_icon) {
+                            eprintln!("[desktop] skip taskbar update failed: {error}");
+                        }
+                    }
+                }
             });
         }
     });
@@ -982,6 +1015,7 @@ fn main() {
             install_desktop_shell_update,
         ])
         .setup(move |app| {
+            let settings = load_shell_settings();
             let webui_origin = Arc::clone(&webui_origin_slot);
             let nav_origin = Arc::clone(&webui_origin);
             let nav_app_handle = app.handle().clone();
@@ -1024,6 +1058,7 @@ fn main() {
             "#)
             .inner_size(1280.0, 800.0)
             .resizable(true)
+            .skip_taskbar(settings.hide_taskbar_icon)
             // Autostart must never flash: the window is created hidden and only
             // shown for a normal (non `--minimized`) launch or a tray/shortcut
             // warm-open. The WebView still loads in the background either way.
@@ -1138,10 +1173,9 @@ fn main() {
                 }
             });
             setup_system_tray(app).expect("初始化系统托盘图标失败");
-            let settings = load_shell_settings();
             apply_autostart(app.handle(), settings.autostart);
             apply_toggle_shortcut(app.handle(), &settings.toggle_shortcut);
-            watch_desktop_shell_settings(app.handle().clone());
+            watch_desktop_shell_settings(app.handle().clone(), settings);
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

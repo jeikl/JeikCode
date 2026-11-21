@@ -775,6 +775,8 @@ export const ko: Record<keyof typeof en, string> = {
   'settings.startupTitle': '시작 및 창',
   'settings.startupDesc': '로그인 시 창 깜빡임 없이 트레이로 조용히 시작합니다. 트레이를 클릭하거나 단축키로 이미 로드된 웹 패널을 바로 열 수 있습니다.',
   'settings.autostartLabel': '로그인 시 자동 시작(트레이로 조용히)',
+  'settings.hideTaskbarIconLabel': '작업 표시줄 아이콘 숨기기',
+  'settings.hideTaskbarIconHint': '켜면 창이 작업 표시줄에 표시되지 않으며 트레이 또는 단축키로만 다시 열 수 있습니다.',
   'settings.autostartHint': '로그인 후 백그라운드에서 시작하며 기본 창을 열지 않습니다.',
   'settings.shortcutTitle': '표시 / 숨기기 단축키',
   'settings.shortcutDesc': '기본값 Ctrl+Alt+J. 클릭한 뒤 조합을 누르세요. Backspace는 지우기, Esc는 취소.',

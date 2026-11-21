@@ -775,6 +775,8 @@ export const fr: Record<keyof typeof en, string> = {
   'settings.startupTitle': 'Démarrage et fenêtre',
   'settings.startupDesc': 'Démarre silencieusement dans la zone de notification à la connexion, sans scintillement ; cliquez sur la zone ou utilisez le raccourci pour ouvrir à chaud le panneau Web déjà chargé.',
   'settings.autostartLabel': 'Lancer à la connexion (silencieux dans la zone de notification)',
+  'settings.hideTaskbarIconLabel': 'Masquer l’icône de la barre des tâches',
+  'settings.hideTaskbarIconHint': 'La fenêtre disparaît de la barre des tâches ; utilisez la zone de notification ou le raccourci pour la rouvrir.',
   'settings.autostartHint': "S'exécute en arrière-plan après la connexion sans ouvrir la fenêtre principale.",
   'settings.shortcutTitle': 'Raccourci afficher / masquer',
   'settings.shortcutDesc': 'Par défaut Ctrl+Alt+J. Cliquez puis appuyez sur une combinaison ; Retour arrière efface, Échap annule.',

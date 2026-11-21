@@ -775,6 +775,8 @@ export const zhTw: Record<keyof typeof en, string> = {
   'settings.startupTitle': '啟動與視窗',
   'settings.startupDesc': '開機後靜默駐留托盤，不閃視窗；點擊托盤或快捷鍵即可熱開啟已載入的 Web 面板。',
   'settings.autostartLabel': '開機自啟（靜默到托盤）',
+  'settings.hideTaskbarIconLabel': '隱藏工作列圖示',
+  'settings.hideTaskbarIconHint': '開啟後視窗不再出現在工作列，僅可透過系統匣或快捷鍵喚起。',
   'settings.autostartHint': '登入系統後在背景啟動，不彈出主視窗。',
   'settings.shortcutTitle': '喚起 / 隱藏快捷鍵',
   'settings.shortcutDesc': '預設 Ctrl+Alt+J；點擊後按下組合鍵完成錄製，Backspace 清空，Esc 取消。',
