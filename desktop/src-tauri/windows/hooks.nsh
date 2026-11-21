@@ -54,8 +54,12 @@ FunctionEnd
   ; Only refresh an existing shortcut. The finish page creates the desktop
   ; shortcut when the user keeps its checkbox checked, so creating it here
   ; unconditionally would ignore that choice.
-  IfFileExists "$DESKTOP\${PRODUCTNAME}.lnk" 0 +2
+  ${If} ${FileExists} "$DESKTOP\${PRODUCTNAME}.lnk"
     CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe" "" "$INSTDIR\${MAINBINARYNAME}.exe" 0
+    ; CreateShortCut rebuilds the .lnk and drops the AppUserModelID that the
+    ; Tauri installer writes for taskbar pinning and notification identity.
+    !insertmacro SetLnkAppUserModelId "$DESKTOP\${PRODUCTNAME}.lnk"
+  ${EndIf}
   ; Refresh shell icon cache so existing cached placeholders/icons are cleared
   System::Call 'shell32.dll::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 
