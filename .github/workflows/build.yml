@@ -555,10 +555,11 @@ jobs:
             const { execSync } = require("child_process");
             function scan(dir) {
               if (!fs.existsSync(dir)) return;
+              const bundleAppImageRoot = `${path.sep}release${path.sep}bundle${path.sep}appimage${path.sep}`;
               for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
                 const full = path.join(dir, entry.name);
                 if (entry.isDirectory()) scan(full);
-                else if (entry.isFile() && entry.name.endsWith(".AppImage")) {
+                else if (entry.isFile() && entry.name.endsWith(".AppImage") && full.includes(bundleAppImageRoot)) {
                   const sig = full + ".sig";
                   if (fs.existsSync(sig)) fs.unlinkSync(sig);
                   execSync(`npx --prefix desktop tauri signer sign --app-version "${process.env.VER}" "${full}"`, { stdio: "inherit" });
@@ -580,11 +581,14 @@ jobs:
 
           function scan(dir) {
             if (!fs.existsSync(dir)) return;
+            // 只收集 Tauri 安装包输出目录，绝不能把 target/release/build/** 里的
+            // Rust build-script 可执行文件、裸的 app/sidecar 二进制当成发布资产。
+            const bundleRoot = `${path.sep}release${path.sep}bundle${path.sep}`;
             for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
               const full = path.join(dir, entry.name);
               if (entry.isDirectory()) {
                 scan(full);
-              } else if (entry.isFile()) {
+              } else if (entry.isFile() && full.includes(bundleRoot)) {
                 const name = entry.name;
                 const match = name.endsWith(".exe") || name.endsWith(".sig") ||
                               name.endsWith(".dmg") || name.endsWith(".app.tar.gz") ||
