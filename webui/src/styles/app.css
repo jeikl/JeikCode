@@ -19968,34 +19968,81 @@ select option {
   color: #b91c1c;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 768px) {
+  /* 手机端弹窗必须是确定高度：否则卡片 height:auto 时 AI 消息区（flex:1）
+     拿不到剩余空间，会被压缩成一条缝隙并裁切对话内容。 */
+  .schedule-modal-card.git-webhook-modal-card {
+    height: 94dvh !important;
+    max-height: 94dvh !important;
+  }
+
   .schedule-modal-body {
     flex-direction: column !important;
+    gap: 12px !important;
+    padding: 10px 14px !important;
     overflow-y: auto !important;
   }
 
+  /* 任务列表改为横向卡片带，给下方对话区留出垂直空间 */
   .schedule-sidebar {
     width: 100%;
-    max-height: 190px;
+    max-height: 150px;
+    flex-shrink: 1;
     border-right: none;
     border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.08));
     padding-right: 0;
-    padding-bottom: 10px;
+    padding-bottom: 8px;
   }
 
+  .schedule-task-list {
+    flex: 0 0 auto;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0 2px 2px 0;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .schedule-task-card {
+    flex: 0 0 190px;
+  }
+
+  .schedule-empty-box {
+    flex: 1 0 100%;
+    padding: 10px 12px;
+  }
+
+  /* 模式标签由分段按钮自身表达，隐藏重复标题以回收高度 */
   .schedule-mode-bar {
     flex-direction: column;
     align-items: stretch;
-    gap: 8px;
+    gap: 0;
+    padding: 8px 10px;
+  }
+
+  .schedule-mode-bar-label {
+    display: none;
   }
 
   .schedule-mode-segmented {
     width: 100%;
+    align-items: stretch;
   }
 
+  /* 每个标签等宽并可换行，彻底避免长语言文案把分段条撑出屏幕 */
   .schedule-mode-tab {
-    flex: 1;
-    padding: 0 8px;
+    flex: 1 1 0;
+    min-width: 0;
+    height: auto;
+    min-height: 32px;
+    padding: 5px 7px;
+    white-space: normal;
+    line-height: 1.25;
+    text-align: center;
+  }
+
+  .schedule-mode-pill-badge {
+    flex-shrink: 0;
   }
 
   .schedule-run-summary-grid {
@@ -20010,6 +20057,22 @@ select option {
   .schedule-exec-grid {
     grid-template-columns: 1fr;
     gap: 12px;
+  }
+
+  .schedule-ai-pane {
+    padding: 10px;
+    /* 极矮视口下列表/输入区整体可滚，避免提交按钮溢出到页脚 */
+    overflow-y: auto;
+  }
+
+  /* 兜底最小高度：极矮视口下也保证对话可读，溢出交给弹窗主体滚动 */
+  .schedule-ai-messages {
+    min-height: clamp(72px, 14dvh, 220px);
+  }
+
+  /* AI 模式说明与页脚重复，移动端隐藏提示文字 */
+  .schedule-modal-card .git-footer-left .git-input-hint {
+    display: none;
   }
 
   .schedule-ai-bottom-bar {

@@ -153,6 +153,12 @@ export function App() {
   const [sessionId, setSessionId] = useState<string | null>(() =>
     rememberedPreviewRef.current?.id ?? null,
   );
+  // 供异步回调读取最新会话 id：侧栏列表刷新可能晚于 sessionId 提交，
+  // 闭包里的旧值会让「当前会话元数据回填」判断失效。
+  const sessionIdRef = useRef<string | null>(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
   const [activeSession, setActiveSession] = useState<SessionMetaWithProject | null>(
     () => rememberedPreviewRef.current,
   );
@@ -887,25 +893,29 @@ export function App() {
       [id]: newSession,
     }));
     // 顶部标题头用的是 activeSession.name；首发时同步成临时标题（已有会话元数据时），
-    // 否则标题头会一直停在占位名 session-<ts>。落地页首发无 activeSession，标题头本就
-    // 隐藏，待回合结束列表刷新后由 handleActiveSessionMeta 回填真实标题。
-    // 但如果用户已手动重命名过会话（名称非 session-xxx 格式），则不覆盖，保护用户选择。
-    setActiveSession((prev) =>
-      prev
-        ? {
-            ...prev,
-            name: prev.name.startsWith('session-') ? title : prev.name,
-          }
-        : prev,
-    );
+    // 落地页首发还没有 activeSession，则先用乐观 meta 接管标题头，避免发送后仍显示 New chat。
+    // 如果用户已手动重命名过会话（名称非 session-xxx 格式），则不覆盖，保护用户选择。
+    setActiveSession((prev) => {
+      if (!prev) return newSession;
+      return prev.name.startsWith('session-') ? { ...prev, name: title } : prev;
+    });
   }
 
   // 侧栏列表（重新）加载后回传当前会话的真实元数据：回合落盘后后端已自动命名，
   // 用真实标题覆盖顶部标题头的临时标题（前 10 字）。仅在仍是同一会话且标题有变时更新。
   function handleActiveSessionMeta(s: SessionMetaWithProject) {
-    setActiveSession((prev) =>
-      prev && prev.id === s.id && prev.name !== s.name ? { ...prev, name: s.name } : prev,
-    );
+    const currentSessionId = sessionIdRef.current;
+    setActiveSession((prev) => {
+      // 落地页首发时 resolve 可能抢在落盘前返回 404，导致 activeSession 一直为空。
+      // 只要侧栏拿到的就是当前会话，就必须补建标题头，不能继续停在 New chat。
+      if (!prev) return s.id === currentSessionId ? s : prev;
+      if (prev.id === s.id) {
+        return prev.name !== s.name ? { ...prev, name: s.name } : prev;
+      }
+      // 乐观标题头尚未对齐真实 id：用当前会话的权威 meta 收口。
+      if (prev.id.startsWith('optimistic-') && s.id === currentSessionId) return s;
+      return prev;
+    });
     // 当真实会话已经从后端拉出且已拥有消息时，才从乐观池移除对应的临时记录，杜绝首轮执行中断档消失
     setOptimisticSessions((prev) => {
       if (!prev[s.id]) return prev;
@@ -1583,8 +1593,8 @@ export function App() {
                 </div>
               )}
             </div>
-          ) : activeSession?.name && (activeSession.message_count ?? 0) > 0 ? (
-            /* 桌面端会话标题：只有当该会话真实拥有消息时才展示其标题 */
+          ) : activeSession?.name && !isLanding ? (
+            /* 桌面端会话标题：与移动端共用落地态信号，空会话仍显示新建入口 */
             <button
               type="button"
               class={

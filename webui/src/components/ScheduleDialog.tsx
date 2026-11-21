@@ -310,7 +310,8 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
   }, []);
 
   useEffect(() => {
-    if (form.mode === 'ai') {
+    // 空会话不自动滚到底部，否则会把空状态标题挤出可视区；仅在有消息时跟随最新回复。
+    if (form.mode === 'ai' && activeThread.messages.length > 0) {
       aiMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [activeThread.messages.length, aiSending, form.mode]);
