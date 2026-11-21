@@ -21,6 +21,24 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.3-beta.1 (2026-11-22)
+
+**This beta is a packaging validation build: desktop installers no longer carry a second copy of the full CLI sidecar, reducing AppImage, DMG, deb and NSIS payloads. Runtime behavior and the console noindex protections are unchanged.**
+
+- **[Desktop Packaging] Duplicate CLI sidecar removed**:
+  - Desktop bundles now keep only the canonical `resources/jeikcode(.exe)`; the redundant `resources/cli-bin` copy and placeholder are removed.
+  - Runtime fallback lookup for already-installed legacy shells remains available.
+  - The standalone CLI binary size is unchanged; this build is intended to measure the actual installer-size reduction before deciding on further size work.
+
+---
+
+**本次 beta 是打包体积验证版：桌面安装包不再额外携带一份完整的 CLI sidecar，降低 AppImage、DMG、deb 与 NSIS 的体积。运行时行为和现有控制台 noindex 防护不变。**
+
+- **[桌面打包] 移除重复 CLI sidecar**：
+  - 桌面安装包只保留规范的 `resources/jeikcode(.exe)`，删除重复的 `resources/cli-bin` 副本与占位文件。
+  - 已安装旧壳的运行时 fallback 查找继续保留。
+  - 独立 CLI 体积不变；本版用于实测安装包体积下降幅度，再决定是否继续做精简。
+
 ## v7.5.2 (2026-11-21)
 
 **v7.5.2 is the stable consolidation of beta.0 through beta.6. It adds full-stack scheduled tasks with an isolated AI assistant, unbounded main-session rounds with soft landing, runtime model swapping, startup Auto/Bypass and persistent mode policy, full desktop updates with two-hop shell upgrades, desktop theme/autostart/hotkey improvements, a denser WebUI, configurable compaction thresholds, accurate context reporting, major connection and performance work, and console noindex hardening. Follow-up fixes cover tool rows, model cards, image lightbox navigation, F5 refresh, mobile Bash summaries, scheduled-task workspaces, and English settings labels.**
