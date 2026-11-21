@@ -585,10 +585,16 @@ export function Chat({
           ...Array.from(document.querySelectorAll('.input-thumbs, .inline-bubble-editor-attachments')),
         ]
       : [];
-    const extraSrcs = pendingAttachRef.current
+    // Include attachments from the message store as well as the rendered DOM:
+    // a virtualized/collapsed history may not keep every <img> mounted, which
+    // used to leave the lightbox with a one-image gallery and no next/prev.
+    const historySrcs = messagesRef.current.flatMap((message) =>
+      (message.images ?? []).map((image) => imageDataUrl(image)),
+    );
+    const pendingSrcs = pendingAttachRef.current
       .filter((item): item is PendingImage => item.kind === 'image' && !!item.image?.data)
       .map((item) => imageDataUrl(item.image));
-    return collectImageSrcs(roots, currentSrc, extraSrcs);
+    return collectImageSrcs(roots, currentSrc, [...historySrcs, ...pendingSrcs]);
   }, []);
 
   // 全局图片大图预览监听：捕获来自 Markdown/助理回复/附件中的任意图片点击

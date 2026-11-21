@@ -75,7 +75,7 @@ import {
 import { useT, useSettings, SettingsSection } from './settings';
 import { setStreamEpoch } from './lib/streamCursor';
 import { sessionMessagesToMarkdownLines } from './lib/historyMessages';
-import { onSoftRefresh, requestSoftRefresh } from './lib/appRefresh';
+import { onSoftRefresh } from './lib/appRefresh';
 import { hasCoreUpdate, hasEffectiveUpdate } from './lib/updateRouting';
 import {
   buildRestoreCandidates,
@@ -1789,7 +1789,7 @@ export function App() {
             <button
               type="button"
               class="top-nav-btn top-nav-desktop-action top-nav-refresh-btn"
-              onClick={requestSoftRefresh}
+              onClick={() => window.location.reload()}
               title={t('header.refresh')}
               aria-label={t('header.refresh')}
             >
@@ -1941,7 +1941,7 @@ export function App() {
                     class="top-nav-more-item"
                     onClick={() => {
                       setTopNavMoreOpen(false);
-                      requestSoftRefresh();
+                      window.location.reload();
                     }}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

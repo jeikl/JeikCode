@@ -920,8 +920,13 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
                   {/* 目标工作区独占一行，完整展示路径并配备资源管理器图标 */}
                   <div class="schedule-ai-workspace-row">
                     <span class="schedule-ai-workspace-label">{t('schedules.workspaceLabel')}</span>
-                    <div class="schedule-ai-cwd-pill" title={form.cwd || defaultWorkspace}>
-                      <span class="schedule-ai-cwd-path">{form.cwd || defaultWorkspace}</span>
+                    <div class="schedule-ai-workspace-select">
+                      <Select
+                        class="git-adapter-select schedule-workspace-select"
+                        value={form.cwd}
+                        options={workspaceOptions}
+                        onChange={(v) => setForm((prev) => ({ ...prev, cwd: v }))}
+                      />
                     </div>
                     <button
                       type="button"

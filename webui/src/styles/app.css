@@ -9176,7 +9176,7 @@ html[data-keyboard-open] .chat-landing {
 }
 
 .system-settings-nav {
-  width: 180px;
+  width: 208px;
   flex-shrink: 0;
   border-right: 1px solid var(--app-menu-border, rgba(255, 255, 255, 0.08));
   background: color-mix(in srgb, var(--app-primary-foreground) 2.5%, transparent);
@@ -9192,7 +9192,7 @@ html[data-keyboard-open] .chat-landing {
 
 .system-settings-tab-btn {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
   padding: 10px 12px;
   border-radius: 8px;
@@ -9204,13 +9204,19 @@ html[data-keyboard-open] .chat-landing {
   cursor: pointer;
   text-align: left;
   transition: all 0.15s ease;
-  /* Long locales (DE/FR/RU/AR) wrap inside the 180px rail instead of
-     overflowing the rounded capsule. */
-  white-space: normal;
-  overflow-wrap: anywhere;
+  /* Keep each tab on one line; the label ellipsizes only if a locale is
+     genuinely wider than the rail. */
+  white-space: nowrap;
+  overflow: hidden;
   line-height: 1.3;
   min-width: 0;
   max-width: 100%;
+}
+.system-settings-tab-btn .tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .system-settings-tab-btn:hover {
   background: color-mix(in srgb, var(--app-primary-foreground) 6%, transparent);
@@ -19870,6 +19876,12 @@ select option {
   white-space: nowrap;
   flex-shrink: 0;
 }
+.schedule-ai-workspace-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.schedule-ai-workspace-select .custom-select { width: 100%; }
+.schedule-ai-workspace-select .custom-select-trigger { height: 32px; }
 
 .schedule-ai-cwd-pill {
   flex: 1;
@@ -19911,8 +19923,7 @@ select option {
   gap: 10px;
   min-width: 0;
 }
-.schedule-ai-bottom-bar .model-capsule-provider-badge,
-.schedule-ai-bottom-bar .effort-selector {
+.schedule-ai-bottom-bar .model-capsule-provider-badge {
   display: none !important;
 }
 
@@ -20108,6 +20119,10 @@ select option {
   .schedule-ai-bottom-bar .git-model-selector-wrapper {
     flex: 1 1 auto;
     min-width: 0;
+  }
+
+  .schedule-ai-bottom-bar .effort-selector {
+    display: none !important;
   }
 
   .schedule-ai-send-btn {
@@ -20630,6 +20645,30 @@ select option {
   .tool-header { align-items: center !important; row-gap: 0 !important; }
   .tool-header .tool-name { max-width: 42% !important; font-size: 12px !important; }
   .tool-header .tool-key-param { font-size: 11.5px !important; }
+
+  /* Bash on mobile stays one line. The human-readable summary keeps its full
+     width; the raw command takes the remainder and ellipsizes at the edge. */
+  .tool-body.kind-terminal .tool-header {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+  }
+  .tool-body.kind-terminal .tool-name {
+    flex: 0 0 auto !important;
+    max-width: none !important;
+    height: 20px !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    white-space: nowrap !important;
+    font-size: 12px !important;
+  }
+  .tool-body.kind-terminal .tool-key-param {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+  }
 }
 
 /* Version readouts: quiet mono annotations, not chips. */
