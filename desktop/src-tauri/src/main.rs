@@ -992,6 +992,36 @@ fn main() {
                 tauri::WebviewUrl::App("index.html".into()),
             )
             .title("JeikCode Desktop")
+            .initialization_script(r#"
+                (() => {
+                    const start = () => {
+                        const root = document.documentElement;
+                        if (!root) return;
+                        let last;
+                        const sync = () => {
+                            // No persisted choice yet => follow the OS. An explicit
+                            // light/dark/system preference always wins.
+                            const preference = root.getAttribute('data-theme-preference');
+                            const theme = ['light', 'dark', 'system'].includes(preference)
+                                ? preference : 'system';
+                            if (theme === last) return;
+                            last = theme;
+                            // The WebUI (webui/src/settings.tsx) owns the `data-theme-preference`
+                            // contract. Use the built-in window command so the capability's
+                            // `core:window:allow-set-theme` permission covers remote origins too.
+                            const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke;
+                            if (!invoke) return;
+                            invoke('plugin:window|set_theme', { value: theme === 'system' ? null : theme }).catch(() => {
+                                if (last === theme) last = undefined;
+                            });
+                        };
+                        new MutationObserver(sync).observe(root, { attributes: true, attributeFilter: ['data-theme-preference'] });
+                        sync();
+                    };
+                    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+                    else start();
+                })();
+            "#)
             .inner_size(1280.0, 800.0)
             .resizable(true)
             // Autostart must never flash: the window is created hidden and only

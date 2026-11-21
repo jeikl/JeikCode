@@ -9,6 +9,7 @@
   "permissions": [
     "core:default",
     "core:webview:default",
-    "core:window:default"
+    "core:window:default",
+    "core:window:allow-set-theme"
   ]
 }

@@ -46,8 +46,8 @@ function readTheme(): Theme {
   } catch {
     /* ignore */
   }
-  // Default to clean Gemini-style dark mode
-  return 'dark';
+  // No explicit choice yet: follow the OS until the user picks light/dark.
+  return 'system';
 }
 
 export function detectBrowserPreferredLang(): Lang | null {
