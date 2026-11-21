@@ -94,6 +94,7 @@ reasoning_history = "exclude"
 | `minimax` | MiniMax | OpenAI 兼容 | `https://api.minimaxi.com/v1` | `MINIMAX_API_KEY` |
 | `openrouter` | OpenRouter | OpenAI 兼容 | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
 | `openai` | OpenAI | OpenAI 兼容 | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `chatgpt-codex` | ChatGPT Plus/Pro (Codex) | Responses | `https://chatgpt.com/backend-api/codex` | (OAuth 认证 / 无需 API Key) |
 | `anthropic` | Anthropic Claude | Anthropic Messages | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | `gemini` | Google Gemini | Gemini generateContent | `https://generativelanguage.googleapis.com/v1beta` | `GEMINI_API_KEY` |
 | `ollama` | 本地 Ollama | Ollama 原生 | `http://localhost:11434` | (无需密钥) |
@@ -101,6 +102,7 @@ reasoning_history = "exclude"
 ### 4.2 自定义协议类型 (`provider`)
 - `openai-compatible` / `openai`：标准 OpenAI Chat 接口，`base_url` 需含 `/v1`。
 - `responses-compatible` / `responses`：OpenAI Responses 新接口（`POST /v1/responses`）。
+- `codex` / `chatgpt-codex`：ChatGPT Plus / Pro 专属 Codex 后端，通过 OAuth PKCE 认证，凭据存储于 `~/.jeikcode/openai_auth.toml`。
 - `anthropic-compatible` / `anthropic`：Anthropic Messages 接口。
 - `gemini-compatible` / `gemini`：Google Gemini 原生流式接口。
 - `ollama`：Ollama 本地接口。

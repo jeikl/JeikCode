@@ -94,6 +94,7 @@ reasoning_history = "exclude"
 | `minimax` | MiniMax | OpenAI Compatible | `https://api.minimaxi.com/v1` | `MINIMAX_API_KEY` |
 | `openrouter` | OpenRouter | OpenAI Compatible | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
 | `openai` | OpenAI | OpenAI Compatible | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `chatgpt-codex` | ChatGPT Plus/Pro (Codex) | Responses | `https://chatgpt.com/backend-api/codex` | (OAuth Auth / No Key Needed) |
 | `anthropic` | Anthropic Claude | Anthropic Messages | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | `gemini` | Google Gemini | Gemini generateContent | `https://generativelanguage.googleapis.com/v1beta` | `GEMINI_API_KEY` |
 | `ollama` | Local Ollama | Ollama Native | `http://localhost:11434` | (No key needed) |
@@ -101,6 +102,7 @@ reasoning_history = "exclude"
 ### 4.2 Custom Protocol Types (`provider`)
 - `openai-compatible` / `openai`: Standard OpenAI Chat endpoints; `base_url` requires `/v1`.
 - `responses-compatible` / `responses`: Modern OpenAI Responses endpoint (`POST /v1/responses`).
+- `codex` / `chatgpt-codex`: ChatGPT Plus / Pro Codex backend endpoint via OAuth PKCE, credentials stored in `~/.jeikcode/openai_auth.toml`.
 - `anthropic-compatible` / `anthropic`: Anthropic Messages endpoints.
 - `gemini-compatible` / `gemini`: Google Gemini native streaming endpoints.
 - `ollama`: Ollama local endpoints.
