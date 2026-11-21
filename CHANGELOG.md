@@ -21,6 +21,56 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.2-beta.4 (2026-11-21)
+
+**This beta delivers the additional fixes that were not part of v7.5.2-beta.3: process-lifetime approval-mode consistency, compact semantic tool rows, schedule and session-title polish, and removal of obsolete tool and display paths.**
+
+- **[Session & Approval] Approval mode stays consistent across sessions**:
+  - Session-scoped mode switches now update the process-level fallback without writing desktop settings, so new sessions and sessionless cold starts inherit the last explicit choice.
+  - A daemon restart still returns to Build; an explicit global policy remains durable and overrides all sessions.
+  - Removed the obsolete `list_directory` summary branch and updated mode tests.
+
+- **[WebUI] Compact semantic tool rows and stable mode display**:
+  - Tool calls render as a one-line "description -> key parameter" row with semantic parameter colors; long values are ellipsized before the fixed status/time, with full arguments in the expanded body.
+  - MCP entries show the real server/tool identity.
+  - Session hydration reads the live global-mode state, so a stale Build closure can no longer overwrite the active global mode.
+
+- **[WebUI] Schedule sheet and session title polish**:
+  - The mobile scheduled-task sheet now has a definite height, a horizontal task strip, wrapped mode tabs, and a bounded AI message area.
+  - Empty AI threads no longer auto-scroll and clip their heading; the session header adopts the authoritative title after the sidebar resolves it.
+  - A first send from the landing page seeds optimistic session metadata immediately.
+
+- **[Tools & Docs] Retire obsolete ast_grep and legacy display paths**:
+  - Removed the review-only `ast_grep` implementation and its registration, tests, personas, and documentation references.
+  - Dropped remaining `list_directory`/`change_dir` display fallbacks from the daemon, TUI, JetBrains client, and docs; `report_finding`, `task`, `use_skill`, `web`, and `code_explore` remain.
+
+- **[Release Infrastructure] Release assets only include desktop bundles**:
+  - The release staging scan now collects only `target/**/release/bundle/**`, preventing Cargo build-script executables and raw app/sidecar binaries from being published.
+
+---
+
+- **[会话与权限] 审批模式跨会话保持一致**:
+  - 会话级模式切换现在会更新进程级兜底模式但不写入 desktop-settings，新会话与无 session 的冷启动继承最后一次显式选择。
+  - daemon 重启仍回到 Build；系统设置中的显式全局策略保持持久化并覆盖所有会话。
+  - 移除遗留的 `list_directory` 摘要分支并更新模式测试。
+
+- **[WebUI] 紧凑语义工具行与稳定的模式显示**:
+  - 工具调用以“描述 → 关键参数”单行展示，参数按语义着色；超长值在固定状态/耗时前省略，完整参数保留在展开区。
+  - MCP 条目显示真实的 server/tool 身份。
+  - 会话加载读取实时全局模式状态，旧 Build 闭包不再覆盖当前全局模式。
+
+- **[WebUI] 定时任务面板与会话标题优化**:
+  - 手机端定时任务弹窗改为确定高度，任务列表横向滚动，模式标签等宽换行，AI 消息区获得可用高度。
+  - 空 AI 会话不再自动滚到底部裁切标题；侧栏回填权威标题后，顶栏同步更新。
+  - 落地页首发立即接管乐观会话元数据。
+
+- **[工具与文档] 移除过时的 ast_grep 与遗留展示路径**:
+  - 移除仅 review 使用的 `ast_grep` 实现及其注册、测试、persona 与文档引用。
+  - 清理 daemon、TUI、JetBrains 客户端和文档中残留的 `list_directory`/`change_dir` 展示兼容；保留 `report_finding`、`task`、`use_skill`、`web` 与 `code_explore`。
+
+- **[发布基建] 发布资产仅包含桌面安装包**:
+  - 发布资产收集只扫描 `target/**/release/bundle/**`，杜绝 Cargo build-script 可执行文件与裸 app/sidecar 二进制被上传。
+
 ## v7.5.2-beta.3 (2026-11-21)
 
 **This beta makes the desktop shell follow the app theme, adds an optional taskbar-icon toggle for supported platforms, and fixes Windows installer shortcut behavior.**
