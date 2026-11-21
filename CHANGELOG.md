@@ -21,6 +21,96 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.2 (2026-11-21)
+
+**v7.5.2 is the stable consolidation of beta.0 through beta.6. It adds full-stack scheduled tasks with an isolated AI assistant, unbounded main-session rounds with soft landing, runtime model swapping, startup Auto/Bypass and persistent mode policy, full desktop updates with two-hop shell upgrades, desktop theme/autostart/hotkey improvements, a denser WebUI, configurable compaction thresholds, accurate context reporting, major connection and performance work, and console noindex hardening. Follow-up fixes cover tool rows, model cards, image lightbox navigation, F5 refresh, mobile Bash summaries, scheduled-task workspaces, and English settings labels.**
+
+- **[Scheduled Tasks] Full-stack scheduling with an isolated AI assistant**:
+  - Added orthogonal calendar scheduling across dates, weekdays and multiple times, plus interval scheduling with atomic configuration writes, one-shot deactivation, and isolated/reuse session modes.
+  - Added a dedicated AI dialog endpoint and isolated schedule tool, so natural-language scheduling never pollutes the main coding workspace.
+  - Added the WebUI schedule dialog with visual editing, Run Now, sidebar activity badges, project task trees, and an AI conversation flow.
+  - Reused the existing project/session workspace picker in AI mode; tightened the mobile composer, moved Send beside the model, restored desktop Effort, and expanded the conversation area.
+
+- **[Agent Runtime] Unbounded rounds, runtime model switching, and mode memory**:
+  - Removed main-session round limits and replaced hard stops with a final soft-landing summary; subagents retain their bounded execution.
+  - Added runtime model hot-swapping at round boundaries with display-only switch chips and persisted switch/tool metrics.
+  - Added startup Auto/Bypass, configurable `memory`/`global` mode policy, per-session approval modes, and process-lifetime fallback without persisting a temporary switch.
+  - Added `/goal` multi-round compaction support, configurable `compact_threshold` and `/compact threshold`, accurate `/context` breakdowns, Gemini overflow recognition, and causal anchors for compaction notices.
+  - Hardened stream retries/resumption, 360-second reasoning timeouts, integer history cursors, project identity/ETag handling, and stale-notice convergence.
+
+- **[Desktop & Updates] Full package updates and desktop integration**:
+  - Added desktop shell compatibility checks and a two-hop upgrade path for legacy shells: hot-update the core, then install the matching shell package.
+  - Added silent-to-tray startup, reliable foreground activation, the configurable `Ctrl+Alt+J` shortcut, native title-bar theme sync, optional taskbar-icon hiding, and Windows shortcut fixes.
+  - Split core and desktop-shell update indicators: only a newer core version turns the top bar green; shell-only updates stay in the update dialog.
+  - Release staging now publishes only desktop bundles, preventing build-script and raw sidecar binaries from leaking into releases.
+
+- **[WebUI] Denser layout, readable tool rows, and mobile fixes**:
+  - Introduced the high-density shell, compact Git commit banner, inline elapsed badges, and the simplified navigation/settings layouts.
+  - Added semantic one-line tool rows with front-end aliases, Bash summaries, Todo plan/count summaries, Task subtask summaries, real MCP server/tool identities, and full details on expansion.
+  - Restored the 7.2.x name/parameter hierarchy and Atelier colors; aligned descriptions, parameters, diffs, statuses and timers on one baseline; mobile Bash keeps the summary complete and ellipsizes only the command.
+  - Stabilized model/provider cards with a fixed right-side action column, kept the model count with the provider identity, and made mobile provider headers single-row.
+  - Restored image lightbox prev/next across virtualized history, made toolbar refresh perform a real F5 reload, and kept English settings tabs on one line.
+  - Added a 17-tool development showcase covering long parameters, timings, switch latency and done/error/incomplete states.
+
+- **[Security] Console WebUI is no longer indexable**:
+  - Added robots/googlebot `noindex, nofollow, noarchive, nosnippet` meta tags, a Disallow-all `/robots.txt`, and `X-Robots-Tag` on daemon and Vite responses.
+  - **Upgrade warning**: older publicly exposed WebUI builds could be indexed by search engines; several community deployments were found indexed, and some public instances had no access token. If you exposed an older build publicly, set a strong token immediately and upgrade. noindex prevents discovery; it is not a replacement for authentication or TLS.
+  - docs-site and GitHub remain indexable; deliberate public exposure behavior is unchanged.
+
+- **[Performance & Reliability] Multiplexed connections and non-blocking I/O**:
+  - Multiplexed global events and session watches over `/stream/ws`, lazy-mounted Terminal/Git/Preview, code-split language packs, and added a bootstrap aggregate with request deduplication and ETag caching.
+  - Moved blocking Git/process/session I/O off the async runtime, sharded session locks, enabled HTTP/2 shared pools, and scoped pools to the active Tokio runtime.
+  - Fixed multi-tab connection starvation, modal stalls, model-config loading freezes, legacy-migration self-termination (#88), auth redirect/pagination failures, and release/CI cross-platform edge cases.
+
+- **[Release] Stable packaging**:
+  - The release workflow builds Windows, Linux and macOS on x64 and arm64 from this tag and publishes one pre-release/stable release set.
+  - Numeric prerelease semver comparison, cross-lockfile version alignment, and project-key/CI fixtures are included in the consolidated line.
+
+---
+
+**v7.5.2 是 beta.0 到 beta.6 的正式汇总版。它带来完整的定时任务系统与隔离式 AI 助手、主会话无限轮次与软着陆、运行时模型热切换、启动 Auto/Bypass 与持久化模式策略、桌面全量更新与旧壳两跳升级、桌面主题/静默自启/全局热键、更高信息密度的 WebUI、可配置压缩阈值、真实上下文明细、连接层与性能重构，以及控制台 noindex 安全加固。后续修复覆盖工具行、模型卡片、图片灯箱切换、F5 刷新、手机 Bash 说明、定时任务工作区和英文设置标签。**
+
+- **[定时任务] 完整调度系统与隔离式 AI 助手**：
+  - 新增按日期、星期、多时间点正交组合的日历调度与间隔调度，配置原子写入，支持单次任务自动停用以及独立/复用会话模式。
+  - 新增独立 AI 调度端点与隔离式 schedule 工具，自然语言创建任务不会污染主编码工作区。
+  - WebUI 上线可视化日程配置、立即试跑、侧栏活动徽标、项目任务树与 AI 对话流程。
+  - AI 模式复用现有项目/会话工作区下拉；移动端输入区收口，发送按钮与模型同排，桌面恢复 Effort，并扩大对话区。
+
+- **[Agent 运行时] 无限轮次、运行时切模与模式记忆**：
+  - 移除主会话轮次上限，用最后一轮软着陆总结替代硬停；子 Agent 仍保留边界。
+  - 新增回合边界模型热切换、Switch 状态徽标，以及切换/工具耗时持久化。
+  - 新增启动 Auto/Bypass、`memory`/`global` 模式策略、每会话审批模式与进程生命周期兜底，不再因草稿或冷启动回退 Build。
+  - 支持 `/goal` 多轮压缩、`compact_threshold` 与 `/compact threshold`、真实 `/context` 明细、Gemini 溢出识别，以及压缩通知因果锚定。
+  - 加固流式重试与断点恢复、360 秒推理超时、整数历史游标、项目身份/ETag 与陈旧通知收敛。
+
+- **[桌面与更新] 全量安装包与桌面集成**：
+  - 新增桌面外壳兼容检查与旧壳两跳升级：先热更新内核，再安装匹配的桌面外壳安装包。
+  - 新增静默托盘自启、可靠前置聚焦、`Ctrl+Alt+J` 全局热键、原生标题栏主题同步、可选隐藏任务栏图标与 Windows 快捷方式修复。
+  - 内核与桌面壳更新提示分离：只有内核新版本让顶栏变绿；仅外壳更新保留在更新弹窗。
+  - 发布资产只收集桌面安装包，杜绝构建脚本与裸 sidecar 二进制进入 Release。
+
+- **[WebUI] 更高密度布局、可读工具行与手机修复**：
+  - 引入高密度外壳、单行 Git 提交横幅、内嵌耗时徽标，以及更紧凑的设置/导航布局。
+  - 工具行支持前端别名、Bash 摘要、Todo 首条计划与数量、Task 子代理摘要、真实 MCP server/tool，以及展开后的完整参数。
+  - 恢复 7.2.x 工具名/参数层级与 Atelier 色谱；描述、参数、diff、状态与耗时共用基线；手机 Bash 优先完整显示说明，只省略命令。
+  - 模型/Provider 卡片操作列固定右侧，模型数量跟随身份，移动端 Provider 保持单行。
+  - 恢复虚拟化历史下的图片灯箱左右切换，顶栏刷新恢复 F5，英文设置标签保持单行。
+  - 新增 17 工具开发展示会话，覆盖长参数、耗时、switch 延迟与 done/error/incomplete 状态。
+
+- **[安全] 控制台 WebUI 禁止收录**：
+  - 增加 robots/googlebot noindex、全站 Disallow 的 robots.txt，以及 daemon/Vite 全响应 X-Robots-Tag。
+  - **升级警告**：旧版本 WebUI 一旦开放到公网，可能被搜索引擎收录；目前已发现多位用户的站点被收录，部分公网实例未设置 token。请立即设置强 token 并升级。noindex 只能阻止被发现，不能替代认证或 TLS。
+  - docs-site 与 GitHub 仍可收录；公网开放策略保持不变。
+
+- **[性能与可靠性] 多路连接与非阻塞 I/O**：
+  - 全局事件与会话监听复用 `/stream/ws`，Terminal/Git/Preview 懒挂载，语言包按需加载，并新增 bootstrap 聚合、请求去重与 ETag 缓存。
+  - Git/进程/会话读盘移出 async runtime，会话锁分片，HTTP/2 共享连接池，并按当前 Tokio runtime 隔离连接池。
+  - 修复多标签连接饥饿、弹窗停顿、模型配置加载卡死、旧环境迁移自毁（#88）、鉴权重定向/分页失败与发布 CI 跨平台问题。
+
+- **[发布] 正式打包**：
+  - 发布流水线从本 tag 构建 Windows、Linux、macOS 的 x64 与 arm64 六套产物，并统一发布。
+  - 汇总包含 prerelease 数值比较修复、跨 lockfile 版本对齐，以及 project-key/CI 夹具修复。
+
 ## v7.5.2-beta.6 (2026-11-21)
 
 **This beta resolves follow-up UI regressions: desktop scheduled-task Effort is restored, refresh buttons perform a real F5 reload, image lightbox prev/next navigation works again for virtualized history, mobile Bash summaries are never truncated, the scheduled-task AI composer reuses the project workspace picker, and English settings tabs stay on one line.**
