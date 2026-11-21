@@ -7611,15 +7611,6 @@ fn format_tool_args(tool_name: &str, args_json: &str) -> String {
                 "subtask".to_string()
             }
         }
-        "list_directory" => {
-            // Schema primary key is `target_directory`; `path` is a serde alias for older calls.
-            let path = args
-                .get("target_directory")
-                .or_else(|| args.get("path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            short_path(path)
-        }
         "grep" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -30316,7 +30307,8 @@ mod channel_mode_tests {
             ),
             crate::approval_mode::ApprovalMode::Auto
         );
-        // A sibling session keeps its own (unset → global) truth.
+        // A sibling without a session record still honors the request copy; only
+        // runtime/new-session fallbacks use the process-lifetime default.
         assert_eq!(
             effective_chat_approval_mode_scoped(
                 Some(crate::approval_mode::ApprovalMode::Build),

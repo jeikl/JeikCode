@@ -94,6 +94,7 @@ pub(crate) fn fallback_approval_decision(mode: ApprovalMode) -> PermissionDecisi
 }
 
 /// Web/TUI 共同显示并下发给 Coding Runtime 的审批模式。
+/// 进程生命周期默认：每次显式模式切换都会更新；重启后回到 Build，除非系统设置指定全局。
 static LIVE_APPROVAL_MODE: StdMutex<ApprovalMode> = StdMutex::new(ApprovalMode::Build);
 
 /// 按 session_id 隔离记录的审批模式表；未单独配置的会话回退到 `LIVE_APPROVAL_MODE`。
@@ -315,13 +316,16 @@ pub(crate) fn live_set_approval_mode(mode: ApprovalMode) {
     *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
 }
 
-/// 设置指定 session 的审批模式；若 session_id 为 None 则更新全局默认模式。
+/// 设置指定 session 的审批模式，并同步更新进程生命周期默认。
+///
+/// 会话切换只写内存：不写 `desktop-settings.json`，因此 daemon 重启后仍按
+/// 系统设置（未显式设置则 Build）启动；但在当前进程内，新会话、无 session 的
+/// `/approval_mode` 和未单独记录的会话都会继承最后一次显式选择。
 pub(crate) fn live_set_session_approval_mode(session_id: Option<&str>, mode: ApprovalMode) {
     if let Some(sid) = session_id.filter(|s| !s.trim().is_empty()) {
         remember_session_approval_mode(sid.trim(), mode);
-    } else {
-        *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
     }
+    *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
 }
 
 /// 清除指定 session 的隔离审批模式记录（在会话删除时释放内存）。
@@ -5294,7 +5298,7 @@ mod tests {
         live_set_mode(ApprovalMode::Build);
         live_set_session_approval_mode(Some("session-alpha"), ApprovalMode::Plan);
 
-        // Default query without session_id returns global Build mode.
+        // The session switch becomes the process-lifetime default.
         let resp_default = approval_mode_get(axum::extract::Query(ApprovalModeQuery::default()))
             .await
             .into_response();
@@ -5304,7 +5308,7 @@ mod tests {
         let val_default: serde_json::Value = serde_json::from_slice(&body_default).expect("json");
         assert_eq!(
             val_default,
-            serde_json::json!({ "ok": true, "mode": "build", "global": false })
+            serde_json::json!({ "ok": true, "mode": "plan", "global": false })
         );
 
         // Scoped query for session-alpha returns isolated Plan mode.
@@ -5322,7 +5326,7 @@ mod tests {
             serde_json::json!({ "ok": true, "mode": "plan", "global": false })
         );
 
-        // Other session without explicit override falls back to global Build mode.
+        // Other session without explicit override falls back to the process default.
         let resp_beta = approval_mode_get(axum::extract::Query(ApprovalModeQuery {
             session_id: Some("session-beta".to_string()),
         }))
@@ -5334,10 +5338,10 @@ mod tests {
         let val_beta: serde_json::Value = serde_json::from_slice(&body_beta).expect("json");
         assert_eq!(
             val_beta,
-            serde_json::json!({ "ok": true, "mode": "build", "global": false })
+            serde_json::json!({ "ok": true, "mode": "plan", "global": false })
         );
 
-        // Clearing session-alpha restores fallback to default mode.
+        // Clearing session-alpha restores fallback to the process default.
         live_clear_session_approval_mode("session-alpha");
         let resp_cleared = approval_mode_get(axum::extract::Query(ApprovalModeQuery {
             session_id: Some("session-alpha".to_string()),
@@ -5350,7 +5354,7 @@ mod tests {
         let val_cleared: serde_json::Value = serde_json::from_slice(&body_cleared).expect("json");
         assert_eq!(
             val_cleared,
-            serde_json::json!({ "ok": true, "mode": "build", "global": false })
+            serde_json::json!({ "ok": true, "mode": "plan", "global": false })
         );
     }
 
@@ -5607,6 +5611,37 @@ mod tests {
         live_set_global_mode_enabled(true, Some(ApprovalMode::Plan));
         init_agent_mode_from_desktop_settings();
         assert!(!live_global_mode_enabled());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_scoped_switch_sets_process_default_without_persisting() {
+        let home = crate::tests::ScopedChatHome::new();
+        let _mode_guard = ScopedApprovalModeForTest::new();
+        let state = crate::tests::chat_test_state(&home);
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+
+        // Explicit session switch also becomes the process-lifetime default, but
+        // session-scoped requests with global=None never write desktop-settings.
+        let _ = approval_mode_set(
+            axum::extract::State(state.clone()),
+            axum::Json(LiveModeReq {
+                mode: ApprovalMode::Plan,
+                session_id: Some("sess-lifetime".into()),
+                global: None,
+            }),
+        )
+        .await;
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Plan);
+        let saved = crate::api_config::load_desktop_settings_payload_at(
+            &home.path().join("desktop-settings.json"),
+        );
+        assert_eq!(saved.agent_mode_policy, "memory");
+        assert_eq!(saved.agent_global_mode, "build");
+
+        // Daemon cold start without an explicit global policy resets to Build.
+        live_set_global_mode_enabled(false, Some(ApprovalMode::Build));
+        init_agent_mode_from_desktop_settings();
+        assert_eq!(live_current_approval_mode(), ApprovalMode::Build);
     }
 
     #[tokio::test]
