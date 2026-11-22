@@ -2,55 +2,27 @@
 # ──────────────────────────────────────────────────────────────────────
 # JeikCode npm package build script
 # Usage:  ./scripts/build_npm_package.sh <version>
-# Example: ./scripts/build_npm_package.sh 4.23.3 --dry-run
-#          ./scripts/build_npm_package.sh 4.23.3
+# Example: ./scripts/build_npm_package.sh 7.5.3 --dry-run
+#          ./scripts/build_npm_package.sh 7.5.3
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-B=""
+REPO="jeikl/JeikCode"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-
-# ── version auto-detection (same helpers as packages/homebrew/scripts/package-tar-gz.sh) ──
-et(){
-    command -v curl &>/dev/null || return 1
-    command -v jq &>/dev/null && return 0
-    j=jq-macos-amd64; [[ $(uname -m) == arm64 ]] && j=jq-macos-arm64
-    g="https://github.com/jqlang/jq/releases/download/jq-1.7.1/$j"
-    d=$(mktemp -d) || return 1; p=$d/jq
-    for u in "${GITHUB_JQ_URL:-}" "$g" "https://ghfast.top/$g"; do
-        [[ $u ]] || continue
-        curl -fsSL --connect-timeout 40 --retry 3 "$u" -o "$p" || continue
-        s=$(stat -f%z "$p" 2>/dev/null || echo 0)
-        [[ $s -ge 80000 ]] || { rm -f "$p"; continue; }
-        chmod +x "$p" || { rm -f "$p"; continue; }
-        "$p" -n . &>/dev/null || { rm -f "$p"; continue; }
-        export PATH="$d:$PATH"
-        command -v jq &>/dev/null && return 0
-    done
-    rm -rf "$d"; return 1
-}
-
-fct(){ curl -sS -H "PRIVATE-TOKEN: $GITHUB_TOKEN" -H "Accept: application/json" \
-    "$B/repos/jeikcode_jeikcode/jeikcode/contents/Cargo.toml?ref=main"; }
-
-pvs(){
-    local t v
-    t=$(jq -er 'select(.type=="file")|.content|gsub("[[:space:]]";"")|@base64d' <<<"$1")
-    v=$(awk 'BEGIN{f=0} index($0,"[workspace.package]")==1{w=1;next} substr($0,1,1)=="["{w=0}
-        w&&/^version *=/{if(match($0,/"[^"]+"/)){print substr($0,RSTART+1,RLENGTH-2);f=1;exit}}
-        END{exit !f}' <<<"$t")
-    [[ $v ]] || exit 1; echo "$v"
-}
 
 # ── resolve version ──
 if [ $# -ge 1 ] && [[ "$1" != -* ]]; then
     VERSION="$1"
     shift
 else
-    et || { echo "Error: jq not available"; exit 1; }
-    j=$(fct) || { echo "Error: failed to fetch Cargo.toml"; exit 1; }
-    jq -e .error_code <<<"$j" &>/dev/null && { echo "Error fetching Cargo.toml: $(echo "$j" | jq -r .message)"; exit 1; }
-    VERSION=$(pvs "$j") || { echo "Error: failed to parse version from Cargo.toml"; exit 1; }
+    VERSION=$(curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/Cargo.toml" | awk '
+        /^\[workspace\.package\]/ { w = 1; next }
+        /^\[/ { w = 0 }
+        w && /^version *=/ { gsub(/.*"|".*/, ""); print; exit }')
+    if [[ -z "$VERSION" ]]; then
+        echo "Error: failed to read [workspace.package].version from Cargo.toml"
+        exit 1
+    fi
 fi
 
 # Capture remaining args for npm publish (e.g. --dry-run, --otp=...)
@@ -61,13 +33,14 @@ WORK_DIR=$(mktemp -d)
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
+# Keep this list in sync with scripts/platforms.json (checked by
+# `node scripts/platforms.js --check`).
 PLATFORMS=(
   "darwin-arm64:darwin:arm64"
   "darwin-x64:darwin:x64"
   "linux-arm64:linux:arm64"
   "linux-x64:linux:x64"
   "win32-x64:win32:x64"
-  "ohos-arm64:ohos:arm64"
 )
 
 publish_platform() {
@@ -75,21 +48,21 @@ publish_platform() {
   local dir="$WORK_DIR/$tag"
   mkdir -p "$dir/bin"
 
-  # generate package.json dynamically — 就几行
+  # The wrapper (bin/jeikcode.js) resolves these names.
   cat > "$dir/package.json" <<EOF
-{"name":"@github.com/JeikCode/JeikCode/jeikcode","version":"${VERSION}-${tag}","os":["${os}"],"cpu":["${arch}"],"files":["bin/"]}
+{"name":"@github.com/jeikcode-${tag}","version":"${VERSION}-${tag}","os":["${os}"],"cpu":["${arch}"],"files":["bin/"]}
 EOF
 
-  # download binary
   local dl_os="$os"
-  [ "$os" = "win32" ] && dl_os="windows"
-  local bin_name="jeikcode$([ "$os" = "win32" ] && echo ".exe")"
-  local url="https://github.com/JeikCode/JeikCode/releases/download/v${VERSION}/jeikcode-v${VERSION}-${dl_os}-${arch}$([ "$os" = "win32" ] && echo ".exe")"
+  local ext=""
+  [ "$os" = "win32" ] && dl_os="windows" && ext=".exe"
+  local bin_name="jeikcode${ext}"
+  local url="https://github.com/${REPO}/releases/download/v${VERSION}/jeikcode-v${VERSION}-${dl_os}-${arch}${ext}"
 
   echo "  ↓ downloading ${tag}..."
   local http_code
   if [ -n "$GITHUB_TOKEN" ]; then
-    http_code=$(curl -fsSL -w '%{http_code}' -H "PRIVATE-TOKEN: $GITHUB_TOKEN" --connect-timeout 30 --retry 3 "$url" -o "$dir/bin/$bin_name" 2>/dev/null)
+    http_code=$(curl -fsSL -w '%{http_code}' -H "Authorization: Bearer ${GITHUB_TOKEN}" --connect-timeout 30 --retry 3 "$url" -o "$dir/bin/$bin_name" 2>/dev/null)
   else
     http_code=$(curl -fsSL -w '%{http_code}' --connect-timeout 30 --retry 3 "$url" -o "$dir/bin/$bin_name" 2>/dev/null)
   fi
@@ -100,14 +73,13 @@ EOF
   fi
   chmod +x "$dir/bin/$bin_name"
 
-  # publish
   cd "$dir"
   npm publish --registry=https://registry.npmjs.org/ --access public $NPM_EXTRA
-  echo "  ✓ @github.com/JeikCode/JeikCode/jeikcode@${VERSION}-${tag}"
+  echo "  ✓ @github.com/jeikcode-${tag}@${VERSION}-${tag}"
 }
 
 echo ""
-echo "  Publishing @github.com/JeikCode/JeikCode/jeikcode v${VERSION}"
+echo "  Publishing @github.com/jeikcode v${VERSION}"
 echo ""
 
 # 1. publish platform versions
@@ -122,22 +94,21 @@ mkdir -p "$CORE_DIR/bin"
 cp "$NPM_DIR/package.json" "$CORE_DIR/"
 cp "$NPM_DIR/bin/jeikcode.js" "$CORE_DIR/bin/"
 cd "$CORE_DIR"
-# Inject version + optionalDependencies dynamically (like Codex does in CI)
+# Inject version + optionalDependencies (same names as bin/jeikcode.js).
 node -e "
 var fs = require('fs');
 var pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 pkg.version = '$VERSION';
 pkg.optionalDependencies = {
-  '@github.com/JeikCode/JeikCode/jeikcode-darwin-arm64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-darwin-arm64',
-  '@github.com/JeikCode/JeikCode/jeikcode-darwin-x64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-darwin-x64',
-  '@github.com/JeikCode/JeikCode/jeikcode-linux-arm64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-linux-arm64',
-  '@github.com/JeikCode/JeikCode/jeikcode-linux-x64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-linux-x64',
-  '@github.com/JeikCode/JeikCode/jeikcode-win32-x64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-win32-x64',
-  '@github.com/JeikCode/JeikCode/jeikcode-ohos-arm64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-ohos-arm64'
+  '@github.com/jeikcode-darwin-arm64': 'npm:@github.com/jeikcode@$VERSION-darwin-arm64',
+  '@github.com/jeikcode-darwin-x64': 'npm:@github.com/jeikcode@$VERSION-darwin-x64',
+  '@github.com/jeikcode-linux-arm64': 'npm:@github.com/jeikcode@$VERSION-linux-arm64',
+  '@github.com/jeikcode-linux-x64': 'npm:@github.com/jeikcode@$VERSION-linux-x64',
+  '@github.com/jeikcode-win32-x64': 'npm:@github.com/jeikcode@$VERSION-win32-x64'
 };
 fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
 "
 npm publish --registry=https://registry.npmjs.org/ --access public $NPM_EXTRA
-echo "  ✓ @github.com/JeikCode/JeikCode/jeikcode@${VERSION} (core)"
+echo "  ✓ @github.com/jeikcode@${VERSION} (core)"
 echo ""
 echo "  All done!"

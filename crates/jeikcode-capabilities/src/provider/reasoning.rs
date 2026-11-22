@@ -7,7 +7,8 @@
 //! Why per-model: OpenAI-compatible "reasoning models" disagree on the round-trip.
 //!
 //! ```text
-//! deepseek-v4*           REQUIRES reasoning_content echoed on assistant tool-call
+//! deepseek-v4* / deepseek-flash
+//!                        REQUIRES reasoning_content echoed on assistant tool-call
 //!                        turns (HTTP 400 "must be passed back" otherwise); an empty
 //!                        string is rejected, so a non-empty REASONING_PLACEHOLDER is
 //!                        sent when no reasoning was captured.
@@ -95,7 +96,7 @@ impl ReasoningPolicy {
         if m.contains("deepseek-reasoner") || m.contains("deepseek-r1") {
             // DeepSeek V3 family: rejects echoed reasoning_content (400).
             ReasoningPolicy::Exclude
-        } else if m.contains("deepseek-v4") || m.contains("grok") {
+        } else if m.contains("deepseek-v4") || m.contains("deepseek-flash") || m.contains("grok") {
             // DeepSeek V4 thinking mode / Grok 4.5/4.6: REQUIRES/expects reasoning_content on tool-call turns.
             ReasoningPolicy::Include
         } else if m.starts_with("kimi-")
@@ -127,6 +128,11 @@ mod tests {
         );
         assert_eq!(
             ReasoningPolicy::derive("DeepSeek-V4", ""),
+            ReasoningPolicy::Include
+        );
+        // Current official Flash ID (V4.1) — must follow the same echo policy.
+        assert_eq!(
+            ReasoningPolicy::derive("deepseek-flash", ""),
             ReasoningPolicy::Include
         );
         assert_eq!(

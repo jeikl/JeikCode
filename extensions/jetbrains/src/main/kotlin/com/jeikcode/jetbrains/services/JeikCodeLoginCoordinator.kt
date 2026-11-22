@@ -25,7 +25,7 @@ class JeikCodeLoginCoordinator {
     ): CompletableFuture<Unit> = login(
         object : LoginTransport {
             override val key: String = client.loginCoordinatorKey()
-            override fun start(): CompletableFuture<LoginStartResponse> = client.startLogin(true)
+            override fun start(): CompletableFuture<LoginStartResponse> = client.startLogin()
             override fun poll(loginId: String): CompletableFuture<LoginPollResponse> = client.pollLogin(loginId)
             override fun cancel(loginId: String): CompletableFuture<Boolean> = client.cancelLogin(loginId)
         },

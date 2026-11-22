@@ -1486,11 +1486,15 @@ mod tests {
         let projected = todo_items_from_board(&session_id);
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].content, "finished task");
-        assert_eq!(
-            jeikcode_capabilities::tools::read_todo_board(&session_id)
-                .unwrap()
-                .items,
-            items,
+        let stored = jeikcode_capabilities::tools::read_todo_board(&session_id)
+            .unwrap()
+            .items;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].content, "finished task");
+        assert_eq!(stored[0].status, items[0].status);
+        assert!(
+            stored[0].id.is_some(),
+            "committing an anonymous todo must assign a stable id"
         );
         jeikcode_capabilities::tools::purge_todo_board(&session_id);
     }

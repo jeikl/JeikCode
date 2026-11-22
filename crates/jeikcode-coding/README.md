@@ -7,12 +7,11 @@ CODING 特化层。它把中性内核（[`jeikcode_kernel`]）+ 能力层
 
 ---
 
-## 依赖现状：core-free L2
+## 依赖现状：L2 装配边界
 
-`jeikcode-core` 已从 workspace 删除。`jeikcode-coding` 的模型能力判断由
-`jeikcode-capabilities` 提供；限流逻辑只依赖可注入的 `RateLimitWindowSource`，具体
-CodingPlan 客户端由 CLI/daemon 等 host adapter 实现；plugin hook 同样通过
-`PluginHookSource` 注入。
+`jeikcode-coding` 的模型能力判断由 `jeikcode-capabilities` 提供；限流逻辑只依赖可注入的
+`RateLimitWindowSource`，具体 CodingPlan 客户端由 CLI/daemon 等 host adapter 实现；
+plugin hook 同样通过 `PluginHookSource` 注入。
 
 直接依赖的 workspace crate 是 `jeikcode-kernel`、`jeikcode-capabilities`、
 `jeikcode-config`、`jeikcode-telemetry` 和 `jeikcode-review`。CLI、TUI、daemon 使用
@@ -34,7 +33,7 @@ use jeikcode_coding::{build_coding_agent, CodingAgentConfig};
 use jeikcode_kernel::agent::AutoRespond;
 
 let agent = build_coding_agent(CodingAgentConfig::new(
-    "sk-...", "https://api.deepseek.com/v1", "deepseek-chat", ".",
+    "sk-...", "https://api.deepseek.com/v1", "deepseek-v4-pro", ".",
 ))?;
 let outcome = agent.run_to_completion("fix the build", AutoRespond::AllowAll).await;
 println!("{}", outcome.text);
@@ -76,5 +75,5 @@ println!("{}", outcome.text);
 
 以 `["provider", "tools", "web", "codeintel", "skills", "mcp", "session",
 "memory", "cc-hooks", "offline"]` 引入 **coding 默认装配所需的能力集**（注意：
-未启用 `jeikcode` / `lsp` / `notify` 等 L1 feature —— 该集合是有选择的，并非覆盖
+未启用 `notify` / `setup` / `plugin` 等 L1 feature —— 该集合是有选择的，并非覆盖
 L1 全部 feature）。L2 是带观点的一方装配，生产 coding agent 默认把这些接好。

@@ -12,9 +12,9 @@
     <a href="https://github.com/jeikl/JeikCode/releases" target="_blank">
       <img src="https://img.shields.io/github/v/release/jeikl/JeikCode?color=blue&label=version" alt="version">
     </a>
-    <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
+    <img src="https://img.shields.io/badge/rust-1.93%2B-orange.svg" alt="rust">
     <img src="https://img.shields.io/badge/license-Non--Commercial%20(CC--BY--NC--4.0)-red.svg" alt="license">
-    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
+    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="platform">
     <a href="https://github.com/jeikl/JeikCode" target="_blank">
       <img src="https://img.shields.io/github/stars/jeikl/JeikCode?style=social" alt="GitHub Stars"/>
     </a>
@@ -45,7 +45,7 @@
 - 🔍 **Semantic CodeGraph (CodeExplore)**: Powered by Tree-Sitter across 12+ programming languages. Seamlessly integrates domain bilingual thesauruses (`thesaurus`) to query code using everyday business natural language, backed by 1~3ms zero-touch incremental patching;
 - 🛡️ **98–99% KV-Cache Protection (Sacred Floor)**: Enforces strict append-only byte immutability and memory preservation (`sacred_floor`), keeping system prefixes frozen across turns. Completely eliminates cache thrashing, slash token expenses by over 90%, and compresses TTFT to milliseconds;
 - ⚡ **9k Minimal Prompts & High Discipline**: Avoids 30–50k token system bloat. A standard greeting turn consumes only ~9–11k tokens, reserving the maximum context window strictly for your codebase. Fully open-source and live-reloadable;
-- 📱 **Omni-Platform Workflows & Unified Agent**: Full coverage across terminal TUI, modern WebUI, Tauri desktop apps, background daemons, and OpenWrt routers/gateways. Runs seamlessly across Windows, macOS, Linux (x86/ARM), and OpenWrt (iStoreOS/ImmortalWrt/Kwrt/LEDE) with a unified mental model and coherent cross-platform experience;
+- 📱 **Omni-Platform Workflows & Unified Agent**: Full coverage across terminal TUI, modern WebUI, Tauri desktop apps, background daemons, and OpenWrt routers/gateways (**x86_64 / aarch64**). Runs seamlessly across Windows, macOS, Linux (x64/ARM64), and OpenWrt (iStoreOS/ImmortalWrt/Kwrt/LEDE) with a unified mental model and coherent cross-platform experience;
 - 🔒 **Git-like State Machine Atomic Protection**: Strict concurrent file edit boundaries eliminate dirty writes. Operates safely across frontier and lightweight models, complete with one-click undo/rollback checkpoints;
 - 🔄 **Native Support for 5 Industry Protocols**: Seamlessly integrates `OpenAI Chat`, `OpenAI Responses`, `Anthropic Claude`, `Google Gemini`, and `Ollama` formats, with complete decoupling of accounts and models;
 - 🧩 **Tri-Protocol Gateway & Open Ecosystem**: Exposes standard OpenAI, Anthropic, and Gemini compatible server endpoints, enabling tools like OpenClaw or translation plugins to connect effortlessly;
@@ -62,8 +62,8 @@ Out-of-the-box cross-platform desktop application with embedded WebUI and automa
 | OS / Architecture | Installer | Description |
 | :--- | :--- | :--- |
 | **Windows** (64-bit) | [📥 **Download Windows Installer (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | Graphical setup wizard |
-| **macOS** (Apple Silicon / Intel) | [🍏 **Download macOS Installer (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | Native M1~M4 & Intel packages |
-| **Linux** (Debian / Ubuntu / Universal) | [🐧 **Download Linux Package (.deb / .AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | Standalone portable executable |
+| **macOS** (Apple Silicon / Intel) | [🍏 **Download macOS Installer (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | Supports Apple Mac |
+| **Linux** (x64: Debian / Ubuntu / Universal) | [🐧 **Download Linux Package (.deb / .AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | Standalone portable executable |
 
 > 🍎 **macOS: Fix for "JeikCode Desktop.app is damaged and cannot be opened"**:  
 > Drag the app into `/Applications`, then open Terminal and run:  
@@ -80,6 +80,8 @@ curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 ```
+
+> Headless devices (boxes, NAS, soft routers) only need the CLI binary. See [Supported Platforms](https://jeikcode.top/guide/supported-platforms) for the exact matrix.
 
 ---
 

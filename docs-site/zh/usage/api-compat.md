@@ -124,7 +124,7 @@ curl -X POST http://127.0.0.1:13457/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-token" \
   -d '{
-    "model": "deepseek/deepseek-v4.1-flash",
+    "model": "deepseek/flash",
     "user": "alice_chat_1",
     "messages": [
       {"role": "user", "content": "请分析当前项目的架构特点"}
@@ -140,7 +140,7 @@ curl -X POST http://127.0.0.1:13457/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-token" \
   -d '{
-    "model": "deepseek/deepseek-v4.1-flash",
+    "model": "deepseek/flash",
     "user": "alice_chat_1",
     "messages": [
       {"role": "user", "content": "现在重点看 daemon 的会话准入路径"}
@@ -156,7 +156,7 @@ curl -X POST http://127.0.0.1:13457/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-token" \
   -d '{
-    "model": "deepseek/deepseek-v4.1-flash",
+    "model": "deepseek/flash",
     "user": "alice_responses_1",
     "input": "总结这次改动最可能的失败模式",
     "stream": true
@@ -172,7 +172,7 @@ curl -X POST http://127.0.0.1:13457/v1/messages \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-token" \
   -d '{
-    "model": "deepseek/deepseek-v4.1-flash",
+    "model": "deepseek/flash",
     "user": "alice_anthropic_1",
     "max_tokens": 4096,
     "messages": [

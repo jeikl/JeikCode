@@ -30,19 +30,24 @@ $ManifestUrl = if ($env:JEIKCODE_MANIFEST_URL) {
 
 # --- detect platform ---
 $os = "windows"
-$RealArch = if ($env:PROCESSOR_ARCHITEW6432) {
+# Test-only override; not a supported user knob.
+$RealArch = if ($env:JEIKCODE_TEST_PROCESSOR_ARCHITECTURE) {
+    $env:JEIKCODE_TEST_PROCESSOR_ARCHITECTURE
+} elseif ($env:PROCESSOR_ARCHITEW6432) {
     $env:PROCESSOR_ARCHITEW6432
 } else {
     $env:PROCESSOR_ARCHITECTURE
 }
+# >>> platforms:arch
 switch ($RealArch) {
-    "AMD64" { $arch = "x64" }
     "ARM64" { $arch = "arm64" }
+    "AMD64" { $arch = "x64" }
     default {
         Write-Host "Unsupported architecture: $RealArch (supported: AMD64, ARM64)" -ForegroundColor Red
         exit 1
     }
 }
+# <<< platforms:arch
 $ext = ".exe"
 
 # --- install dir ---

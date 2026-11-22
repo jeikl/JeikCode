@@ -10,6 +10,14 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { DESKTOP_INSTALLERS } = require('./platforms');
+
+// Derived from scripts/platforms.json; never hand-list desktop keys here.
+const DESKTOP_SPECS = DESKTOP_INSTALLERS.map((entry) => ({
+  installerKey: entry.installerKey,
+  tauriTarget: entry.tauriTarget || null,
+  match: (name) => entry.assetSuffixes.some((suffix) => name.endsWith(suffix)),
+}));
 
 function walkFiles(dir) {
   if (!fs.existsSync(dir)) return [];
@@ -58,48 +66,10 @@ function buildDesktopManifest({ tag, distDir, repo = 'jeikl/JeikCode', pubDate, 
   const downloadBase = `https://github.com/${repo}/releases/download/${normalizedTag}`;
   const files = walkFiles(distDir);
 
-  const specs = [
-    {
-      installerKey: 'windows-x64',
-      tauriTarget: 'windows-x86_64',
-      match: (n) => n.endsWith('_x64-setup.exe') || n.endsWith('-setup.exe'),
-    },
-    {
-      installerKey: 'darwin-arm64-app',
-      tauriTarget: 'darwin-aarch64',
-      match: (n) => n.endsWith('_aarch64.app.tar.gz'),
-    },
-    {
-      installerKey: 'darwin-x64-app',
-      tauriTarget: 'darwin-x86_64',
-      match: (n) => n.endsWith('_x64.app.tar.gz'),
-    },
-    {
-      installerKey: 'darwin-arm64-dmg',
-      tauriTarget: null,
-      match: (n) => n.endsWith('_aarch64.dmg'),
-    },
-    {
-      installerKey: 'darwin-x64-dmg',
-      tauriTarget: null,
-      match: (n) => n.endsWith('_x64.dmg'),
-    },
-    {
-      installerKey: 'linux-x64-appimage',
-      tauriTarget: 'linux-x86_64',
-      match: (n) => n.endsWith('_amd64.AppImage') || n.endsWith('_x86_64.AppImage'),
-    },
-    {
-      installerKey: 'linux-x64-deb',
-      tauriTarget: null,
-      match: (n) => n.endsWith('_amd64.deb'),
-    },
-  ];
-
   const platforms = {};
   const installers = {};
 
-  for (const spec of specs) {
+  for (const spec of DESKTOP_SPECS) {
     const filePath = findMatchingAsset(files, spec.match);
     if (!filePath) continue;
     const filename = normalizeReleaseAssetName(path.basename(filePath));
@@ -170,6 +140,7 @@ function main() {
 }
 
 module.exports = {
+  DESKTOP_SPECS,
   normalizeReleaseAssetName,
   buildDesktopManifest,
 };

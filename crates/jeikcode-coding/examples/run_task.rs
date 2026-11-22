@@ -5,7 +5,7 @@
 //! ```bash
 //! JEIKCODE_API_KEY=sk-... \
 //! JEIKCODE_BASE_URL=https://api.deepseek.com/v1 \
-//! JEIKCODE_MODEL=deepseek-chat \
+//! JEIKCODE_MODEL=deepseek-v4-pro \
 //! cargo run -p jeikcode-coding --example run_task -- "list the rust files and summarize the crate"
 //! ```
 
@@ -27,7 +27,7 @@ async fn main() {
     };
     let base_url = std::env::var("JEIKCODE_BASE_URL")
         .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
-    let model = std::env::var("JEIKCODE_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
+    let model = std::env::var("JEIKCODE_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
     let cwd = std::env::current_dir().expect("cwd");
 
     let agent = match build_coding_agent(CodingAgentConfig::new(api_key, base_url, model, cwd)) {

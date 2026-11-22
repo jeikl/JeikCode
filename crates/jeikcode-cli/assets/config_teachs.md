@@ -64,11 +64,11 @@ JeikCode 采用分层解耦的 Provider 体系，支持 **内置预设提供商*
 系统无缝兼容两种配置方式，Agent 可按需生成或解析：
 
 ### 结构 A：解耦推荐架构（`provider_accounts` 账号 + `models` 模型）
-**优势**：同一账号的 API Key / Base URL 仅需配置一次，可挂载多个不同模型（如 Chat、Reasoner、Fast 档位）。
+**优势**：同一账号的 API Key / Base URL 仅需配置一次，可挂载多个不同模型（如 Pro、Flash 档位）。
 
 ```toml
 # 顶层默认选择
-default_model = "deepseek/chat"
+default_model = "deepseek/v4-pro"
 language = "en"
 
 # -----------------------------------------------------------------------------
@@ -87,18 +87,25 @@ base_url = "https://api.your-proxy.com/v1"
 # -----------------------------------------------------------------------------
 # 2. 模型档案定义 [models."<account_id>/<model_alias>"]
 # -----------------------------------------------------------------------------
-[models."deepseek/chat"]
+[models."deepseek/v4-pro"]
 account = "deepseek"                        # 关联对应的 provider_account
-model = "deepseek-chat"                     # 真实发往后端的模型代号
-context_window = 64000                      # 上下文窗口 Token 数
-max_tokens = 8192
-
-[models."deepseek/reasoner"]
-account = "deepseek"
-model = "deepseek-reasoner"
-context_window = 64000
+model = "deepseek-v4-pro"                   # 真实发往后端的模型代号（旗舰）
+context_window = 1000000                    # 上下文窗口 Token 数（DeepSeek V4 支持 1M）
+max_tokens = 384000
 reasoning_model = true                      # 声明为推理/思考模型
-reasoning_history = "exclude"               # 推理历史回显策略："include" | "exclude"
+reasoning_history = "include"               # 推理历史回显策略："include" | "exclude"
+reasoning_effort = "max"                    # 思考强度："low" | "high" | "max"
+reasoning_levels = ["low", "high", "max"]   # Ctrl+T 循环切换档位
+
+[models."deepseek/flash"]
+account = "deepseek"
+model = "deepseek-flash"                    # 真实发往后端的模型代号（快速档）
+context_window = 1000000
+max_tokens = 384000
+reasoning_model = true
+reasoning_history = "include"
+reasoning_effort = "high"
+reasoning_levels = ["low", "high", "max"]
 
 [models."custom/gpt4o"]
 account = "my-custom-proxy"
@@ -124,10 +131,14 @@ language = "en"
 [providers.deepseek]
 type = "openai"                             # 或填 "deepseek"
 api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-model = "deepseek-chat"
+model = "deepseek-v4-pro"
 base_url = "https://api.deepseek.com/v1"
-context_window = 64000
-max_tokens = 8192
+context_window = 1000000
+max_tokens = 384000
+reasoning_model = true
+reasoning_history = "include"
+reasoning_effort = "max"
+reasoning_levels = ["low", "high", "max"]
 
 # 示例 2: 智谱 GLM-5.2
 [providers.glm]
@@ -150,9 +161,10 @@ context_window = 131072
 [providers.siliconflow]
 type = "openai"                             # 或填 "siliconflow"
 api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-model = "deepseek-ai/DeepSeek-V3"
+model = "deepseek-ai/DeepSeek-V4-Pro"
 base_url = "https://api.siliconflow.cn/v1"
-context_window = 64000
+context_window = 1000000
+max_tokens = 384000
 
 # 示例 5: Anthropic Claude 原生
 [providers.claude]
@@ -190,7 +202,7 @@ context_window = 32768
 - `reasoning_model` (布尔值):
   是否为思考/推理大模型。
 - `reasoning_history` (`"include"` | `"exclude"`):
-  推理过程历史回显策略（DeepSeek R1/V3 通常使用 `"exclude"`，Kimi K2 / DeepSeek V4 thinking 常用 `"include"`）。
+  推理过程历史回显策略（DeepSeek V4 的 `deepseek-v4-pro` / `deepseek-flash` 通常使用 `"include"`；DeepSeek R1/V3 旧模型使用 `"exclude"`，Kimi K2 常用 `"include"`）。
 - `reasoning_effort` (`"low"` | `"medium"` | `"high"` | `"max"`):
   设定推理深度/思考强度档位。
 - `reasoning_levels` (字符串数组，例如 `["low", "medium", "high", "max"]`):

@@ -4,7 +4,7 @@
 //!
 //!   JEIKCODE_LIVE_API_KEY=sk-... \
 //!   JEIKCODE_LIVE_BASE_URL=https://api.deepseek.com \
-//!   JEIKCODE_LIVE_MODEL=deepseek-v4-flash \
+//!   JEIKCODE_LIVE_MODEL=deepseek-flash \
 //!   cargo test -p jeikcode-capabilities --features e2e --test e2e -- --nocapture
 //!
 //! GLM example: BASE_URL=https://open.bigmodel.cn/api/paas/v4  MODEL=glm-4-flash
@@ -240,7 +240,7 @@ async fn live_agent_turn_loop_logs_via_hook() {
 }
 
 /// Open a real stream WITH a tool and assert a whole ToolCall assembles.
-/// Best run against a model that reliably calls tools (e.g. deepseek-chat).
+/// Best run against a model that reliably calls tools (e.g. deepseek-v4-pro).
 #[tokio::test]
 #[ignore = "tool-calling behavior is model-dependent; run explicitly"]
 async fn live_smoke_tool_call_assembles() {
@@ -291,7 +291,7 @@ async fn live_smoke_tool_call_assembles() {
 /// loop with no error IS the proof the round-trip held; a missing/wrong echo would 400
 /// the second round.
 ///
-/// Requires JEIKCODE_LIVE_MODEL to be a `deepseek-v4*` model (Include policy).
+/// Requires JEIKCODE_LIVE_MODEL to be a `deepseek-v4*` or `deepseek-flash` model (Include policy).
 #[tokio::test]
 async fn e2e_multi_round_reasoning_roundtrip_does_not_400() {
     use jeikcode_capabilities::hooks::WireLogHooks;

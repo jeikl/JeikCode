@@ -66,9 +66,12 @@ class InstallerIntegrityTests(unittest.TestCase):
     def target(self) -> tuple[str, str, bytes, str]:
         if os.name == "nt":
             return "windows-x64", ".exe", Path(sys.executable).read_bytes(), "AMD64"
-        if platform.system() == "Linux" and platform.machine() in {"x86_64", "amd64"}:
+        machine = platform.machine().lower()
+        if platform.system() == "Linux" and machine in {"x86_64", "amd64"}:
             return "linux-x64", "", b"#!/bin/sh\necho jeikcode-test\n", "x86_64"
-        self.skipTest("installer regression targets GitHub Windows/Linux x64 runners")
+        if platform.system() == "Linux" and machine in {"aarch64", "arm64"}:
+            return "linux-arm64", "", b"#!/bin/sh\necho jeikcode-test\n", "aarch64"
+        self.skipTest("installer regression targets GitHub Linux x64/arm64 and Windows x64 runners")
 
     def write_fixture(
         self,
@@ -78,18 +81,24 @@ class InstallerIntegrityTests(unittest.TestCase):
         version: str = TAG,
         include_target: bool = True,
         compact: bool = False,
+        extra_binaries: dict[str, bytes] | None = None,
     ) -> None:
         target, ext, payload, _arch = self.target()
-        asset = f"jeikcode-{TAG}-{target}{ext}"
-        asset_path = self.server_root / "releases" / "download" / TAG / asset
-        asset_path.parent.mkdir(parents=True, exist_ok=True)
-        asset_path.write_bytes(payload)
+        entries: dict[str, bytes] = {}
+        if include_target:
+            entries[target] = payload
+        entries.update(extra_binaries or {})
 
         binaries = {}
-        if include_target:
-            binaries[target] = {
-                "sha256": hash_override if hash_override is not None else sha256(payload),
-                "size": size_override if size_override is not None else len(payload),
+        for key, body in entries.items():
+            key_ext = ".exe" if key.startswith("windows") else ""
+            asset = f"jeikcode-{TAG}-{key}{key_ext}"
+            asset_path = self.server_root / "releases" / "download" / TAG / asset
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            asset_path.write_bytes(body)
+            binaries[key] = {
+                "sha256": hash_override if hash_override is not None else sha256(body),
+                "size": size_override if size_override is not None else len(body),
             }
         manifest = {"version": version, "released_at": "2026-10-05", "binaries": binaries}
         manifest_path = self.server_root / "latest.json"
@@ -105,6 +114,8 @@ class InstallerIntegrityTests(unittest.TestCase):
         manifest: str = "latest.json",
         requested_version: str | None = None,
         architecture: str | None = None,
+        uname_m: str | None = None,
+        processor_arch: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         _target, _ext, _payload, arch = self.target()
         env = os.environ.copy()
@@ -122,6 +133,11 @@ class InstallerIntegrityTests(unittest.TestCase):
             env.pop("JEIKCODE_VERSION", None)
         else:
             env["JEIKCODE_VERSION"] = requested_version
+        if uname_m is not None:
+            env["JEIKCODE_TEST_UNAME_M"] = uname_m
+            env["JEIKCODE_TEST_UNAME_S"] = "Linux"
+        if processor_arch is not None:
+            env["JEIKCODE_TEST_PROCESSOR_ARCHITECTURE"] = processor_arch
 
         if os.name == "nt":
             env["PROCESSOR_ARCHITECTURE"] = architecture or arch
@@ -225,6 +241,53 @@ class InstallerIntegrityTests(unittest.TestCase):
             result = self.run_installer(base, requested_version=TAG)
         self.assert_preserved_failure(result)
         self.assertIn("manifest reports", result.stdout + result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX arch mapping")
+    def test_armv7_userland_fails_with_64bit_message(self) -> None:
+        self.write_fixture()
+        self.seed_existing_install()
+        with FixtureServer(self.server_root) as base:
+            result = self.run_installer(base, uname_m="armv7l")
+        self.assert_preserved_failure(result)
+        output = result.stdout + result.stderr
+        self.assertIn("32-bit ARM userland is not supported", output)
+
+    @unittest.skipIf(os.name == "nt", "POSIX arch mapping")
+    def test_armv8l_userland_fails_with_64bit_message(self) -> None:
+        self.write_fixture()
+        self.seed_existing_install()
+        with FixtureServer(self.server_root) as base:
+            result = self.run_installer(base, uname_m="armv8l")
+        self.assert_preserved_failure(result)
+        self.assertIn("32-bit ARM userland is not supported", result.stdout + result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX arch mapping")
+    def test_mips_userland_fails_with_explicit_message(self) -> None:
+        self.write_fixture()
+        self.seed_existing_install()
+        with FixtureServer(self.server_root) as base:
+            result = self.run_installer(base, uname_m="mips")
+        self.assert_preserved_failure(result)
+        self.assertIn("MIPS is not supported", result.stdout + result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX arch mapping")
+    def test_aarch64_userland_downloads_linux_arm64_asset(self) -> None:
+        arm_payload = b"#!/bin/sh\necho jeikcode-arm64-test\n"
+        self.write_fixture(extra_binaries={"linux-arm64": arm_payload}, include_target=False)
+        with FixtureServer(self.server_root) as base:
+            result = self.run_installer(base, uname_m="aarch64")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.installed_path().is_file())
+        self.assertIn("linux-arm64", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell arch mapping")
+    def test_arm32_processor_architecture_fails_closed(self) -> None:
+        self.write_fixture()
+        self.seed_existing_install()
+        with FixtureServer(self.server_root) as base:
+            result = self.run_installer(base, processor_arch="ARM")
+        self.assert_preserved_failure(result)
+        self.assertIn("Unsupported architecture", result.stdout + result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "PowerShell compatibility-wrapper status propagation")
     def test_powershell_wrapper_propagates_explicit_exit_failure(self) -> None:

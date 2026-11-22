@@ -7,6 +7,9 @@ on:
       - '**.md'
       - 'docs/**'
       - 'docs-site/**'
+      # desktop/src-tauri 不在 workspace members 内；桌面打包由
+      # beta-desktop-x64.yml / build.yml 负责，代码 push 不必跑 Rust 套件。
+      - 'desktop/**'
       - '.vscode/**'
       - 'LICENSE*'
   push:
@@ -15,6 +18,7 @@ on:
       - '**.md'
       - 'docs/**'
       - 'docs-site/**'
+      - 'desktop/**'
       - '.vscode/**'
       - 'LICENSE*'
   workflow_dispatch:
@@ -27,30 +31,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  version-consistency:
-    name: Version consistency
+  repo-consistency:
+    name: Repository consistency
     if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-      - run: node scripts/check-version-consistency.js
+      - name: Version consistency
+        run: node scripts/check-version-consistency.js
+      - name: Platform manifest consistency
+        run: node scripts/platforms.js --check
+      - name: Script unit tests
+        run: node --test scripts/platforms.test.js scripts/publish-release.test.js scripts/bump-version.test.js
+      - name: Docs parity (English source)
+        run: node scripts/check-docs-parity.js
 
   installer-integrity:
     name: Installer integrity (${{ matrix.os }})
     if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
+        # Mapping is exercised on x64 with the installer's test-only uname
+        # override; real arm64 runtime is covered by headless-arm64 below.
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version-file: .python-version
       - name: Verify installer fail-closed behavior
         run: python scripts/test_installers.py
 
@@ -58,6 +73,7 @@ jobs:
     name: WebUI quality
     if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -85,98 +101,175 @@ jobs:
           name: ci-webui-dist
           path: webui/dist/
           if-no-files-found: error
+          # 产物只服务同一次 run 的 daemon/arm64 测试。
+          retention-days: 1
 
-  rust-quality:
-    name: Rust quality
-    needs: webui-quality
+  # Rust 静态检查 + 契约测试：不依赖 WebUI 产物，与 webui-quality 并行。
+  # TUI 只在 PR/手动事件跑；push 已由 portability（win/mac，serial）与 arm64 覆盖。
+  rust-static-contracts:
+    name: Rust static + contracts
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Isolate runtime home
+        shell: bash
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/jeikcode-home" >> "$GITHUB_ENV"
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      # fmt 需要 rustfmt 安装在 rust-toolchain.toml 指定的同一个 channel 上。
+      - uses: dtolnay/rust-toolchain@master
         with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          name: ci-webui-dist
-          path: webui/dist
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.0
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt
       - name: Check Rust code formatting
         run: cargo fmt --all --check
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "ci-rust-quality"
+          shared-key: "ci-rust-contracts"
+          save-if: ${{ github.event_name == 'push' }}
       - name: Check all Rust targets
         run: cargo check --workspace --all-targets --locked
-        env:
-          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Test config lib (project key contract)
         run: cargo test -p jeikcode-config --lib --locked
-        env:
-          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Test updater distribution gates
         run: cargo test -p jeikcode-updater --lib --features distro-pm --locked
-        env:
-          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
-      - name: Test read tool integrity & capabilities
-        run: "cargo test -p jeikcode-capabilities --lib tools::read:: --locked"
-        env:
-          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
-      - name: Smoke persisted catalog timestamp units
-        shell: bash
-        env:
-          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
-          JEIKCODE_CATALOG_SMOKE_ROOT: ${{ runner.temp }}/catalog-timestamp-smoke
-        run: |
-          set -euo pipefail
-          smoke=crates/jeikcode-capabilities/examples/__catalog_timestamp_smoke.rs
-          mkdir -p "$(dirname "$smoke")"
-          trap 'rm -f "$smoke"' EXIT
-          cat > "$smoke" <<'RS'
-          use jeikcode_capabilities::session::{SessionManager, SessionMeta};
-          use std::{fs, path::PathBuf};
-
-          fn main() {
-              let root = PathBuf::from(std::env::var_os("JEIKCODE_CATALOG_SMOKE_ROOT").unwrap());
-              let bucket = root.join("0123456789abcdef");
-              let manager = SessionManager::with_root(&bucket);
-              let mut both = SessionMeta::new("both", "/native", 2_000);
-              both.updated_at = 4_000;
-              manager.write_meta(&both).unwrap();
-              manager.write_meta(&SessionMeta::new("native", "/native-only", 1_000)).unwrap();
-              for (id, updated) in [("both", 3), ("legacy", 2)] {
-                  let legacy = serde_json::json!({
-                      "id": id, "name": id, "working_dir": "/legacy",
-                      "created_at": 1, "updated_at": updated, "messages": []
-                  });
-                  fs::write(bucket.join(format!("{id}.json")), serde_json::to_vec(&legacy).unwrap()).unwrap();
-              }
-              let scan = SessionManager::scan_catalog(&root);
-              assert!(scan.diagnostics.is_empty(), "{:?}", scan.diagnostics);
-              assert_eq!(scan.latest().unwrap().id, "both");
-              for (id, created, updated) in [("both", 2_000, 4_000), ("native", 1_000, 1_000), ("legacy", 1_000, 2_000)] {
-                  let entry = scan.entries.iter().find(|entry| entry.id == id).unwrap();
-                  assert_eq!((entry.created_at_ms, entry.updated_at_ms), (created, updated), "{id}");
-                  println!("catalog smoke: {id} created_at_ms={} updated_at_ms={}", entry.created_at_ms, entry.updated_at_ms);
-              }
-              fs::remove_dir_all(root).unwrap();
-          }
-          RS
-          cargo run --quiet --locked -p jeikcode-capabilities --features session --example __catalog_timestamp_smoke
-          cargo test --locked -p jeikcode-capabilities --features session --lib session::manager::tests::catalog_scan_merges_physical_sources_and_keeps_diagnostics -- --exact
       - name: Test capabilities integration suite
         run: cargo test -p jeikcode-capabilities --test tools_integration --test http_mock --test anthropic_mock --test ollama_mock --test compaction_cache --test session_fixture_invariants --locked
-        env:
-          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
-      - name: Verify embedded WebUI
-        run: "cargo test -p jeikcode-daemon --lib webui::tests:: --locked"
-        env:
-          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
-      - name: Test TUI library contracts
+      # 临时 example 每次都会因 mtime 变化重编译；这里只保留既有的 session 单测。
+      - name: Test session catalog contract
+        run: cargo test --locked -p jeikcode-capabilities --features session --lib session::manager::tests::catalog_scan_merges_physical_sources_and_keeps_diagnostics -- --exact
+      - name: Test TUI library contracts (PR / manual)
+        if: github.event_name != 'push'
         run: cargo test --locked -p jeikcode-tuix --lib -- --test-threads=1
-        env:
-          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+
+  # daemon 全量 lib（597 用例，约 4.3m 运行时）：唯一需要 WebUI 产物的测试 job。
+  # 该套件同时覆盖 webui::tests，因此不再单独跑 "Verify embedded WebUI"。
+  rust-daemon:
+    name: Rust daemon lib
+    needs: webui-quality
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Isolate runtime home
+        shell: bash
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/jeikcode-home" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-webui-dist
+          path: webui/dist
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-rust-daemon"
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Test daemon lib (includes embedded WebUI)
+        run: cargo test -p jeikcode-daemon --lib --locked
+
+  # 其余库套件都很轻（实际测试运行时间 < 6s），单独并行，避免串在 daemon 后面。
+  rust-libs:
+    name: Rust lib suites
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Isolate runtime home
+        shell: bash
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/jeikcode-home" >> "$GITHUB_ENV"
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-rust-libs"
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Test full lib suites
+        run: cargo test --locked -p jeikcode-coding -p jeikcode-kernel -p jeikcode -p jeikcode-review -p jeikcode-telemetry --lib
+
+  # 真实 arm64 安装器测试。PR 上跳过以保持反馈速度；
+  # push/dispatch 在原生 arm64 上验证 linux-arm64 产物下载与校验。
+  installer-integrity-arm64:
+    name: Installer integrity (arm64)
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):') && github.event_name != 'pull_request'"
+    runs-on: ${{ vars.ARM64_RUNNER || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - name: Verify installer on native arm64
+        run: python scripts/test_installers.py
+
+  # 真实 arm64 Linux 原生 lib 测试。PR 上跳过以保持反馈速度；
+  # push/dispatch 跑一次，覆盖发布前 qemu 之外的原生环境。
+  # 进程级 build/冒烟已移到发布端（build.yml 的 published-binary smoke）：
+  # 稳定面的契约由 daemon lib 里的 /health 路由单测覆盖，不再每次 push 编译并拉起 CLI。
+  headless-arm64:
+    name: Native arm64 tests
+    # push 常跑；workflow_dispatch 可手动验证 runner 是否可用。
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: webui-quality
+    # GitHub-hosted arm64 Linux runner label; override with repo variable
+    # ARM64_RUNNER if the plan does not expose it (e.g. a self-hosted label).
+    runs-on: ${{ vars.ARM64_RUNNER || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Isolate runtime home
+        shell: bash
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/jeikcode-home" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-webui-dist
+          path: webui/dist
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "headless-arm64"
+          save-if: ${{ github.event_name == 'push' }}
+      # 原生 arm64 跑全部 lib 测试；比 qemu 更能暴露指令集/页大小/原子性问题。
+      - name: Native arm64 library tests
+        run: cargo test --locked --workspace --lib --no-fail-fast

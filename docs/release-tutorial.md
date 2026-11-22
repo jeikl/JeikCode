@@ -29,7 +29,7 @@ cargo build --release --bin jeikcode --locked
 - **可执行文件**：`target/release/jeikcode.exe`
 
 ### 3. 底层机制与注意事项
-- **打包内嵌原理**：`crates/jeikcode-cli` 使用了 `rust-embed`，在 Rust 编译期会将 `webui/dist/` 目录下的所有 HTML/JS/CSS 资源直接压缩内嵌进生成的 `jeikcode.exe` 单一二进制文件中，运行时由 Axum 本地 Web 服务直接在内存中提供。
+- **打包内嵌原理**：`crates/jeikcode-daemon` 的 `webui` 模块使用 `rust-embed`，在 Rust 编译期将 `webui/dist/` 下的 HTML/JS/CSS 压缩内嵌；CLI 以库形式启动同一服务，因此最终仍是单个 `jeikcode.exe`，运行时由 Axum 直接提供静态资源。
 - **为什么必须先 `npm ci && npm run build`**：`npm ci` 严格使用仓库中的 `webui/package-lock.json`，依赖与 CI 保持一致；随后生成新的 `dist`，避免 RustEmbed 打包旧前端。
 - **构建不再读取开发者 `~/.jeikcode` 回写源码树**：仓库资产是唯一构建输入。构建保持纯净与确定性输入。
 
@@ -68,7 +68,7 @@ cargo build --release --bin jeikcode --locked
 - **触发源**：`.github/workflows/build.yml` 监听 `push: tags: - "v*"`；
 - **全自动构建矩阵**：
   1. `build-webui`：在 Ubuntu 环境下独立构建 WebUI SPA 并生成构件；
-  2. 三端物理 Runner 并发编译 6 套目标架构：
+  2. 三端物理 Runner 并发编译 6 套目标架构。目标列表的唯一事实源是 `scripts/platforms.json`，`build.yml` 的 `plan` 作业动态生成矩阵，禁止在 workflow 里手写 target：
      - **macOS**：`jeikcode-<tag>-darwin-arm64`（Apple Silicon）与 `jeikcode-<tag>-darwin-x64`（Intel）
      - **Linux**：`jeikcode-<tag>-linux-arm64` 与 `jeikcode-<tag>-linux-x64`（基于 zigbuild 的纯静态 musl，无 libc 依赖；ARM64 按 16K 页对齐，4K 和 16K 内核都能跑）
      - **Windows**：`jeikcode-<tag>-windows-arm64.exe` 与 `jeikcode-<tag>-windows-x64.exe`
@@ -106,8 +106,8 @@ cargo build --release --bin jeikcode --locked
   - 具体缺陷修复与行为改善说明...
 ```
 
-#### 步骤 3：确认三份 README 权威引用
-`README.zh-CN.md`、`README.md` 与 `README.en.md` 的更新日志章节已统一收敛为指向 `CHANGELOG.md` 与 GitHub Releases 的单行权威引用，发版时无需向三份 README 重复拷贝版本条目。
+#### 步骤 3：确认 README 与文档站一致性
+所有 `README*.md` 的更新日志章节只保留指向 `CHANGELOG.md` 与 GitHub Releases 的引用；英文 `README.md` 是结构真源，`node scripts/check-docs-parity.js` 会在 CI 中校验各语言 README 与 `docs-site/zh` 的标题/代码块/表格结构，缺段直接失败。发版时无需向多份 README 重复拷贝版本条目。
 
 #### 步骤 4：提交与推送
 提交上述版本与日志变动，推送到远程仓库对应分支（正式版推 `origin/main`，预发布版推 `origin/beta`），保持工作区干净。
@@ -139,9 +139,9 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 ## 附：用户端官方安装一键命令 (参考)
 
-- **Linux / macOS**：
+- **Linux / macOS / OpenWrt**：
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | sh
   ```
 - **Windows (PowerShell)**：
   ```powershell

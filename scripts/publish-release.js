@@ -17,15 +17,11 @@ const path = require('path');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 const { compareSemVer } = require('./bump-version');
+const { CLI_TARGETS, assetName: platformAssetName } = require('./platforms');
 
-const TARGETS = [
-  'darwin-arm64',
-  'darwin-x64',
-  'linux-arm64',
-  'linux-x64',
-  'windows-arm64',
-  'windows-x64',
-];
+// CLI-only: the desktop installers have their own manifest
+// (desktop-updater.json) and must never leak into latest.json.
+const TARGETS = CLI_TARGETS;
 
 const EN_GROUPS = [
   { type: 'feat', title: 'Features' },
@@ -63,8 +59,7 @@ const TYPE_TO_KEY = {
 };
 
 function assetName(tag, target) {
-  const ext = target.startsWith('windows') ? '.exe' : '';
-  return `jeikcode-${tag}-${target}${ext}`;
+  return platformAssetName(tag, target);
 }
 
 function isStableTag(tag) {

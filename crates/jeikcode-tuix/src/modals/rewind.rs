@@ -356,7 +356,7 @@ mod tests {
                 files: Vec::new(),
             }],
             code_unavailable: Some(
-                "Code Rewind is temporarily disabled; conversation Rewind remains available."
+                "Code Rewind is disabled until the checkpoint store has bounded GC/quota; conversation Rewind remains available."
                     .into(),
             ),
         }

@@ -6,7 +6,7 @@ Manual acceptance after each build. All items must pass before considering the r
 ## Build
 
 - [ ] `cargo build --release 2>&1 | tail -3` → Finished, 0 errors
-- [ ] `cargo test -p jeikcode-tuix 2>&1 | tail -5` → all 79 pass
+- [ ] `cargo test -p jeikcode-tuix 2>&1 | tail -5` → all library tests pass
 - [ ] `cargo clippy -p jeikcode-tuix --all-targets 2>&1 | tail -10` → no warnings
 
 ## TTY happy path

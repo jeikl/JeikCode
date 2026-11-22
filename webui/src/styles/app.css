@@ -20641,34 +20641,22 @@ select option {
 .tool-tone-punct { color: var(--app-secondary-foreground); opacity: 0.55; }
 .tool-tone-danger { color: var(--app-error-foreground); }
 
+/* Bash terminal rows: the human-readable summary gets priority, but must stop
+   before the fixed status/time/chevron boundary on both desktop and mobile. */
+.tool-body.kind-terminal .tool-name {
+  flex: 0 1 auto !important;
+  max-width: calc(100% - 144px) !important;
+  min-width: 0 !important;
+  height: 20px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
 @media (max-width: 768px) {
   .tool-header { align-items: center !important; row-gap: 0 !important; }
   .tool-header .tool-name { max-width: 42% !important; font-size: 12px !important; }
   .tool-header .tool-key-param { font-size: 11.5px !important; }
-
-  /* Bash on mobile stays one line. The human-readable summary keeps its full
-     width; the raw command takes the remainder and ellipsizes at the edge. */
-  .tool-body.kind-terminal .tool-header {
-    display: flex !important;
-    flex-wrap: nowrap !important;
-    align-items: center !important;
-  }
-  .tool-body.kind-terminal .tool-name {
-    flex: 0 0 auto !important;
-    max-width: none !important;
-    height: 20px !important;
-    overflow: visible !important;
-    text-overflow: clip !important;
-    white-space: nowrap !important;
-    font-size: 12px !important;
-  }
-  .tool-body.kind-terminal .tool-key-param {
-    flex: 1 1 0 !important;
-    min-width: 0 !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
-    white-space: nowrap !important;
-  }
 }
 
 /* Version readouts: quiet mono annotations, not chips. */

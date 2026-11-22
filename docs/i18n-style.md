@@ -169,7 +169,7 @@ ErrLoginFailed(&'a str)
 4. **编译验证**
 
    ```bash
-   cargo build -p jeikcode-core
+   cargo build -p jeikcode
    ```
 
    如果任一语言文件遗漏了新 variant，编译将失败并明确指出缺少的分支，从而杜绝翻译遗漏。

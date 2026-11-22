@@ -1087,12 +1087,13 @@ fn supports_strict_mode(cfg: &OpenAiCompatConfig) -> bool {
     })
 }
 
-/// DeepSeek V4 thinking models reject the `tool_choice` control parameter while
-/// still accepting tools in auto mode. This is a model protocol constraint, not an
-/// endpoint property: compatible gateways and fallback routes enforce it too.
+/// DeepSeek V4 thinking models (including the current `deepseek-flash` ID)
+/// reject the `tool_choice` control parameter while still accepting tools in
+/// auto mode. This is a model protocol constraint, not an endpoint property:
+/// compatible gateways and fallback routes enforce it too.
 fn supports_tool_choice(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase().replace(['_', ' '], "-");
-    !model.contains("deepseek-v4")
+    !(model.contains("deepseek-v4") || model.contains("deepseek-flash"))
 }
 
 /// Whether a model-name heuristic says this family takes a thinking-effort
@@ -1103,6 +1104,7 @@ fn supports_tool_choice(model: &str) -> bool {
 pub fn reason_effort_applicable(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     m.contains("deepseek-v4")
+        || m.contains("deepseek-flash")
         || m.starts_with("o1")
         || m.starts_with("o3")
         || m.contains("o1-")
@@ -2577,6 +2579,33 @@ mod tests {
     }
 
     #[test]
+    fn current_deepseek_flash_id_uses_the_v4_protocol() {
+        // `deepseek-flash` is the current official Flash ID (V4.1) and inherits
+        // the V4 family constraints even though its name lacks the `v4` segment.
+        assert!(!supports_tool_choice("deepseek-flash"));
+        assert!(!supports_tool_choice("DeepSeek_Flash"));
+        assert!(reason_effort_applicable("deepseek-flash"));
+
+        let cfg = OpenAiCompatConfig::new("k", "https://api.deepseek.com/v1", "deepseek-flash");
+        let opts = ChatOptions {
+            tool_choice: ToolChoice::Specific("todowrite".into()),
+            ..Default::default()
+        };
+        let body = build_request_body(
+            "deepseek-flash",
+            &[Message::user("hi")],
+            &[],
+            &opts,
+            &cfg,
+            ReasoningPolicy::Include,
+        );
+        assert!(
+            body.get("tool_choice").is_none(),
+            "deepseek-flash must not receive the rejected tool_choice control parameter"
+        );
+    }
+
+    #[test]
     fn proxied_deepseek_v4_omits_unsupported_tool_choice() {
         let cfg = OpenAiCompatConfig::new("k", "", "deepseek-v4-flash");
         let opts = ChatOptions {
@@ -2693,6 +2722,12 @@ mod tests {
             "no config + unknown family → hidden"
         );
         assert!(effort_control_applicable("grok-4.6", None, None, None));
+        assert!(effort_control_applicable(
+            "deepseek-flash",
+            None,
+            None,
+            None
+        ));
         assert!(effort_control_applicable(
             "gemini-3-flash",
             None,

@@ -273,8 +273,9 @@ pub fn desktop_updater_url_for_tag(tag: &str) -> String {
     format!("{}/{}/desktop-updater.json", download_base(), norm)
 }
 
-pub fn resolve_desktop_installer_key(bundle_type: &str) -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH, bundle_type) {
+/// Pure key resolver so `scripts/platforms.json` can be asserted against it.
+pub fn desktop_installer_key(os: &str, arch: &str, bundle_type: &str) -> Option<&'static str> {
+    match (os, arch, bundle_type) {
         ("windows", "x86_64", _) => Some("windows-x64"),
         ("macos", "aarch64", "dmg") => Some("darwin-arm64-dmg"),
         ("macos", "aarch64", _) => Some("darwin-arm64-app"),
@@ -286,14 +287,23 @@ pub fn resolve_desktop_installer_key(bundle_type: &str) -> Option<&'static str> 
     }
 }
 
-pub fn resolve_desktop_tauri_platform_key() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+pub fn resolve_desktop_installer_key(bundle_type: &str) -> Option<&'static str> {
+    desktop_installer_key(std::env::consts::OS, std::env::consts::ARCH, bundle_type)
+}
+
+/// Pure Tauri target resolver for the same manifest-parity test.
+pub fn desktop_tauri_platform_key(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
         ("windows", "x86_64") => Some("windows-x86_64"),
         ("macos", "aarch64") => Some("darwin-aarch64"),
         ("macos", "x86_64") => Some("darwin-x86_64"),
         ("linux", "x86_64") => Some("linux-x86_64"),
         _ => None,
     }
+}
+
+pub fn resolve_desktop_tauri_platform_key() -> Option<&'static str> {
+    desktop_tauri_platform_key(std::env::consts::OS, std::env::consts::ARCH)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -323,30 +333,8 @@ pub struct RollbackSummary {
 /// `None` means the current platform has no published release — the
 /// caller must surface a clean "unsupported platform" message rather
 /// than fall through to a 404 download.
-// `target_env = "ohos"` is unknown to the check-cfg lint on toolchains
-// without the OpenHarmony target registered; the cfg is still correct when
-// building for `*-linux-ohos`, so silence the false-positive.
-#[allow(unexpected_cfgs)]
 pub fn detect_target() -> Option<&'static str> {
-    // HarmonyOS / OpenHarmony builds report `std::env::consts::OS == "linux"`
-    // at runtime, so the OS+ARCH table below would resolve to `linux-arm64`
-    // — a STATIC-musl build that doesn't run on HarmonyOS — and the auto-
-    // upgrade would clobber the working DYNAMIC-musl install (the one linked
-    // against `/lib/ld-musl-aarch64.so.1`), leaving `permission denied`.
-    // The OHOS artifact is compiled for a `*-linux-ohos` target, so pin it to
-    // its own `ohos-arm64` asset using the COMPILE-TIME target rather than the
-    // runtime OS string. Zero effect on every other platform.
-    #[cfg(any(target_os = "ohos", target_env = "ohos"))]
-    {
-        return match std::env::consts::ARCH {
-            "aarch64" | "arm64" => Some("ohos-arm64"),
-            _ => None,
-        };
-    }
-    #[cfg(not(any(target_os = "ohos", target_env = "ohos")))]
-    {
-        target_tag(std::env::consts::OS, std::env::consts::ARCH)
-    }
+    target_tag(std::env::consts::OS, std::env::consts::ARCH)
 }
 
 fn target_tag(os: &str, arch: &str) -> Option<&'static str> {
@@ -3787,6 +3775,78 @@ mod tests {
         assert_eq!(target_tag("windows", "x86_64"), Some("windows-x64"));
         assert_eq!(target_tag("windows", "aarch64"), Some("windows-arm64"));
         assert_eq!(target_tag("linux", "arm"), None);
+        assert_eq!(target_tag("ohos", "aarch64"), None);
+    }
+
+    /// `scripts/platforms.json` is the release source of truth. Pins the Rust
+    /// resolver to it so adding/removing a target cannot drift silently.
+    #[test]
+    fn target_tag_table_matches_platform_manifest() {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../../../scripts/platforms.json"))
+                .expect("parse scripts/platforms.json");
+        let cli = doc["cli"].as_array().expect("cli array");
+        let mut manifest_targets = std::collections::BTreeSet::new();
+        for entry in cli {
+            let id = entry["id"].as_str().expect("cli id");
+            let os = entry["rustOs"].as_str().expect("cli rustOs");
+            let arch = entry["rustArch"].as_str().expect("cli rustArch");
+            assert_eq!(
+                target_tag(os, arch),
+                Some(id),
+                "target_tag mismatch for manifest entry {id}"
+            );
+            manifest_targets.insert(id.to_string());
+        }
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("macos", "x86_64"),
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+            ("windows", "x86_64"),
+            ("windows", "aarch64"),
+        ] {
+            let id = target_tag(os, arch).expect("supported host tag");
+            assert!(
+                manifest_targets.contains(id),
+                "{id} is resolvable at runtime but missing from platforms.json"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_installer_keys_match_platform_manifest() {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../../../scripts/platforms.json"))
+                .expect("parse scripts/platforms.json");
+        let installers = doc["desktopInstallers"]
+            .as_array()
+            .expect("desktopInstallers array");
+        for entry in installers {
+            let key = entry["installerKey"].as_str().expect("installerKey");
+            let os = entry["hostOs"].as_str().expect("hostOs");
+            let arch = entry["hostArch"].as_str().expect("hostArch");
+            let bundle = entry["bundleType"].as_str().expect("bundleType");
+            let probe = if bundle == "any" { "nsis" } else { bundle };
+            assert_eq!(
+                desktop_installer_key(os, arch, probe),
+                Some(key),
+                "installer resolver mismatch for manifest entry {key}"
+            );
+            if let Some(tauri) = entry["tauriTarget"].as_str() {
+                assert_eq!(
+                    desktop_tauri_platform_key(os, arch),
+                    Some(tauri),
+                    "tauri target mismatch for manifest entry {key}"
+                );
+            }
+        }
+        // Linux has a documented non-AppImage fallback to the .deb installer.
+        assert_eq!(
+            desktop_installer_key("linux", "x86_64", "rpm"),
+            Some("linux-x64-deb")
+        );
+        assert_eq!(desktop_installer_key("linux", "aarch64", "deb"), None);
     }
 
     #[test]

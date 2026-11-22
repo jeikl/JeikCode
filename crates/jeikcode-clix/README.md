@@ -2,7 +2,7 @@
 
 一个独立的、单一能力的命令行工具:**代码评审**。它驱动
 [`jeikcode-review`](../jeikcode-review) agent(kernel + capabilities)对一段 git diff 进行
-评审,并输出结构化发现(findings)。与 `jeikcode-cli` / `jeikcode-core` 完全解耦。
+评审,并输出结构化发现(findings)。与 `jeikcode-cli` 完全解耦。
 
 二进制名:**`jeikcodex`**。通过 `cargo run -p jeikcode-clix -- review …` 运行,或安装后直接
 `jeikcodex review …`。
@@ -26,11 +26,11 @@ jeikcodex review --provider openrouter
 
 # C) 直接传入(任意 OpenAI 兼容端点)
 jeikcodex review \
-  --api-key sk-... --base-url https://api.deepseek.com/v1 --model deepseek-chat
+  --api-key sk-... --base-url https://api.deepseek.com/v1 --model deepseek-v4-pro
 
 # 或用环境变量
 JEIKCODE_API_KEY=sk-... JEIKCODE_BASE_URL=https://api.deepseek.com/v1 \
-  JEIKCODE_MODEL=deepseek-chat jeikcodex review
+  JEIKCODE_MODEL=deepseek-v4-pro jeikcodex review
 ```
 
 `config.toml` 结构(clix 读取的子集):
@@ -194,7 +194,7 @@ jeikcodex review --no-rules
   在 `--json` 时保持纯净。)
 
 ```
-Reviewing 120 changed line(s) with deepseek-chat …
+Reviewing 120 changed line(s) with deepseek-v4-pro …
   → read_file src/auth.rs
     ✓ read_file (4096 chars)
   → grep verify_token

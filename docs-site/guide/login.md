@@ -37,15 +37,15 @@ base_url = "https://api.your-proxy.com/v1"
 # =============================================================================
 # 2. Model Profiles [models."<account_id>/<model_alias>"]
 # =============================================================================
-[models."deepseek-v4.1-flash"]
+[models."deepseek/flash"]
 account = "deepseek"
-model = "deepseek-v4.1-flash"              # Upstream actual model ID
-context_window = 1024000                   # Context window token limit
-max_tokens = 131200                        # Maximum completion tokens
+model = "deepseek-flash"                   # Upstream actual model ID
+context_window = 1000000                   # Context window token limit (DeepSeek V4 supports 1M)
+max_tokens = 384000                        # Maximum completion tokens
 reasoning_model = true                     # Declare as reasoning/thinking model
-reasoning_history = "exclude"              # Thinking replay strategy: "include" | "exclude"
-reasoning_effort = "high"                  # Default thinking budget: "low" | "medium" | "high" | "max"
-reasoning_levels = ["low", "medium", "high", "max"] # Quick-cycle levels via Ctrl+T in terminal
+reasoning_history = "include"              # Thinking replay strategy: "include" | "exclude"
+reasoning_effort = "max"                   # Default thinking budget: "low" | "high" | "max"
+reasoning_levels = ["low", "high", "max"]   # Quick-cycle levels via Ctrl+T in terminal
 image_input = true                         # Enable direct multimodal image input
 ```
 

@@ -5,8 +5,7 @@
 > core driver 协议、v1 engine 和 `jeikcode-bridge` 已退役。当前工作不再是继续迁移 bridge，
 > 而是收敛接入层仍保留的 session/conversation 双模型、历史兼容和基础设施重复实现。
 >
-> 目标是单一状态所有权、清晰依赖方向和可验证兼容性；`jeikcode-core` 是否最终移除，
-> 取决于它是否自然失去职责和消费者，不作为独立 KPI。
+> 目标是单一状态所有权、清晰依赖方向和可验证兼容性。
 
 ## 1. 当前目标调用链
 
@@ -38,16 +37,15 @@ kernel ← capabilities ← L2 specialization ← frontend/transport
 | 层 | 拥有 | 禁止 |
 |---|---|---|
 | `jeikcode-kernel` | 中立 agent 循环、hook/middleware/tool/provider trait、kernel message/event | coding、approval、plan、plugin、具体 provider/tool 实现 |
-| `jeikcode-capabilities` | provider、tools、MCP、skills、session、memory、codeintel 等可复用能力 | 依赖 core、L2 或前端；读取前端状态 |
-| `jeikcode-coding` | coding persona、runtime 生命周期、provider/session reassemble、goal/loop、审批协调 | 依赖 core；UI、HTTP、终端渲染 |
+| `jeikcode-capabilities` | provider、tools、MCP、skills、session、memory、codeintel 等可复用能力 | 依赖 L2 或前端；读取前端状态 |
+| `jeikcode-coding` | coding persona、runtime 生命周期、provider/session reassemble、goal/loop、审批协调 | UI、HTTP、终端渲染 |
 | CLI/TUI/daemon | 输入、展示、HTTP/WS/SSE、本地明确操作、历史格式接入 | 第二 runtime owner；把 coding 生命周期直接塞进 kernel 命令 |
-| `jeikcode-core` 兼容负担 | 当前仍被接入层使用的 session/conversation、plugin、live、部分旧能力 | 恢复旧 driver 协议、bridge 或 runtime fallback |
 
 编译期不变量：
 
 - kernel 不依赖 capabilities、L2 或前端；
-- capabilities 不依赖 core、L2 或前端；
-- coding 不依赖 core 或前端；
+- capabilities 不依赖 L2 或前端；
+- coding 不依赖前端；
 - frontend 可以依赖 L2 和叶子基础设施，但不得持有第二套业务 runtime。
 
 ## 3. Runtime 所有权

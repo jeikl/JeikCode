@@ -5,6 +5,8 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 
@@ -65,45 +67,39 @@ class JeikCodeDaemonClient(
             )
         }
 
-    fun authStatus(): CompletableFuture<AuthStatusResponse> =
-        send("GET", "/auth/status").thenApply { raw ->
+    /**
+     * Login is owned by the CLI/TUI now: the daemon no longer exposes `/auth/*`.
+     * Read `auth.toml` locally so the IDE can still show whether a login exists.
+     */
+    fun authStatus(): CompletableFuture<AuthStatusResponse> {
+        val home = System.getenv("JEIKCODE_HOME")?.takeIf { it.isNotBlank() }
+            ?: Path.of(System.getProperty("user.home"), ".jeikcode").toString()
+        val authPath = Path.of(home, "auth.toml")
+        return CompletableFuture.completedFuture(
             AuthStatusResponse(
-                loggedIn = raw.jsonBoolean("logged_in") ?: false,
-                expired = raw.jsonBoolean("expired") ?: false,
-                authPath = raw.jsonString("auth_path").orEmpty(),
-                userName = raw.jsonNestedObject("user")?.let {
-                    it.jsonString("name") ?: it.jsonString("username") ?: it.jsonString("email")
-                },
+                loggedIn = Files.isRegularFile(authPath),
+                expired = false,
+                authPath = authPath.toString(),
+                userName = null,
             )
-        }
+        )
+    }
 
-    fun startLogin(openBrowser: Boolean = true): CompletableFuture<LoginStartResponse> =
-        send("POST", "/auth/login/start", """{"open_browser":$openBrowser}""").thenApply { raw ->
-            LoginStartResponse(
-                loginId = raw.jsonString("login_id").orEmpty(),
-                url = raw.jsonString("url").orEmpty(),
-                expiresInSeconds = raw.jsonInt("expires_in_seconds") ?: 600,
-                daemonInstanceId = raw.jsonString("daemon_instance_id"),
+    fun startLogin(): CompletableFuture<LoginStartResponse> =
+        CompletableFuture.failedFuture(
+            IllegalStateException(
+                "Daemon-managed sign-in was retired. Open a terminal, run `jeikcode`, then use /login, or add a provider manually."
             )
-        }
+        )
 
     fun pollLogin(loginId: String): CompletableFuture<LoginPollResponse> =
-        send("POST", "/auth/login/${loginId.urlPathEncoded()}/poll").thenApply { raw ->
-            LoginPollResponse(
-                status = raw.jsonString("status").orEmpty(),
-                userName = raw.jsonNestedObject("user")?.let {
-                    it.jsonString("name") ?: it.jsonString("username") ?: it.jsonString("email")
-                },
-                code = raw.jsonString("code"),
-                message = raw.jsonString("message"),
-                retryAfterMs = raw.jsonInt("retry_after_ms"),
-            )
-        }
+        CompletableFuture.failedFuture(
+            IllegalStateException("Sign-in is CLI-managed; poll is no longer available ($loginId).")
+        )
 
+    @Suppress("UNUSED_PARAMETER")
     fun cancelLogin(loginId: String): CompletableFuture<Boolean> =
-        send("DELETE", "/auth/login/${loginId.urlPathEncoded()}").thenApply {
-            it.jsonBoolean("success") ?: false
-        }
+        CompletableFuture.completedFuture(false)
 
     fun listProviders(): CompletableFuture<ProvidersResponse> =
         send("GET", "/providers").thenApply { raw ->

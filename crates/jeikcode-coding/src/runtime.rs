@@ -13407,6 +13407,26 @@ mod tests {
         .expect("runtime drop did not release the session lease");
     }
 
+    /// Active contract test for the intentional gate: the catalog must expose a
+    /// machine-readable reason instead of silently pretending code rewind works.
+    #[tokio::test]
+    #[serial_test::serial(jeikcode_home)]
+    async fn code_rewind_reports_the_disabled_reason() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let _home = jeikcode_config::test_util::IsolatedHome::at(home.path());
+        let mut start = native_start(false);
+        start.agent.working_dir = project.path().to_path_buf();
+        start.prepare.session = crate::SessionMode::Fresh;
+        let runtime = CodingRuntime::start(start).await.unwrap();
+        let catalog = runtime.handle.rewind_points().await.unwrap();
+        assert!(
+            catalog.code_unavailable.is_some(),
+            "code rewind must advertise why it is unavailable"
+        );
+        runtime.handle.shutdown().await.unwrap();
+    }
+
     async fn mutating_rewind_runtime(
         fail_second_build: bool,
     ) -> (
@@ -13462,7 +13482,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(jeikcode_home)]
-    #[ignore = "workspace Rewind is intentionally disabled in v5.0.5"]
+    #[ignore = "code rewind is gated off until the checkpoint store has bounded GC/quota; conversation rewind stays active"]
     async fn code_only_rewind_restores_workspace_but_keeps_conversation() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
 
@@ -13493,7 +13513,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(jeikcode_home)]
-    #[ignore = "workspace Rewind is intentionally disabled in v5.0.5"]
+    #[ignore = "code rewind is gated off until the checkpoint store has bounded GC/quota; conversation rewind stays active"]
     async fn combined_rewind_restores_workspace_and_conversation() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
 
@@ -13527,7 +13547,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(jeikcode_home)]
-    #[ignore = "workspace Rewind is intentionally disabled in v5.0.5"]
+    #[ignore = "code rewind is gated off until the checkpoint store has bounded GC/quota; conversation rewind stays active"]
     async fn code_rewind_preserves_workspace_changes_made_after_the_turn() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
         std::fs::write(&generated, "user changed this after the turn\n").unwrap();
@@ -13549,7 +13569,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(jeikcode_home)]
-    #[ignore = "workspace Rewind is intentionally disabled in v5.0.5"]
+    #[ignore = "code rewind is gated off until the checkpoint store has bounded GC/quota; conversation rewind stays active"]
     async fn combined_rewind_compensates_workspace_when_agent_rebuild_fails() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(true).await;
 
@@ -13579,7 +13599,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(jeikcode_home)]
-    #[ignore = "workspace Rewind is intentionally disabled in v5.0.5"]
+    #[ignore = "code rewind is gated off until the checkpoint store has bounded GC/quota; conversation rewind stays active"]
     async fn cancelled_rewind_transaction_compensates_and_releases_runtime() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
         let catalog = runtime.handle.rewind_points().await.unwrap();
@@ -13624,7 +13644,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(jeikcode_home)]
-    #[ignore = "workspace Rewind is intentionally disabled in v5.0.5"]
+    #[ignore = "code rewind is gated off until the checkpoint store has bounded GC/quota; conversation rewind stays active"]
     async fn cancelled_begin_receiver_is_recovered_by_runtime_owner() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
         let catalog = runtime.handle.rewind_points().await.unwrap();
@@ -13666,7 +13686,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(jeikcode_home)]
-    #[ignore = "workspace Rewind is intentionally disabled in v5.0.5"]
+    #[ignore = "code rewind is gated off until the checkpoint store has bounded GC/quota; conversation rewind stays active"]
     async fn abandoned_rewind_recovers_after_undo_advances_generation() {
         let (_home, _project, _generated, runtime, point) = mutating_rewind_runtime(false).await;
         let catalog = runtime.handle.rewind_points().await.unwrap();
@@ -13718,7 +13738,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(jeikcode_home)]
-    #[ignore = "workspace Rewind is intentionally disabled in v5.0.5"]
+    #[ignore = "code rewind is gated off until the checkpoint store has bounded GC/quota; conversation rewind stays active"]
     async fn rewind_from_stale_catalog_is_not_reinterpreted_against_live_state() {
         let (_home, _project, _generated, runtime, point) = mutating_rewind_runtime(false).await;
         let mut stale = runtime.handle.rewind_points().await.unwrap();

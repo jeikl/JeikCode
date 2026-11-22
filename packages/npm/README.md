@@ -1,7 +1,7 @@
 # @github.com/jeikcode
 
 [![npm version](https://img.shields.io/npm/v/@github.com/jeikcode)](https://www.npmjs.com/package/@github.com/jeikcode)
-[![license](https://img.shields.io/npm/l/@github.com/jeikcode)](https://github.com/JeikCode/JeikCode)
+[![license](https://img.shields.io/npm/l/@github.com/jeikcode)](https://github.com/jeikl/JeikCode)
 
 **JeikCode** — 开源终端 AI 编码助手。用自然语言描述任务，自动阅读代码、编辑文件、执行命令、验证结果。
 
@@ -17,7 +17,7 @@ npm install -g @github.com/jeikcode
 jeikcode
 ```
 
-> 安装时 npm 会自动下载匹配当前平台的预编译二进制（darwin/linux arm64+x64, windows x64, ohos arm64）。
+> 安装时 npm 会自动下载匹配当前平台的预编译二进制（darwin/linux arm64+x64，windows x64）。
 
 ## 使用
 
@@ -49,13 +49,13 @@ jeikcode uninstall
 
 ## 版本对应
 
-npm 版本号与 JeikCode 发布版本一致。详见 [Releases](https://github.com/JeikCode/JeikCode/releases)。
+npm 版本号与 JeikCode 发布版本一致。详见 [Releases](https://github.com/jeikl/JeikCode/releases)。
 
 ## 链接
 
-- [源码仓库](https://github.com/JeikCode/JeikCode)
-- [Issues](https://github.com/JeikCode/JeikCode/issues)
-- [许可证](https://github.com/JeikCode/JeikCode/blob/main/LICENSE)
+- [源码仓库](https://github.com/jeikl/JeikCode)
+- [Issues](https://github.com/jeikl/JeikCode/issues)
+- [许可证](https://github.com/jeikl/JeikCode/blob/main/LICENSE)
 
 ---
 

@@ -37,8 +37,8 @@ async fn shutdown(handle: &mut jeikcode_kernel::agent::AgentHandle, phase: &str)
     match tokio::time::timeout(Duration::from_secs(20), &mut handle.task).await {
         Ok(_) => {}
         Err(_) => panic!(
-            "{phase}: the agent task did not exit on Shutdown (deadlock — see the test's \
-             `#[ignore]` note)"
+            "{phase}: the agent task did not exit on Shutdown (deadlock; the bounded guard \
+             exists so CI fails fast instead of hanging)"
         ),
     }
 }

@@ -12,9 +12,9 @@
     <a href="https://github.com/jeikl/JeikCode/releases" target="_blank">
       <img src="https://img.shields.io/github/v/release/jeikl/JeikCode?color=blue&label=version" alt="version">
     </a>
-    <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
+    <img src="https://img.shields.io/badge/rust-1.93%2B-orange.svg" alt="rust">
     <img src="https://img.shields.io/badge/license-Non--Commercial%20(CC--BY--NC--4.0)-red.svg" alt="license">
-    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
+    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="platform">
     <a href="https://github.com/jeikl/JeikCode" target="_blank">
       <img src="https://img.shields.io/github/stars/jeikl/JeikCode?style=social" alt="GitHub Stars"/>
     </a>
@@ -40,35 +40,100 @@
 
 ## 📌 JeikCode là gì?
 
-**JeikCode** là tác nhân lập trình AI tự hành thế hệ mới, mã nguồn mở, đa nền tảng và đầy đủ tính năng, được xây dựng hoàn toàn bằng **Rust** thuần. Được thiết kế chuyên biệt cho kỹ thuật phần mềm phức tạp trong môi trường sản xuất, JeikCode mang lại tốc độ cực nhanh, khả năng kiểm soát toàn diện và quy trình làm việc đa thiết bị liền mạch:
+**JeikCode** là một AI coding agent mã nguồn mở thế hệ mới, đa nền tảng và đầy đủ tính năng, được xây dựng thuần **Rust**. Thiết kế cho kỹ thuật phần mềm production phức tạp, nó mang lại sự nhẹ nhàng tối đa, kiểm soát hoàn toàn và quy trình đa thiết bị đầu-cuối:
 
-- 🔍 **Đồ thị mã nguồn ngữ nghĩa (CodeExplore)**: Được hỗ trợ bởi Tree-Sitter trên hơn 12 ngôn ngữ lập trình. Cho phép tìm kiếm cấu trúc và luồng gọi mã bằng ngôn ngữ tự nhiên nghiệp vụ, cập nhật gia tăng siêu nhanh trong 1~3ms;
-- 🛡️ **Bảo vệ bộ nhớ đệm KV 98–99% (Sacred Floor)**: Thực thi tính bất biến của byte chỉ nối thêm (append-only) và bảo vệ bộ nhớ (`sacred_floor`), cố định các tiền tố prompt qua nhiều lượt. Giảm hơn 90% chi phí token và nén độ trễ ký tự đầu tiên (TTFT) xuống mức mili giây;
-- ⚡ **Prompt tối giản 9k & kỷ luật cao**: Tránh sự cồng kềnh 30–50k token của hệ thống. Một lượt tiêu chuẩn chỉ tiêu tốn ~9–11k token, dành trọn vẹn cửa sổ ngữ cảnh tối đa cho mã dự án của bạn;
-- 📱 **Quy trình làm việc trên mọi nền tảng**: Bao phủ toàn diện: giao diện dòng lệnh TUI, WebUI hiện đại, ứng dụng máy tính Tauri, tiến trình nền daemon và bộ định tuyến OpenWrt. Hoạt động mượt mà trên Windows, macOS, Linux và OpenWrt;
-- 🔒 **Bảo vệ nguyên tử máy trạng thái kiểu Git**: Ranh giới chỉnh sửa tệp đồng thời nghiêm ngặt loại bỏ ghi đè sai sót, đi kèm các điểm kiểm tra hoàn tác/quay lại chỉ với một cú nhấp chuột;
-- 🔄 **Hỗ trợ gốc 5 giao thức tiêu chuẩn công nghiệp**: Tích hợp hoàn hảo `OpenAI Chat`, `OpenAI Responses`, `Anthropic Claude`, `Google Gemini` và `Ollama`, tách biệt hoàn toàn giữa tài khoản và mô hình.
+- 🔍 **Đồ thị mã ngữ nghĩa (CodeExplore)**: dựa trên Tree-Sitter cho 12+ ngôn ngữ. Từ điển song ngữ theo miền (`thesaurus`) cho phép truy vấn mã và chuỗi gọi bằng ngôn ngữ nghiệp vụ tự nhiên, với bản vá tăng dần 1–3 ms;
+- 🛡️ **Bảo vệ KV-Cache 98–99% (Sacred Floor)**: bất biến byte append-only nghiêm ngặt và bảo toàn bộ nhớ giữ prefix hệ thống cố định qua các lượt. Loại bỏ cache thrashing, giảm chi phí token hơn 90% và nén TTFT xuống mili giây;
+- ⚡ **Prompt tối giản 9k và kỷ luật cao**: tránh prompt hệ thống phình 30–50k token. Một lượt tiêu chuẩn chỉ dùng ~9–11k token, dành tối đa ngữ cảnh cho mã nguồn; quy tắc được nạp lại nóng;
+- 📱 **Quy trình đa nền tảng và agent thống nhất**: TUI terminal, WebUI hiện đại, ứng dụng Tauri, daemon nền và router/gateway OpenWrt (x86_64 / aarch64). Trải nghiệm nhất quán trên Windows, macOS, Linux và OpenWrt;
+- 🔒 **Bảo vệ nguyên tử kiểu Git**: ranh giới chỉnh sửa đồng thời nghiêm ngặt loại bỏ ghi bẩn. Hoạt động ổn định với cả mô hình mạnh và nhẹ, kèm undo và điểm khôi phục một chạm;
+- 🔄 **Hỗ trợ gốc 5 giao thức**: `OpenAI Chat`, `OpenAI Responses`, `Anthropic Claude`, `Google Gemini` và `Ollama`, tách biệt hoàn toàn tài khoản và mô hình;
+- 🧩 **Gateway ba giao thức và hệ sinh thái mở**: cung cấp endpoint máy chủ tương thích OpenAI, Anthropic và Gemini, cho phép OpenClaw hoặc plugin dịch kết nối dễ dàng;
+- 🚀 **Lặp nhanh và review linh hoạt**: Issue và PR cộng đồng được review, merge với tốc độ cao, kèm các bản beta nhanh.
 
 ---
 
-## 🚀 Bắt đầu nhanh
+## 🚀 Cài đặt và bắt đầu nhanh
 
-### Cài đặt một bước (Khuyến nghị)
+### 1. Ứng dụng desktop (khuyến nghị)
+
+Ứng dụng desktop đa nền tảng dùng ngay, tích hợp WebUI và tự động thêm CLI `jeikcode` vào PATH:
+
+| Hệ điều hành / kiến trúc | Bộ cài | Mô tả |
+| :--- | :--- | :--- |
+| **Windows** (64-bit) | [📥 **Tải bộ cài Windows (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | Trình cài đặt đồ họa |
+| **macOS** (Apple Silicon / Intel) | [🍏 **Tải bộ cài macOS (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | Hỗ trợ Apple Mac |
+| **Linux** (x64: Debian / Ubuntu / phổ thông) | [🐧 **Tải gói Linux (.deb / .AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | Gói chạy độc lập |
+
+> 🍎 **macOS: sửa lỗi «ứng dụng bị hỏng và không thể mở»**:
+> Kéo ứng dụng vào `/Applications`, sau đó chạy trong Terminal:
+> `xattr -cr "/Applications/JeikCode Desktop.app"`
+
+### 2. Cài đặt chính thức một dòng (CLI)
 
 ```bash
-# macOS & Linux
-curl -fsSL https://jeikcode.top/install.sh | bash
-
-# Windows (PowerShell)
-irm https://jeikcode.top/install.ps1 | iex
+# Chạy trong terminal Linux / macOS / OpenWrt
+curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | sh
 ```
 
-### Khởi chạy sau khi cài đặt
+```powershell
+# Chạy trên Windows (PowerShell)
+irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
+```
+
+> Thiết bị không giao diện (box, NAS, router phần mềm) chỉ cần binary CLI. Ma trận hỗ trợ: [Supported Platforms](https://jeikcode.top/guide/supported-platforms).
+
+---
+
+## 💡 Bắt đầu nhanh
+
+Di chuyển vào bất kỳ kho mã nào và chạy:
 
 ```bash
-# Khởi chạy giao diện dòng lệnh tương tác TUI
+cd /path/to/your/project
 jeikcode
-
-# Khởi chạy máy chủ WebUI
-jeikcode serve --host 0.0.0.0 --port 13457
 ```
+
+Tùy chọn CLI thường dùng:
+```bash
+# Khởi động trong thư mục chỉ định
+jeikcode -C /path/to/project
+
+# Mở WebUI trong trình duyệt
+jeikcode webui
+
+# Tiếp tục phiên trước
+jeikcode -c
+
+# Chạy tác vụ không giao diện (CI/CD và script)
+jeikcode -p "Investigate and fix OAuth callback 404 issue"
+
+# Nâng cấp lên bản mới nhất một chạm
+jeikcode update
+```
+
+---
+
+## 📝 Nhật ký thay đổi (Changelog)
+
+> Lịch sử đầy đủ tại [CHANGELOG.md](./CHANGELOG.md) và [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
+
+---
+
+## ☕ Hỗ trợ và tài trợ
+
+Nếu JeikCode hữu ích cho quy trình của bạn, hãy ủng hộ quá trình phát triển và duy trì mã nguồn mở!
+
+<div align="center">
+  <img src="./assets/jeikpaypal.jpg" width="220" alt="PayPal Sponsor QR Code" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />
+</div>
+
+---
+
+## 📄 Giấy phép
+
+Dự án được phát hành theo **Giấy phép JeikCode Phi thương mại & Ghi công (phỏng theo CC BY-NC 4.0)**. Xem [LICENSE](./LICENSE):
+
+1. **Hạn chế phi thương mại**: không được sử dụng phần mềm hoặc tác phẩm phái sinh, toàn bộ hoặc một phần, cho mục đích thương mại, tích hợp sản phẩm thương mại, dịch vụ kiếm tiền, lưu trữ SaaS hoặc phân phối thương mại mà không có sự cho phép bằng văn bản trước của tác giả.
+2. **Ghi công bắt buộc**: mọi triển khai công khai, phân phối, fork hoặc tác phẩm phái sinh phải giữ nổi bật thông báo bản quyền gốc, tên dự án (**JeikCode**), ghi công tác giả và URL kho chính thức `https://github.com/jeikl/JeikCode`.
+3. **Cấp phép thương mại**: cho cấp phép thương mại, tích hợp doanh nghiệp hoặc hợp tác, vui lòng liên hệ tác giả qua kho chính thức.

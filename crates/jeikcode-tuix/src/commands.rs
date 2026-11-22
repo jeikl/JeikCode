@@ -170,7 +170,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     // Opens the checkpoint picker — the same modal the double-Esc gesture opens —
     // so the feature is discoverable without knowing the keybind. needs_args=false:
     // selection happens in the modal, not on the command line.
-    Command { name: "rewind",  desc: "Restore the conversation to an earlier checkpoint", needs_args: false, hidden: false },
+    Command { name: "rewind",  desc: "Restore the conversation (code rewind is temporarily unavailable)", needs_args: false, hidden: false },
     Command { name: "worktree", desc: "Git worktree isolation (create/list/done/cleanup)", needs_args: true, hidden: false },
     Command { name: "update",  desc: "Upgrade jeikcode to latest (subcommands: set <url>, rollback)", needs_args: false, hidden: true },
     Command { name: "upgrade", desc: "Upgrade jeikcode to latest (subcommands: set <url>, rollback)", needs_args: false, hidden: true },

@@ -67,8 +67,9 @@ fn foreground_state_from_ui(state: &UiState) -> bg_runtime::RuntimeState {
 /// with `RewindCatalogRefreshed`, which the main loop turns into the Rewind
 /// modal (or a "no rewind points" notice) via `install_pending_rewind_modal`.
 /// Idle-only: rewinding mutates conversation history, so it must not race a
-/// running turn (mirrors the double-Esc gate and `dispatch_undo`). Workspace/code
-/// Rewind is disabled in v5.0.5.
+/// running turn (mirrors the double-Esc gate and `dispatch_undo`). Code Rewind
+/// is gated off until the checkpoint store has bounded GC/quota; the catalog
+/// carries the machine-readable reason.
 pub(super) fn dispatch_rewind(state: &UiState, ctx: &LoopCtx, renderer: &mut dyn Renderer) {
     if state.phase != crate::state::UiPhase::Idle {
         renderer.render(UiLine::CommandOutput(t(Msg::CmdRewindBusy).into_owned()));
@@ -1490,11 +1491,6 @@ const FALLBACK_BINARIES: &[(&str, &str, u64)] = &[
         4661464,
     ),
     (
-        "ohos-arm64",
-        "a5082c219aaea7114758774b9c9e4924c84c9fb16b39fe9f92e6c7ab083d0744",
-        4646656,
-    ),
-    (
         "x86_64-win",
         "9819fad219bb743af036a134ff903de8c2469bcffe7a655548c2229edb5f398e",
         5683344,
@@ -1544,16 +1540,6 @@ async fn fetch_relay_manifest() -> Result<RelayManifest, String> {
 /// 检测当前平台对应的目标标识，用于构建下载文件名。
 /// 格式：{arch}-{os}，与 Release 实际文件名一致。
 fn relay_client_target() -> &'static str {
-    // HarmonyOS / OpenHarmony 在运行时 OS 显示为 "linux"，
-    // 用编译时 cfg 区分
-    #[cfg(target_env = "ohos")]
-    {
-        return match std::env::consts::ARCH {
-            "aarch64" | "arm64" => "ohos-arm64",
-            _ => "unknown",
-        };
-    }
-    #[cfg(not(target_env = "ohos"))]
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "aarch64-macos",
         ("macos", "x86_64") => "x86_64-macos",
@@ -2137,9 +2123,9 @@ fn execute_slash_command_impl(
                  [providers.deepseek]\n\
                  type           = \"openai\"\n\
                  api_key        = \"sk-...\"\n\
-                 model          = \"deepseek-chat\"\n\
+                 model          = \"deepseek-v4-pro\"\n\
                  base_url       = \"https://api.deepseek.com/v1\"\n\
-                 context_window = 64000\n\
+                 context_window = 1000000\n\
                  ```\n\
                  \n\
                  Full reference: docs/config.example.toml (every field, every provider flavour).\n\

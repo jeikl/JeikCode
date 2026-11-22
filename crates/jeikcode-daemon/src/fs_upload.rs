@@ -202,10 +202,13 @@ fn save_uploads(
 /// Keep a single path segment. Drop separators, reserved Windows chars, and
 /// control bytes so the write stays inside `.jeikcode_store`.
 pub fn sanitize_upload_filename(raw: &str) -> String {
-    let base = Path::new(raw)
+    // Treat Windows separators as path separators on Unix too: a browser that
+    // uploads `..\secret.txt` must land on `secret.txt`, not `_secret.txt`.
+    let normalized = raw.replace('\\', "/");
+    let base = Path::new(&normalized)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or(raw)
+        .unwrap_or(&normalized)
         .trim();
     let mut out = String::new();
     for ch in base.chars() {

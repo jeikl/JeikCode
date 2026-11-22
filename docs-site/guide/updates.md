@@ -2,7 +2,9 @@
 
 Tutorial: https://jeikcode.top/guide/updates.html
 
-The desktop app, a browser opened from another machine, and a headless CLI all support multi-version updates and rollbacks. Windows, macOS, Linux, and HarmonyOS PC use the same commands. Prompts follow the JeikCode interface language (Simplified Chinese, English, and Vietnamese).
+The desktop app, a browser opened from another machine, and a headless CLI all support multi-version updates and rollbacks. Windows, macOS and Linux use the same commands. Prompts follow the JeikCode interface language (Simplified Chinese, English, and Vietnamese).
+
+Updates only resolve targets published in the release manifest. Unsupported userlands (32-bit ARM/x86, MIPS) fail closed with an explicit message instead of downloading a wrong-architecture binary.
 
 ---
 

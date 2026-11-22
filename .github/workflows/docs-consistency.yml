@@ -1,0 +1,58 @@
+name: Docs consistency
+
+on:
+  pull_request:
+    paths:
+      - '**.md'
+      - 'docs-site/**'
+      - 'scripts/check-docs-parity.js'
+  push:
+    branches: [main, beta]
+    paths:
+      - '**.md'
+      - 'docs-site/**'
+      - 'scripts/check-docs-parity.js'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-consistency-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: English source parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: README + docs-site parity
+        run: node scripts/check-docs-parity.js
+
+  # docs-site 的构建只在 main 的 Deploy 里验证会太晚；PR/beta 先构建一次。
+  # main push 跳过，避免与 docs-deploy 的同一个构建重复。
+  site-build:
+    name: Docs site build
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+      - name: Install docs dependencies
+        working-directory: docs-site
+        run: npm ci
+      - name: Build docs site
+        working-directory: docs-site
+        run: npm run docs:build
+        env:
+          VITEPRESS_BASE: /JeikCode/

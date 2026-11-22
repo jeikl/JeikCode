@@ -1,5 +1,7 @@
 # Beta native portability review
 
+> Historical change report. The live workflow is `.github/workflows/portability.yml`; platform matrices and release smoke checks are defined in `.github/workflows/build.yml` and `scripts/platforms.json`.
+
 ## Target and ownership
 
 `portability.yml` targets pull requests into `beta`, pushes to `beta`, and manual

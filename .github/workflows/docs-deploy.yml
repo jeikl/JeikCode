@@ -41,6 +41,9 @@ jobs:
           enablement: true
         continue-on-error: true
 
+      - name: Docs parity gate (English source)
+        run: node scripts/check-docs-parity.js
+
       - name: Install dependencies
         run: npm ci
         working-directory: docs-site

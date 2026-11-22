@@ -8067,8 +8067,53 @@ pub(crate) fn hash_path(path: &std::path::Path) -> String {
     NativeSessionManager::project_hash(path)
 }
 
+/// Bucket a NEW session will be written to. Existing catalog navigation must
+/// use the physical `CatalogEntry::project_bucket` instead: a working dir can
+/// be renamed after its sessions were stored under a historical bucket.
 fn response_project_hash(path: &std::path::Path) -> String {
     hash_path(path)
+}
+
+/// Resolve the physical catalog bucket for a logical working directory.
+///
+/// Order: the active session's bucket (if it matches this path), then the most
+/// recently updated visible catalog entry for the path, then the hash a brand
+/// new session would receive. This keeps a renamed project navigable without
+/// letting a recomputed hash silently select an unrelated bucket.
+fn project_bucket_for_path_in_root(
+    sessions_root: &std::path::Path,
+    path: &std::path::Path,
+) -> String {
+    let key = jeikcode_capabilities::pathnorm::path_case_key(path);
+    let Ok(scan) = catalog_scan_in_root(sessions_root) else {
+        return hash_path(path);
+    };
+    if let Some(active) = active_catalog_location(&scan.entries) {
+        if let Some(entry) = scan
+            .entries
+            .iter()
+            .find(|entry| entry.id == active.id && entry.project_bucket == active.project_bucket)
+        {
+            if jeikcode_capabilities::pathnorm::path_case_key(&entry.working_dir) == key {
+                return entry.project_bucket.clone();
+            }
+        }
+    }
+    let mut best: Option<&jeikcode_capabilities::session::CatalogEntry> = None;
+    for entry in &scan.entries {
+        if jeikcode_capabilities::pathnorm::path_case_key(&entry.working_dir) != key {
+            continue;
+        }
+        if best.is_none_or(|current| entry.updated_at_ms > current.updated_at_ms) {
+            best = Some(entry);
+        }
+    }
+    best.map(|entry| entry.project_bucket.clone())
+        .unwrap_or_else(|| hash_path(path))
+}
+
+fn project_bucket_for_path(path: &std::path::Path) -> String {
+    project_bucket_for_path_in_root(&NativeSessionManager::sessions_root(), path)
 }
 
 /// System temp directory prefixes to exclude from the project list.
@@ -8138,8 +8183,11 @@ fn list_projects_from_entries(
         if !catalog_entry_is_visible(sessions_root, &entry, active) {
             continue;
         }
+        // Physical bucket, not a hash recomputed from the current working dir:
+        // renamed/moved projects keep a historical bucket, and navigation must
+        // return the bucket that actually owns the sessions.
         by_project_entries
-            .entry(NativeSessionManager::project_hash(&entry.working_dir))
+            .entry(entry.project_bucket.clone())
             .or_default()
             .push(entry);
     }
@@ -8286,7 +8334,9 @@ fn catalog_entry_with_project(
     entry: &jeikcode_capabilities::session::CatalogEntry,
 ) -> SessionMetaWithProject {
     SessionMetaWithProject {
-        project_hash: NativeSessionManager::project_hash(&entry.working_dir),
+        // Return the physical bucket so a short/full id lookup can navigate
+        // even when the working directory was renamed after the session was saved.
+        project_hash: entry.project_bucket.clone(),
         meta: catalog_entry_to_session_summary(entry),
     }
 }
@@ -8413,9 +8463,10 @@ fn list_sessions_from_entries(
 ) -> Vec<SessionSummary> {
     let mut entries: Vec<_> = raw_entries
         .into_iter()
+        // Physical bucket is the only project identity. A recomputed hash is
+        // not a navigation key: renamed projects keep their historical bucket.
         .filter(|entry| {
-            let entry_hash = NativeSessionManager::project_hash(&entry.working_dir);
-            (entry_hash == project_hash || entry.project_bucket == project_hash)
+            entry.project_bucket == project_hash
                 && catalog_entry_is_visible(sessions_root, entry, active)
         })
         .collect();
@@ -8673,13 +8724,25 @@ struct ProjectStateResponse {
 
 /// GET /project - Get current project state
 async fn get_project_state(State(state): State<AppState>) -> impl IntoResponse {
-    let state = state.project.read().await;
+    let (working_dir, previous_dir, recent_dirs, name) = {
+        let project = state.project.read().await;
+        (
+            project.working_dir.clone(),
+            project.previous_dir.clone(),
+            project.recent_dirs.clone(),
+            project.name.clone(),
+        )
+    };
+    let scan_dir = working_dir.clone();
+    let project_hash = run_session_catalog_io(move || Ok(project_bucket_for_path(&scan_dir)))
+        .await
+        .unwrap_or_else(|_| hash_path(&working_dir));
     Json(ProjectStateResponse {
-        working_dir: state.working_dir.clone(),
-        previous_dir: state.previous_dir.clone(),
-        recent_dirs: state.recent_dirs.clone(),
-        name: state.name.clone(),
-        project_hash: hash_path(&state.working_dir),
+        working_dir,
+        previous_dir,
+        recent_dirs,
+        name,
+        project_hash,
     })
 }
 
@@ -8843,7 +8906,10 @@ async fn change_dir(
             });
         }
 
-        let hash = hash_path(&new_path);
+        let hash_dir = new_path.clone();
+        let hash = run_session_catalog_io(move || Ok(project_bucket_for_path(&hash_dir)))
+            .await
+            .unwrap_or_else(|_| hash_path(&new_path));
         state.telemetry.track(Event::UseCommand {
             type_: "cd".into(),
             success: Some(true),
@@ -11662,13 +11728,25 @@ async fn bootstrap_handler(State(state): State<AppState>) -> impl IntoResponse {
     });
 
     let project_fut = async {
-        let proj = state.project.read().await;
+        let (working_dir, previous_dir, recent_dirs, name) = {
+            let proj = state.project.read().await;
+            (
+                proj.working_dir.clone(),
+                proj.previous_dir.clone(),
+                proj.recent_dirs.clone(),
+                proj.name.clone(),
+            )
+        };
+        let scan_dir = working_dir.clone();
+        let project_hash = run_session_catalog_io(move || Ok(project_bucket_for_path(&scan_dir)))
+            .await
+            .unwrap_or_else(|_| hash_path(&working_dir));
         ProjectStateResponse {
-            working_dir: proj.working_dir.clone(),
-            previous_dir: proj.previous_dir.clone(),
-            recent_dirs: proj.recent_dirs.clone(),
-            name: proj.name.clone(),
-            project_hash: hash_path(&proj.working_dir),
+            working_dir,
+            previous_dir,
+            recent_dirs,
+            name,
+            project_hash,
         }
     };
 
@@ -11800,7 +11878,16 @@ async fn append_session_messages(
         messages.push((role, msg.content));
     }
 
-    let project_hash = response_project_hash(&working_dir);
+    // Append to the bucket that actually owns this session, not a bucket
+    // recomputed from the current working dir (renames/moves preserve history).
+    let lookup_id = session_id.clone();
+    let project_hash = run_session_catalog_io(move || {
+        Ok(resolve_session_by_id(&lookup_id)?.map(|resolved| resolved.project_hash))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| response_project_hash(&working_dir));
     let client_request_id = req
         .client_request_id
         .as_deref()
@@ -26551,6 +26638,40 @@ mod tests {
         }
     }
 
+    /// `/health` 的契约必须在单测里常驻：发布端仍会在真实产物上做进程冒烟，
+    /// 但日常 push 不再为此编译并拉起 CLI。
+    #[tokio::test]
+    async fn health_route_reports_ok_and_daemon_identity() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let home = ScopedChatHome::new();
+        let app = Router::new()
+            .route("/health", axum::routing::get(crate::health))
+            .with_state(chat_test_state(&home));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("/health must be mounted");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["service"], "jeikcode-daemon");
+        assert_eq!(body["instance_id"], "chat-test-instance");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    }
+
     #[test]
     fn new_chat_assignment_is_sent_only_after_the_native_aggregate_is_durable() {
         let home = ScopedChatHome::new();
@@ -28374,6 +28495,43 @@ mod tests {
             sessions.len(),
             "projects session_count 必须与可见会话列表长度完全一致"
         );
+
+        // A recomputed hash is NOT a navigation key for a historical bucket.
+        let computed = SessionManager::project_hash(std::path::Path::new("/project"));
+        assert_ne!(computed, project_bucket);
+        assert!(
+            list_sessions_in_root(tmp.path(), &computed, Some(&active))
+                .unwrap()
+                .is_empty(),
+            "only the physical bucket may list these sessions"
+        );
+    }
+
+    #[test]
+    fn project_bucket_for_path_returns_the_physical_bucket() {
+        use jeikcode_capabilities::session::{SessionManager, SessionMeta};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bucket = "0123456789abcdef";
+        let manager = SessionManager::with_root(tmp.path().join(bucket));
+        let mut meta = SessionMeta::new("renamed", "/renamed/project", 1);
+        meta.message_count = 1;
+        manager.write_meta(&meta).unwrap();
+
+        assert_eq!(
+            project_bucket_for_path_in_root(tmp.path(), std::path::Path::new("/renamed/project")),
+            bucket
+        );
+    }
+
+    #[test]
+    fn project_bucket_for_new_path_uses_the_computed_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = std::path::Path::new("/brand/new/project");
+        assert_eq!(
+            project_bucket_for_path_in_root(tmp.path(), path),
+            NativeSessionManager::project_hash(path)
+        );
     }
 
     #[test]
@@ -28681,7 +28839,11 @@ mod tests {
             .await
             .unwrap();
         let operation_id = admission.operation_id.clone();
-        process_chat_request(
+        let cancel = admission.cancellation.clone();
+        // 断言只关心“提交前预处理”：两个请求被捕获即可，不必等整轮 turn 结束。
+        // mock 没有 TurnFinished 时，等 turn 完成会一直拖到运行时看门狗超时，
+        // 并持有 ScopedChatHome 全局锁，把同进程内其他 chat 测试一起拖慢。
+        let mut chat_task = tokio::spawn(process_chat_request(
             ChatRequest {
                 message: "explain this screenshot".into(),
                 working_dir: Some(home._dir.path().to_path_buf()),
@@ -28710,10 +28872,7 @@ mod tests {
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             false,
             None,
-        )
-        .await
-        .expect("chat request succeeds");
-        active_chats.complete(&operation_id).await;
+        ));
 
         let vl_request = tokio::time::timeout(std::time::Duration::from_secs(2), vl_request)
             .await
@@ -28732,8 +28891,23 @@ mod tests {
             "main text-only provider must receive the VL description: {main_request}"
         );
 
-        main_task.await.expect("main provider task");
-        vl_task.await.expect("VL provider task");
+        cancel.cancel();
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut chat_task)
+            .await
+            .is_err()
+        {
+            chat_task.abort();
+            let _ = chat_task.await;
+        }
+        active_chats.complete(&operation_id).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), main_task)
+            .await
+            .expect("main provider task")
+            .expect("main provider task panicked");
+        tokio::time::timeout(std::time::Duration::from_secs(5), vl_task)
+            .await
+            .expect("VL provider task")
+            .expect("VL provider task panicked");
     }
 
     // 回归：限流事件必须作为独立的 `rate_limited` ChatEvent 下发（非 error/warning），

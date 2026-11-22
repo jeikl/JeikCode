@@ -28,6 +28,13 @@ import {
   type SidebarSnapshot,
 } from '../lib/navState';
 import { mcpAutoTrustSignature, mcpEnableNeedsTrust } from '../lib/mcpTrust';
+import {
+  capabilityPendingKey,
+  isCapabilityRefreshCurrent,
+  normalizeCapabilityDir,
+  withPendingCapabilityOverrides,
+  type PendingCapabilityToggle,
+} from '../lib/capabilityState';
 import { sessionMessagesToMarkdownLines } from '../lib/historyMessages';
 import { collapseHomePath as collapseHomePathShared, displayPath, isLoopbackHost, stripExtendedPathPrefix } from '../lib/displayPath';
 import { FileExplorer } from './FileExplorer';
@@ -634,6 +641,12 @@ export function Sidebar({
   const [capsLoading, setCapsLoading] = useState(false);
   const [capsBusy, setCapsBusy] = useState<Set<string>>(new Set());
   const [capsError, setCapsError] = useState<string | null>(null);
+  // Capability refresh is async and may race with an optimistic toggle (menu-open
+  // fetch, capabilities_changed broadcast, post-toggle reconcile). Only the newest
+  // response may land, and in-flight toggles stay overlaid until confirmed.
+  const capRequestSeqRef = useRef(0);
+  const capPendingRef = useRef(new Map<string, PendingCapabilityToggle>());
+  const capsBusyRef = useRef<Set<string>>(new Set());
   const [skillsMenuOpen, setSkillsMenuOpen] = useState(false);
   const [skillsMenuPos, setSkillsMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const skillsMenuRef = useRef<HTMLDivElement | null>(null);
@@ -861,11 +874,21 @@ export function Sidebar({
   // 服务端只推“变了什么”（带 payload），这里按 id 就地 upsert/删行并同步失效缓存；
   // 刷新后仍以同一份本地缓存恢复，与后端保持最终一致。
   const refreshCapabilitiesRef = useRef<() => void>(() => {});
+  // The global-event subscription is not re-created on cwd changes; keep the
+  // filter reading the latest project instead of the mount-time value.
+  const cwdForCapabilitiesRef = useRef(cwd);
+  cwdForCapabilitiesRef.current = cwd;
   useEffect(() => {
     return onGlobalEvent((event) => {
       if (event.type === 'capabilities_changed') {
         // MCP / 技能开关是持久化系统设置：远端实例改动后立即重拉面板，
-        // 而不是等用户手动展开或整页刷新才看到新状态。
+        // 而不是等用户手动展开或整页刷新才看到新状态。只刷新当前项目，
+        // 避免别的项目的广播把本项目的在途 toggle 冲掉。
+        const eventDir = event.working_dir;
+        const currentCwd = cwdForCapabilitiesRef.current;
+        if (eventDir && currentCwd) {
+          if (normalizeCapabilityDir(eventDir) !== normalizeCapabilityDir(currentCwd)) return;
+        }
         refreshCapabilitiesRef.current();
         return;
       }
@@ -1752,16 +1775,35 @@ export function Sidebar({
   function capabilityProjectKey() {
     return `${cwd || ''}|${projectHash || ''}`;
   }
-  function refreshCapabilities() {
-    capProjectKeyRef.current = capabilityProjectKey();
+  async function refreshCapabilities() {
+    const seq = ++capRequestSeqRef.current;
+    const requestProjectKey = capabilityProjectKey();
+    capProjectKeyRef.current = requestProjectKey;
     setCapsLoading(true);
-    getCapabilities(cwd || undefined)
-      .then(setCapabilities)
-      .catch(() => setCapabilities((cur) => cur ?? []))
-      .finally(() => setCapsLoading(false));
+    // The mcp/status ride-along only feeds silent trust auto-confirm; it must not
+    // delay the capability panel.
     getMcpStatus(cwd || undefined)
       .then(maybeAutoTrustProjectMcp)
       .catch(() => {});
+    try {
+      const items = await getCapabilities(cwd || undefined);
+      // Ignore an older response and any response for a project we already left.
+      if (
+        !isCapabilityRefreshCurrent(
+          seq,
+          capRequestSeqRef.current,
+          requestProjectKey,
+          capabilityProjectKey(),
+        )
+      ) {
+        return;
+      }
+      setCapabilities(withPendingCapabilityOverrides(items, capPendingRef.current.values()));
+    } catch {
+      if (seq === capRequestSeqRef.current) setCapabilities((cur) => cur ?? []);
+    } finally {
+      if (seq === capRequestSeqRef.current) setCapsLoading(false);
+    }
   }
   refreshCapabilitiesRef.current = refreshCapabilities;
 
@@ -1807,11 +1849,21 @@ export function Sidebar({
   async function onToggleCapability(item: CapabilityItem, scope: CapScope, e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    const key = `${item.kind}:${item.id}:${scope}`;
-    if (capsBusy.has(key)) return;
+    const key = capabilityPendingKey(item.kind, item.id, scope);
+    // Ref guard: state updates render later, so a double click in the same tick
+    // could otherwise start two writes and flip the switch twice.
+    if (capsBusyRef.current.has(key)) return;
+    capsBusyRef.current.add(key);
     setCapsError(null);
     setCapsBusy((s) => new Set(s).add(key));
     const wasDisabled = scope === 'global' ? item.global_disabled : item.project_disabled;
+    const nextDisabled = !wasDisabled;
+    capPendingRef.current.set(key, {
+      kind: item.kind,
+      id: item.id,
+      scope,
+      disabled: nextDisabled,
+    });
     setCapabilities((cur) =>
       cur
         ? cur.map((c) =>
@@ -1845,21 +1897,35 @@ export function Sidebar({
         item.kind,
         item.id,
         scope,
-        !wasDisabled,
+        nextDisabled,
         cwd || undefined,
       );
-      if (!res.ok) setCapsError(res.error || 'toggle failed');
-      // Give the runtime a beat to rebuild, then reconcile with the backend.
-      await new Promise((resolve) => window.setTimeout(resolve, 300));
-      refreshCapabilities();
+      if (!res.ok) {
+        // Revert to server truth before dropping the overlay.
+        capPendingRef.current.delete(key);
+        setCapsError(res.error || 'toggle failed');
+        await refreshCapabilities();
+        return;
+      }
+      // The backend awaits the capability rebuild before responding, so this
+      // reconcile already sees the new state. Keep the overlay until it lands so
+      // an older in-flight menu-open refresh cannot flip the switch back.
+      await refreshCapabilities();
+      capPendingRef.current.delete(key);
     } catch (error) {
+      capPendingRef.current.delete(key);
       setCapsError(error instanceof Error ? error.message : String(error));
+      await refreshCapabilities();
     } finally {
+      capsBusyRef.current.delete(key);
       setCapsBusy((s) => {
         const next = new Set(s);
         next.delete(key);
         return next;
       });
+      // A successful reconcile already dropped its pending entry; this is the
+      // final safety net for unmount/early-return paths.
+      capPendingRef.current.delete(key);
     }
   }
 

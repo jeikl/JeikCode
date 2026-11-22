@@ -23,7 +23,7 @@ Define credentials and Base URLs in `provider_accounts`, then declare and config
 # =============================================================================
 # Top-level global defaults (MUST precede all [table] sections)
 # =============================================================================
-default_model = "deepseek/chat"
+default_model = "deepseek/v4-pro"
 language = "en"                             # Global language: "en" | "vi-VN" | "zh-CN" (auto-detected if unset, fallback to en)
 
 # =============================================================================
@@ -41,20 +41,25 @@ base_url = "https://api.your-proxy.com/v1"
 # =============================================================================
 # 2. Model Profiles [models."<account_id>/<model_alias>"]
 # =============================================================================
-[models."deepseek/chat"]
+[models."deepseek/v4-pro"]
 account = "deepseek"                        # Bound provider_accounts
-model = "deepseek-chat"                     # Upstream model ID
-context_window = 64000                      # Total context window tokens
-max_tokens = 8192                           # Maximum output tokens
-
-[models."deepseek/reasoner"]
-account = "deepseek"
-model = "deepseek-reasoner"
-context_window = 64000
+model = "deepseek-v4-pro"                   # Upstream model ID (flagship)
+context_window = 1000000                    # Total context window tokens (DeepSeek V4 supports 1M)
+max_tokens = 384000                         # Maximum output tokens
 reasoning_model = true                      # Declared as reasoning/thinking model
-reasoning_history = "exclude"               # Back-transmit thinking history in turns: "exclude" | "include"
-reasoning_effort = "high"                   # Thinking effort: "low" | "medium" | "high" | "max"
-reasoning_levels = ["low", "medium", "high", "max"] # Candidate list for cycling gears
+reasoning_history = "include"               # Back-transmit thinking history in turns: "exclude" | "include"
+reasoning_effort = "max"                    # Thinking effort: "low" | "high" | "max"
+reasoning_levels = ["low", "high", "max"]   # Candidate list for cycling gears
+
+[models."deepseek/flash"]
+account = "deepseek"
+model = "deepseek-flash"                    # Upstream model ID (cost-efficient fast tier)
+context_window = 1000000
+max_tokens = 384000
+reasoning_model = true
+reasoning_history = "include"
+reasoning_effort = "high"
+reasoning_levels = ["low", "high", "max"]
 
 [models."custom/gpt4o"]
 account = "custom-proxy"

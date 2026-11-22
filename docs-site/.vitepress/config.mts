@@ -131,6 +131,7 @@ export default defineConfig({
             items: [
               { text: 'Introduction', link: '/guide/introduction' },
               { text: 'Quick Installation (Terminal, Desktop, Docker, Standalone)', link: '/guide/installation' },
+              { text: 'Supported Platforms', link: '/guide/supported-platforms' },
               { text: 'Quickstart', link: '/guide/getting-started' },
               { text: 'Autostart & Remote Access', link: '/guide/autostart-and-remote' },
               { text: 'Updates & Uninstall', link: '/guide/updates' },
@@ -214,6 +215,7 @@ export default defineConfig({
             items: [
               { text: '产品简介', link: '/zh/guide/introduction' },
               { text: '快速安装（终端、桌面端、Docker、单文件）', link: '/zh/guide/installation' },
+              { text: '支持的平台', link: '/zh/guide/supported-platforms' },
               { text: '快速开始', link: '/zh/guide/getting-started' },
               { text: '开机自启与远程访问', link: '/zh/guide/autostart-and-remote' },
               { text: '更新与卸载', link: '/zh/guide/updates' },
