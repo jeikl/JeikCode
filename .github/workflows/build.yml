@@ -121,9 +121,16 @@ jobs:
           name: webui-dist
           path: webui/dist
 
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
       - name: Setup Python
@@ -136,6 +143,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
           shared-key: "build-target-${{ matrix.target }}"
+          # tag 作用域缓存无法被 beta 复用，写入只会挤占日常 push 的缓存预算。
+          save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
       # 自动从 Git Tag 注入版本号到 Cargo.toml（无需手动改）
       - name: Sync version from Git Tag
@@ -199,9 +208,16 @@ jobs:
           name: webui-dist
           path: webui/dist
 
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
       - name: Rust Cache
@@ -209,6 +225,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
           shared-key: "build-target-${{ matrix.target }}"
+          # tag 作用域缓存无法被 beta 复用，写入只会挤占日常 push 的缓存预算。
+          save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
       - uses: actions/setup-python@v5
         with:
@@ -281,9 +299,16 @@ jobs:
           name: webui-dist
           path: webui/dist
 
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
       - name: Rust Cache
@@ -291,6 +316,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
           shared-key: "build-target-${{ matrix.target }}"
+          # tag 作用域缓存无法被 beta 复用，写入只会挤占日常 push 的缓存预算。
+          save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
       # 自动从 Git Tag 注入版本号到 Cargo.toml（兼容 macOS BSD sed）
       - name: Sync version from Git Tag
@@ -448,12 +475,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config libsoup-3.0-dev javascriptcoregtk-4.1 libjavascriptcoregtk-4.1-dev zsync
 
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
 
       - name: Add Rust target
         if: matrix.rust_target != ''
-        run: rustup target add ${{ matrix.rust_target }}
+        run: rustup target add --toolchain ${{ steps.toolchain.outputs.channel }} ${{ matrix.rust_target }}
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -461,6 +496,7 @@ jobs:
           workspaces: desktop/src-tauri
           key: desktop-${{ matrix.os }}-${{ matrix.rust_target || 'default' }}
           shared-key: "desktop-${{ matrix.os }}-${{ matrix.rust_target || 'default' }}"
+          save-if: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

@@ -26638,6 +26638,40 @@ mod tests {
         }
     }
 
+    /// `/health` 的契约必须在单测里常驻：发布端仍会在真实产物上做进程冒烟，
+    /// 但日常 push 不再为此编译并拉起 CLI。
+    #[tokio::test]
+    async fn health_route_reports_ok_and_daemon_identity() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let home = ScopedChatHome::new();
+        let app = Router::new()
+            .route("/health", axum::routing::get(crate::health))
+            .with_state(chat_test_state(&home));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("/health must be mounted");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["service"], "jeikcode-daemon");
+        assert_eq!(body["instance_id"], "chat-test-instance");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    }
+
     #[test]
     fn new_chat_assignment_is_sent_only_after_the_native_aggregate_is_durable() {
         let home = ScopedChatHome::new();
@@ -28805,7 +28839,11 @@ mod tests {
             .await
             .unwrap();
         let operation_id = admission.operation_id.clone();
-        process_chat_request(
+        let cancel = admission.cancellation.clone();
+        // 断言只关心“提交前预处理”：两个请求被捕获即可，不必等整轮 turn 结束。
+        // mock 没有 TurnFinished 时，等 turn 完成会一直拖到运行时看门狗超时，
+        // 并持有 ScopedChatHome 全局锁，把同进程内其他 chat 测试一起拖慢。
+        let mut chat_task = tokio::spawn(process_chat_request(
             ChatRequest {
                 message: "explain this screenshot".into(),
                 working_dir: Some(home._dir.path().to_path_buf()),
@@ -28834,10 +28872,7 @@ mod tests {
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             false,
             None,
-        )
-        .await
-        .expect("chat request succeeds");
-        active_chats.complete(&operation_id).await;
+        ));
 
         let vl_request = tokio::time::timeout(std::time::Duration::from_secs(2), vl_request)
             .await
@@ -28856,8 +28891,23 @@ mod tests {
             "main text-only provider must receive the VL description: {main_request}"
         );
 
-        main_task.await.expect("main provider task");
-        vl_task.await.expect("VL provider task");
+        cancel.cancel();
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut chat_task)
+            .await
+            .is_err()
+        {
+            chat_task.abort();
+            let _ = chat_task.await;
+        }
+        active_chats.complete(&operation_id).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), main_task)
+            .await
+            .expect("main provider task")
+            .expect("main provider task panicked");
+        tokio::time::timeout(std::time::Duration::from_secs(5), vl_task)
+            .await
+            .expect("VL provider task")
+            .expect("VL provider task panicked");
     }
 
     // 回归：限流事件必须作为独立的 `rate_limited` ChatEvent 下发（非 error/warning），

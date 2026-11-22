@@ -7,6 +7,7 @@ on:
       - '**.md'
       - 'docs/**'
       - 'docs-site/**'
+      - 'desktop/**'
       - '.vscode/**'
       - 'LICENSE*'
   push:
@@ -15,6 +16,7 @@ on:
       - '**.md'
       - 'docs/**'
       - 'docs-site/**'
+      - 'desktop/**'
       - '.vscode/**'
       - 'LICENSE*'
   workflow_dispatch:
@@ -43,18 +45,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # ubuntu 由 ci.yml 的 Rust static + contracts / daemon / libs 覆盖；
+        # 这里只保留 Windows/macOS 的跨平台维度，避免同一套件在 ubuntu 跑两遍。
+        os: [windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Isolate runtime home
         run: echo "JEIKCODE_HOME=$RUNNER_TEMP/beta-portability-home" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "portability-native-${{ matrix.os }}"
+          save-if: ${{ github.event_name == 'push' }}
       - uses: actions/setup-python@v5
         with:
           python-version-file: .python-version
@@ -108,11 +121,20 @@ jobs:
           persist-credentials: false
       - name: Isolate runtime home
         run: echo "JEIKCODE_HOME=$RUNNER_TEMP/beta-portability-home" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve pinned toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "portability-feature-subsets-${{ matrix.id }}"
+          save-if: ${{ github.event_name == 'push' }}
       - uses: actions/setup-python@v5
         with:
           python-version-file: .python-version
