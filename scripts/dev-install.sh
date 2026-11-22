@@ -1,5 +1,5 @@
 #!/bin/sh
-# JeikCode Self — 源码开发模式系统命令安装(Unix/macOS/Linux/HarmonyOS)
+# JeikCode Self — 源码开发模式系统命令安装(Unix/macOS/Linux)
 #
 # 作用: 把本仓库的 cargo 构建结果注册为系统 `jeikcode` 命令,
 #       免去每次敲全量 target/release/jeikcode 路径。

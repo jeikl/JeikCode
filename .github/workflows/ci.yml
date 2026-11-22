@@ -27,30 +27,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  version-consistency:
-    name: Version consistency
+  repo-consistency:
+    name: Repository consistency
     if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-      - run: node scripts/check-version-consistency.js
+      - name: Version consistency
+        run: node scripts/check-version-consistency.js
+      - name: Platform manifest consistency
+        run: node scripts/platforms.js --check
+      - name: Script unit tests
+        run: node --test scripts/platforms.test.js scripts/publish-release.test.js scripts/bump-version.test.js
+      - name: Docs parity (English source)
+        run: node scripts/check-docs-parity.js
 
   installer-integrity:
     name: Installer integrity (${{ matrix.os }})
     if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
+        # Mapping is exercised on x64 with the installer's test-only uname
+        # override; real arm64 runtime is covered by headless-arm64 below.
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version-file: .python-version
       - name: Verify installer fail-closed behavior
         run: python scripts/test_installers.py
 
@@ -58,6 +69,7 @@ jobs:
     name: WebUI quality
     if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -90,6 +102,7 @@ jobs:
     name: Rust quality
     needs: webui-quality
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
     steps:
@@ -100,6 +113,8 @@ jobs:
         with:
           name: ci-webui-dist
           path: webui/dist
+      # Keep in sync with rust-toolchain.toml: fmt needs rustfmt on the SAME
+      # pinned channel, otherwise `@stable` installs it for a different one.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
@@ -180,3 +195,82 @@ jobs:
         run: cargo test --locked -p jeikcode-tuix --lib -- --test-threads=1
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      # PR 保持快速；push 才跑这些较重的 lib 套件。
+      # 覆盖此前 CI 从不执行的 daemon/cli/review/telemetry 用例，
+      # 以及 Rewind gate、steer drain 等运行时契约。
+      - name: Test full lib suites (push)
+        if: github.event_name != 'pull_request'
+        run: cargo test --locked -p jeikcode-coding -p jeikcode-kernel -p jeikcode-daemon -p jeikcode -p jeikcode-review -p jeikcode-telemetry --lib
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+
+  # 真实 arm64 安装器测试。PR 上跳过以保持反馈速度；
+  # push/dispatch 在原生 arm64 上验证 linux-arm64 产物下载与校验。
+  installer-integrity-arm64:
+    name: Installer integrity (arm64)
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):') && github.event_name != 'pull_request'"
+    runs-on: ${{ vars.ARM64_RUNNER || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - name: Verify installer on native arm64
+        run: python scripts/test_installers.py
+
+  # 真实 arm64 Linux 原生 lib 测试 + 运行时冒烟。PR 上跳过以保持反馈速度；
+  # push/dispatch 跑一次，覆盖发布前 qemu 之外的原生环境。
+  headless-arm64:
+    name: Native arm64 tests + smoke
+    # push 常跑；workflow_dispatch 可手动验证 runner 是否可用。
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: webui-quality
+    # GitHub-hosted arm64 Linux runner label; override with repo variable
+    # ARM64_RUNNER if the plan does not expose it (e.g. a self-hosted label).
+    runs-on: ${{ vars.ARM64_RUNNER || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-webui-dist
+          path: webui/dist
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "headless-arm64"
+      # 原生 arm64 跑全部 lib 测试；比 qemu 更能暴露指令集/页大小/原子性问题。
+      - name: Native arm64 library tests
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+        run: cargo test --locked --workspace --lib --no-fail-fast
+      - name: Build headless CLI
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+        run: cargo build --locked -p jeikcode
+      - name: Smoke --version + serve /health
+        shell: bash
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+        run: |
+          set -euo pipefail
+          BIN=target/debug/jeikcode
+          "$BIN" --version
+          "$BIN" --host 127.0.0.1 --port 38473 --dir "$PWD" --no-token --no-telemetry &
+          pid=$!
+          for _ in $(seq 1 45); do
+            if curl -fsS -o /dev/null http://127.0.0.1:38473/health; then
+              curl -fsS -o /dev/null http://127.0.0.1:38473/
+              echo "headless arm64 smoke OK"
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+          kill "$pid" 2>/dev/null || true
+          echo "headless arm64: /health never became ready" >&2
+          exit 1

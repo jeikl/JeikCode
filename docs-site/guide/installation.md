@@ -1,20 +1,19 @@
 # Quick Installation (Terminal, Desktop, Docker, Standalone)
 
-JeikCode provides versatile delivery formats across **Terminal CLI (Terminal / TUI)**, **Cross-Platform Desktop Client (Desktop)**, **Containerized Environments (Docker)**, and **Standalone Binaries (Standalone)**. Choose the installation method that fits your environment.
+JeikCode ships two product lines from the same Rust core:
+
+- **Headless** — one self-contained `jeikcode` binary with the embedded WebUI, HTTP API, host-service registration and self-updater. This is the right choice for boxes, NAS, servers and CI.
+- **Desktop** — a Tauri shell for GUI machines. It opens the same WebUI and adds the CLI to `PATH`.
+
+The exact artifact matrix is maintained on [Supported Platforms](./supported-platforms).
 
 ---
 
 ## 1. Terminal Command-Line (Terminal / TUI)
 
-The core JeikCode engine is written in Rust, supporting one-liner installation on Linux, macOS, Windows, OpenWrt, and HarmonyOS PC.
+The core engine is written in Rust. One-liner installation is supported on Linux, macOS, Windows and OpenWrt (x86_64 / aarch64):
 
-### Official One-Liner Script
-
-The installer automatically detects your operating system and CPU architecture (x86_64, aarch64, etc.), fetches the latest binary, and adds it to your PATH:
-
-::: code-group
-
-```bash [Linux / macOS / OpenWrt / HarmonyOS PC]
+```bash [Linux / macOS / OpenWrt]
 curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | sh
 ```
 
@@ -22,92 +21,56 @@ curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install
 irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 ```
 
-:::
-
-After installation, run `jeikcode` in any terminal to enter the interactive workspace.
+The installer detects the OS and CPU architecture, verifies the release manifest (SHA256 + size) and installs a single binary. 32-bit userlands (`armv7l`, `armv8l`, `i686`) and MIPS fail closed with an explicit message.
 
 ---
 
-## 2. Desktop GUI Client (Desktop) (Recommended)
+## 2. Desktop GUI Client (Desktop)
 
-JeikCode offers a zero-config, highly optimized desktop client built with **Tauri 2.0** (ultra-lightweight, using only tens of megabytes of RAM).
-
-### 1. Key Features
-- **Minimal Resource Footprint**: Leverages the system's native WebView (Windows WebView2 / macOS WebKit / Linux WebKitGTK), keeping installer sizes compact and memory consumption low;
-- **CLI & GUI Synchronization**: When the desktop client is launched for the first time, it **automatically links the corresponding `jeikcode` CLI into your system PATH**;
-- **Native OS Integration**: System tray support, desktop notifications, split-pane browsing, and native keybindings.
-
-### 2. Official Desktop Downloads
-
-Visit the official release page: 👉 **[https://github.com/jeikl/JeikCode/releases](https://github.com/jeikl/JeikCode/releases)**:
+The desktop client is for machines with a graphical session. Headless devices should use the CLI binary — the Tauri shell only adds a system WebView dependency.
 
 | Platform / Architecture | Package Format | Notes |
 | :--- | :--- | :--- |
-| **Windows** (64-bit) | `JeikCode.Desktop_<version>_x64-setup.exe` | Standard Windows graphical installer |
-| **macOS** (Apple Silicon M-Series) | `JeikCode.Desktop_<version>_aarch64.dmg` | For Apple Silicon M1 / M2 / M3 / M4 Macs |
-| **macOS** (Intel) | `JeikCode.Desktop_<version>_x64.dmg` | For older Intel-based Macs |
-| **Linux** (Debian / Ubuntu) | `JeikCode.Desktop_<version>_amd64.deb` | Native `.deb` package |
-| **Linux** (Universal) | `JeikCode.Desktop_<version>_amd64.AppImage` | Standalone AppImage for major Linux distros |
+| **Windows** (x64) | `JeikCode.Desktop_<version>_x64-setup.exe` | Graphical installer |
+| **macOS** (Apple Silicon) | `JeikCode.Desktop_<version>_aarch64.dmg` | M1 / M2 / M3 / M4 |
+| **macOS** (Intel) | `JeikCode.Desktop_<version>_x64.dmg` | Intel Macs |
+| **Linux** (x64) | `JeikCode.Desktop_<version>_amd64.deb` | Debian / Ubuntu |
+| **Linux** (x64) | `JeikCode.Desktop_<version>_amd64.AppImage` | Portable package |
 
-### 3. Platform Installation Guides
-- **Windows**: Run the `.exe` installer and follow the setup wizard;
-- **macOS**: Mount the `.dmg` image and drag the **JeikCode** app icon into the **Applications** folder;
-  > 💡 **Fix for macOS "is damaged and cannot be opened" prompt**:  
-  > Drag the app into `/Applications`, then open Terminal and run:  
-  > `xattr -cr "/Applications/JeikCode Desktop.app"`
-- **Linux**:
-  - *Debian / Ubuntu*: Run `sudo dpkg -i "JeikCode.Desktop_<version>_amd64.deb"`;
-  - *AppImage*: Grant execution rights and launch:
-    ```bash
-    chmod +x "JeikCode.Desktop_<version>_amd64.AppImage"
-    ./"JeikCode.Desktop_<version>_amd64.AppImage"
-    ```
+> macOS "app is damaged" fix: drag the app into `/Applications`, then run `xattr -cr "/Applications/JeikCode Desktop.app"`.
 
 ---
 
 ## 3. Docker Containerization (Docker)
 
-If you prefer isolated container environments, use the official Dockerfiles:
+There is no prebuilt multi-arch image yet. Build one from a released Linux binary:
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/jeikl/JeikCode.git
 cd JeikCode
 
-# 2. Build the Daemon image
-docker build -t jeikcode-daemon -f docker/Dockerfile-Daemon .
+docker build \
+  --build-arg JEIKCODE_BIN=/path/to/jeikcode-vX.Y.Z-linux-x64 \
+  -t jeikcode-daemon -f docker/Dockerfile-Daemon .
 
-# 3. Run container mounting your workspace and configurations
 docker run -d \
   --name jeikcode-server \
-  -p 13457:13457 \
+  -p 13456:13456 \
   -e JEIKCODE_SERVER_TOKEN="sk-your-secret-token" \
   -v ~/.jeikcode:/root/.jeikcode \
   -v /path/to/your/projects:/workspace \
   jeikcode-daemon
 ```
 
-Access the WebUI directly at `http://<SERVER_IP>:13457/?token=sk-your-secret-token`.
+The image runs `jeikcode daemon --host 0.0.0.0`. A non-loopback bind requires `JEIKCODE_SERVER_TOKEN`; startup fails closed without it. Open `http://<SERVER_IP>:13456/?token=sk-your-secret-token`.
 
 ---
 
-## 4. Standalone Binaries & Source Build (Standalone)
+## 4. Standalone Binary & Source Build
 
-For offline environments, automated CI/CD runners, or custom source compilations:
+Release assets are a **single executable per target** (`.exe` on Windows, no archive). Download it from [GitHub Releases](https://github.com/jeikl/JeikCode/releases), make it executable and place it on `PATH`.
 
-### 1. Standalone Binary Releases
-
-Download single-file precompiled archives directly from [GitHub Releases](https://github.com/jeikl/JeikCode/releases):
-
-| OS / Architecture | Format | Instructions |
-| :--- | :--- | :--- |
-| **Windows** (x86_64) | `.zip` archive | Extract and place `jeikcode.exe` into your system PATH |
-| **macOS** (Apple Silicon / Intel) | `.tar.gz` archive | Extract and move binary to `/usr/local/bin` or `~/.local/bin` |
-| **Linux** (x86_64 / aarch64) | `.tar.gz` archive | Extract, `chmod +x`, and move to a standard bin path |
-
-### 2. Build from Source via Cargo
-
-If you have a Rust toolchain installed (Rust 1.80+ recommended):
+To build from source (Rust 1.93+, pinned by `rust-toolchain.toml`):
 
 ```bash
 git clone https://github.com/jeikl/JeikCode.git

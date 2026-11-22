@@ -4,7 +4,7 @@
 //! solving the common issue where systemd services lack the user's interactive login shell
 //! environment (such as nvm, node, bun, cargo, go, pyenv in PATH).
 //!
-//! Fully cross-platform compatible (Windows / macOS / Linux / HarmonyOS):
+//! Fully cross-platform compatible (Windows / macOS / Linux):
 //! - Only activates the systemd wizard on Linux with an active systemd runtime and interactive TTY.
 //! - The wizard runs **before** the foreground listener binds, using line-buffered
 //!   stdin (no crossterm raw mode). Prompting after bind+banner races job-control

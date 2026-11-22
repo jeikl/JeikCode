@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 # 自动抢占与防重：每个 Tag 独立独占运行，新提交自动取消同 Tag 的旧流水线
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
@@ -38,10 +41,27 @@ jobs:
         run: |
           node scripts/check-version-gate.js "$TAG_NAME" "$REPO"
 
+  # --- 平台矩阵唯一来源：scripts/platforms.json（禁止在 workflow 里手写 target 列表） ---
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      windows: ${{ steps.matrix.outputs.windows }}
+      linux: ${{ steps.matrix.outputs.linux }}
+      macos: ${{ steps.matrix.outputs.macos }}
+      desktop: ${{ steps.matrix.outputs.desktop }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Emit matrices
+        id: matrix
+        run: node scripts/platforms.js --emit-github-matrix >> "$GITHUB_OUTPUT"
+
   build-webui:
     needs: [check-version]
     if: always() && (needs.check-version.result == 'success' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -80,17 +100,13 @@ jobs:
 
   # --- Windows 构建：x86_64 与 ARM64 矩阵并行编译 ---
   build-windows:
-    needs: [build-webui]
-    if: always() && needs.build-webui.result == 'success'
+    needs: [plan, build-webui]
+    if: always() && needs.build-webui.result == 'success' && needs.plan.result == 'success'
     runs-on: windows-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            arch: x64
-          - target: aarch64-pc-windows-msvc
-            arch: arm64
+      matrix: ${{ fromJSON(needs.plan.outputs.windows) }}
 
     steps:
       - name: Checkout
@@ -108,8 +124,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
           targets: ${{ matrix.target }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -133,6 +153,13 @@ jobs:
       - name: Build Windows ${{ matrix.arch }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: Verify Windows ${{ matrix.arch }} artifact
+        shell: bash
+        run: >
+          python scripts/check_binary.py
+          --format pe --machine ${{ matrix.arch }}
+          target/${{ matrix.target }}/release/jeikcode.exe
+
       - name: Prepare Windows ${{ matrix.arch }} binary
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -151,17 +178,13 @@ jobs:
 
   # --- Linux 构建：x86_64 与 ARM64 矩阵并行编译 ---
   build-linux:
-    needs: [build-webui]
-    if: always() && needs.build-webui.result == 'success'
+    needs: [plan, build-webui]
+    if: always() && needs.build-webui.result == 'success' && needs.plan.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            arch: x64
-          - target: aarch64-unknown-linux-musl
-            arch: arm64
+      matrix: ${{ fromJSON(needs.plan.outputs.linux) }}
 
     steps:
       - name: Checkout
@@ -179,7 +202,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
           targets: ${{ matrix.target }}
 
       - name: Rust Cache
@@ -190,7 +212,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version-file: .python-version
           cache: "pip"
 
       - name: Install cross-compilation tools
@@ -212,29 +234,12 @@ jobs:
       - name: Build Linux ${{ matrix.arch }}
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}
 
-      - name: Require 16K page alignment
-        if: matrix.arch == 'arm64'
-        run: |
-          python3 - <<'PY'
-          import struct, pathlib, sys
-          p = pathlib.Path("target/aarch64-unknown-linux-musl/release/jeikcode")
-          data = p.read_bytes()
-          if data[:4] != b"\x7fELF":
-              sys.exit("not an ELF binary")
-          e_phoff = struct.unpack_from("<Q", data, 32)[0]
-          e_phentsize = struct.unpack_from("<H", data, 54)[0]
-          e_phnum = struct.unpack_from("<H", data, 56)[0]
-          aligns = []
-          for i in range(e_phnum):
-              off = e_phoff + i * e_phentsize
-              p_type = struct.unpack_from("<I", data, off)[0]
-              p_align = struct.unpack_from("<Q", data, off + 48)[0]
-              if p_type == 1:
-                  aligns.append(p_align)
-          print("PT_LOAD align", [hex(a) for a in aligns])
-          if not aligns or min(aligns) < 16384:
-              sys.exit("aarch64 musl binary is not 16K-page compatible")
-          PY
+      - name: Verify Linux ${{ matrix.arch }} artifact
+        run: >
+          python3 scripts/check_binary.py
+          --format elf --machine ${{ matrix.arch }} --static
+          --min-page-size ${{ matrix.arch == 'arm64' && '16384' || '4096' }}
+          target/${{ matrix.target }}/release/jeikcode
 
       - name: Prepare and Strip Linux ${{ matrix.arch }} binary
         if: startsWith(github.ref, 'refs/tags/')
@@ -255,17 +260,13 @@ jobs:
 
   # --- macOS 构建：x86_64 与 ARM64 矩阵并行编译 ---
   build-macos:
-    needs: [build-webui]
-    if: always() && needs.build-webui.result == 'success'
+    needs: [plan, build-webui]
+    if: always() && needs.build-webui.result == 'success' && needs.plan.result == 'success'
     runs-on: macos-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            arch: x64
-          - target: aarch64-apple-darwin
-            arch: arm64
+      matrix: ${{ fromJSON(needs.plan.outputs.macos) }}
 
     steps:
       - name: Checkout
@@ -283,7 +284,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
           targets: ${{ matrix.target }}
 
       - name: Rust Cache
@@ -306,6 +306,12 @@ jobs:
 
       - name: Build macOS ${{ matrix.arch }}
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Verify macOS ${{ matrix.arch }} artifact
+        run: >
+          python3 scripts/check_binary.py
+          --format macho --machine ${{ matrix.arch }}
+          target/${{ matrix.target }}/release/jeikcode
 
       - name: Prepare and Strip macOS ${{ matrix.arch }} binary
         if: startsWith(github.ref, 'refs/tags/')
@@ -330,6 +336,7 @@ jobs:
     needs: [build-windows, build-linux, build-macos]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
 
@@ -354,6 +361,43 @@ jobs:
           pattern: cli-*
           path: dist
           merge-multiple: true
+
+      # 发布门禁：验证“发布出去的那个二进制”能启动并响应 /health。
+      # linux-x64 原生跑；linux-arm64 用 qemu-user 跑同一份 musl 产物。
+      - name: Smoke published Linux binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static curl
+          TAG="$GITHUB_REF_NAME"
+          X64="dist/jeikcode-${TAG}-linux-x64"
+          ARM64="dist/jeikcode-${TAG}-linux-arm64"
+          chmod +x "$X64" "$ARM64"
+
+          smoke() {
+            local label="$1"; shift
+            local port="$1"; shift
+            timeout 60 "$@" --version
+            "$@" --host 127.0.0.1 --port "$port" --dir "$PWD" --no-token --no-telemetry &
+            local pid=$!
+            for _ in $(seq 1 30); do
+              if curl -fsS -o /dev/null "http://127.0.0.1:${port}/health"; then
+                curl -fsS -o /dev/null "http://127.0.0.1:${port}/"
+                echo "${label}: --version + /health + WebUI OK"
+                kill "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                return 0
+              fi
+              sleep 1
+            done
+            kill "$pid" 2>/dev/null || true
+            echo "${label}: /health never became ready" >&2
+            return 1
+          }
+
+          smoke "linux-x64" 38471 "$X64"
+          smoke "linux-arm64 (qemu)" 38472 qemu-aarch64-static "$ARM64"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -384,47 +428,15 @@ jobs:
   # 失败不挡住上面的 CLI Release。
   desktop:
     name: Desktop ${{ matrix.name }}
-    needs: [publish]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [plan, publish]
+    if: always() && needs.plan.result == 'success' && needs.publish.result == 'success' && startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     permissions:
       contents: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: windows-x64 (nsis)
-            key: windows-x64
-            os: windows-latest
-            artifact: cli-windows-x64
-            cli: jeikcode-${{ github.ref_name }}-windows-x64.exe
-            bundles: nsis
-            rust_target: ""
-            mac_arch: ""
-          - name: macos-arm64 (dmg,app)
-            key: macos-arm64
-            os: macos-latest
-            artifact: cli-macos-arm64
-            cli: jeikcode-${{ github.ref_name }}-darwin-arm64
-            bundles: dmg,app
-            rust_target: aarch64-apple-darwin
-            mac_arch: aarch64
-          - name: macos-x64 (dmg,app)
-            key: macos-x64
-            os: macos-latest
-            artifact: cli-macos-x64
-            cli: jeikcode-${{ github.ref_name }}-darwin-x64
-            bundles: dmg,app
-            rust_target: x86_64-apple-darwin
-            mac_arch: x64
-          - name: linux-x64 (deb, appimage)
-            key: linux-x64
-            os: ubuntu-22.04
-            artifact: cli-linux-x64
-            cli: jeikcode-${{ github.ref_name }}-linux-x64
-            bundles: deb,appimage
-            rust_target: ""
-            mac_arch: ""
+      matrix: ${{ fromJSON(needs.plan.outputs.desktop) }}
 
     steps:
       - name: Checkout
@@ -438,8 +450,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.0
 
       - name: Add Rust target
         if: matrix.rust_target != ''
@@ -469,10 +479,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/resources
+          CLI_SRC="cli-dist/jeikcode-${GITHUB_REF_NAME}-${{ matrix.cliTarget }}${{ matrix.ext }}"
           if [[ "${{ matrix.os }}" == *"windows"* ]]; then
-            cp "cli-dist/${{ matrix.cli }}" desktop/src-tauri/resources/jeikcode.exe
+            cp "$CLI_SRC" desktop/src-tauri/resources/jeikcode.exe
           else
-            cp "cli-dist/${{ matrix.cli }}" desktop/src-tauri/resources/jeikcode
+            cp "$CLI_SRC" desktop/src-tauri/resources/jeikcode
             chmod +x desktop/src-tauri/resources/jeikcode || true
           fi
 
@@ -624,6 +635,7 @@ jobs:
     needs: [publish, desktop]
     if: always() && needs.publish.result == 'success' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:

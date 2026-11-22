@@ -1,0 +1,33 @@
+name: Docs consistency
+
+on:
+  pull_request:
+    paths:
+      - '**.md'
+      - 'scripts/check-docs-parity.js'
+  push:
+    branches: [main, beta]
+    paths:
+      - '**.md'
+      - 'scripts/check-docs-parity.js'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-consistency-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: English source parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: README + docs-site parity
+        run: node scripts/check-docs-parity.js

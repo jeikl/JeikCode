@@ -17,9 +17,6 @@ const PLATFORM_PACKAGES = {
   win32: {
     x64: "@github.com/jeikcode-win32-x64",
   },
-  ohos: {
-    arm64: "@github.com/jeikcode-ohos-arm64",
-  },
 };
 
 const os = process.platform;
@@ -29,7 +26,7 @@ const pkgName = PLATFORM_PACKAGES[os]?.[arch];
 if (!pkgName) {
   console.error(
     `Unsupported platform: ${os} ${arch}. ` +
-      "JeikCode provides binaries for darwin (arm64/x64), linux (arm64/x64), windows (x64), and ohos (arm64)."
+      "JeikCode provides binaries for darwin (arm64/x64), linux (arm64/x64), and windows (x64)."
   );
   process.exit(1);
 }

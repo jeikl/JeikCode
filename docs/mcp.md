@@ -2,7 +2,7 @@
 
 > JeikCode 实现了 **MCP（Model Context Protocol）客户端**：通过 `.mcp.json` / `~/.jeikcode/mcp.json` 连接外部 MCP server，把它们的 **tools** 暴露成与内建工具一致的可调用工具（含审批链路）。
 >
-> 实现位于 **`crates/jeikcode-capabilities/src/mcp/`**（L1 能力层，`mcp` Cargo feature，非 default），零 `jeikcode-core` 依赖。
+> 实现位于 **`crates/jeikcode-capabilities/src/mcp/`**（L1 能力层，`mcp` Cargo feature，非 default），不依赖上层 crate。
 
 ---
 

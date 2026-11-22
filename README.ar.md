@@ -12,9 +12,9 @@
     <a href="https://github.com/jeikl/JeikCode/releases" target="_blank">
       <img src="https://img.shields.io/github/v/release/jeikl/JeikCode?color=blue&label=version" alt="version">
     </a>
-    <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
+    <img src="https://img.shields.io/badge/rust-1.93%2B-orange.svg" alt="rust">
     <img src="https://img.shields.io/badge/license-Non--Commercial%20(CC--BY--NC--4.0)-red.svg" alt="license">
-    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
+    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="platform">
     <a href="https://github.com/jeikl/JeikCode" target="_blank">
       <img src="https://img.shields.io/github/stars/jeikl/JeikCode?style=social" alt="GitHub Stars"/>
     </a>
@@ -40,35 +40,100 @@
 
 ## 📌 ما هو JeikCode؟
 
-**JeikCode** هو وكيل برمجة ذاتي بالذكاء الاصطناعي من الجيل الجديد، مفتوح المصدر ومتعدد المنصات بالكامل، مبني بلغة **Rust** الصافية. صُمم خصيصًا للهندسة البرمجية الإنتاجية المعقدة، ويوفر سرعة فائقة وتحكمًا كاملاً وتدفق عمل سلس عبر الأجهزة المختلفة:
+**JeikCode** هو وكيل برمجة بالذكاء الاصطناعي مفتوح المصدر من الجيل الجديد، متعدد المنصات وكامل الميزات، بُني أصلاً بلغة **Rust**. صُمم لهندسة البرمجيات الإنتاجية المعقدة، ويوفر خفة فائقة وتحكماً كاملاً وسير عمل متعدد الأجهزة من البداية إلى النهاية:
 
-- 🔍 **مخطط الكود الدلالي (CodeExplore)**: مدعوم بمحرك Tree-Sitter لأكثر من 12 لغة برمجة. يتيح الاستعلام عن الكود وعلاقات الاستدعاء بلغة الأعمال الطبيعية، مع تحديثات تدريجية في غضون 1 إلى 3 مللي ثانية؛
-- 🛡️ **حماية فائقة للتخزين المؤقت KV بنسبة 98–99% (Sacred Floor)**: يفرض ثباتًا صارمًا للبيانات وحماية الذاكرة (`sacred_floor`)، مما يثبت بادئات المحادثة عبر الجولات. يخفض تكاليف الرموز (Tokens) بأكثر من 90% ويقلل زمن الاستجابة إلى أجزاء من الثانية؛
-- ⚡ **توجيهات موجزة بحجم 9k وانضباط عالٍ**: يتجنب تضخم التعليمات النظامية التي تصل إلى 30–50k رمز. تستهلك الجولة القياسية حوالي 9–11k رمز فقط، مما يوفر نافذة السياق القصوى لكود مشروعك الحقيقي؛
-- 📱 **سير عمل متكامل عبر كافة المنصات**: تغطية كاملة: واجهة الطرفية TUI، واجهة الويب الحديثة WebUI، تطبيق سطح المكتب Tauri، الخدمات الخلفية، وأجهزة توجيه OpenWrt. تجربة متسقة وموحدة عبر أنظمة Windows و macOS و Linux و OpenWrt؛
-- 🔒 **حماية ذرية للعمليات بأسلوب Git**: حدود صارمة لتعديل الملفات المتزامنة لمنع الكتابة الخاطئة، مع نقاط استعادة وتراجع بنقرة واحدة؛
-- 🔄 **دعم أصلي لأهم 5 بروتوكولات قياسية**: تكامل تام مع `OpenAI Chat` و `OpenAI Responses` و `Anthropic Claude` و `Google Gemini` و `Ollama`، مع فصل كامل بين الحسابات والنماذج.
+- 🔍 **رسم بياني دلالي للشيفرة (CodeExplore)**: مدعوم بـ Tree-Sitter لأكثر من 12 لغة. تتيح القواميس ثنائية اللغة (`thesaurus`) الاستعلام عن الشيفرة وسلاسل الاستدعاء بلغة الأعمال الطبيعية، مع تحديثات تدريجية من 1 إلى 3 مللي ثانية؛
+- 🛡️ **حماية ذاكرة KV بنسبة 98–99% (Sacred Floor)**: ثبات بايتات صارم بنمط append-only وحفظ للذاكرة يبقيان بادئة النظام مجمّدة بين الأدوار. يزيل اهتزاز الذاكرة ويقلل تكلفة الرموز بأكثر من 90% ويضغط زمن أول رمز إلى المللي ثانية؛
+- ⚡ **أوامر نظام مختصرة بحجم 9k وانضباط عالٍ**: يتجنب تضخم أوامر النظام إلى 30–50k رمزاً. يستهلك الدور العادي نحو 9–11k رمزاً فقط، مع ترك أقصى سياق للشيفرة؛ وتُعاد القواعد تحميلها فورياً؛
+- 📱 **سير عمل موحّد عبر المنصات**: TUI طرفية، WebUI حديثة، تطبيق Tauri سطح مكتب، خادم خلفي، وموجّهات/بوابات OpenWrt (x86_64 / aarch64). تجربة متسقة على Windows وmacOS وLinux وOpenWrt؛
+- 🔒 **حماية ذرّية بنمط Git**: حدود صارمة للتحرير المتزامن للملفات تمنع الكتابات الفاسدة. يعمل بثبات مع النماذج القوية والخفيفة، مع تراجع ونقاط استعادة بنقرة واحدة؛
+- 🔄 **دعم أصلي لخمسة بروتوكولات**: `OpenAI Chat` و`OpenAI Responses` و`Anthropic Claude` و`Google Gemini` و`Ollama` مع فصل كامل للحسابات والنماذج؛
+- 🧩 **بوابة ثلاثية البروتوكولات ونظام بيئي مفتوح**: exposes نقاط نهاية متوافقة مع OpenAI وAnthropic وGemini، ما يتيح لـ OpenClaw أو إضافات الترجمة الاتصال بسهولة؛
+- 🚀 **تكرار سريع ومراجعة مرنة**: تُراجع Issues وPRs المجتمع وتُدمج بسرعة عالية، مع إصدارات beta سريعة.
 
 ---
 
-## 🚀 البدء السريع
+## 🚀 التثبيت والبدء السريع
 
-### التثبيت بنقرة واحدة (موصى به)
+### 1. تطبيق سطح المكتب (موصى به)
+
+تطبيق سطح مكتب جاهز للاستخدام ومتعدد المنصات، يتضمن WebUI مدمجة ويضيف CLI ‏`jeikcode` تلقائياً إلى PATH:
+
+| نظام التشغيل / المعمارية | المثبّت | الوصف |
+| :--- | :--- | :--- |
+| **Windows** (64-bit) | [📥 **تنزيل مثبّت Windows (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | معالج تثبيت رسومي |
+| **macOS** (Apple Silicon / Intel) | [🍏 **تنزيل مثبّت macOS (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | يدعم أجهزة Apple Mac |
+| **Linux** (x64: Debian / Ubuntu / عام) | [🐧 **تنزيل حزمة Linux (.deb / .AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | حزمة مستقلة |
+
+> 🍎 **macOS: إصلاح رسالة «التطبيق تالف ولا يمكن فتحه»**:
+> اسحب التطبيق إلى `/Applications` ثم نفّذ في الطرفية:
+> `xattr -cr "/Applications/JeikCode Desktop.app"`
+
+### 2. التثبيت الرسمي بسطر واحد (CLI)
 
 ```bash
-# macOS و Linux
-curl -fsSL https://jeikcode.top/install.sh | bash
-
-# Windows (PowerShell)
-irm https://jeikcode.top/install.ps1 | iex
+# نفّذ في طرفية Linux / macOS / OpenWrt
+curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | sh
 ```
 
-### التشغيل بعد التثبيت
+```powershell
+# نفّذ في Windows (PowerShell)
+irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
+```
+
+> الأجهزة بلا واجهة (الصناديق، NAS، الموجّهات البرمجية) تحتاج فقط إلى ثنائي CLI. مصفوفة الدعم: [Supported Platforms](https://jeikcode.top/guide/supported-platforms).
+
+---
+
+## 💡 البدء السريع
+
+انتقل إلى أي مستودع شيفرة ثم شغّل:
 
 ```bash
-# تشغيل واجهة الطرفية التفاعلية TUI
+cd /path/to/your/project
 jeikcode
-
-# تشغيل خادم WebUI
-jeikcode serve --host 0.0.0.0 --port 13457
 ```
+
+خيارات CLI الشائعة:
+```bash
+# البدء في دليل محدد
+jeikcode -C /path/to/project
+
+# فتح WebUI في المتصفح
+jeikcode webui
+
+# متابعة الجلسة السابقة
+jeikcode -c
+
+# تنفيذ مهمة بلا واجهة (CI/CD والسكربتات)
+jeikcode -p "Investigate and fix OAuth callback 404 issue"
+
+# الترقية إلى أحدث إصدار بنقرة واحدة
+jeikcode update
+```
+
+---
+
+## 📝 سجل التغييرات (Changelog)
+
+> السجل الكامل في [CHANGELOG.md](./CHANGELOG.md) و[GitHub Releases](https://github.com/jeikl/JeikCode/releases).
+
+---
+
+## ☕ الدعم والرعاية
+
+إذا كان JeikCode مفيداً لسير عملك، يمكنك دعم التطوير المستمر وصيانة المصدر المفتوح!
+
+<div align="center">
+  <img src="./assets/jeikpaypal.jpg" width="220" alt="PayPal Sponsor QR Code" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />
+</div>
+
+---
+
+## 📄 الترخيص
+
+يُوزَّع هذا المشروع بموجب **ترخيص JeikCode غير التجاري مع الإسناد (مستند إلى CC BY-NC 4.0)**. راجع [LICENSE](./LICENSE):
+
+1. **قيد غير تجاري**: لا يجوز استخدام البرنامج أو أعماله المشتقة، كلياً أو جزئياً، لأي غرض تجاري أو دمج في منتج تجاري أو خدمة مربحة أو استضافة SaaS أو إعادة توزيع تجاري دون إذن كتابي مسبق من المؤلف.
+2. **إسناد إلزامي**: يجب على أي نشر عام أو توزيع أو fork أو عمل مشتق الاحتفاظ بشكل بارز بإشعار حقوق النشر الأصلي واسم المشروع (**JeikCode**) واسم المؤلف ورابط المستودع الرسمي `https://github.com/jeikl/JeikCode`.
+3. **الترخيص التجاري**: للترخيص التجاري أو التكامل المؤسسي أو الشراكات، تواصل مع المؤلف عبر المستودع الرسمي.

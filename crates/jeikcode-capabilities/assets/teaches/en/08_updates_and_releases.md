@@ -42,7 +42,7 @@ auto_update_mins = 30
 
 ## 3. Upgrade Commands & Mode Differences (`/update` / `/upgrade`)
 
-Entering `/update` or `/upgrade` in the TUI/WebUI slash command bar is completely equivalent to terminal CLI commands:
+Entering `/update` or `/upgrade` in the TUI/WebUI slash command bar is equivalent to the terminal CLI; `jeikcode list` / `up` / `down` / `rollback` manage channels and versions:
 
 ```bash
 # Interactive upgrade: Downloads new release and displays config diff dialog for selective overwrite
@@ -71,14 +71,17 @@ jeikcode update rollback
 ## 4. Service Listening & Auto-Start Configuration
 
 ```bash
-# Start Web daemon and register as system service (auto-start on boot)
+# Start the web service; an interactive terminal is asked whether to register it as a system service
 jeikcode --host 0.0.0.0 --port 13457
 ```
 
 - **Linux**: Generates and registers as a systemd service.
+- **OpenWrt / iStoreOS etc.**: Generates a procd service (`/etc/init.d/jeikcode-*`).
 - **macOS**: Registers as a launchd service.
 - **Windows**: Writes to registry under current user Run keys.
-- Port and token configurations persist in `~/.jeikcode/webui-listen.json`.
+- Non-interactive environments skip the service wizard. Port and token configurations persist in `~/.jeikcode/webui-listen.json`.
+
+Updates and rollbacks only resolve targets published in the release manifest (currently x64/arm64 for Windows, macOS and Linux). Unsupported 32-bit userlands and MIPS fail explicitly instead of downloading a wrong-architecture binary.
 
 ---
 

@@ -12,9 +12,9 @@
     <a href="https://github.com/jeikl/JeikCode/releases" target="_blank">
       <img src="https://img.shields.io/github/v/release/jeikl/JeikCode?color=blue&label=version" alt="version">
     </a>
-    <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
+    <img src="https://img.shields.io/badge/rust-1.93%2B-orange.svg" alt="rust">
     <img src="https://img.shields.io/badge/license-Non--Commercial%20(CC--BY--NC--4.0)-red.svg" alt="license">
-    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
+    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="platform">
     <a href="https://github.com/jeikl/JeikCode" target="_blank">
       <img src="https://img.shields.io/github/stars/jeikl/JeikCode?style=social" alt="GitHub Stars"/>
     </a>
@@ -40,35 +40,100 @@
 
 ## 📌 Was ist JeikCode?
 
-**JeikCode** ist ein autonomer, plattformübergreifender Open-Source-KI-Coding-Agent der nächsten Generation, der nativ in reinem **Rust** entwickelt wurde. Speziell für komplexe Softwareentwicklung in Produktionsumgebungen konzipiert, bietet er extreme Leichtigkeit, Geschwindigkeit und durchgängige Workflows über mehrere Geräte hinweg:
+**JeikCode** ist ein plattformübergreifender, funktionsreicher Open-Source-KI-Coding-Agent der nächsten Generation, nativ in **Rust** entwickelt. Für komplexe Production-Engineering-Aufgaben konzipiert, bietet er extreme Leichtigkeit, volle Kontrolle und durchgängige Multi-Device-Workflows:
 
-- 🔍 **Semantischer Code-Graph (CodeExplore)**: Unterstützt durch Tree-Sitter für über 12 Programmiersprachen. Ermöglicht das Abfragen von Code- und Aufrufbeziehungen in natürlicher Fachsprache mit inkrementellen Updates in 1–3 ms;
-- 🛡️ **98–99% KV-Cache-Schutz (Sacred Floor)**: Erzwingt strikte Append-Only-Byte-Unveränderlichkeit und Speicherschutz (`sacred_floor`), wodurch System-Präfixe über Runden hinweg eingefroren bleiben. Senkt Token-Kosten um über 90% und minimiert die Antwortlatenz (TTFT) auf Millisekunden;
-- ⚡ **9k Minimale Prompts & Hohe Disziplin**: Vermeidet überdimensionierte System-Prompts von 30–50k Tokens. Eine Standard-Runde verbraucht nur ~9–11k Tokens und reserviert das Kontextfenster für Ihren echten Code;
-- 📱 **Plattformübergreifende Workflows**: Vollständige Abdeckung: Terminal-TUI, modernes WebUI, Tauri-Desktop-App, Hintergrund-Daemons und OpenWrt-Router. Nahtlose Nutzung unter Windows, macOS, Linux und OpenWrt;
-- 🔒 **Atomarer Zustandsschutz im Git-Stil**: Strenge Grenzen für parallele Dateibearbeitung verhindern fehlerhafte Überschreibungen, inklusive Ein-Klick-Widerrufen und Rollback-Checkpoints;
-- 🔄 **Native Unterstützung für 5 Industriestandards**: Integriert `OpenAI Chat`, `OpenAI Responses`, `Anthropic Claude`, `Google Gemini` und `Ollama` bei vollständiger Entkopplung von Konten und Modellen.
+- 🔍 **Semantischer CodeGraph (CodeExplore)**: Tree-Sitter für 12+ Sprachen. Zweisprachige Domänen-Thesauri (`thesaurus`) ermöglichen Abfragen in natürlicher Geschäftssprache, mit inkrementellen Patches in 1–3 ms;
+- 🛡️ **98–99 % KV-Cache-Schutz (Sacred Floor)**: strikte Append-only-Byte-Unveränderlichkeit und Speicherbewahrung halten den System-Prefix über Turns hinweg eingefroren. Eliminiert Cache-Thrashing, senkt Token-Kosten um über 90 % und komprimiert TTFT auf Millisekunden;
+- ⚡ **Minimale 9k-Prompts und hohe Disziplin**: vermeidet 30–50k Token große System-Prompts. Ein normaler Turn verbraucht nur ~9–11k Token und lässt dem Code maximalen Kontext; Regeln werden live neu geladen;
+- 📱 **Omni-Plattform-Workflows und einheitlicher Agent**: Terminal-TUI, moderne WebUI, Tauri-Desktop, Hintergrund-Daemon und OpenWrt-Router/Gateways (x86_64 / aarch64). Konsistente Erfahrung unter Windows, macOS, Linux und OpenWrt;
+- 🔒 **Git-ähnlicher atomarer Zustandsschutz**: strikte Grenzen für parallele Dateibearbeitung verhindern schmutzige Schreibvorgänge. Stabil mit starken und leichten Modellen, inklusive Undo und Rollback-Checkpoints;
+- 🔄 **Native Unterstützung von 5 Protokollen**: `OpenAI Chat`, `OpenAI Responses`, `Anthropic Claude`, `Google Gemini` und `Ollama`, mit vollständiger Entkopplung von Konten und Modellen;
+- 🧩 **Tri-Protokoll-Gateway und offenes Ökosystem**: stellt OpenAI-, Anthropic- und Gemini-kompatible Server-Endpunkte bereit, sodass OpenClaw oder Übersetzungs-Plugins sich mühelos verbinden;
+- 🚀 **Schnelle Iterationen und agiles Review**: Community-Issues und PRs werden sehr schnell geprüft und gemerged, begleitet von schnellen Beta-Builds.
 
 ---
 
-## 🚀 Schnellstart
+## 🚀 Installation und Schnellstart
 
-### Ein-Klick-Installation (empfohlen)
+### 1. Desktop-Anwendung (empfohlen)
+
+Sofort einsatzbereite plattformübergreifende Desktop-App mit integrierter WebUI und automatischer `jeikcode`-CLI-Integration in den PATH:
+
+| OS / Architektur | Installer | Beschreibung |
+| :--- | :--- | :--- |
+| **Windows** (64-bit) | [📥 **Windows-Installer (.exe) herunterladen**](https://github.com/jeikl/JeikCode/releases/latest) | Grafischer Setup-Assistent |
+| **macOS** (Apple Silicon / Intel) | [🍏 **macOS-Installer (.dmg) herunterladen**](https://github.com/jeikl/JeikCode/releases/latest) | Unterstützt Apple Mac |
+| **Linux** (x64: Debian / Ubuntu / universell) | [🐧 **Linux-Paket (.deb / .AppImage) herunterladen**](https://github.com/jeikl/JeikCode/releases/latest) | Eigenständiges Paket |
+
+> 🍎 **macOS: „App ist beschädigt und kann nicht geöffnet werden“ beheben**:
+> Ziehe die App nach `/Applications` und führe im Terminal aus:
+> `xattr -cr "/Applications/JeikCode Desktop.app"`
+
+### 2. Offizielle Terminal-Einzeiler-Installation (CLI)
 
 ```bash
-# macOS & Linux
-curl -fsSL https://jeikcode.top/install.sh | bash
-
-# Windows (PowerShell)
-irm https://jeikcode.top/install.ps1 | iex
+# Im Terminal unter Linux / macOS / OpenWrt ausführen
+curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | sh
 ```
 
-### Starten nach der Installation
+```powershell
+# Unter Windows (PowerShell) ausführen
+irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
+```
+
+> Headless-Geräte (Boxen, NAS, Soft-Router) benötigen nur das CLI-Binary. Support-Matrix: [Supported Platforms](https://jeikcode.top/guide/supported-platforms).
+
+---
+
+## 💡 Schnellstart
+
+Wechsle in ein beliebiges Code-Repository und starte:
 
 ```bash
-# Interaktive Terminal-TUI starten
+cd /path/to/your/project
 jeikcode
-
-# WebUI-Dienst starten
-jeikcode serve --host 0.0.0.0 --port 13457
 ```
+
+Häufige CLI-Optionen:
+```bash
+# In einem bestimmten Verzeichnis starten
+jeikcode -C /path/to/project
+
+# WebUI im Browser öffnen
+jeikcode webui
+
+# Vorherige Sitzung fortsetzen
+jeikcode -c
+
+# Headless-Aufgabe ausführen (CI/CD und Skripte)
+jeikcode -p "Investigate and fix OAuth callback 404 issue"
+
+# Mit einem Klick auf die neueste Version aktualisieren
+jeikcode update
+```
+
+---
+
+## 📝 Änderungsprotokoll (Changelog)
+
+> Vollständige Historie in [CHANGELOG.md](./CHANGELOG.md) und [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
+
+---
+
+## ☕ Support und Sponsoring
+
+Wenn JeikCode deinen Workflow verbessert, unterstütze gerne die weitere Entwicklung und Open-Source-Pflege!
+
+<div align="center">
+  <img src="./assets/jeikpaypal.jpg" width="220" alt="PayPal Sponsor QR Code" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />
+</div>
+
+---
+
+## 📄 Lizenz
+
+Dieses Projekt steht unter der **JeikCode Non-Commercial & Attribution License (abgeleitet von CC BY-NC 4.0)**. Details in [LICENSE](./LICENSE):
+
+1. **Nicht-kommerzielle Einschränkung**: Ohne vorherige schriftliche Genehmigung des Autors darf die Software ganz oder teilweise nicht für kommerzielle Zwecke, kommerzielle Produktintegration, monetarisierte Dienste, SaaS-Hosting oder kommerzielle Weiterverbreitung genutzt werden.
+2. **Pflicht zur Namensnennung**: Jede öffentliche Bereitstellung, Verbreitung, Fork oder abgeleitete Arbeit muss den ursprünglichen Copyright-Hinweis, den Projektnamen (**JeikCode**), die Autorennennung und die offizielle Repository-URL `https://github.com/jeikl/JeikCode` deutlich sichtbar beibehalten.
+3. **Kommerzielle Lizenzierung**: Für kommerzielle Lizenzen, Unternehmensintegration oder Partnerschaften kontaktiere den Autor über das offizielle Repository.

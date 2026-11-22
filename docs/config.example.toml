@@ -40,9 +40,14 @@ offline_mode = "off"
 [providers.deepseek]
 type = "openai"
 api_key = "sk-..."
-model = "deepseek-chat"
+model = "deepseek-v4-pro"
 base_url = "https://api.deepseek.com/v1"
-context_window = 64000
+context_window = 1000000
+max_tokens = 384000
+reasoning_model = true
+reasoning_history = "include"
+reasoning_effort = "max"
+reasoning_levels = ["low", "high", "max"]
 # 是否接受图片输入（OpenAI image_url / Anthropic base64）。
 # 新 schema 写在 [models.*] 上，键名是 image_input（旧名 supports_vision 仍可读）。
 # 省略时：openai/claude/anthropic 默认为 false（需显式开启）；也可在 /provider 切换。
@@ -57,7 +62,7 @@ context_window = 64000
 # image_input = true
 
 # DeepSeek V4 专属：推理历史回显策略
-# (unset = auto-detect: deepseek-v4* → include, deepseek-reasoner/r1 → exclude)
+# (unset = auto-detect: deepseek-v4* / deepseek-flash → include, deepseek-reasoner/r1 → exclude)
 # reasoning_history = "include"  # 或 "exclude"
 # reasoning_effort = "high"
 #
@@ -124,9 +129,10 @@ context_window = 131072
 [providers.siliconflow]
 type = "openai"
 api_key = "sk-..."
-model = "deepseek-ai/DeepSeek-V3"
+model = "deepseek-ai/DeepSeek-V4-Pro"
 base_url = "https://api.siliconflow.cn/v1"
-context_window = 64000
+context_window = 1000000
+max_tokens = 384000
 
 # =============================================================================
 # 视觉预处理（可选：主模型不支持图片时，指定另一个已配置的 provider 代为识别）

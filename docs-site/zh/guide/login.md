@@ -37,15 +37,15 @@ base_url = "https://api.your-proxy.com/v1"
 # =============================================================================
 # 2. 模型定义 [models."<account_id>/<model_alias>"]
 # =============================================================================
-[models."deepseek-v4.1-flash"]
+[models."deepseek/flash"]
 account = "deepseek"
-model = "deepseek-v4.1-flash"              # 上游实际调用的真实模型 ID
-context_window = 1024000                   # 上下文窗口 Token 数
-max_tokens = 131200                        # 模型最大输出 Token 数
+model = "deepseek-flash"                   # 上游实际调用的真实模型 ID
+context_window = 1000000                   # 上下文窗口 Token 数（DeepSeek V4 支持 1M）
+max_tokens = 384000                        # 模型最大输出 Token 数
 reasoning_model = true                     # 声明为推理/思考模型
-reasoning_history = "exclude"              # 是否回传思考过程："include" | "exclude"
-reasoning_effort = "high"                  # 默认选择思考强度档位："low" | "medium" | "high" | "max"
-reasoning_levels = ["low", "medium", "high", "max"] # 终端 Ctrl+T 快速循环切换的档位
+reasoning_history = "include"              # 是否回传思考过程："include" | "exclude"
+reasoning_effort = "max"                   # 默认选择思考强度档位："low" | "high" | "max"
+reasoning_levels = ["low", "high", "max"]   # 终端 Ctrl+T 快速循环切换的档位
 image_input = true                         # 支持图片多模态输入
 ```
 

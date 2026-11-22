@@ -7153,14 +7153,12 @@ mod parallel_tools_cap_clamp_tests {
     }
 }
 
-// ── STEER BUFFER TESTS (Task 1: route mid-turn SendMessage into steer buffer) ─
+// ── STEER BUFFER TESTS (route + drain mid-turn SendMessage) ─
 //
-// Task 1 only ROUTES the steer into the buffer; the DRAIN that makes round 2 see
-// the steered text is Task 2. The full end-to-end test is marked
-// `#[ignore = "drain lands in Task 2"]` so Task 1 stays green. A separate active
-// test asserts the Task-1-visible invariant: a mid-turn SendMessage must NOT open
-// a second TurnStarted (it was routed into the steer buffer, not queued as a new
-// pending turn). Choice: SPLIT — active test for Task 1, ignored full test for Task 2.
+// A mid-turn SendMessage is routed into the steer buffer and drained into the
+// SAME turn: no second TurnStarted, and round 2 sees the steered text. The
+// active tests below cover both halves (route invariant + drain fold), plus
+// cancel-before-drain and round-cap reset.
 #[cfg(test)]
 mod steer_buffer_tests {
     use super::*;

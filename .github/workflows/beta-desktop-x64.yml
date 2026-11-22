@@ -1,0 +1,92 @@
+name: Beta desktop x64 setup
+
+# Beta-only, standalone packaging job: build exactly one Windows x64 NSIS
+# setup installer on every beta push. No tags, no GitHub Release, no other
+# architectures — the artifact is uploaded to the workflow run.
+
+on:
+  push:
+    branches: [beta]
+    # Only Windows-relevant changes; docs/config-only pushes should not spend
+    # a Windows runner just to rebuild the same installer.
+    paths:
+      - 'crates/**'
+      - 'desktop/**'
+      - 'webui/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'package.json'
+      - 'scripts/**'
+      - '.github/workflows/beta-desktop-x64.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-desktop-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  windows-x64-nsis:
+    name: Windows x64 NSIS
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: |
+            webui/package-lock.json
+            desktop/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            desktop/src-tauri
+          shared-key: "beta-desktop-x64-nsis"
+
+      - name: Build WebUI
+        working-directory: webui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Windows x64 CLI
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p jeikcode
+
+      - name: Stage CLI into the desktop bundle
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/resources
+          cp target/x86_64-pc-windows-msvc/release/jeikcode.exe desktop/src-tauri/resources/jeikcode.exe
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build NSIS installer
+        working-directory: desktop
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Upload setup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jeikcode-beta-windows-x64-setup
+          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7

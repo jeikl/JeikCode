@@ -6,7 +6,7 @@
 # Env overrides:
 #   JEIKCODE_VERSION   release tag to install (default: latest release asset latest.json)
 #   JEIKCODE_PREFIX    install dir (absolute path; default: /usr/local/bin if writable,
-#                        else ~/.local/bin). On HarmonyOS as non-root, default is ~/.local/bin.
+#                        else ~/.local/bin).
 #   JEIKCODE_MANIFEST_URL / JEIKCODE_DOWNLOAD_BASE  override update channel (optional)
 #   JEIKCODE_INSTALL_FONTS  1 = also install a CJK font package on a Linux desktop
 #                           that lacks one; 0 = never mention fonts.
@@ -38,17 +38,20 @@ else
 fi
 
 # --- detect platform ---
-uname_s=$(uname -s)
-uname_m=$(uname -m)
+# Test-only overrides so the arch/OS mapping can be exercised on any CI runner.
+# They are not a supported user knob and are not documented.
+uname_s="${JEIKCODE_TEST_UNAME_S:-$(uname -s)}"
+uname_m="${JEIKCODE_TEST_UNAME_M:-$(uname -m)}"
 ext=""  # binary filename suffix; ".exe" on Windows shells (set below)
 
+# >>> platforms:os
 case "$uname_s" in
     Darwin) os="darwin" ;;
-    Linux)  os="linux"  ;;
-    HarmonyOS) os="ohos" ;;
+    Linux) os="linux" ;;
     MSYS*|MINGW*|CYGWIN*) os="windows"; ext=".exe" ;;
-    *) echo "Unsupported OS: $uname_s (Windows users: download the zip from the release page)"; exit 1 ;;
+    *) echo "Unsupported OS: $uname_s (Windows users: download the release binary)" >&2; exit 1 ;;
 esac
+# <<< platforms:os
 
 # Detect OpenWrt and its derivatives (ImmortalWrt, iStoreOS, Kwrt, LEDE, etc.)
 is_openwrt=0
@@ -60,16 +63,30 @@ if [ "$os" = "linux" ]; then
     fi
 fi
 
+# >>> platforms:arch
 case "$uname_m" in
     arm64|aarch64) arch="arm64" ;;
-    x86_64|amd64)  arch="x64"   ;;
-    *) echo "Unsupported arch: $uname_m"; exit 1 ;;
+    x86_64|amd64) arch="x64" ;;
+    armv7l|armv8l|armv6l)
+        echo "Error: $uname_m: 32-bit ARM userland is not supported; use a 64-bit aarch64 system." >&2
+        exit 1
+        ;;
+    i386|i486|i586|i686)
+        echo "Error: $uname_m: 32-bit x86 is not supported; use an x86_64 system." >&2
+        exit 1
+        ;;
+    mips|mipsel|mips64|mips64el)
+        echo "Error: $uname_m: MIPS is not supported; use an x86_64 or aarch64 system." >&2
+        exit 1
+        ;;
+    *) echo "Unsupported architecture: $uname_m (supported: x86_64, aarch64)" >&2; exit 1 ;;
 esac
+# <<< platforms:arch
 
 # --- pick install dir ---
 if [ -n "${JEIKCODE_PREFIX:-}" ]; then
     PREFIX="$JEIKCODE_PREFIX"
-elif [ "$os" = "ohos" ] || [ "$os" = "windows" ]; then
+elif [ "$os" = "windows" ]; then
     PREFIX="$HOME/.local/bin"
 elif [ -w /usr/local/bin ] 2>/dev/null; then
     PREFIX="/usr/local/bin"

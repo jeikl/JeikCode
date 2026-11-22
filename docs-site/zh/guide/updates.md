@@ -2,7 +2,9 @@
 
 详细教程：https://jeikcode.top/zh/guide/updates.html
 
-桌面版、浏览器异地环境和命令行无头环境都支持多版本更新与回退。Windows、macOS、Linux、HarmonyOS PC 使用同一套命令。提示语言跟随 JeikCode 的界面语言（简体中文、英文、越南文）。
+桌面版、浏览器异地环境和命令行无头环境都支持多版本更新与回退。Windows、macOS、Linux 使用同一套命令。提示语言跟随 JeikCode 的界面语言（简体中文、英文、越南文）。
+
+更新只会解析发布清单中实际存在的目标。不支持的 32 位用户态（ARM/x86）与 MIPS 会以明确错误 fail-closed，不会下载错误架构的二进制。
 
 ---
 

@@ -51,15 +51,13 @@ jobs:
       - name: Isolate runtime home
         run: echo "JEIKCODE_HOME=$RUNNER_TEMP/beta-portability-home" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.0
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "portability-native-${{ matrix.os }}"
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version-file: .python-version
       - name: Required UTF-8 hook diagnostic
         run: |
           set -o pipefail
@@ -111,15 +109,13 @@ jobs:
       - name: Isolate runtime home
         run: echo "JEIKCODE_HOME=$RUNNER_TEMP/beta-portability-home" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.0
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "portability-feature-subsets-${{ matrix.id }}"
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version-file: .python-version
       - name: Test supported capability subset
         env:
           FEATURES: ${{ matrix.features }}

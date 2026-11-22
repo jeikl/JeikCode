@@ -19,7 +19,7 @@
 //! use jeikcode_kernel::agent::AutoRespond;
 //!
 //! let agent = build_coding_agent(CodingAgentConfig::new(
-//!     "sk-...", "https://api.deepseek.com/v1", "deepseek-chat", ".",
+//!     "sk-...", "https://api.deepseek.com/v1", "deepseek-v4-pro", ".",
 //! ))?;
 //! let outcome = agent.run_to_completion("fix the build", AutoRespond::AllowAll).await;
 //! println!("{}", outcome.text);

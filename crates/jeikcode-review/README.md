@@ -1,7 +1,7 @@
 # jeikcode-review(L2)
 
 一个只读的**代码评审 agent**,由中立内核([`jeikcode-kernel`](../jeikcode-kernel))+ 能力层
-([`jeikcode-capabilities`](../jeikcode-capabilities))组装而成 —— 不依赖 `jeikcode-core`。
+([`jeikcode-capabilities`](../jeikcode-capabilities))组装而成，不依赖上层 crate。
 结构对标 [`jeikcode-coding`](../jeikcode-coding),但面向评审。
 
 终端用户的 CLI 见 [`jeikcode-clix`](../jeikcode-clix)(`jeikcodex review …`)。本 README 面向
@@ -22,7 +22,7 @@ use jeikcode_kernel::agent::AutoRespond;
 let (agent, report) = build_review_agent(ReviewAgentConfig::new(
     "sk-...",                       // api_key(keyless 网关可留空)
     "https://api.deepseek.com/v1",  // base_url
-    "deepseek-v4",                  // model
+    "deepseek-v4-pro",              // model
     ".",                            // 只读工具作用的仓库 working_dir
 ))?;
 

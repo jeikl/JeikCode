@@ -131,7 +131,7 @@ struct PendingRewindPoint {
 }
 
 const CODE_REWIND_DISABLED_REASON: &str =
-    "Code Rewind is temporarily disabled in v5.0.5 to protect disk space; conversation Rewind remains available.";
+    "Code Rewind is disabled until the per-session checkpoint store has bounded GC/quota; conversation Rewind remains available.";
 
 #[derive(Clone, Debug)]
 pub struct RewindTransactionReceipt {
@@ -170,10 +170,10 @@ impl SnapshotHook {
     ) -> Self {
         let session_id = session_id.into();
         let working_dir = working_dir.into();
-        // v5.0.5 safety stop: the per-session shadow Git store could grow without
-        // a quota or object collection and exhaust the system disk. Keep the
-        // conversation checkpoint ledger active, but do not initialize or write
-        // a workspace object database until the bounded shared-store design lands.
+        // Safety stop: the per-session shadow Git store has no quota/object
+        // collection yet and could exhaust the system disk. Keep the conversation
+        // checkpoint ledger active, but do not initialize a workspace object
+        // database until the bounded store design lands.
         let checkpoint = None;
         let unavailable = Some(CODE_REWIND_DISABLED_REASON.to_string());
         let points = mgr
@@ -1450,7 +1450,7 @@ mod tests {
         assert_eq!(recovered.rewind_points(), vec![point]);
         assert!(recovered
             .code_rewind_unavailable()
-            .is_some_and(|reason| reason.contains("temporarily disabled")));
+            .is_some_and(|reason| reason.contains("Code Rewind is disabled")));
         assert!(recovered
             .rewind
             .lock()
@@ -2280,7 +2280,7 @@ mod tests {
         assert!(points[0].files.is_empty());
         assert!(hook
             .code_rewind_unavailable()
-            .is_some_and(|reason| reason.contains("temporarily disabled")));
+            .is_some_and(|reason| reason.contains("Code Rewind is disabled")));
         assert_eq!(
             manager
                 .load_rewind_ledger("conversation-rewind")

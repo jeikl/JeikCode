@@ -27,7 +27,7 @@ Key assets inside `~/.jeikcode`:
 # =============================================================================
 # Global Top-Level Defaults (Must be at the very top of the file)
 # =============================================================================
-default_model = "deepseek/deepseek-v4.1-flash"  # Default model loaded on startup
+default_model = "deepseek/flash"                 # Default model loaded on startup
 language = "zh-CN"                             # Interface & interaction language
 auto_update = false                            # Auto-update (disabled by default)
 auto_commit = false                            # Automatically commit changes after each turn

@@ -1,0 +1,229 @@
+{
+  "schemaVersion": 1,
+  "policy": {
+    "userland": "64-bit",
+    "minFreeDiskMb": 256,
+    "recommendedRamMb": 512,
+    "unsupportedArches": [
+      {
+        "aliases": ["armv7l", "armv8l", "armv6l"],
+        "message": "32-bit ARM userland is not supported; use a 64-bit aarch64 system."
+      },
+      {
+        "aliases": ["i386", "i486", "i586", "i686"],
+        "message": "32-bit x86 is not supported; use an x86_64 system."
+      },
+      {
+        "aliases": ["mips", "mipsel", "mips64", "mips64el"],
+        "message": "MIPS is not supported; use an x86_64 or aarch64 system."
+      }
+    ]
+  },
+  "cli": [
+    {
+      "id": "darwin-arm64",
+      "buildFamily": "macos",
+      "os": "darwin",
+      "arch": "arm64",
+      "rustOs": "macos",
+      "rustArch": "aarch64",
+      "triple": "aarch64-apple-darwin",
+      "runner": "macos-latest",
+      "ext": "",
+      "unameOs": ["Darwin"],
+      "unameArch": ["arm64", "aarch64"],
+      "support": "supported"
+    },
+    {
+      "id": "darwin-x64",
+      "buildFamily": "macos",
+      "os": "darwin",
+      "arch": "x64",
+      "rustOs": "macos",
+      "rustArch": "x86_64",
+      "triple": "x86_64-apple-darwin",
+      "runner": "macos-latest",
+      "ext": "",
+      "unameOs": ["Darwin"],
+      "unameArch": ["x86_64", "amd64"],
+      "support": "supported"
+    },
+    {
+      "id": "linux-arm64",
+      "buildFamily": "linux",
+      "os": "linux",
+      "arch": "arm64",
+      "rustOs": "linux",
+      "rustArch": "aarch64",
+      "triple": "aarch64-unknown-linux-musl",
+      "runner": "ubuntu-latest",
+      "ext": "",
+      "unameOs": ["Linux"],
+      "unameArch": ["aarch64", "arm64"],
+      "minPageSize": 16384,
+      "support": "supported"
+    },
+    {
+      "id": "linux-x64",
+      "buildFamily": "linux",
+      "os": "linux",
+      "arch": "x64",
+      "rustOs": "linux",
+      "rustArch": "x86_64",
+      "triple": "x86_64-unknown-linux-musl",
+      "runner": "ubuntu-latest",
+      "ext": "",
+      "unameOs": ["Linux"],
+      "unameArch": ["x86_64", "amd64"],
+      "minPageSize": 4096,
+      "support": "supported"
+    },
+    {
+      "id": "windows-arm64",
+      "buildFamily": "windows",
+      "os": "windows",
+      "arch": "arm64",
+      "rustOs": "windows",
+      "rustArch": "aarch64",
+      "triple": "aarch64-pc-windows-msvc",
+      "runner": "windows-latest",
+      "ext": ".exe",
+      "unameOs": ["MSYS*", "MINGW*", "CYGWIN*"],
+      "unameArch": ["arm64", "aarch64"],
+      "windowsEnvArch": ["ARM64"],
+      "support": "supported"
+    },
+    {
+      "id": "windows-x64",
+      "buildFamily": "windows",
+      "os": "windows",
+      "arch": "x64",
+      "rustOs": "windows",
+      "rustArch": "x86_64",
+      "triple": "x86_64-pc-windows-msvc",
+      "runner": "windows-latest",
+      "ext": ".exe",
+      "unameOs": ["MSYS*", "MINGW*", "CYGWIN*"],
+      "unameArch": ["x86_64", "amd64"],
+      "windowsEnvArch": ["AMD64"],
+      "support": "supported"
+    }
+  ],
+  "desktopBuilds": [
+    {
+      "name": "windows-x64 (nsis)",
+      "key": "windows-x64",
+      "os": "windows-latest",
+      "artifact": "cli-windows-x64",
+      "cliTarget": "windows-x64",
+      "ext": ".exe",
+      "bundles": "nsis",
+      "rust_target": "",
+      "mac_arch": "",
+      "formats": "NSIS `.exe`"
+    },
+    {
+      "name": "macos-arm64 (dmg,app)",
+      "key": "macos-arm64",
+      "os": "macos-latest",
+      "artifact": "cli-macos-arm64",
+      "cliTarget": "darwin-arm64",
+      "ext": "",
+      "bundles": "dmg,app",
+      "rust_target": "aarch64-apple-darwin",
+      "mac_arch": "aarch64",
+      "formats": "`.dmg` / `.app`"
+    },
+    {
+      "name": "macos-x64 (dmg,app)",
+      "key": "macos-x64",
+      "os": "macos-latest",
+      "artifact": "cli-macos-x64",
+      "cliTarget": "darwin-x64",
+      "ext": "",
+      "bundles": "dmg,app",
+      "rust_target": "x86_64-apple-darwin",
+      "mac_arch": "x64",
+      "formats": "`.dmg` / `.app`"
+    },
+    {
+      "name": "linux-x64 (deb, appimage)",
+      "key": "linux-x64",
+      "os": "ubuntu-22.04",
+      "artifact": "cli-linux-x64",
+      "cliTarget": "linux-x64",
+      "ext": "",
+      "bundles": "deb,appimage",
+      "rust_target": "",
+      "mac_arch": "",
+      "formats": "`.deb` / `.AppImage`"
+    }
+  ],
+  "desktopInstallers": [
+    {
+      "installerKey": "windows-x64",
+      "tauriTarget": "windows-x86_64",
+      "assetSuffixes": ["_x64-setup.exe", "-setup.exe"],
+      "hostOs": "windows",
+      "hostArch": "x86_64",
+      "bundleType": "any"
+    },
+    {
+      "installerKey": "darwin-arm64-app",
+      "tauriTarget": "darwin-aarch64",
+      "assetSuffixes": ["_aarch64.app.tar.gz"],
+      "hostOs": "macos",
+      "hostArch": "aarch64",
+      "bundleType": "app"
+    },
+    {
+      "installerKey": "darwin-arm64-dmg",
+      "tauriTarget": null,
+      "assetSuffixes": ["_aarch64.dmg"],
+      "hostOs": "macos",
+      "hostArch": "aarch64",
+      "bundleType": "dmg"
+    },
+    {
+      "installerKey": "darwin-x64-app",
+      "tauriTarget": "darwin-x86_64",
+      "assetSuffixes": ["_x64.app.tar.gz"],
+      "hostOs": "macos",
+      "hostArch": "x86_64",
+      "bundleType": "app"
+    },
+    {
+      "installerKey": "darwin-x64-dmg",
+      "tauriTarget": null,
+      "assetSuffixes": ["_x64.dmg"],
+      "hostOs": "macos",
+      "hostArch": "x86_64",
+      "bundleType": "dmg"
+    },
+    {
+      "installerKey": "linux-x64-appimage",
+      "tauriTarget": "linux-x86_64",
+      "assetSuffixes": ["_amd64.AppImage", "_x86_64.AppImage"],
+      "hostOs": "linux",
+      "hostArch": "x86_64",
+      "bundleType": "appimage"
+    },
+    {
+      "installerKey": "linux-x64-deb",
+      "tauriTarget": null,
+      "assetSuffixes": ["_amd64.deb"],
+      "hostOs": "linux",
+      "hostArch": "x86_64",
+      "bundleType": "deb"
+    }
+  ],
+  "npm": {
+    "platforms": [
+      { "cli": "darwin-arm64", "tag": "darwin-arm64", "os": "darwin", "arch": "arm64" },
+      { "cli": "darwin-x64", "tag": "darwin-x64", "os": "darwin", "arch": "x64" },
+      { "cli": "linux-arm64", "tag": "linux-arm64", "os": "linux", "arch": "arm64" },
+      { "cli": "linux-x64", "tag": "linux-x64", "os": "linux", "arch": "x64" },
+      { "cli": "windows-x64", "tag": "win32-x64", "os": "win32", "arch": "x64" }
+    ]
+  }
+}

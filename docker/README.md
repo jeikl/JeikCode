@@ -60,43 +60,28 @@ docker run --rm -it \
 
 ## JeikCode Daemon 镜像
 
+> 目前没有 CI 预构建/预推送的镜像。发布流水线只产出 `jeikcode` 单文件，镜像请用该二进制自行构建。
+
 ## 构建镜像
 
-首先准备 Linux x64 daemon 二进制（从 CI artifact / Release 资产获取，或本地交叉编译）：
+先准备 Linux 二进制：从 [GitHub Releases](https://github.com/jeikl/JeikCode/releases) 下载 `jeikcode-<tag>-linux-x64`，或本地编译：
 
 ```bash
-# 本地 musl 交叉编译（可选）
 rustup target add x86_64-unknown-linux-musl
-cargo build --release --locked --target x86_64-unknown-linux-musl -p jeikcode-daemon
+cargo build --release --locked --target x86_64-unknown-linux-musl -p jeikcode
 mkdir -p dist/local
-cp target/x86_64-unknown-linux-musl/release/jeikcode-daemon dist/local/jeikcode-daemon-linux-x64
+cp target/x86_64-unknown-linux-musl/release/jeikcode dist/local/jeikcode-linux-x64
 ```
 
 然后构建 Docker 镜像：
 
 ```bash
 docker build \
-  --build-arg JEIKCODE_DAEMON_BIN=dist/local/jeikcode-daemon-linux-x64 \
-  -t jeikcode-daemon:v5.0.3 -f docker/Dockerfile-Daemon .
+  --build-arg JEIKCODE_BIN=dist/local/jeikcode-linux-x64 \
+  -t jeikcode-daemon:latest -f docker/Dockerfile-Daemon .
 ```
 
-### 推送到华为云 SWR
-
-华为云 SWR 基础版不支持 OCI 规范的镜像格式。如果你使用的是较新版本的 Docker（BuildKit），需要添加 `--provenance=false` 参数：
-
-```bash
-# 标记镜像
-docker tag jeikcode-daemon:v5.0.3 swr.cn-north-4.myhuaweicloud.com/gitcode-be/jeikcode-daemon:v5.0.3
-
-# 使用 buildx 构建并推送（推荐）
-docker buildx build --provenance=false --platform linux/amd64 -t swr.cn-north-4.myhuaweicloud.com/gitcode-be/jeikcode-daemon:v5.0.3 --push -f docker/Dockerfile-Daemon .
-
-# 或者先构建再推送
-docker build --provenance=false -t swr.cn-north-4.myhuaweicloud.com/gitcode-be/jeikcode-daemon:v5.0.3 -f docker/Dockerfile-Daemon .
-docker push swr.cn-north-4.myhuaweicloud.com/gitcode-be/jeikcode-daemon:v5.0.3
-```
-
-> **注意**: 如果不添加 `--provenance=false`，推送时会报错: `Invalid image, fail to parse 'manifest.json'`
+镜像入口为 `jeikcode daemon --host 0.0.0.0 --port 13456`，因此运行容器时必须提供 token：
 
 ## 运行容器
 
@@ -105,7 +90,8 @@ docker push swr.cn-north-4.myhuaweicloud.com/gitcode-be/jeikcode-daemon:v5.0.3
 ```bash
 docker run -d --name jeikcode-daemon \
   -p 13456:13456 \
-  jeikcode-daemon:v5.0.3
+  -e JEIKCODE_SERVER_TOKEN=sk-your-secret-token \
+  jeikcode-daemon:latest
 ```
 
 ### 挂载配置文件
@@ -113,8 +99,9 @@ docker run -d --name jeikcode-daemon \
 ```bash
 docker run -d --name jeikcode-daemon \
   -p 13456:13456 \
+  -e JEIKCODE_SERVER_TOKEN=sk-your-secret-token \
   -v /path/to/config.toml:/root/.jeikcode/config.toml \
-  jeikcode-daemon:v5.0.3
+  jeikcode-daemon:latest
 ```
 
 ### 挂载项目目录
@@ -122,9 +109,10 @@ docker run -d --name jeikcode-daemon \
 ```bash
 docker run -d --name jeikcode-daemon \
   -p 13456:13456 \
+  -e JEIKCODE_SERVER_TOKEN=sk-your-secret-token \
   -v /path/to/config.toml:/root/.jeikcode/config.toml \
   -v /path/to/project:/workspace \
-  jeikcode-daemon:v5.0.3
+  jeikcode-daemon:latest
 ```
 
 ### 传递环境变量
@@ -134,7 +122,7 @@ docker run -d --name jeikcode-daemon \
   -p 13456:13456 \
   -e ANTHROPIC_API_KEY=your-api-key \
   -v $(pwd)/config.toml:/root/.jeikcode/config.toml \
-  jeikcode-daemon:v5.0.3
+  jeikcode-daemon:latest
 ```
 
 ## 验证服务

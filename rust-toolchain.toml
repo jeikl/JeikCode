@@ -1,3 +1,6 @@
 [toolchain]
 channel = "1.93.0"
 profile = "minimal"
+# `cargo fmt --check` runs in CI; keep rustfmt attached to the pinned
+# toolchain so it is not installed for a different (stable) channel.
+components = ["rustfmt"]

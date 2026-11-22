@@ -42,7 +42,7 @@ auto_update_mins = 30
 
 ## 3. 升级命令与模式差异 (`/update` / `/upgrade`)
 
-在 TUI / WebUI 中输入斜杠命令 `/update` 或 `/upgrade`，与终端 CLI 命令完全等价：
+在 TUI / WebUI 中输入斜杠命令 `/update` 或 `/upgrade`，与终端 CLI 命令完全等价；`jeikcode list` / `up` / `down` / `rollback` 管理通道与版本：
 
 ```bash
 # 交互式升级：下载新版并弹出配置文件差异列表，由用户手动勾选是否覆盖（在终端或聊天框输入 /update 或 /upgrade）
@@ -71,14 +71,17 @@ jeikcode update rollback
 ## 4. 服务监听与自启配置
 
 ```bash
-# 启动 Web 服务并根据引导登记为系统服务（开机自启）
+# 启动 Web 服务；在交互式终端中会询问是否登记为系统服务（开机自启）
 jeikcode --host 0.0.0.0 --port 13457
 ```
 
 - **Linux**：生成并注册为 systemd 服务。
+- **OpenWrt / iStoreOS 等**：生成 procd 服务（`/etc/init.d/jeikcode-*`）。
 - **macOS**：注册为 launchd 服务。
 - **Windows**：写入注册表当前用户启动项。
-- 端口与 Token 配置持久化于 `~/.jeikcode/webui-listen.json`。
+- 非交互环境跳过服务注册向导；端口与 Token 配置持久化于 `~/.jeikcode/webui-listen.json`。
+
+更新/回退只解析发布清单中实际存在的目标（当前为 win/mac/linux 的 x64 与 arm64）。不支持的 32 位用户态与 MIPS 会明确失败，不会下载错误架构的二进制。
 
 ---
 

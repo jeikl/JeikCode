@@ -105,7 +105,6 @@ JEIKCODE_DAEMON_WIN32_X64=/path/to/jeikcode-daemon.exe \
 - 选中文本上下文的隐私控制及相对/绝对路径显示
 - 用于健康、设置、提供商、会话、聊天、停止、权限和文件变更工作流的后端 REST/SSE 客户端
 - 提供商创建/编辑/删除、默认模型切换以及思考/推理控制
-- CodingPlan 设置触发器
 - 支持文本、推理、工具、产物、令牌、停止、错误和权限事件的流式聊天
 - 在生成响应时排队另一条聊天消息
 - 复制最后一条助手回复，以及在活动编辑器中预览/应用最后一个围栏代码块
@@ -234,14 +233,15 @@ cargo build -p jeikcode-daemon
 ./target/debug/jeikcode-daemon --host 127.0.0.1 --port 13456 --idle-timeout 0 --no-telemetry --client jetbrains
 curl -sS http://127.0.0.1:13456/health
 curl -sS -X POST http://127.0.0.1:13456/cd -H "Content-Type: application/json" -d '{"path":"/path/to/project"}'
-curl -sS http://127.0.0.1:13456/auth/status
 curl -sS http://127.0.0.1:13456/providers
 curl -sS http://127.0.0.1:13456/models
 curl -sS http://127.0.0.1:13456/sessions
 curl -sS http://127.0.0.1:13456/config
 ```
 
-最新的本地后端冒烟测试返回了 `service=jeikcode-daemon`、`version=4.26.0`，成功更改了项目目录，并返回了 auth/provider/model/session/config 的数据。这验证了 JetBrains 插件在完整的 IDE 安装冒烟测试之前所使用的 HTTP 端点。
+最新的本地后端冒烟测试返回了 `service=jeikcode-daemon` 与当前构建的 `version`，成功更改了项目目录，并返回了 provider/model/session/config 的数据。这验证了 JetBrains 插件在完整的 IDE 安装冒烟测试之前所使用的 HTTP 端点。
+
+> 登录与 CodingPlan 初始化已不再由 daemon 暴露。插件通过本地 `auth.toml` 判断登录状态，并在登录操作时提示用户在终端运行 `jeikcode` 后使用 `/login`，或手动添加 Provider。
 
 ## 安全说明
 

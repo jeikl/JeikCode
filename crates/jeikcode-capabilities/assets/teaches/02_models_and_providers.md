@@ -23,7 +23,7 @@ UI 语言在 CLI/TUI、daemon 与 WebUI 之间统一支持：`en` (English)、`v
 # =============================================================================
 # 顶层全局默认项（必须位于所有 [table] 之前）
 # =============================================================================
-default_model = "deepseek/chat"
+default_model = "deepseek/v4-pro"
 language = "en"                             # 全局语言："en" | "vi-VN" | "zh-CN"（未配置时自动检测系统语言，未匹配默认 en）
 
 # =============================================================================
@@ -41,20 +41,25 @@ base_url = "https://api.your-proxy.com/v1"
 # =============================================================================
 # 2. 模型档案 [models."<account_id>/<model_alias>"]
 # =============================================================================
-[models."deepseek/chat"]
+[models."deepseek/v4-pro"]
 account = "deepseek"                        # 关联 provider_accounts
-model = "deepseek-chat"                     # 实际模型 ID
-context_window = 64000                      # 上下文窗口 Token 数
-max_tokens = 8192                           # 最大输出 Token
-
-[models."deepseek/reasoner"]
-account = "deepseek"
-model = "deepseek-reasoner"
-context_window = 64000
+model = "deepseek-v4-pro"                   # 实际模型 ID（旗舰）
+context_window = 1000000                    # 上下文窗口 Token 数（DeepSeek V4 支持 1M）
+max_tokens = 384000                         # 最大输出 Token
 reasoning_model = true                      # 声明为推理/深度思考模型
-reasoning_history = "exclude"               # 思考历史是否在多轮中回传："exclude" | "include"
-reasoning_effort = "high"                   # 思考强度："low" | "medium" | "high" | "max"
-reasoning_levels = ["low", "medium", "high", "max"] # 循环切换档位列表
+reasoning_history = "include"               # 思考历史是否在多轮中回传："exclude" | "include"
+reasoning_effort = "max"                    # 思考强度："low" | "high" | "max"
+reasoning_levels = ["low", "high", "max"]   # 循环切换档位列表
+
+[models."deepseek/flash"]
+account = "deepseek"
+model = "deepseek-flash"                    # 实际模型 ID（高性价比快速档）
+context_window = 1000000
+max_tokens = 384000
+reasoning_model = true
+reasoning_history = "include"
+reasoning_effort = "high"
+reasoning_levels = ["low", "high", "max"]
 
 [models."custom/gpt4o"]
 account = "custom-proxy"
