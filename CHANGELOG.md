@@ -21,9 +21,9 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
-## v7.5.2 (2026-11-21)
+## v7.5.3 (2026-11-22)
 
-**v7.5.2 is the stable consolidation of beta.0 through beta.6. It adds full-stack scheduled tasks with an isolated AI assistant, unbounded main-session rounds with soft landing, runtime model swapping, startup Auto/Bypass and persistent mode policy, full desktop updates with two-hop shell upgrades, desktop theme/autostart/hotkey improvements, a denser WebUI, configurable compaction thresholds, accurate context reporting, major connection and performance work, and console noindex hardening. Follow-up fixes cover tool rows, model cards, image lightbox navigation, F5 refresh, mobile Bash summaries, scheduled-task workspaces, and English settings labels.**
+**v7.5.3 is the stable consolidation of beta.0 through beta.6. It adds full-stack scheduled tasks with an isolated AI assistant, unbounded main-session rounds with soft landing, runtime model swapping, startup Auto/Bypass and persistent mode policy, full desktop updates with two-hop shell upgrades, desktop theme/autostart/hotkey improvements, a denser WebUI, configurable compaction thresholds, accurate context reporting, major connection and performance work, and console noindex hardening. Follow-up fixes cover tool rows, model cards, image lightbox navigation, F5 refresh, mobile Bash summaries, scheduled-task workspaces, and English settings labels. This release also removes the duplicate desktop CLI sidecar, cutting DMG/deb installer sizes by about 44–45% in validation.**
 
 - **[Scheduled Tasks] Full-stack scheduling with an isolated AI assistant**:
   - Added orthogonal calendar scheduling across dates, weekdays and multiple times, plus interval scheduling with atomic configuration writes, one-shot deactivation, and isolated/reuse session modes.
@@ -65,10 +65,11 @@
 - **[Release] Stable packaging**:
   - The release workflow builds Windows, Linux and macOS on x64 and arm64 from this tag and publishes one pre-release/stable release set.
   - Numeric prerelease semver comparison, cross-lockfile version alignment, and project-key/CI fixtures are included in the consolidated line.
+  - Desktop installers now keep only the canonical `resources/jeikcode(.exe)`; removing the duplicate `resources/cli-bin` copy reduced DMG/deb assets by about 44–45% in the validation build.
 
 ---
 
-**v7.5.2 是 beta.0 到 beta.6 的正式汇总版。它带来完整的定时任务系统与隔离式 AI 助手、主会话无限轮次与软着陆、运行时模型热切换、启动 Auto/Bypass 与持久化模式策略、桌面全量更新与旧壳两跳升级、桌面主题/静默自启/全局热键、更高信息密度的 WebUI、可配置压缩阈值、真实上下文明细、连接层与性能重构，以及控制台 noindex 安全加固。后续修复覆盖工具行、模型卡片、图片灯箱切换、F5 刷新、手机 Bash 说明、定时任务工作区和英文设置标签。**
+**v7.5.3 是 beta.0 到 beta.6 的正式汇总版。它带来完整的定时任务系统与隔离式 AI 助手、主会话无限轮次与软着陆、运行时模型热切换、启动 Auto/Bypass 与持久化模式策略、桌面全量更新与旧壳两跳升级、桌面主题/静默自启/全局热键、更高信息密度的 WebUI、可配置压缩阈值、真实上下文明细、连接层与性能重构，以及控制台 noindex 安全加固。后续修复覆盖工具行、模型卡片、图片灯箱切换、F5 刷新、手机 Bash 说明、定时任务工作区和英文设置标签。本版同时移除桌面端重复 CLI sidecar，验证构建中 DMG/deb 体积下降约 44–45%。**
 
 - **[定时任务] 完整调度系统与隔离式 AI 助手**：
   - 新增按日期、星期、多时间点正交组合的日历调度与间隔调度，配置原子写入，支持单次任务自动停用以及独立/复用会话模式。
@@ -110,6 +111,7 @@
 - **[发布] 正式打包**：
   - 发布流水线从本 tag 构建 Windows、Linux、macOS 的 x64 与 arm64 六套产物，并统一发布。
   - 汇总包含 prerelease 数值比较修复、跨 lockfile 版本对齐，以及 project-key/CI 夹具修复。
+  - 桌面安装包只保留规范的 `resources/jeikcode(.exe)`；移除重复的 `resources/cli-bin` 后，验证构建中 DMG/deb 体积下降约 44–45%。
 
 ## v7.5.2-beta.6 (2026-11-21)
 
