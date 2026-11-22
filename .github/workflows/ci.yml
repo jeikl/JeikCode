@@ -113,9 +113,11 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
-      JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
     steps:
       - uses: actions/checkout@v4
+      - name: Isolate runtime home
+        shell: bash
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/jeikcode-home" >> "$GITHUB_ENV"
       - name: Resolve pinned toolchain
         id: toolchain
         shell: bash
@@ -159,9 +161,11 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
-      JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
     steps:
       - uses: actions/checkout@v4
+      - name: Isolate runtime home
+        shell: bash
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/jeikcode-home" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           name: ci-webui-dist
@@ -191,9 +195,11 @@ jobs:
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: "0"
-      JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
     steps:
       - uses: actions/checkout@v4
+      - name: Isolate runtime home
+        shell: bash
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/jeikcode-home" >> "$GITHUB_ENV"
       - name: Resolve pinned toolchain
         id: toolchain
         shell: bash
@@ -241,9 +247,11 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
-      JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
     steps:
       - uses: actions/checkout@v4
+      - name: Isolate runtime home
+        shell: bash
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/jeikcode-home" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           name: ci-webui-dist
