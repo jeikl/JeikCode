@@ -23,11 +23,17 @@
 
 ## v7.5.4-beta.1 (2026-11-23)
 
-**This beta builds on the v7.5.3 stable consolidation and adds the platform convergence pass, unified session activity timestamps, WebUI editor/tool-row fixes, prompt YAML single-source defaults with the new command-execution block, DeepSeek V4 protocol support, and a substantially faster CI/test pipeline.**
+**This beta builds on the v7.5.3 stable consolidation. Its first model-reasoning performance change is the new `<command_execution>` block that cuts useless existence preflight and repeated confirmation; it also adds the platform convergence pass, unified session activity timestamps, WebUI editor/tool-row fixes, YAML-only prompt defaults, DeepSeek V4 protocol support, and a substantially faster CI/test pipeline.**
+
+- **[Prompts & Agent] Model reasoning performance: YAML-only defaults and the sys-3 command-execution block**:
+  - `assets/prompts/*.yaml` is now the single default prompt source; user `rules.yaml` remains the override. The compiled-in RULES/prompt_sections fallbacks and the ASKING THE USER block were removed.
+  - Added a dedicated sys-3 `<command_execution>` block between `<system_rules>` and `<explore_strategy>`: it reduces useless pre-execution existence probes and repeated confirmation by running the expected command first, trusting successful simple state changes, and reserving tests/build/type-checks for real code fixes and milestone verification.
+  - The block also makes retrieval directional and workspace-first, with correct/incorrect examples: it avoids whole-disk or whole-database scans when the target is outside the current workspace, treats full-folder search as a fallback, and uses short gaps for genuinely expensive queries. Legacy `<todo_rules>` are reconciled on resume.
 
 - **[Platform & Release] Single-source platform matrix and stricter artifact gates**:
   - Release platforms are now generated from one manifest for CLI, desktop, npm, installer, and updater, with dynamic matrices, generated manifests, artifact format/static-link/16K page checks, qemu `/health` smoke, native arm64 tests, and a beta-only Windows x64 NSIS build.
   - WebUI capability toggles stay stable when an older refresh response arrives late; the daemon now uses physical catalog buckets for project/session navigation and normalizes Windows upload separators on Unix.
+  - Release smoke tests now register arm64 binfmt via `docker/setup-qemu-action` and run the published linux-arm64 binary directly, removing the Ubuntu `qemu-user-static` apt dependency that blocked the beta.1 publish gate.
 
 - **[Sessions] One activity timestamp for WebUI, APIs, and TUI**:
   - `SessionMeta.updated_at` is now the single user-perceived activity clock for the WebUI sidebar, `/sessions`, the OpenAI/Anthropic-compatible endpoints, and the TUI session history.
@@ -37,10 +43,6 @@
   - Fixed the desktop WebView2 editor selection drifting half a line above the text; selection and viewport now stay stable when switching between Markdown preview and source editing, and target-line/Ctrl+F positioning uses the measured line height.
   - Bash summaries now stop before the fixed status/time/chevron group on desktop and mobile, so status never gets pushed off-screen.
   - Rebalanced tool-row parameter accents: search patterns use a content mauve instead of error-like rose, and repetition counts use a calm sage badge in both themes.
-
-- **[Prompts & Agent] YAML-only defaults and a dedicated command-execution block**:
-  - `assets/prompts/*.yaml` is now the single default prompt source; user `rules.yaml` remains the override. The compiled-in RULES/prompt_sections fallbacks and the ASKING THE USER block were removed.
-  - Added a dedicated `<command_execution>` system block between `<system_rules>` and `<explore_strategy>`, with correct/incorrect execution examples; legacy `<todo_rules>` are reconciled on resume.
 
 - **[Providers] DeepSeek V4 protocol**:
   - `deepseek-flash` now follows the V4 protocol with refreshed model documentation.
@@ -52,11 +54,17 @@
 
 ---
 
-**本 beta 基于 v7.5.3 稳定汇总版，新增平台收敛、统一会话活跃时间、WebUI 编辑器/工具行修复、提示词 YAML 单一默认源与新的命令执行块、DeepSeek V4 协议支持，以及显著加速的 CI/测试流水线。**
+**本 beta 基于 v7.5.3 稳定汇总版。第一个模型思考性能改动是新增 `<command_execution>` 块，减少无用的前置存在性探测和重复确认；同时包含平台收敛、统一会话活跃时间、WebUI 编辑器/工具行修复、提示词 YAML 单一默认源、DeepSeek V4 协议支持，以及显著加速的 CI/测试流水线。**
+
+- **[提示词与 Agent] 模型思考性能：YAML 单一默认源与 sys-3 命令执行块**：
+  - `assets/prompts/*.yaml` 成为唯一默认提示词来源，用户 `rules.yaml` 作为覆盖；删除编译期 RULES/prompt_sections fallback 与 ASKING THE USER 块。
+  - 新增位于 `<system_rules>` 与 `<explore_strategy>` 之间的 sys-3 `<command_execution>` 块：先运行预期命令，成功即继续；简单状态变更不重复核对；测试/构建/类型检查只用于真正的代码修复和阶段性验证，从而减少无用的前置存在性探测与重复确认。
+  - 该块同时约束检索方向并提供正确/错误案例：目标不在当前工作区时避免全盘 / 全库扫描；全文件夹检索仅作兜底；确实高耗时的查询保留短间隙。恢复会话时清理旧 `<todo_rules>`。
 
 - **[平台与发布] 平台矩阵单一事实源与更严格的产物校验**：
   - CLI、桌面、npm、安装器与更新器的发布平台统一由一份清单生成，包含动态矩阵、生成清单、产物格式/静态链接/16K 页校验、qemu `/health` 冒烟、原生 arm64 测试，以及 beta 专用的 Windows x64 NSIS 构建。
   - WebUI 能力开关在旧刷新响应晚到时保持稳定；daemon 的项目/会话导航改用物理 catalog 桶，并在 Unix 上归一化 Windows 上传路径分隔符。
+  - 发布 smoke 测试改用 `docker/setup-qemu-action` 注册 arm64 binfmt，并直接运行发布出的 linux-arm64 二进制，移除 Ubuntu `qemu-user-static` apt 依赖，修复 beta.1 发布门禁被阻断的问题。
 
 - **[会话] WebUI、API 与 TUI 共用同一活跃时间**：
   - `SessionMeta.updated_at` 成为 WebUI 侧栏、`/sessions`、OpenAI/Anthropic 兼容端点与 TUI 会话历史的唯一“用户可感知活跃时间”。
@@ -66,10 +74,6 @@
   - 修复桌面 WebView2 下编辑器选区比文字高半行的问题；Markdown 预览与源码编辑互切时保持选区与视口稳定，目标行/Ctrl+F 定位改用实测行高。
   - Bash 说明在桌面和手机上都会在固定状态/耗时/箭头之前停止，不再把状态顶出屏幕。
   - 重新平衡工具行参数配色：搜索 pattern 使用内容语义的 mauve，重复次数使用克制的 sage 徽标，深色与浅色主题同步。
-
-- **[提示词与 Agent] YAML 单一默认源与独立命令执行块**：
-  - `assets/prompts/*.yaml` 成为唯一默认提示词来源，用户 `rules.yaml` 作为覆盖；删除编译期 RULES/prompt_sections fallback 与 ASKING THE USER 块。
-  - 新增位于 `<system_rules>` 与 `<explore_strategy>` 之间的 `<command_execution>` System 块，包含正确/错误执行案例；恢复会话时清理旧 `<todo_rules>`。
 
 - **[Provider] DeepSeek V4 协议**：
   - `deepseek-flash` 按 V4 协议处理，并同步更新模型文档。
