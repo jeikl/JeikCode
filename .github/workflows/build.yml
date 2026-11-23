@@ -390,13 +390,16 @@ jobs:
           merge-multiple: true
 
       # 发布门禁：验证“发布出去的那个二进制”能启动并响应 /health。
-      # linux-x64 原生跑；linux-arm64 用 qemu-user 跑同一份 musl 产物。
+      # linux-x64 原生跑；linux-arm64 通过 binfmt/qemu 跑同一份 musl 产物。
+      - name: Set up QEMU for arm64 smoke
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Smoke published Linux binaries
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-static curl
           TAG="$GITHUB_REF_NAME"
           X64="dist/jeikcode-${TAG}-linux-x64"
           ARM64="dist/jeikcode-${TAG}-linux-arm64"
@@ -424,7 +427,7 @@ jobs:
           }
 
           smoke "linux-x64" 38471 "$X64"
-          smoke "linux-arm64 (qemu)" 38472 qemu-aarch64-static "$ARM64"
+          smoke "linux-arm64 (qemu)" 38472 "$ARM64"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
