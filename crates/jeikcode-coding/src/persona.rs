@@ -721,6 +721,8 @@ mod tests {
     /// Tests run with no user prompts dir, so `render_custom_rules()` resolves to the
     /// bundled `assets/prompts/rules.yaml` seed — the single default rules source.
     fn coding_persona(model: &str, todo_enabled: bool, request_user_input_enabled: bool) -> String {
+        // Tests must resolve the bundled seed, not an ambient CI home's seeded rules.yaml.
+        let _guard = crate::custom_prompts::EmbeddedRulesGuard::new();
         super::coding_persona(model, todo_enabled, request_user_input_enabled)
     }
 

@@ -134,6 +134,32 @@ fn cache() -> &'static RwLock<PromptCacheState> {
     PROMPT_CACHE.get_or_init(|| RwLock::new(PromptCacheState::default()))
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_EMBEDDED_RULES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only guard: force the bundled `rules.yaml` seed regardless of `JEIKCODE_HOME`.
+/// Persona tests must not depend on an ambient CI home that may contain a seeded
+/// `rules.yaml`, otherwise the legacy feature blocks are gated differently per machine.
+#[cfg(test)]
+pub(crate) struct EmbeddedRulesGuard(bool);
+
+#[cfg(test)]
+impl EmbeddedRulesGuard {
+    pub(crate) fn new() -> Self {
+        let previous = FORCE_EMBEDDED_RULES.with(|flag| flag.replace(true));
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for EmbeddedRulesGuard {
+    fn drop(&mut self) {
+        FORCE_EMBEDDED_RULES.with(|flag| flag.set(self.0));
+    }
+}
+
 /// Test-only: drop the cached prompt/persona state so the next load re-reads from
 /// disk. Integration tests share ONE process and this cache is keyed by mtime
 /// only (not by the prompts dir), so a test that installs a DIFFERENT temp home
@@ -269,6 +295,10 @@ fn embedded_rules_config() -> CustomRulesConfig {
 /// otherwise the bundled `assets/prompts/rules.yaml` seed is the default. There is no
 /// compiled-in fallback prompt: the asset YAML is the single source of truth.
 pub fn get_custom_rules_config() -> CustomRulesConfig {
+    #[cfg(test)]
+    if FORCE_EMBEDDED_RULES.with(|flag| flag.get()) {
+        return embedded_rules_config();
+    }
     let Some(dir) = resolve_prompts_dir() else {
         return embedded_rules_config();
     };
@@ -318,6 +348,10 @@ pub fn get_custom_rules_config() -> CustomRulesConfig {
 /// A user-owned `rules.yaml` is exclusive: the legacy conditional feature blocks
 /// (SKILLS / SUBAGENT / CODE REVIEW / ...) are not appended when it is present.
 pub fn custom_rules_user_override_active() -> bool {
+    #[cfg(test)]
+    if FORCE_EMBEDDED_RULES.with(|flag| flag.get()) {
+        return false;
+    }
     let Some(dir) = resolve_prompts_dir() else {
         return false;
     };
