@@ -320,13 +320,10 @@ impl CodingPersonaHook {
             convo.reconcile_system_block("<system_rules>", Some(block_2));
         }
 
-        // Block 3 (`<todo_rules>`) is temporarily disabled in `persona.rs`, so the block
-        // arrives empty. Pass `None` instead of `Some("")` — the latter would insert an
-        // empty system message — and drop any block left by a resumed conversation.
-        convo.reconcile_system_block(
-            "<todo_rules>",
-            (!block_3.trim().is_empty()).then_some(block_3),
-        );
+        // Block 3 is `<command_execution>`. Drop any legacy `<todo_rules>` block left by a
+        // resumed conversation, then reconcile the current block in its place.
+        convo.reconcile_system_block("<todo_rules>", None);
+        convo.reconcile_system_block("<command_execution>", Some(block_3));
 
         let existing_b4 = convo
             .messages

@@ -1,7 +1,6 @@
 pub mod instructions;
 pub mod memory;
 pub mod offline;
-pub mod prompt_sections;
 pub mod provider;
 pub mod provider_preset;
 pub mod runtime_state;
@@ -16,9 +15,10 @@ use crate::proxy::ProxyConfig;
 use jeikcode_telemetry::TelemetryConfig;
 use provider::{ModelProfileConfig, ProviderAccountConfig, ProviderConfig, ResolvedModelConfig};
 
-// DEFAULT_SYSTEM_PROMPT removed — single source of truth is now
-// config/prompt_sections.rs::UNIFIED_PROMPT (~500 tok).
-// Do NOT add prompt rules here. Edit prompt_sections.rs instead.
+// DEFAULT_SYSTEM_PROMPT removed — the single source of truth is
+// `crates/jeikcode-coding/assets/prompts/rules.yaml` (bundled seed), with the
+// optional user override at `~/.jeikcode/prompts/rules.yaml`.
+// Do NOT add prompt rules here.
 
 /// Windows-specific rules appended to the system prompt.
 /// Only injected on Windows builds — macOS/Linux never see these.
@@ -1601,7 +1601,7 @@ pub fn todo_enabled_from_env(env: Option<&str>, cfg_value: bool) -> bool {
 ///
 /// Opt-out: set `JEIKCODE_REQUEST_USER_INPUT=0` (or `false`/`off`) to disable.
 ///
-/// Called by `jeikcode-coding`'s persona gate (`request_user_input_switch_enabled`).
+/// Called by `jeikcode-coding`'s tool-mount gate (`request_user_input_switch_enabled`).
 ///
 /// NOTE: `jeikcode-capabilities`' tool-registration gate contains an INTENTIONAL
 /// DUPLICATE of this logic — it cannot call this helper because `jeikcode-config` is not

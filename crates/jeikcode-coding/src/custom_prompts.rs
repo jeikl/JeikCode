@@ -4,8 +4,10 @@
 //! - `init.yaml` (**live**): identity, precedence, security, environment. Every key in
 //!   the seed is deserialized and rendered into the System persona.
 //! - `rules.yaml` (**live**): workflow, tools discipline, locating code, doing tasks,
-//!   etc. When present, **replaces** the compiled-in `RULES` block (not merged).
-//!   Every key in the seed is rendered; unknown keys are ignored.
+//!   etc. When present, it replaces the bundled seed (not merged). When absent, the
+//!   bundled `assets/prompts/rules.yaml` seed is used directly. There is no
+//!   compiled-in fallback prompt. Every key in the seed is rendered; unknown keys
+//!   are ignored.
 //! - `root_docs_prompts.md` / `root_docs_内置工具.yaml` / `root_docs_内置技能.yaml`:
 //!   human-facing seed documents. **Not loaded** into the model. Live tool schema
 //!   comes from `Tool::description()` / `parameters_schema()`; live skills come
@@ -252,9 +254,25 @@ pub fn get_custom_prompt_config() -> Option<CustomPromptConfig> {
     config
 }
 
-/// Returns the active `rules.yaml` custom rules configuration.
-pub fn get_custom_rules_config() -> Option<CustomRulesConfig> {
-    let rules_path = resolve_prompts_dir()?.join("rules.yaml");
+/// Parse the bundled `rules.yaml` seed — the single default system-rules source.
+fn embedded_rules_config() -> CustomRulesConfig {
+    PROMPT_SEEDS
+        .iter()
+        .find(|(name, _)| *name == "rules.yaml")
+        .and_then(|(_, body)| serde_yaml::from_str(strip_utf8_bom(body)).ok())
+        .unwrap_or_default()
+}
+
+/// Returns the active `rules.yaml` rules configuration.
+///
+/// The user copy under `~/.jeikcode/prompts/rules.yaml` wins when present and valid;
+/// otherwise the bundled `assets/prompts/rules.yaml` seed is the default. There is no
+/// compiled-in fallback prompt: the asset YAML is the single source of truth.
+pub fn get_custom_rules_config() -> CustomRulesConfig {
+    let Some(dir) = resolve_prompts_dir() else {
+        return embedded_rules_config();
+    };
+    let rules_path = dir.join("rules.yaml");
     let current_mtime = std::fs::metadata(&rules_path)
         .ok()
         .and_then(|m| m.modified().ok());
@@ -263,31 +281,56 @@ pub fn get_custom_rules_config() -> Option<CustomRulesConfig> {
     {
         if let Ok(r) = c.read() {
             if r.last_rules_mtime == current_mtime && r.last_rules_mtime.is_some() {
-                return r.rules_config.clone();
+                if let Some(cfg) = r.rules_config.clone() {
+                    return cfg;
+                }
             }
-            // rules 缺失时保持 None：persona 的内建基线（含 PROHIBITIONS）才是这类段落的
-            // 来源；用“内嵌 seed”顶替会把基线的静态段落挤掉。
-            if current_mtime.is_none() && r.last_rules_mtime.is_none() {
-                return None;
+            // Missing file (or a previous embedded-seed load): reuse the cached config.
+            // A later file creation changes `current_mtime` and triggers a reload.
+            if current_mtime.is_none() {
+                if let Some(cfg) = r.rules_config.clone() {
+                    return cfg;
+                }
             }
         }
     }
 
-    let mut w = c.write().ok()?;
-    // rules：文件缺失/读不到 → None（保留 persona 内建基线，而不是用 seed 顶替）。
+    let mut w = c.write().unwrap_or_else(|error| error.into_inner());
+    // User file wins only when it exists AND parses; otherwise the bundled seed is the default.
     let config = if rules_path.is_file() {
         std::fs::read_to_string(&rules_path)
             .ok()
             .and_then(|content| {
                 serde_yaml::from_str::<CustomRulesConfig>(strip_utf8_bom(&content)).ok()
             })
+            .unwrap_or_else(embedded_rules_config)
     } else {
-        None
+        embedded_rules_config()
     };
 
     w.last_rules_mtime = current_mtime;
-    w.rules_config = config.clone();
+    w.rules_config = Some(config.clone());
     config
+}
+
+/// Whether the active rules come from the user's `rules.yaml` rather than the bundled seed.
+///
+/// A user-owned `rules.yaml` is exclusive: the legacy conditional feature blocks
+/// (SKILLS / SUBAGENT / CODE REVIEW / ...) are not appended when it is present.
+pub fn custom_rules_user_override_active() -> bool {
+    let Some(dir) = resolve_prompts_dir() else {
+        return false;
+    };
+    let rules_path = dir.join("rules.yaml");
+    if !rules_path.is_file() {
+        return false;
+    }
+    std::fs::read_to_string(&rules_path)
+        .ok()
+        .and_then(|content| {
+            serde_yaml::from_str::<CustomRulesConfig>(strip_utf8_bom(&content)).ok()
+        })
+        .is_some()
 }
 
 /// Render the identity and precedence section based on custom config, or default if absent.
@@ -647,14 +690,13 @@ pub fn render_init_windows_platform() -> Option<String> {
     render_init_environment(None)
 }
 
-/// Render rules from `rules.yaml` if available, formatted as markdown sections.
-pub fn render_custom_rules() -> Option<String> {
-    let cfg = get_custom_rules_config()?;
-    let out = render_custom_rules_from(&cfg);
+/// Render the active rules (user `rules.yaml` or the bundled seed) as the system-rules body.
+pub fn render_custom_rules() -> String {
+    let out = render_custom_rules_from(&get_custom_rules_config());
     if out.is_empty() {
-        None
+        render_custom_rules_from(&embedded_rules_config())
     } else {
-        Some(out)
+        out
     }
 }
 
@@ -1057,5 +1099,67 @@ doing_tasks:
             "b2 must end with </system_rules>, got: {b2}"
         );
         assert!(!b2.contains("Critical Precedence"));
+    }
+
+    #[test]
+    #[serial_test::serial(jeikcode_home)]
+    fn missing_rules_yaml_uses_bundled_seed() {
+        let home = tempfile::tempdir().unwrap();
+        let prompts = home.path().join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        let _home = jeikcode_config::test_util::IsolatedHome::at(home.path());
+        invalidate_cache_for_test();
+
+        let out = render_custom_rules();
+        assert!(out.contains("## Execution Guidelines"), "{out}");
+        assert!(out.contains("## Tool Discipline"), "{out}");
+        assert!(
+            out.contains("## Task Checklist Guidelines & Operations:"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("## WORKFLOW:"),
+            "compiled fallback must be gone: {out}"
+        );
+        assert!(!out.contains("Prefer the real command"), "{out}");
+
+        invalidate_cache_for_test();
+    }
+
+    #[test]
+    #[serial_test::serial(jeikcode_home)]
+    fn malformed_rules_yaml_uses_bundled_seed() {
+        let home = tempfile::tempdir().unwrap();
+        let prompts = home.path().join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(prompts.join("rules.yaml"), "raw: [not valid").unwrap();
+        let _home = jeikcode_config::test_util::IsolatedHome::at(home.path());
+        invalidate_cache_for_test();
+
+        let out = render_custom_rules();
+        assert!(out.contains("## Execution Guidelines"), "{out}");
+        assert!(!out.contains("Prefer the real command"), "{out}");
+
+        invalidate_cache_for_test();
+    }
+
+    #[test]
+    #[serial_test::serial(jeikcode_home)]
+    fn user_rules_yaml_overrides_bundled_seed() {
+        let home = tempfile::tempdir().unwrap();
+        let prompts = home.path().join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(
+            prompts.join("rules.yaml"),
+            "version: \"test\"\nraw: |-\n  USER-RULES-ONLY\n",
+        )
+        .unwrap();
+        let _home = jeikcode_config::test_util::IsolatedHome::at(home.path());
+        invalidate_cache_for_test();
+
+        let out = render_custom_rules();
+        assert_eq!(out.trim(), "USER-RULES-ONLY");
+
+        invalidate_cache_for_test();
     }
 }

@@ -195,7 +195,7 @@ pub fn register_coding_tools_with_vision_and_bash_state(
     //
     // INTENTIONAL DUPLICATION: the same env-var logic lives in
     // `jeikcode_config::config::request_user_input_enabled_from_env` (the authoritative
-    // helper used by jeikcode-coding's persona gate).  We cannot call that helper here
+    // helper used by jeikcode-coding's tool-mount gate).  We cannot call that helper here
     // because `jeikcode-config` is NOT a dependency of `jeikcode-capabilities` under the
     // `tools` feature (it would drag in unwanted transitive deps for embedders that only
     // need the tools layer).  If you change the logic here, mirror the change in

@@ -856,6 +856,12 @@ fn system_block_order(text: &str) -> u8 {
         || text.starts_with("<workflow_and_execution_discipline>")
     {
         20
+    } else if text.starts_with("<todo_rules>") {
+        24
+    } else if text.starts_with("<command_execution>") {
+        25
+    } else if text.starts_with("<explore_strategy>") {
+        26
     } else if text.starts_with("<available_skills>") || text.starts_with("=== AVAILABLE SKILLS") {
         30
     } else if text.starts_with("<mcp_server_instructions>")

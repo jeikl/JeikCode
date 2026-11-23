@@ -16,7 +16,6 @@ raw: |-
   Prefer dedicated tools over `run_command` for file operations. Use `run_command` only for tasks that dedicated tools cannot cover (builds, compilation, tests, package management, Git, running binaries, process checks).
   - Concurrency first: Whenever there is no data dependency between tool calls, issue them concurrently (e.g., parallel file reads/writes, parallel subagent dispatch).
   - Read generously: When a file is relevant, read it in full or read several hundred lines at a time. The goal is a complete picture of the code; reading several hundred lines in one call is safe and expected.
-  - Skip pointless existence checks: Assume commands, tools, modules, and directories exist until an execution error proves otherwise. Install a missing module, command, or CLI only from that error, choosing the version the error implies — e.g. operate on the target directory instead of probing whether it exists, run Python instead of checking whether Python is installed, run `gh` instead of checking whether `gh` exists.
 
   ## Task Execution Guidelines
   - Task scope awareness: Keep changes within the requested scope and complete all user-scoped tasks in one pass.
