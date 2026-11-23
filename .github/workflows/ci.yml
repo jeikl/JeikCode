@@ -147,6 +147,10 @@ jobs:
       # 临时 example 每次都会因 mtime 变化重编译；这里只保留既有的 session 单测。
       - name: Test session catalog contract
         run: cargo test --locked -p jeikcode-capabilities --features session --lib session::manager::tests::catalog_scan_merges_physical_sources_and_keeps_diagnostics -- --exact
+      # Linux x64 的 capabilities 运行时覆盖：PR 不跑以保持反馈速度。
+      - name: Test capabilities lib (Ubuntu x64, push)
+        if: github.event_name == 'push'
+        run: cargo test --locked -p jeikcode-capabilities --lib
       - name: Test TUI library contracts (PR / manual)
         if: github.event_name != 'push'
         run: cargo test --locked -p jeikcode-tuix --lib -- --test-threads=1
