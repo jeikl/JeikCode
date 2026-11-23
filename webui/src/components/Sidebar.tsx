@@ -551,6 +551,15 @@ export function Sidebar({
     () => initialSidebarSnapshot?.sessions ?? [],
   );
   const [loading, setLoading] = useState(() => !initialSidebarSnapshot);
+  // 相对时间自走：仅可见时每 30s 触发一次重渲染。时间戳本身仍由后端
+  // `session_upsert` 驱动；这里只解决长时间无事件时“1 分钟前”被冻住的问题。
+  const [, setClockTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (!document.hidden) setClockTick((n) => n + 1);
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
   // 活跃（正在运行 turn）的会话 id，来自 GET /chat/active；配合 5s 轮询，
   // 让「哪个会话正在执行」实时显示在侧栏行右侧的圈圈里。
   const [activeIds, setActiveIds] = useState<string[]>([]);

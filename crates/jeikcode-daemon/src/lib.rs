@@ -17182,6 +17182,13 @@ fn persist_admitted_user_fields(
     }
     let manager =
         NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(&bucket));
+    // 提问采纳 = 用户可感知活跃：在服务端唯一的 send 边界刷新时间戳。
+    // 新建会话此时 meta 尚未创建（`publish_chat_session_assignment` 会以当前
+    // 时间创建），NotFound 静默跳过；随后的 `session_assigned` upsert 会推送
+    // 这份权威行（已存在会话），所有实例据此立即上浮侧栏时间。
+    let _ = manager.update_meta(session_id, |meta| {
+        meta.updated_at = jeikcode_capabilities::session::now_ms();
+    });
     let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = images
         .iter()
         .map(|image| jeikcode_capabilities::session::DisplayImage {
@@ -27279,6 +27286,29 @@ mod tests {
                 "request_id": 41,
             }));
         assert!(missing_runtime_instance.is_err());
+    }
+
+    #[test]
+    fn chat_admission_stamps_existing_session_activity() {
+        let home = ScopedChatHome::new();
+        let working_dir = home._dir.path().join("project");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let session_id = "44444444-4444-4444-8444-444444444444";
+        let manager = NativeSessionManager::for_project(&working_dir);
+        let mut meta = jeikcode_capabilities::session::SessionMeta::new(
+            session_id,
+            working_dir.to_string_lossy(),
+            1,
+        );
+        meta.owner = jeikcode_capabilities::session::StorageOwner::Native;
+        manager.write_meta(&meta).unwrap();
+
+        persist_admitted_user_fields("hello", &[], Some(&working_dir), session_id, "input-1");
+
+        assert!(
+            manager.read_meta(session_id).unwrap().updated_at > 1,
+            "the admitted prompt must stamp the sidebar activity clock"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

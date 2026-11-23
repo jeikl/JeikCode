@@ -428,6 +428,12 @@ pub struct SessionMeta {
     pub working_dir: String,
     /// epoch MILLISECONDS, UTC.
     pub created_at: i64,
+    /// 侧栏“最近活跃”时间（epoch MILLISECONDS, UTC）。
+    ///
+    /// 语义 = 最后一次用户可感知的会话活动，是 `/sessions` 排序与 WebUI 侧栏
+    /// 相对时间的唯一来源。合法写点只有三处：会话创建、`user_prompt_submit`
+    /// （非 steer 提问）、`turn_complete`（`StopReason::Cancelled` 除外）。
+    /// AI 自动命名、流式输出、工具调用与 display 账本都不得写它。
     pub updated_at: i64,
     #[serde(default)]
     pub turn_count: u32,
