@@ -20525,19 +20525,25 @@ select option {
 }
 
 /* === Tool row v2: one line, description first, colored key parameter === */
-/* JeikCode "Atelier": structural parameters use petrol/teal, content values
-   use rose/coral, and MCP uses rose gold. Blue is reserved for the brand and
-   tool alias, not for parameters. */
+/* JeikCode "Atelier": structural parameters use petrol/teal, matcher/query
+   content uses mauve, priority uses coral, repetition counts use a calm sage
+   green, and MCP uses rose gold. Blue is reserved for the brand and tool
+   alias, not for parameters. */
 :root {
-  /* One ink family for structural values; warm accents only where they carry
+  /* One ink family for structural values; tinted accents only where they carry
      meaning. This keeps the row closer to 7.2.x's calm hierarchy. */
   --app-tool-param-path: #6fd6ca;
   --app-tool-param-range: #a9cdc8;
   --app-tool-param-command: #7fd0d6;
   --app-tool-param-url: #7fd4e2;
-  --app-tool-param-pattern: #f09ab7;
+  /* Mauve instead of rose/gold: a search match is content, but rose reads as
+     an error and gold reads like an editor comment. Mauve keeps the
+     "matched text" cue without borrowing either semantic. */
+  --app-tool-param-pattern: #cba6f7;
   --app-tool-param-priority: #f28b7d;
-  --app-tool-param-count: #ffa08f;
+  /* Sage green reads as an ordinal/badge accent rather than a success state:
+     it stays distinct from the emerald status color and the teal path ink. */
+  --app-tool-param-count: #a6e3a1;
   --app-mcp-color: #67e8f9;
 }
 :root[data-theme='light'] {
@@ -20545,9 +20551,12 @@ select option {
   --app-tool-param-range: #6b8c88;
   --app-tool-param-command: #2a6f78;
   --app-tool-param-url: #1f7a8c;
-  --app-tool-param-pattern: #a84e68;
+  /* Same mauve idea, deepened for the matte light canvas. */
+  --app-tool-param-pattern: #6d28d9;
   --app-tool-param-priority: #9e4438;
-  --app-tool-param-count: #b85c4a;
+  /* Deep sage badge green: no error-red, still distinguishable from the
+     success checkmark. */
+  --app-tool-param-count: #3f6b52;
   --app-mcp-color: #0e7490;
 }
 
