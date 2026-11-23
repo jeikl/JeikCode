@@ -22,6 +22,28 @@ import { fileStampFromRead, type FileStamp } from '../lib/fileStamp';
 import { subscribeFileFreshness, type FileFreshnessSubscription } from '../lib/fsFreshness';
 import { useT } from '../settings';
 
+/** 第 line（0 基）行首在文本中的字符偏移；越界时夹到文本末尾。 */
+function charOffsetAtLine(text: string, line: number): number {
+  if (line <= 0) return 0;
+  let offset = 0;
+  for (let i = 0; i < line; i++) {
+    const nl = text.indexOf('\n', offset);
+    if (nl < 0) return text.length;
+    offset = nl + 1;
+  }
+  return offset;
+}
+
+/** 字符偏移所在的行号（0 基）；用于把选区还原到可见区域。 */
+function lineIndexAtOffset(text: string, offset: number): number {
+  const limit = Math.max(0, Math.min(offset, text.length));
+  let line = 0;
+  for (let i = 0; i < limit; i++) {
+    if (text.charCodeAt(i) === 10) line++;
+  }
+  return line;
+}
+
 export interface CodeEditorTabProps {
   filePath: string;
   onClose?: () => void;
@@ -232,6 +254,10 @@ export function CodeEditorTab({
   useEffect(() => {
     viewModeRef.current = viewMode;
   }, [viewMode]);
+  // 编辑/预览切换时的视口接续现场：记录切换前的相对滚动位置，等新视图挂载后再恢复。
+  const modeRestorePendingRef = useRef<{ mode: 'edit' | 'preview'; ratio: number } | null>(null);
+  // 编辑器字号（Ctrl+滚轮）变化后强制重算依赖行高的定位结果。
+  const [fontEpoch, setFontEpoch] = useState(0);
 
   // 图片预览与缩放状态
   const [imgScale, setImgScale] = useState<number>(() => restoredSnapshot?.imgScale ?? 1.0);
@@ -244,16 +270,30 @@ export function CodeEditorTab({
 
   const setViewMode = useCallback(
     (updater: 'edit' | 'preview' | 'image' | 'binary' | ((prev: 'edit' | 'preview' | 'image' | 'binary') => 'edit' | 'preview' | 'image' | 'binary')) => {
+      // 编辑与预览是两个互斥的挂载分支：切走前必须先固化当前滚动位置与选区，
+      // 否则重新挂载时浏览器会把 textarea 光标推到文件末尾、把预览弹回顶部。
+      const ta = textareaRef.current;
+      const preview = previewContainerRef.current;
+      let ratio = 0;
+      if (ta) {
+        const viewport = editorViewportRef.current;
+        viewport.start = ta.selectionStart ?? 0;
+        viewport.end = ta.selectionEnd ?? 0;
+        viewport.scrollTop = ta.scrollTop;
+        viewport.scrollLeft = ta.scrollLeft;
+        const max = ta.scrollHeight - ta.clientHeight;
+        ratio = max > 0 ? Math.min(1, Math.max(0, ta.scrollTop / max)) : 0;
+      } else if (preview) {
+        const viewport = editorViewportRef.current;
+        viewport.previewScrollTop = preview.scrollTop;
+        const max = preview.scrollHeight - preview.clientHeight;
+        ratio = max > 0 ? Math.min(1, Math.max(0, preview.scrollTop / max)) : 0;
+      }
       setViewModeState((prev) => {
         const next = typeof updater === 'function' ? updater(prev) : updater;
         if (next === 'edit' || next === 'preview') {
           onViewModeChangeRef.current?.(next);
-        }
-        // 只有前台标签切到编辑模式才抢焦点：后台保活标签必须保持安静。
-        if (next === 'edit' && activeRef.current) {
-          window.setTimeout(() => {
-            textareaRef.current?.focus();
-          }, 50);
+          if (next !== prev) modeRestorePendingRef.current = { mode: next, ratio };
         }
         return next;
       });
@@ -374,7 +414,9 @@ export function CodeEditorTab({
 
       const textBefore = content.slice(0, targetPos);
       const lineNo = textBefore.split('\n').length - 1;
-      const lineHeight = 20;
+      // 行高跟随编辑器字号缩放，绝不能写死 20px，否则 Ctrl+F 跳转会落在错误行。
+      const parsedLh = parseFloat(getComputedStyle(ta).lineHeight);
+      const lineHeight = Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : 20;
       const targetScroll = Math.max(0, lineNo * lineHeight - 60);
       ta.scrollTop = targetScroll;
       if (preRef.current) preRef.current.scrollTop = targetScroll;
@@ -395,6 +437,7 @@ export function CodeEditorTab({
   const preRef = useRef<HTMLPreElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
   const editorRootRef = useRef<HTMLDivElement>(null);
+  const targetCodeBandRef = useRef<HTMLDivElement>(null);
   const fileName = useMemo(() => filePath.split(/[\\/]/).pop() || filePath, [filePath]);
 
   // 标签现场的滚动 / 选区记忆：display:none 会让浏览器丢掉滚动盒位置，
@@ -428,6 +471,73 @@ export function CodeEditorTab({
     if (!root) return false;
     // 祖先 display:none 时没有布局盒：保活编辑器不得吞掉前台快捷键。
     return root.getClientRects().length > 0;
+  }, []);
+
+  // 预览/编辑互切后把新挂载的视图接续到同一相对位置。
+  // 重新挂载会触发 focus() 把光标放到文件末尾并滚到底部，预览容器也会回到顶部；
+  // 不接续的话，用户切一次模式就会看到选中的文字/阅读位置“漂移”。
+  useEffect(() => {
+    const pending = modeRestorePendingRef.current;
+    if (!pending || pending.mode !== viewMode) return;
+    // 文件还在加载时不接续：等就绪后用户可能已滚动/选词，旧比例不再可信。
+    if (loading) {
+      modeRestorePendingRef.current = null;
+      return;
+    }
+    const renderedPreview = viewMode === 'preview' && isMarkdown;
+    const frame = requestAnimationFrame(() => {
+      const viewport = editorViewportRef.current;
+      if (renderedPreview) {
+        const container = previewContainerRef.current;
+        if (!container) return;
+        const max = Math.max(0, container.scrollHeight - container.clientHeight);
+        container.scrollTop = Math.round(pending.ratio * max);
+        viewport.previewScrollTop = container.scrollTop;
+        modeRestorePendingRef.current = null;
+        return;
+      }
+      const ta = textareaRef.current;
+      if (!ta) return;
+      // 先聚焦再恢复选区，最后写滚动：focus() 本身会把光标移到末尾。
+      // 只读预览（非 Markdown 文件）不得抢焦点。
+      if (viewMode === 'edit' && activeRef.current) ta.focus({ preventScroll: true });
+      try {
+        ta.setSelectionRange(viewport.start, viewport.end);
+      } catch {}
+      const parsedLh = parseFloat(getComputedStyle(ta).lineHeight);
+      const lineHeight = Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : 20;
+      const max = Math.max(0, ta.scrollHeight - ta.clientHeight);
+      const top = Math.round(pending.ratio * max);
+      const selTop = Math.min(ta.selectionStart ?? 0, ta.selectionEnd ?? 0);
+      const selBottom = Math.max(ta.selectionStart ?? 0, ta.selectionEnd ?? 0);
+      const selVisible = selBottom >= top && selTop <= top + ta.clientHeight;
+      // 旧选区已滚出视口：绝不能把它丢掉或改成别的文字（那就是用户看到的“漂移”）。
+      // 选区存在时把它滚回可视区；只有纯光标时，才落到当前视口首行继续输入。
+      if (!selVisible && selTop === selBottom) {
+        const offset = charOffsetAtLine(ta.value, Math.floor(top / lineHeight));
+        ta.setSelectionRange(offset, offset);
+      }
+      let scrollTop = top;
+      if (!selVisible && selTop !== selBottom) {
+        const selLine = lineIndexAtOffset(ta.value, selTop);
+        const centered = selLine * lineHeight - ta.clientHeight / 2;
+        scrollTop = Math.round(Math.max(0, Math.min(max, centered)));
+      }
+      ta.scrollTop = scrollTop;
+      if (preRef.current) preRef.current.scrollTop = scrollTop;
+      if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = scrollTop;
+      viewport.scrollTop = scrollTop;
+      viewport.gutterScrollTop = scrollTop;
+      modeRestorePendingRef.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [viewMode, loading, isMarkdown]);
+
+  // 字号行高是全局共享的：任一编辑器缩放后，其他已挂载编辑器也要重算目标行定位。
+  useEffect(() => {
+    const onFontChange = () => setFontEpoch((n) => n + 1);
+    window.addEventListener('jeikcode:editor_font_change', onFontChange);
+    return () => window.removeEventListener('jeikcode:editor_font_change', onFontChange);
   }, []);
 
   // 首次可见与前台切回共用一条还原路径：把离开前的滚动与选区还给用户。
@@ -583,6 +693,10 @@ export function CodeEditorTab({
     }
     if (lineNumbersRef.current) {
       lineNumbersRef.current.scrollTop = ta.scrollTop;
+    }
+    // 目标行高亮带位于不滚动的 wrapper 上，必须跟随 textarea 的滚动量平移。
+    if (targetCodeBandRef.current) {
+      targetCodeBandRef.current.style.transform = `translateY(${-ta.scrollTop}px)`;
     }
     rememberEditorViewport();
   };
@@ -1017,6 +1131,15 @@ export function CodeEditorTab({
     showToast(t('editor.replaceAllSuccess', { n: String(parts.length - 1) }), 'success');
   };
 
+  // 编辑器真实行高：跟随字号缩放，供目标行高亮带与跳转定位共用同一真源。
+  const editorLineHeight = useMemo(() => {
+    if (typeof window === 'undefined') return 20;
+    const parsed = parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue('--app-editor-line-height'),
+    );
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+  }, [fontEpoch]);
+
   // 计算行号范围高亮带 (支持单行号及多行范围)
   const targetLineBand = useMemo(() => {
     if (!startLine || startLine <= 0 || !content) return null;
@@ -1025,10 +1148,18 @@ export function CodeEditorTab({
     const end = endLine && endLine >= start ? Math.min(lines.length, endLine) : start;
     const lineCount = end - start + 1;
     return {
-      top: `${(start - 1) * 20 + 8}px`,
-      height: `${lineCount * 20}px`,
+      top: `${(start - 1) * editorLineHeight + 8}px`,
+      height: `${lineCount * editorLineHeight}px`,
     };
-  }, [startLine, endLine, content]);
+  }, [startLine, endLine, content, editorLineHeight]);
+
+  // 目标行高亮带不在滚动容器内：每次挂载/切回编辑模式时，按当前 scrollTop 对齐一次。
+  useEffect(() => {
+    if (!targetLineBand) return;
+    const band = targetCodeBandRef.current;
+    const ta = textareaRef.current;
+    if (band && ta) band.style.transform = `translateY(${-ta.scrollTop}px)`;
+  }, [targetLineBand, viewMode]);
 
   // 平滑滚动并高亮选中目标行号范围
   const scrollToTargetLine = useCallback(
@@ -1694,7 +1825,12 @@ export function CodeEditorTab({
               onDrop={handleEditorDrop}
             >
               {targetLineBand && (
-                <div class="editor-target-lines-band" style={targetLineBand} aria-hidden="true" />
+                <div
+                  ref={targetCodeBandRef}
+                  class="editor-target-lines-band"
+                  style={targetLineBand}
+                  aria-hidden="true"
+                />
               )}
               <pre ref={preRef} class="editor-syntax-highlight" aria-hidden="true">
                 <code dangerouslySetInnerHTML={{ __html: highlightedHtml + '\n' }} />

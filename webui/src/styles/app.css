@@ -16051,12 +16051,16 @@ select option {
 }
 .editor-syntax-highlight {
   position: absolute;
-  top: 0;
+  /* 垂直留白改由盒子 inset 提供，不再用 padding：
+     部分 WebView2 版本绘制 textarea 原生选区时会漏掉 padding-top，
+     导致蓝色选区整体比文字高约半行（8px）。inset 不属于选区绘制坐标系，
+     两层原点因此始终一致。 */
+  top: 8px;
   left: 0;
   width: 100%;
-  height: 100%;
+  height: calc(100% - 16px);
   margin: 0;
-  padding: 8px 12px;
+  padding: 0 12px;
   overflow: hidden;
   pointer-events: none;
   color: #d4d4d4;
@@ -16070,10 +16074,11 @@ select option {
 }
 .editor-textarea {
   position: absolute;
-  top: 0;
+  /* 与高亮层保持完全相同的垂直 inset：选区绘制与可见文字共用同一原点。 */
+  top: 8px;
   left: 0;
   width: 100%;
-  height: 100%;
+  height: calc(100% - 16px);
   background: transparent;
   color: transparent !important;
   -webkit-text-fill-color: transparent !important;
@@ -16081,7 +16086,7 @@ select option {
   border: none;
   outline: none;
   resize: none;
-  padding: 8px 12px;
+  padding: 0 12px;
   overflow: auto;
 }
 .editor-textarea::selection {
