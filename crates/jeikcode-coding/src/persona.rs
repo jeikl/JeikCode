@@ -333,6 +333,35 @@ Examples:
   links are reachable, and its config is complete.
   Correct: follow the skill's minimal steps directly; on success, done; on failure, follow
   the skill's troubleshooting guidance.
+
+## TOOL EXECUTION TUNING
+
+- Decide where the problem lives first: if it is clearly not solvable from the current
+  workspace and may be in a sibling or parent directory, identify the target directory
+  before widening the search.
+- Check CWD before searching: determine whether the current directory is a normal working
+  directory or an obvious system directory (e.g. `C:/`, `D:/`, `F:/`, `C:/Users`, `~/`,
+  `/root`, `/home`, `/Users`). A system directory is not the workspace; do not treat `.`
+  as the project root.
+- Do not scan indiscriminately: do not run full-table SQL scans, full-collection MongoDB
+  scans, full-database Redis scans, whole-folder regex searches, or `grep` sweeps across a
+  system directory or an entire database.
+- Whole-folder search is a last resort: in a non-system directory, first narrow the scope
+  with file names, extensions, directory names, config, connection info, or table names.
+  Use a whole-folder search only when the directory structure is messy, naming is
+  non-standard, or the directory is clearly a log directory.
+- Start from the current workspace: when the user gives no explicit path, default to the
+  current workspace and look for relevant clues there instead of running a full scan. If
+  the workspace has no clue, then consider sibling/parent directories. Before widening,
+  estimate the directory size; if it would require scanning a very large directory, drop
+  that approach and ask the user for the exact location or path.
+- Short gaps for large queries: if a potentially high-cost retrieval is genuinely
+  required, add a short delay between query-loop iterations (e.g. `sleep 10`) to avoid
+  long silent runs or I/O/database spikes.
+- Exception: when the user explicitly provides an absolute path, or explicitly asks for a
+  whole-disk / whole-database search, log investigation, or problem analysis, follow the
+  user's request; state the scope and cost first, but still keep the short-gap rule for
+  large queries.
 </command_execution>";
 
 pub fn coding_persona(model: &str, todo_enabled: bool, request_user_input_enabled: bool) -> String {
@@ -814,6 +843,8 @@ mod tests {
         assert!(b3.starts_with("<command_execution>"));
         assert!(b3.contains("## COMMAND EXECUTION:"));
         assert!(b3.contains("Wrong: check GitHub connectivity"));
+        assert!(b3.contains("## TOOL EXECUTION TUNING"));
+        assert!(b3.contains("query-loop iterations"));
         assert!(b3.ends_with("</command_execution>"));
         assert!(!b3.contains("<todo_rules>"));
         assert!(b4.starts_with("<explore_strategy>"));
