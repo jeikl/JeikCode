@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import {
   fetchFsRead,
   fetchFsWrite,
@@ -42,6 +42,46 @@ function lineIndexAtOffset(text: string, offset: number): number {
     if (text.charCodeAt(i) === 10) line++;
   }
   return line;
+}
+
+/** 页面级 CSS zoom：getBoundingClientRect 返回缩放后的视口坐标，需换算回 CSS 像素。 */
+function pageZoomFactor(): number {
+  if (typeof window === 'undefined') return 1;
+  const zoom = parseFloat(getComputedStyle(document.documentElement).zoom);
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+}
+
+/** 1 基逻辑行首锚点在语法层内容坐标中的 Y 值；锚点不存在时返回 null。 */
+function anchorContentTop(pre: HTMLElement, line: number): number | null {
+  const anchor = pre.querySelector<HTMLElement>(`.editor-line-anchor[data-line="${line}"]`);
+  if (!anchor) return null;
+  const preRect = pre.getBoundingClientRect();
+  return (anchor.getBoundingClientRect().top - preRect.top) / pageZoomFactor() + pre.scrollTop;
+}
+
+/** 内容坐标 Y 处所在的逻辑行号（1 基），用于软换行后的光标/选区落点。 */
+function lineAtContentTop(pre: HTMLElement, top: number): number {
+  const anchors = pre.querySelectorAll<HTMLElement>('.editor-line-anchor');
+  if (anchors.length === 0) return 1;
+  const preRect = pre.getBoundingClientRect();
+  const zoom = pageZoomFactor();
+  const contentTopOf = (anchor: HTMLElement) =>
+    (anchor.getBoundingClientRect().top - preRect.top) / zoom + pre.scrollTop;
+  // 锚点按行序排列：二分查找最后一个首行不高于当前视口顶部的逻辑行。
+  let lo = 0;
+  let hi = anchors.length - 1;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const anchor = anchors[mid]!;
+    if (contentTopOf(anchor) <= top + 0.5) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return Number(anchors[best]!.dataset.line) || 1;
 }
 
 export interface CodeEditorTabProps {
@@ -414,13 +454,14 @@ export function CodeEditorTab({
 
       const textBefore = content.slice(0, targetPos);
       const lineNo = textBefore.split('\n').length - 1;
-      // 行高跟随编辑器字号缩放，绝不能写死 20px，否则 Ctrl+F 跳转会落在错误行。
+      // 行高跟随编辑器字号缩放，绝不能写死 20px；软换行后再用行首锚点取真实位置。
       const parsedLh = parseFloat(getComputedStyle(ta).lineHeight);
       const lineHeight = Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : 20;
-      const targetScroll = Math.max(0, lineNo * lineHeight - 60);
+      const pre = preRef.current;
+      const anchorTop = pre ? anchorContentTop(pre, lineNo + 1) : null;
+      const targetScroll = Math.max(0, (anchorTop ?? lineNo * lineHeight) - 60);
       ta.scrollTop = targetScroll;
-      if (preRef.current) preRef.current.scrollTop = targetScroll;
-      if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = targetScroll;
+      if (pre) pre.scrollTop = targetScroll;
     },
     [matchIndices, findText, content, viewMode, previewMatchCount]
   );
@@ -435,10 +476,61 @@ export function CodeEditorTab({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const preRef = useRef<HTMLPreElement>(null);
-  const lineNumbersRef = useRef<HTMLDivElement>(null);
   const editorRootRef = useRef<HTMLDivElement>(null);
+  const targetBandsRef = useRef<HTMLDivElement>(null);
+  const targetRailBandRef = useRef<HTMLDivElement>(null);
   const targetCodeBandRef = useRef<HTMLDivElement>(null);
   const fileName = useMemo(() => filePath.split(/[\\/]/).pop() || filePath, [filePath]);
+
+  // 目标行范围带：软换行后高度取决于实际折行行数，改用行首锚点的实时矩形定位；
+  // 每次滚动/尺寸变化重新测量两个锚点即可，不依赖“行号 × 行高”的估算。
+  const syncTargetBands = useCallback(() => {
+    const bands = targetBandsRef.current;
+    const pre = preRef.current;
+    if (!bands || !pre) return;
+    if (!startLine || startLine <= 0 || !content) {
+      bands.style.display = 'none';
+      return;
+    }
+    const totalLines = content.split('\n').length;
+    const start = Math.min(totalLines, Math.max(1, startLine));
+    const end = endLine && endLine >= start ? Math.min(totalLines, endLine) : start;
+    const first = pre.querySelector<HTMLElement>(`.editor-line-anchor[data-line="${start}"]`);
+    const next = pre.querySelector<HTMLElement>(`.editor-line-anchor[data-line="${end + 1}"]`);
+    if (!first) {
+      bands.style.display = 'none';
+      return;
+    }
+    const preRect = pre.getBoundingClientRect();
+    const zoom = pageZoomFactor();
+    const firstRect = first.getBoundingClientRect();
+    const firstTop = (firstRect.top - preRect.top) / zoom;
+    let height: number;
+    if (next) {
+      height = (next.getBoundingClientRect().top - firstRect.top) / zoom;
+    } else {
+      height = pre.scrollHeight - (firstTop + pre.scrollTop);
+    }
+    const lh = parseFloat(getComputedStyle(pre).lineHeight);
+    const top = firstTop + 8;
+    const bandHeight = Math.max(Number.isFinite(lh) && lh > 0 ? lh : 20, height);
+    bands.style.display = 'block';
+    for (const el of [targetRailBandRef.current, targetCodeBandRef.current]) {
+      if (!el) continue;
+      el.style.top = `${top}px`;
+      el.style.height = `${bandHeight}px`;
+    }
+  }, [startLine, endLine, content]);
+
+  // 内容/字体/模式变化以及宽度变化后重新对齐目标带。
+  useLayoutEffect(() => {
+    syncTargetBands();
+    const pre = preRef.current;
+    if (!pre) return;
+    const observer = new ResizeObserver(() => syncTargetBands());
+    observer.observe(pre);
+    return () => observer.disconnect();
+  }, [syncTargetBands, viewMode, loading, fontEpoch]);
 
   // 标签现场的滚动 / 选区记忆：display:none 会让浏览器丢掉滚动盒位置，
   // 所以离开前持续记住，切回时再原样还回去（初始值来自卸载前的现场）。
@@ -460,8 +552,6 @@ export function CodeEditorTab({
       viewport.scrollTop = ta.scrollTop;
       viewport.scrollLeft = ta.scrollLeft;
     }
-    const gutter = lineNumbersRef.current;
-    if (gutter) viewport.gutterScrollTop = gutter.scrollTop;
     const preview = previewContainerRef.current;
     if (preview) viewport.previewScrollTop = preview.scrollTop;
   }, []);
@@ -508,26 +598,29 @@ export function CodeEditorTab({
       const lineHeight = Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : 20;
       const max = Math.max(0, ta.scrollHeight - ta.clientHeight);
       const top = Math.round(pending.ratio * max);
+      const pre = preRef.current;
       const selTop = Math.min(ta.selectionStart ?? 0, ta.selectionEnd ?? 0);
-      const selBottom = Math.max(ta.selectionStart ?? 0, ta.selectionEnd ?? 0);
-      const selVisible = selBottom >= top && selTop <= top + ta.clientHeight;
+      const selCollapsed = (ta.selectionStart ?? 0) === (ta.selectionEnd ?? 0);
+      const selLine = lineIndexAtOffset(ta.value, selTop) + 1;
+      const selAnchorTop = pre ? anchorContentTop(pre, selLine) : null;
+      const selPosition = selAnchorTop ?? (selLine - 1) * lineHeight;
+      const selVisible = selPosition >= top && selPosition <= top + ta.clientHeight;
       // 旧选区已滚出视口：绝不能把它丢掉或改成别的文字（那就是用户看到的“漂移”）。
       // 选区存在时把它滚回可视区；只有纯光标时，才落到当前视口首行继续输入。
-      if (!selVisible && selTop === selBottom) {
-        const offset = charOffsetAtLine(ta.value, Math.floor(top / lineHeight));
+      if (!selVisible && selCollapsed) {
+        const line = pre ? lineAtContentTop(pre, top) : Math.floor(top / lineHeight) + 1;
+        const offset = charOffsetAtLine(ta.value, line - 1);
         ta.setSelectionRange(offset, offset);
       }
       let scrollTop = top;
-      if (!selVisible && selTop !== selBottom) {
-        const selLine = lineIndexAtOffset(ta.value, selTop);
-        const centered = selLine * lineHeight - ta.clientHeight / 2;
+      if (!selVisible && !selCollapsed) {
+        const centered = selPosition - ta.clientHeight / 2;
         scrollTop = Math.round(Math.max(0, Math.min(max, centered)));
       }
       ta.scrollTop = scrollTop;
-      if (preRef.current) preRef.current.scrollTop = scrollTop;
-      if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = scrollTop;
+      if (pre) pre.scrollTop = scrollTop;
+      syncTargetBands();
       viewport.scrollTop = scrollTop;
-      viewport.gutterScrollTop = scrollTop;
       modeRestorePendingRef.current = null;
     });
     return () => cancelAnimationFrame(frame);
@@ -563,7 +656,6 @@ export function CodeEditorTab({
         preRef.current.scrollTop = viewport.scrollTop;
         preRef.current.scrollLeft = viewport.scrollLeft;
       }
-      if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = viewport.gutterScrollTop;
       if (previewContainerRef.current) previewContainerRef.current.scrollTop = viewport.previewScrollTop;
     });
     return () => cancelAnimationFrame(frame);
@@ -672,6 +764,49 @@ export function CodeEditorTab({
     return codeHtml;
   }, [content, filePath, findOpen, findText, currentMatchIdx]);
 
+  // 软换行下每个逻辑行首插入零宽锚点：行号伪元素挂在这些锚点上，
+  // 折行后仍停在逻辑行首，而不是随视觉行数漂移。
+  const anchoredHtml = useMemo(() => {
+    const parts = highlightedHtml.split('\n');
+    const lineCount = content.split('\n').length;
+    if (parts.length > lineCount) parts.length = lineCount;
+    while (parts.length < lineCount) parts.push('');
+    return parts
+      .map((line, i) => `<span class="editor-line-anchor" data-line="${i + 1}"></span>${line}`)
+      .join('\n');
+  }, [highlightedHtml, content]);
+
+  // 软换行宽度对齐：语法层没有滚动条，必须让出与 textarea 相同的滚动槽宽度，
+  // 否则两层折行点不同，选区又会错位。
+  useLayoutEffect(() => {
+    const root = editorRootRef.current;
+    const ta = textareaRef.current;
+    if (!root || !ta) return;
+    const measure = () => {
+      const width = Math.max(0, ta.offsetWidth - ta.clientWidth);
+      root.style.setProperty('--editor-scrollbar-w', `${width}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(ta);
+    window.addEventListener('resize', measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [viewMode, isMarkdown, loading]);
+
+  // 语法高亮层重渲染（输入/搜索/外部刷新）后可能丢失滚动位置。
+  // textarea 是唯一滚动真源：每次 content/搜索标记变化后重新对齐文字层与行号层。
+  useLayoutEffect(() => {
+    const ta = textareaRef.current;
+    const pre = preRef.current;
+    if (!ta || !pre) return;
+    pre.scrollTop = ta.scrollTop;
+    pre.scrollLeft = ta.scrollLeft;
+    syncTargetBands();
+  }, [anchoredHtml, viewMode, syncTargetBands]);
+
   // 一键格式化代码 (支持 JSON/JSONC、JS/TS/Rust 等标准化美化)
   const handleFormat = useCallback(() => {
     const formatted = formatCodeContent(content, filePath);
@@ -691,13 +826,8 @@ export function CodeEditorTab({
       preRef.current.scrollTop = ta.scrollTop;
       preRef.current.scrollLeft = ta.scrollLeft;
     }
-    if (lineNumbersRef.current) {
-      lineNumbersRef.current.scrollTop = ta.scrollTop;
-    }
-    // 目标行高亮带位于不滚动的 wrapper 上，必须跟随 textarea 的滚动量平移。
-    if (targetCodeBandRef.current) {
-      targetCodeBandRef.current.style.transform = `translateY(${-ta.scrollTop}px)`;
-    }
+    // 目标行范围带位于不滚动的 wrapper 上，跟随 textarea 的滚动量重新测量。
+    syncTargetBands();
     rememberEditorViewport();
   };
 
@@ -1131,36 +1261,6 @@ export function CodeEditorTab({
     showToast(t('editor.replaceAllSuccess', { n: String(parts.length - 1) }), 'success');
   };
 
-  // 编辑器真实行高：跟随字号缩放，供目标行高亮带与跳转定位共用同一真源。
-  const editorLineHeight = useMemo(() => {
-    if (typeof window === 'undefined') return 20;
-    const parsed = parseFloat(
-      getComputedStyle(document.documentElement).getPropertyValue('--app-editor-line-height'),
-    );
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
-  }, [fontEpoch]);
-
-  // 计算行号范围高亮带 (支持单行号及多行范围)
-  const targetLineBand = useMemo(() => {
-    if (!startLine || startLine <= 0 || !content) return null;
-    const lines = content.split('\n');
-    const start = Math.min(lines.length, startLine);
-    const end = endLine && endLine >= start ? Math.min(lines.length, endLine) : start;
-    const lineCount = end - start + 1;
-    return {
-      top: `${(start - 1) * editorLineHeight + 8}px`,
-      height: `${lineCount * editorLineHeight}px`,
-    };
-  }, [startLine, endLine, content, editorLineHeight]);
-
-  // 目标行高亮带不在滚动容器内：每次挂载/切回编辑模式时，按当前 scrollTop 对齐一次。
-  useEffect(() => {
-    if (!targetLineBand) return;
-    const band = targetCodeBandRef.current;
-    const ta = textareaRef.current;
-    if (band && ta) band.style.transform = `translateY(${-ta.scrollTop}px)`;
-  }, [targetLineBand, viewMode]);
-
   // 平滑滚动并高亮选中目标行号范围
   const scrollToTargetLine = useCallback(
     (targetStart?: number, targetEnd?: number, select = true) => {
@@ -1188,12 +1288,16 @@ export function CodeEditorTab({
             ta.setSelectionRange(charStart, charEnd);
           }
         } catch {}
-        const totalLines = Math.max(1, lines.length);
-        const approxLineHeight = ta.scrollHeight / totalLines || 20;
-        const targetScrollTop = Math.max(0, (startIdx - 4) * approxLineHeight);
+        const targetScrollTop = (() => {
+          const pre = preRef.current;
+          const anchorTop = pre ? anchorContentTop(pre, startIdx) : null;
+          if (anchorTop !== null) return Math.max(0, anchorTop - 60);
+          const approxLineHeight = ta.scrollHeight / Math.max(1, lines.length) || 20;
+          return Math.max(0, (startIdx - 4) * approxLineHeight);
+        })();
         ta.scrollTop = targetScrollTop;
         if (preRef.current) preRef.current.scrollTop = targetScrollTop;
-        if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = targetScrollTop;
+        syncTargetBands();
       }
 
       if (viewMode === 'preview' && previewContainerRef.current) {
@@ -1203,7 +1307,7 @@ export function CodeEditorTab({
       }
       if (select) rememberEditorViewport();
     },
-    [content, viewMode, rememberEditorViewport],
+    [content, viewMode, rememberEditorViewport, syncTargetBands],
   );
 
   // 目标行跳转只响应“打开/跳转到某行”的一次性意图：后续输入引起的 content 变化
@@ -1233,16 +1337,8 @@ export function CodeEditorTab({
     };
   }, [startLine, endLine, content, scrollToTargetLine]);
 
-  // 计算行号列表与行号纯文本（将原本上万个 DOM 节点精简为单个 pre 文本节点，大文件缩放性能提升 100 倍！）
+  // 计算行号列表（供目标行选择与行首定位使用）
   const lines = useMemo(() => content.split('\n'), [content]);
-  const lineNumbersText = useMemo(() => {
-    const len = lines.length;
-    let res = '';
-    for (let i = 1; i <= len; i++) {
-      res += i + '\n';
-    }
-    return res;
-  }, [lines.length]);
 
   // 独立的编辑器/文件预览字号滚轮缩放 (在捕获阶段拦截，支持代码编辑模式与 Markdown 预览模式平滑缩放，40ms 防抖杜绝卡顿)
   useEffect(() => {
@@ -1811,29 +1907,22 @@ export function CodeEditorTab({
             onDragOver={handleEditorDragOver}
             onDrop={handleEditorDrop}
           >
-            {/* 行号侧栏 (单个 pre 极速渲染，大文件缩放与滚动零延迟) */}
-            <div class="editor-line-numbers" ref={lineNumbersRef} aria-hidden="true">
-              {targetLineBand && (
-                <div class="editor-target-gutter-band" style={targetLineBand} aria-hidden="true" />
-              )}
-              <pre class="line-numbers-pre">{lineNumbersText}</pre>
-            </div>
             {/* 代码主体包装器 (双层叠加：高亮预览底层 + 原生透明编辑上层) */}
             <div
               class="editor-code-wrapper"
               onDragOver={handleEditorDragOver}
               onDrop={handleEditorDrop}
             >
-              {targetLineBand && (
-                <div
-                  ref={targetCodeBandRef}
-                  class="editor-target-lines-band"
-                  style={targetLineBand}
-                  aria-hidden="true"
-                />
+              {/* 行号轨道固定在左侧，行号本身挂在语法层的逻辑行首锚点上。 */}
+              <div class="editor-line-number-rail" aria-hidden="true" />
+              {(startLine ?? 0) > 0 && (
+                <div class="editor-target-bands" ref={targetBandsRef} aria-hidden="true">
+                  <div class="editor-target-rail-band" ref={targetRailBandRef} />
+                  <div class="editor-target-lines-band" ref={targetCodeBandRef} />
+                </div>
               )}
               <pre ref={preRef} class="editor-syntax-highlight" aria-hidden="true">
-                <code dangerouslySetInnerHTML={{ __html: highlightedHtml + '\n' }} />
+                <code dangerouslySetInnerHTML={{ __html: anchoredHtml }} />
               </pre>
               <textarea
                 ref={textareaRef}
@@ -1859,7 +1948,7 @@ export function CodeEditorTab({
                 onKeyDown={handleTextareaKeyDown}
                 onScroll={handleScroll}
                 spellcheck={false}
-                wrap="off"
+                wrap="soft"
               />
             </div>
           </div>
