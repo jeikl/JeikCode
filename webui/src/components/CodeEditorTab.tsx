@@ -51,6 +51,21 @@ function pageZoomFactor(): number {
   return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
 }
 
+/**
+ * 让语法层与 textarea 的可滚动范围一致。
+ * textarea 的横向滚动条会占掉可视高度（WebView2/Chrome 约 9–15px），
+ * 使其最大滚动量大于无滚动条的 pre；滚到底部时 pre 被提前 clamp，
+ * 光标就会比正文高半行。用 pre 的底部留白补上这段差值。
+ */
+function syncEditorScrollExtent(ta: HTMLTextAreaElement | null, pre: HTMLElement | null): void {
+  if (!ta || !pre) return;
+  // 先清掉上一轮补的留白，再按当前真实内容高度重新测量。
+  if (pre.style.paddingBottom) pre.style.paddingBottom = '0px';
+  const taMax = Math.max(0, ta.scrollHeight - ta.clientHeight);
+  const preMax = Math.max(0, pre.scrollHeight - pre.clientHeight);
+  if (taMax > preMax) pre.style.paddingBottom = `${taMax - preMax}px`;
+}
+
 /** 1 基逻辑行首锚点在语法层内容坐标中的 Y 值；锚点不存在时返回 null。 */
 function anchorContentTop(pre: HTMLElement, line: number): number | null {
   const anchor = pre.querySelector<HTMLElement>(`.editor-line-anchor[data-line="${line}"]`);
@@ -460,6 +475,7 @@ export function CodeEditorTab({
       const pre = preRef.current;
       const anchorTop = pre ? anchorContentTop(pre, lineNo + 1) : null;
       const targetScroll = Math.max(0, (anchorTop ?? lineNo * lineHeight) - 60);
+      syncEditorScrollExtent(ta, pre);
       ta.scrollTop = targetScroll;
       if (pre) pre.scrollTop = targetScroll;
     },
@@ -509,7 +525,8 @@ export function CodeEditorTab({
     if (next) {
       height = (next.getBoundingClientRect().top - firstRect.top) / zoom;
     } else {
-      height = pre.scrollHeight - (firstTop + pre.scrollTop);
+      const prePaddingBottom = parseFloat(pre.style.paddingBottom || '0') || 0;
+      height = pre.scrollHeight - prePaddingBottom - (firstTop + pre.scrollTop);
     }
     const lh = parseFloat(getComputedStyle(pre).lineHeight);
     const top = firstTop + 8;
@@ -617,6 +634,7 @@ export function CodeEditorTab({
         const centered = selPosition - ta.clientHeight / 2;
         scrollTop = Math.round(Math.max(0, Math.min(max, centered)));
       }
+      syncEditorScrollExtent(ta, pre);
       ta.scrollTop = scrollTop;
       if (pre) pre.scrollTop = scrollTop;
       syncTargetBands();
@@ -647,6 +665,7 @@ export function CodeEditorTab({
         try {
           ta.setSelectionRange(viewport.start, viewport.end);
         } catch {}
+        syncEditorScrollExtent(ta, preRef.current);
         ta.scrollTop = viewport.scrollTop;
         ta.scrollLeft = viewport.scrollLeft;
         // 回到前台继续编辑：把焦点还给编辑器，保持与浏览器标签一致的编辑现场。
@@ -785,6 +804,7 @@ export function CodeEditorTab({
     const measure = () => {
       const width = Math.max(0, ta.offsetWidth - ta.clientWidth);
       root.style.setProperty('--editor-scrollbar-w', `${width}px`);
+      syncEditorScrollExtent(ta, preRef.current);
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -802,6 +822,7 @@ export function CodeEditorTab({
     const ta = textareaRef.current;
     const pre = preRef.current;
     if (!ta || !pre) return;
+    syncEditorScrollExtent(ta, pre);
     pre.scrollTop = ta.scrollTop;
     pre.scrollLeft = ta.scrollLeft;
     syncTargetBands();
@@ -1295,6 +1316,7 @@ export function CodeEditorTab({
           const approxLineHeight = ta.scrollHeight / Math.max(1, lines.length) || 20;
           return Math.max(0, (startIdx - 4) * approxLineHeight);
         })();
+        syncEditorScrollExtent(ta, preRef.current);
         ta.scrollTop = targetScrollTop;
         if (preRef.current) preRef.current.scrollTop = targetScrollTop;
         syncTargetBands();
