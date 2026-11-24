@@ -1311,4 +1311,12 @@ export const zhTw: Record<keyof typeof en, string> = {
   'settings.terminalCheck.promptWindowsLead': 'Windows 下 CLI 隨桌面端安裝；若終端中沒有 jeikcode，請重新安裝或修復桌面端。',
   'settings.terminalCheck.promptWindowsTitle': '由桌面安裝包管理',
   'settings.terminalCheck.noticeWindowsInstaller': 'Windows 下 CLI 隨桌面安裝包安裝並寫入 PATH；若缺少，請重新安裝或修復桌面端。',
+  "settings.chatModifiedFileTitle": "模型回答中的修改檔案",
+  "settings.chatModifiedFileDesc": "點擊模型回答裡指向已修改檔案的連結時的預設動作。預覽遵循目前版面；查看差異會在右側可用時開啟右側 diff，否則開啟主舞台工作區 diff。",
+  "settings.chatModifiedFilePreview": "預覽",
+  "settings.chatModifiedFileDiff": "查看差異",
+  "preview.viewDiff": "查看差異",
+  "preview.diffLoading": "正在載入差異…",
+  "preview.diffError": "載入差異失敗",
+  "preview.diffEmpty": "工作區沒有變更",
 };

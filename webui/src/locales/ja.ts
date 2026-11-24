@@ -1311,4 +1311,12 @@ export const ja: Record<keyof typeof en, string> = {
   'settings.terminalCheck.promptWindowsLead': 'Windows では CLI はデスクトップアプリに同梱されています。jeikcode がない場合はアプリを再インストールまたは修復してください。',
   'settings.terminalCheck.promptWindowsTitle': 'デスクトップインストーラー管理',
   'settings.terminalCheck.noticeWindowsInstaller': 'Windows では CLI はデスクトップアプリと一緒にインストールされ、PATH に登録されます。見つからない場合はデスクトップアプリを再インストールまたは修復してください。',
+  "settings.chatModifiedFileTitle": "モデル回答内の変更ファイル",
+  "settings.chatModifiedFileDesc": "モデル回答内の変更されたファイルリンクをクリックしたときの既定の動作。プレビューは現在のレイアウトに従い、差分表示は右側が利用可能なら右側、そうでなければメインの作業ツリー差分を開きます。",
+  "settings.chatModifiedFilePreview": "プレビュー",
+  "settings.chatModifiedFileDiff": "差分を表示",
+  "preview.viewDiff": "差分を表示",
+  "preview.diffLoading": "差分を読み込み中…",
+  "preview.diffError": "差分の読み込みに失敗しました",
+  "preview.diffEmpty": "作業ツリーに変更はありません",
 };

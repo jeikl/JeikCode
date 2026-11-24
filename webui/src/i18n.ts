@@ -1399,6 +1399,14 @@ const zh = {
   'settings.terminalCheck.promptWindowsLead': 'Windows 下 CLI 随桌面端安装；若终端中没有 jeikcode，请重新安装或修复桌面端。',
   'settings.terminalCheck.promptWindowsTitle': '由桌面安装包管理',
   'settings.terminalCheck.noticeWindowsInstaller': 'Windows 下 CLI 随桌面安装包安装并写入 PATH；若缺失，请重新安装或修复桌面端。',
+  "settings.chatModifiedFileTitle": "模型回答中的修改文件",
+  "settings.chatModifiedFileDesc": "点击模型回答里指向已修改文件的链接时的默认动作。预览遵循当前布局；查看差异会在右侧可用时打开右侧 diff，否则打开主舞台工作区 diff。",
+  "settings.chatModifiedFilePreview": "预览",
+  "settings.chatModifiedFileDiff": "查看差异",
+  "preview.viewDiff": "查看差异",
+  "preview.diffLoading": "正在加载差异…",
+  "preview.diffError": "加载差异失败",
+  "preview.diffEmpty": "工作区没有改动",
 } as const;
 
 export type MsgKey = keyof typeof zh;
@@ -2764,6 +2772,14 @@ Please prioritize the user's comment intent and identity. If review is not requi
   'settings.terminalCheck.promptWindowsLead': 'On Windows the CLI ships with the desktop app. Reinstall or repair the desktop app if jeikcode is missing.',
   'settings.terminalCheck.promptWindowsTitle': 'Managed by the desktop installer',
   'settings.terminalCheck.noticeWindowsInstaller': 'On Windows the CLI is installed with the desktop app and registered in PATH. Reinstall or repair the desktop app if it is missing.',
+  "settings.chatModifiedFileTitle": "Changed files in model answers",
+  "settings.chatModifiedFileDesc": "Default action when clicking a changed file link in a model answer. Previews follow the current layout; View diff opens the right-side diff when available, otherwise the main working diff.",
+  "settings.chatModifiedFilePreview": "Preview",
+  "settings.chatModifiedFileDiff": "View diff",
+  "preview.viewDiff": "View diff",
+  "preview.diffLoading": "Loading diff…",
+  "preview.diffError": "Failed to load diff",
+  "preview.diffEmpty": "No working-tree changes",
 };
 
 export const messages: Partial<Record<Lang, Record<MsgKey, string>>> & {

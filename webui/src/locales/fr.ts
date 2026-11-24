@@ -1311,4 +1311,12 @@ export const fr: Record<keyof typeof en, string> = {
   'settings.terminalCheck.promptWindowsLead': 'Sous Windows, le CLI est fourni avec l’application. Réinstallez ou réparez l’application si jeikcode est absent.',
   'settings.terminalCheck.promptWindowsTitle': 'Géré par l’installateur',
   'settings.terminalCheck.noticeWindowsInstaller': 'Sous Windows, le CLI est installé avec l’application et ajouté au PATH. Réinstallez ou réparez l’application s’il manque.',
+  "settings.chatModifiedFileTitle": "Fichiers modifiés dans les réponses du modèle",
+  "settings.chatModifiedFileDesc": "Action par défaut lors du clic sur un lien de fichier modifié dans une réponse du modèle. L'aperçu suit la disposition actuelle ; l'affichage du diff ouvre le panneau de droite s'il est disponible, sinon le diff de l'arbre de travail dans la zone principale.",
+  "settings.chatModifiedFilePreview": "Aperçu",
+  "settings.chatModifiedFileDiff": "Afficher le diff",
+  "preview.viewDiff": "Afficher le diff",
+  "preview.diffLoading": "Chargement du diff…",
+  "preview.diffError": "Échec du chargement du diff",
+  "preview.diffEmpty": "Aucune modification dans l'arbre de travail",
 };

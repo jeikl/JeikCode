@@ -1325,4 +1325,12 @@ Vui lòng ưu tiên chú ý đến nhu cầu bình luận và danh tính của n
   'settings.terminalCheck.promptWindowsLead': 'Trên Windows, CLI đi kèm ứng dụng desktop. Hãy cài lại hoặc sửa ứng dụng nếu thiếu jeikcode.',
   'settings.terminalCheck.promptWindowsTitle': 'Do trình cài đặt desktop quản lý',
   'settings.terminalCheck.noticeWindowsInstaller': 'Trên Windows, CLI được cài cùng ứng dụng desktop và thêm vào PATH. Hãy cài lại hoặc sửa ứng dụng nếu thiếu.',
+  "settings.chatModifiedFileTitle": "Tệp đã sửa trong câu trả lời của mô hình",
+  "settings.chatModifiedFileDesc": "Hành động mặc định khi nhấp vào liên kết tệp đã sửa trong câu trả lời của mô hình. Bản xem trước tuân theo bố cục hiện tại; xem diff mở bảng bên phải nếu có, nếu không sẽ mở diff cây làm việc ở khu vực chính.",
+  "settings.chatModifiedFilePreview": "Xem trước",
+  "settings.chatModifiedFileDiff": "Xem diff",
+  "preview.viewDiff": "Xem diff",
+  "preview.diffLoading": "Đang tải diff…",
+  "preview.diffError": "Không tải được diff",
+  "preview.diffEmpty": "Không có thay đổi trong cây làm việc",
 };

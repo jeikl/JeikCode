@@ -1311,4 +1311,12 @@ export const ar: Record<keyof typeof en, string> = {
   'settings.terminalCheck.promptWindowsLead': 'في Windows تأتي CLI مع تطبيق سطح المكتب. أعد تثبيت التطبيق أو أصلحه إذا كان jeikcode مفقودًا.',
   'settings.terminalCheck.promptWindowsTitle': 'تُدار بواسطة مثبّت سطح المكتب',
   'settings.terminalCheck.noticeWindowsInstaller': 'في Windows يتم تثبيت CLI مع تطبيق سطح المكتب وإضافته إلى PATH. أعد تثبيت التطبيق أو أصلحه إذا كان مفقودًا.',
+  "settings.chatModifiedFileTitle": "الملفات المُعدّلة في ردود النموذج",
+  "settings.chatModifiedFileDesc": "الإجراء الافتراضي عند النقر على رابط ملف مُعدّل في رد النموذج. تتبع المعاينة التخطيط الحالي؛ ويفتح عرض الفرق اللوحة اليمنى إن كانت متاحة، وإلا يفتح فرق شجرة العمل في المنطقة الرئيسية.",
+  "settings.chatModifiedFilePreview": "معاينة",
+  "settings.chatModifiedFileDiff": "عرض الفرق",
+  "preview.viewDiff": "عرض الفرق",
+  "preview.diffLoading": "جارٍ تحميل الفرق…",
+  "preview.diffError": "تعذّر تحميل الفرق",
+  "preview.diffEmpty": "لا توجد تغييرات في شجرة العمل",
 };

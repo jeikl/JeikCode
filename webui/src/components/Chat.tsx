@@ -187,6 +187,7 @@ import {
   type GitCommitFile,
   type GitStatusItem,
 } from '../api';
+import { lookupMarkdownGitFile } from '../lib/markdownGitFile';
 import { useSettings } from '../settings';
 import type { MsgKey } from '../i18n';
 import {
@@ -542,7 +543,7 @@ export function Chat({
   onLiveReview,
   onBindReviewDismiss,
 }: ChatProps) {
-  const { t, escUndoEnabled } = useSettings();
+  const { t, escUndoEnabled, chatModifiedFileAction } = useSettings();
   // Read by window-level keydown handlers that intentionally keep a stable
   // listener instead of re-subscribing on every settings change.
   const escUndoEnabledRef = useRef(escUndoEnabled);
@@ -6658,6 +6659,13 @@ export function Chat({
   rightPanelCollapsedRef.current = rightPanelCollapsed;
   // 欢迎页语义只看会话是否为空，不受当前主标签影响；landing 的显示条件另行计算。
   const isWelcomeSessionRef = useRef(true);
+  const chatModifiedFileActionRef = useRef(chatModifiedFileAction);
+  chatModifiedFileActionRef.current = chatModifiedFileAction;
+  const chatOpenCwdRef = useRef('');
+  chatOpenCwdRef.current = effectiveWorkingDir || cwd || '';
+  const chatOpenSeqRef = useRef(0);
+  const workingDiffRequests = useRef(new Map<string, object>());
+  const handleOpenWorkingDiffRef = useRef<(file: GitStatusItem, staged: boolean, repoRoot?: string) => void>(() => {});
 
   // 桌面缩到手机宽度时，面板从双列退化为底部弹层：必须先收起，
   // 否则弹层会直接盖住整个对话。手机用户主动点开面板不受影响。
@@ -6720,6 +6728,68 @@ export function Chat({
     };
     window.addEventListener('jeikcode:explorer_open_file', handleExplorerOpen);
     return () => window.removeEventListener('jeikcode:explorer_open_file', handleExplorerOpen);
+  }, []);
+
+  // 聊天文件链接路由：默认预览遵循智能位置；模型回答中的已修改文件默认动作由系统设置决定。
+  // 选择「查看 diff」时，右侧可见则在右侧 diff 打开，否则才落到主舞台 working diff。
+  useEffect(() => {
+    const handleChatOpen = async (event: Event) => {
+      const detail = (event as CustomEvent).detail || {};
+      const filePath = detail.filePath;
+      if (!filePath) return;
+      const fileName = detail.fileName;
+      const startLine = detail.startLine ?? detail.line;
+      const endLine = detail.endLine;
+      const requestId = ++chatOpenSeqRef.current;
+      const mobileDocked =
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
+      const useMain = isWelcomeSessionRef.current || (!mobileDocked && rightPanelCollapsedRef.current);
+      const openPreview = () => {
+        if (requestId !== chatOpenSeqRef.current) return;
+        if (useMain) {
+          window.dispatchEvent(
+            new CustomEvent('jeikcode:open_file', {
+              detail: { path: filePath, startLine, endLine },
+            }),
+          );
+          return;
+        }
+        window.dispatchEvent(
+          new CustomEvent('jeikcode:preview:open_file', {
+            detail: { filePath, fileName, startLine, endLine },
+          }),
+        );
+        window.dispatchEvent(new CustomEvent('jeikcode:switch_right_tab', { detail: 'preview' }));
+      };
+
+      if (chatModifiedFileActionRef.current !== 'diff') {
+        openPreview();
+        return;
+      }
+
+      try {
+        const changed = await lookupMarkdownGitFile(filePath, chatOpenCwdRef.current);
+        if (requestId !== chatOpenSeqRef.current) return;
+        if (!changed) {
+          openPreview();
+          return;
+        }
+        if (useMain) {
+          handleOpenWorkingDiffRef.current(changed.file, changed.staged, changed.repoRoot);
+          return;
+        }
+        window.dispatchEvent(
+          new CustomEvent('jeikcode:preview:open_file', {
+            detail: { filePath, fileName, startLine, endLine, viewMode: 'diff', changed },
+          }),
+        );
+        window.dispatchEvent(new CustomEvent('jeikcode:switch_right_tab', { detail: 'preview' }));
+      } catch {
+        openPreview();
+      }
+    };
+    window.addEventListener('jeikcode:chat_open_file', handleChatOpen);
+    return () => window.removeEventListener('jeikcode:chat_open_file', handleChatOpen);
   }, []);
 
   const [rightPanelWidth, setRightPanelWidthState] = useState<number>(() => {
@@ -7028,11 +7098,8 @@ export function Chat({
     const fullRelativePath = getRelativePathToProject(file.path, repoRoot, projectRoot);
     const tabId = `working:${staged ? 'staged' : 'unstaged'}:${fullRelativePath}`;
     const targetCwd = repoRoot || cwd;
-    const existing = diffTabs.find((t) => t.id === tabId);
-    if (existing) {
-      setActiveMainTabId(tabId);
-      return;
-    }
+    const request = {};
+    workingDiffRequests.current.set(tabId, request);
 
     const fileName = file.path.split('/').pop() || file.path;
     const newTab: OpenDiffTab = {
@@ -7047,15 +7114,21 @@ export function Chat({
       loading: true,
     };
 
-    setDiffTabs((prev: OpenDiffTab[]) => [...prev, newTab]);
+    setDiffTabs((prev: OpenDiffTab[]) =>
+      prev.some((tab) => tab.id === tabId)
+        ? prev.map((tab) => (tab.id === tabId ? newTab : tab))
+        : [...prev, newTab],
+    );
     setActiveMainTabId(tabId);
 
     try {
       const res = await fetchGitWorkingDiff(file.path, staged, targetCwd);
+      if (workingDiffRequests.current.get(tabId) !== request) return;
       setDiffTabs((prev: OpenDiffTab[]) =>
         prev.map((t: OpenDiffTab) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
       );
     } catch (err: any) {
+      if (workingDiffRequests.current.get(tabId) !== request) return;
       setDiffTabs((prev: OpenDiffTab[]) =>
         prev.map((t: OpenDiffTab) =>
           t.id === tabId ? { ...t, diffText: `Error: ${err?.message || 'Failed to load diff'}`, loading: false } : t
@@ -7063,8 +7136,10 @@ export function Chat({
       );
     }
   };
+  handleOpenWorkingDiffRef.current = handleOpenWorkingDiff;
 
   const handleCloseDiffTab = (tabId: string) => {
+    workingDiffRequests.current.delete(tabId);
     const closing = diffTabs.find((t: OpenDiffTab) => t.id === tabId);
     if (closing?.type === 'editor' && closing.filePath) {
       dropEditorTabSnapshot(mainEditorStateKey(closing.filePath));

@@ -1311,4 +1311,12 @@ export const es: Record<keyof typeof en, string> = {
   'settings.terminalCheck.promptWindowsLead': 'En Windows, el CLI se incluye con la aplicación. Reinstale o repare la aplicación si falta jeikcode.',
   'settings.terminalCheck.promptWindowsTitle': 'Gestionado por el instalador',
   'settings.terminalCheck.noticeWindowsInstaller': 'En Windows, el CLI se instala con la aplicación y se registra en PATH. Reinstale o repare la aplicación si falta.',
+  "settings.chatModifiedFileTitle": "Archivos modificados en las respuestas del modelo",
+  "settings.chatModifiedFileDesc": "Acción predeterminada al hacer clic en un enlace a un archivo modificado en una respuesta del modelo. La vista previa sigue el diseño actual; ver el diff abre el panel derecho si está disponible; de lo contrario, el diff del árbol de trabajo en el área principal.",
+  "settings.chatModifiedFilePreview": "Vista previa",
+  "settings.chatModifiedFileDiff": "Ver diff",
+  "preview.viewDiff": "Ver diff",
+  "preview.diffLoading": "Cargando diff…",
+  "preview.diffError": "No se pudo cargar el diff",
+  "preview.diffEmpty": "No hay cambios en el árbol de trabajo",
 };

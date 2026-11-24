@@ -11,6 +11,9 @@ import { Theme, EffectiveTheme, resolveEffectiveTheme } from './lib/theme';
 export type { Theme, EffectiveTheme };
 export { resolveEffectiveTheme };
 
+/** Default action when clicking a changed file link in a model answer. */
+export type ChatModifiedFileAction = 'preview' | 'diff';
+
 /** Which settings dialog to open from the sidebar settings menu. */
 export type SettingsSection = 'theme' | 'language' | 'model' | 'system' | 'agent_mode';
 
@@ -31,6 +34,9 @@ interface SettingsCtx {
   /** ESC 是否执行“撤销上一条消息 / 取消待发卡片 / 退出编辑”（默认开启）。 */
   escUndoEnabled: boolean;
   setEscUndoEnabled: (v: boolean) => void;
+  /** 模型回答中的已修改文件默认动作：预览或直接查看差异（默认预览）。 */
+  chatModifiedFileAction: ChatModifiedFileAction;
+  setChatModifiedFileAction: (v: ChatModifiedFileAction) => void;
 }
 
 const Ctx = createContext<SettingsCtx | null>(null);
@@ -38,6 +44,7 @@ const Ctx = createContext<SettingsCtx | null>(null);
 const THEME_KEY = 'jeikcode.theme';
 const LANG_KEY = 'jeikcode.lang';
 const ESC_UNDO_KEY = 'jeikcode.escUndo';
+const CHAT_MODIFIED_FILE_ACTION_KEY = 'jeikcode.chatModifiedFileAction';
 
 function readTheme(): Theme {
   try {
@@ -76,6 +83,17 @@ function readEscUndo(): boolean {
   }
   // Default on: ESC keeps its historical undo/restore behavior until opted out.
   return true;
+}
+
+function readChatModifiedFileAction(): ChatModifiedFileAction {
+  try {
+    const v = localStorage.getItem(CHAT_MODIFIED_FILE_ACTION_KEY);
+    if (v === 'diff' || v === 'preview') return v;
+  } catch {
+    /* ignore */
+  }
+  // Safe default: unchanged file-opening behavior; diff is opt-in.
+  return 'preview';
 }
 
 function readLang(): Lang {
@@ -127,6 +145,7 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
   const [updateDead, setUpdateDead] = useState<boolean>(false);
   const [autoGitSync, setAutoGitSyncState] = useState<boolean>(true);
   const [escUndoEnabled, setEscUndoEnabledState] = useState<boolean>(readEscUndo);
+  const [chatModifiedFileAction, setChatModifiedFileActionState] = useState<ChatModifiedFileAction>(readChatModifiedFileAction);
   const [, setLocaleRevision] = useState<number>(0);
 
   // 若选用按需拆分的非默认语种，后台拉取对应分包并在到达后平滑刷新文案
@@ -218,11 +237,30 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
     }
   }
 
+  function setChatModifiedFileAction(next: ChatModifiedFileAction): void {
+    setChatModifiedFileActionState(next);
+    try {
+      localStorage.setItem(CHAT_MODIFIED_FILE_ACTION_KEY, next);
+    } catch {
+      /* private mode / quota */
+    }
+  }
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const onStorage = (event: StorageEvent) => {
       if (event.key !== ESC_UNDO_KEY) return;
       setEscUndoEnabledState(readEscUndo());
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== CHAT_MODIFIED_FILE_ACTION_KEY) return;
+      setChatModifiedFileActionState(readChatModifiedFileAction());
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -321,7 +359,7 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
 
   return (
     <Ctx.Provider
-      value={{ theme, effectiveTheme, setTheme: setThemeState, lang, setLang, t, githubLogo, updateDead, autoGitSync, setAutoGitSync, escUndoEnabled, setEscUndoEnabled }}
+      value={{ theme, effectiveTheme, setTheme: setThemeState, lang, setLang, t, githubLogo, updateDead, autoGitSync, setAutoGitSync, escUndoEnabled, setEscUndoEnabled, chatModifiedFileAction, setChatModifiedFileAction }}
     >
       {children}
     </Ctx.Provider>

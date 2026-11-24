@@ -1311,4 +1311,12 @@ export const ru: Record<keyof typeof en, string> = {
   'settings.terminalCheck.promptWindowsLead': 'В Windows CLI поставляется вместе с приложением. Если jeikcode отсутствует, переустановите или восстановите приложение.',
   'settings.terminalCheck.promptWindowsTitle': 'Управляется установщиком',
   'settings.terminalCheck.noticeWindowsInstaller': 'В Windows CLI устанавливается вместе с приложением и регистрируется в PATH. Если его нет, переустановите или восстановите приложение.',
+  "settings.chatModifiedFileTitle": "Изменённые файлы в ответах модели",
+  "settings.chatModifiedFileDesc": "Действие по умолчанию при клике на ссылку изменённого файла в ответе модели. Предпросмотр следует текущей раскладке; просмотр diff открывает правую панель, если она доступна, иначе diff рабочего дерева в основной области.",
+  "settings.chatModifiedFilePreview": "Предпросмотр",
+  "settings.chatModifiedFileDiff": "Просмотреть diff",
+  "preview.viewDiff": "Просмотреть diff",
+  "preview.diffLoading": "Загрузка diff…",
+  "preview.diffError": "Не удалось загрузить diff",
+  "preview.diffEmpty": "В рабочем дереве нет изменений",
 };

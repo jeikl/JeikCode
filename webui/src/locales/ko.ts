@@ -1311,4 +1311,12 @@ export const ko: Record<keyof typeof en, string> = {
   'settings.terminalCheck.promptWindowsLead': 'Windows에서는 CLI가 데스크톱 앱과 함께 제공됩니다. jeikcode가 없으면 앱을 다시 설치하거나 복구하세요.',
   'settings.terminalCheck.promptWindowsTitle': '데스크톱 설치 관리자 관리',
   'settings.terminalCheck.noticeWindowsInstaller': 'Windows에서는 CLI가 데스크톱 앱과 함께 설치되고 PATH에 등록됩니다. 없으면 데스크톱 앱을 다시 설치하거나 복구하세요.',
+  "settings.chatModifiedFileTitle": "모델 답변의 변경된 파일",
+  "settings.chatModifiedFileDesc": "모델 답변에서 변경된 파일 링크를 클릭할 때의 기본 동작입니다. 미리보기는 현재 레이아웃을 따르고, 차이 보기는 오른쪽을 사용할 수 있으면 오른쪽에, 아니면 메인 작업 트리 차이를 엽니다.",
+  "settings.chatModifiedFilePreview": "미리보기",
+  "settings.chatModifiedFileDiff": "차이 보기",
+  "preview.viewDiff": "차이 보기",
+  "preview.diffLoading": "차이를 불러오는 중…",
+  "preview.diffError": "차이를 불러오지 못했습니다",
+  "preview.diffEmpty": "작업 트리에 변경 사항이 없습니다",
 };

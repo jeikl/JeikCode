@@ -1311,4 +1311,12 @@ export const de: Record<keyof typeof en, string> = {
   'settings.terminalCheck.promptWindowsLead': 'Unter Windows wird die CLI mit der Desktop-App geliefert. Installieren oder reparieren Sie die App, wenn jeikcode fehlt.',
   'settings.terminalCheck.promptWindowsTitle': 'Vom Desktop-Installer verwaltet',
   'settings.terminalCheck.noticeWindowsInstaller': 'Unter Windows wird die CLI mit der App installiert und im PATH registriert. Installieren oder reparieren Sie die App, wenn sie fehlt.',
+  "settings.chatModifiedFileTitle": "Geänderte Dateien in Modellantworten",
+  "settings.chatModifiedFileDesc": "Standardaktion beim Klick auf einen Link zu einer geänderten Datei in einer Modellantwort. Die Vorschau folgt dem aktuellen Layout; „Diff anzeigen“ öffnet den rechten Bereich, falls verfügbar, andernfalls den Working-Tree-Diff im Hauptbereich.",
+  "settings.chatModifiedFilePreview": "Vorschau",
+  "settings.chatModifiedFileDiff": "Diff anzeigen",
+  "preview.viewDiff": "Diff anzeigen",
+  "preview.diffLoading": "Diff wird geladen…",
+  "preview.diffError": "Diff konnte nicht geladen werden",
+  "preview.diffEmpty": "Keine Änderungen im Working Tree",
 };
