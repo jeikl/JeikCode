@@ -2274,14 +2274,22 @@ body {
 /* Outline present: content fills from the left; the rail sits in the right gutter. */
 .chat-stage.has-turn-nav,
 .chat-stage.has-right-panel {
+  /* 配置宽度、网格间距、最小主列共同推导出唯一有效宽度：
+     面板不会超出舞台，也不会把主列挤到 0；其余依赖面板宽度的浮层复用同一变量。 */
+  --chat-grid-gap: 8px;
+  --chat-min-main-width: 260px;
+  --right-panel-effective-width: min(
+    var(--right-panel-width, 260px),
+    max(0px, 100% - var(--chat-grid-gap) - var(--chat-min-main-width))
+  );
   display: grid;
-  grid-template-columns: minmax(0, 1fr) min(var(--right-panel-width, 260px), max(0px, 100% - 8px));
+  grid-template-columns: minmax(var(--chat-min-main-width), 1fr) var(--right-panel-effective-width);
   grid-template-rows: minmax(0, 1fr) auto auto;
   grid-template-areas:
     "messages nav"
     "warning  nav"
     "input    nav";
-  column-gap: 8px;
+  column-gap: var(--chat-grid-gap);
   align-items: stretch;
 }
 .chat-stage .chat-main-column,
@@ -2334,7 +2342,9 @@ body {
 }
 .chat-stage.has-turn-nav .msg-search-float,
 .chat-stage.has-right-panel .msg-search-float {
-  right: calc(var(--right-panel-width, 260px) + 18px);
+  right: calc(var(--right-panel-effective-width, 260px) + 18px);
+  /* 主列被最小宽度限制时，搜索浮层不能沿用舞台全宽，否则会压到面板/侧栏上。 */
+  width: min(320px, calc(100% - var(--right-panel-effective-width, 260px) - 32px));
 }
 
 .turn-nav {
