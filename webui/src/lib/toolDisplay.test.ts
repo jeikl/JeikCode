@@ -200,6 +200,32 @@ test('parseDiffPreview colors add/del and ignores non-diff output', () => {
   assert.equal(looksLikeUnifiedDiff('Created new file foo.rs (12 bytes)'), false);
 });
 
+// write 新建文件时后端会附带 `@@ -0,0 +1,N @@` 的全新增 diff（仅人类展示）。
+// 这里锁定前端解析契约：它必须被识别为 diff，且每一行都是新增、行号从 1 开始。
+test('new-file diff from write colors every created line green', () => {
+  const output = [
+    'Created src/new.rs (34 bytes, 3 lines)',
+    '--- a/src/new.rs',
+    '+++ b/src/new.rs',
+    '@@ -0,0 +1,3 @@',
+    '+fn main() {',
+    '+    println!("hi");',
+    '+}',
+  ].join('\n');
+  assert.equal(looksLikeUnifiedDiff(output), true);
+  const lines = parseDiffPreview(output);
+  const adds = lines.filter((l) => l.kind === 'add');
+  assert.deepEqual(
+    adds.map((l) => l.newLine),
+    [1, 2, 3],
+  );
+  assert.equal(
+    lines.some((l) => l.kind === 'del'),
+    false,
+    'a brand-new file has no deleted lines',
+  );
+});
+
 test('bullet lists and code_explore output are not treated as diffs', () => {
   const explore = [
     "- F3 'memory/黄金sql案例/foo.sql'",

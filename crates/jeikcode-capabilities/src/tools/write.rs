@@ -79,7 +79,8 @@ impl Tool for WriteFileTool {
         };
 
         // State machine check: if file exists, enforce read confirmation in current turn
-        if tokio::fs::try_exists(&path).await.unwrap_or(false)
+        let existed = tokio::fs::try_exists(&path).await.unwrap_or(false);
+        if existed
             && crate::tools::write_state::check_write_permitted(&path)
                 == crate::tools::write_state::WritePermission::RefusedUnread
         {
@@ -134,7 +135,21 @@ impl Tool for WriteFileTool {
                 }
                 m
             }
-            None => format!("Created {disp} ({bytes} bytes, {new_lines} lines)"),
+            None => {
+                let mut m = format!("Created {disp} ({bytes} bytes, {new_lines} lines)");
+                // 新建文件的前端预览：整份内容都是新增，复用编辑工具的紧凑 unified diff。
+                // 该 diff 仅用于人类展示——provider 投影到模型上下文前会调用
+                // `strip_tool_result_diff_for_model` 剥离它，模型只看到上面那行摘要。
+                // 既有文件但旧内容读不出（非 UTF-8 / 权限）时不伪造“全新增” diff。
+                if !existed {
+                    let diff = super::edit::build_compact_diff("", &a.content, Some(&path));
+                    if diff.contains("@@") {
+                        m.push('\n');
+                        m.push_str(&diff);
+                    }
+                }
+                m
+            }
         };
         ok(msg)
     }
@@ -207,6 +222,61 @@ mod tests {
         assert!(
             model_view.contains("was 3 lines, now 5 lines, +2"),
             "model view must retain concise summary: {model_view}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_emits_presentation_diff_and_model_view_stays_concise() {
+        let d = tempfile::tempdir().unwrap();
+        let r = WriteFileTool
+            .execute(
+                r#"{"path":"new.rs","content":"fn main() {\n    println!(\"hi\");\n}\n"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("Created "), "{}", r.content);
+        // 新建文件的 diff：old 侧 0 行，整份内容都是新增（前端/TUI 解析 @@ 渲染绿色 diff）
+        assert!(
+            r.content.contains("--- a/") && r.content.contains("+++ b/"),
+            "output should retain unified diff headers for presentation: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("@@ -0,0 +1,3 @@"),
+            "new-file hunk must start at old line 0: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("\n+fn main() {"),
+            "every created line must be an addition: {}",
+            r.content
+        );
+
+        // 人类展示层保留 diff；投影到模型上下文时只留摘要
+        let model_view = crate::provider::strip_tool_result_diff_for_model(&r.content);
+        assert!(
+            !model_view.contains("@@") && !model_view.contains("+fn main()"),
+            "model view must strip the presentation diff: {model_view}"
+        );
+        assert!(
+            model_view.contains("Created ") && model_view.contains("3 lines"),
+            "model view must retain the concise creation summary: {model_view}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_empty_content_has_no_diff_block() {
+        let d = tempfile::tempdir().unwrap();
+        let r = WriteFileTool
+            .execute(r#"{"path":"empty.txt","content":""}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("Created "), "{}", r.content);
+        assert!(
+            !r.content.contains("@@"),
+            "an empty file has nothing to diff: {}",
+            r.content
         );
     }
 
