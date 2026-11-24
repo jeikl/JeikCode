@@ -3027,14 +3027,14 @@ body {
   background-color: rgba(16, 185, 129, 0.15);
   color: #a7f3d0;
 }
-.diff-row-add .diff-gutter-marker {
+.diff-gutter-marker.diff-row-add {
   color: #34d399;
 }
 .diff-row-del {
   background-color: rgba(239, 68, 68, 0.15);
   color: #fca5a5;
 }
-.diff-row-del .diff-gutter-marker {
+.diff-gutter-marker.diff-row-del {
   color: #f87171;
 }
 .diff-row-hunk {
@@ -3091,14 +3091,14 @@ body {
   background-color: #dcfce7;
   color: #15803d;
 }
-:root[data-theme='light'] .diff-row-add .diff-gutter-marker {
+:root[data-theme='light'] .diff-gutter-marker.diff-row-add {
   color: #16a34a;
 }
 :root[data-theme='light'] .diff-row-del {
   background-color: #fee2e2;
   color: #b91c1c;
 }
-:root[data-theme='light'] .diff-row-del .diff-gutter-marker {
+:root[data-theme='light'] .diff-gutter-marker.diff-row-del {
   color: #dc2626;
 }
 :root[data-theme='light'] .diff-row-hunk {

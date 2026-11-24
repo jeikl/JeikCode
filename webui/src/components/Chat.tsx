@@ -6983,16 +6983,14 @@ export function Chat({
     }
   };
 
+  const workingDiffRequests = useRef(new Map<string, object>());
   const handleOpenWorkingDiff = async (file: GitStatusItem, staged: boolean, repoRoot?: string) => {
     const projectRoot = effectiveWorkingDir || cwd || '';
     const fullRelativePath = getRelativePathToProject(file.path, repoRoot, projectRoot);
     const tabId = `working:${staged ? 'staged' : 'unstaged'}:${fullRelativePath}`;
     const targetCwd = repoRoot || cwd;
-    const existing = diffTabs.find((t) => t.id === tabId);
-    if (existing) {
-      setActiveMainTabId(tabId);
-      return;
-    }
+    const request = {};
+    workingDiffRequests.current.set(tabId, request);
 
     const fileName = file.path.split('/').pop() || file.path;
     const newTab: OpenDiffTab = {
@@ -7007,15 +7005,19 @@ export function Chat({
       loading: true,
     };
 
-    setDiffTabs((prev: OpenDiffTab[]) => [...prev, newTab]);
+    setDiffTabs((prev: OpenDiffTab[]) => prev.some((tab) => tab.id === tabId)
+      ? prev.map((tab) => tab.id === tabId ? newTab : tab)
+      : [...prev, newTab]);
     setActiveMainTabId(tabId);
 
     try {
       const res = await fetchGitWorkingDiff(file.path, staged, targetCwd);
+      if (workingDiffRequests.current.get(tabId) !== request) return;
       setDiffTabs((prev: OpenDiffTab[]) =>
         prev.map((t: OpenDiffTab) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
       );
     } catch (err: any) {
+      if (workingDiffRequests.current.get(tabId) !== request) return;
       setDiffTabs((prev: OpenDiffTab[]) =>
         prev.map((t: OpenDiffTab) =>
           t.id === tabId ? { ...t, diffText: `Error: ${err?.message || 'Failed to load diff'}`, loading: false } : t
@@ -7024,7 +7026,17 @@ export function Chat({
     }
   };
 
+  useEffect(() => {
+    const open = (event: Event) => {
+      const { file, staged, repoRoot } = (event as CustomEvent).detail;
+      void handleOpenWorkingDiff(file, staged, repoRoot);
+    };
+    window.addEventListener('jeikcode:markdown_working_diff', open);
+    return () => window.removeEventListener('jeikcode:markdown_working_diff', open);
+  });
+
   const handleCloseDiffTab = (tabId: string) => {
+    workingDiffRequests.current.delete(tabId);
     const closing = diffTabs.find((t: OpenDiffTab) => t.id === tabId);
     if (closing?.type === 'editor' && closing.filePath) {
       dropEditorTabSnapshot(mainEditorStateKey(closing.filePath));

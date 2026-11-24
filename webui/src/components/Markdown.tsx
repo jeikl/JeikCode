@@ -10,6 +10,9 @@ import { showToast } from './Toast';
 import { parseFilePathAndLines } from '../lib/displayPath';
 import { revealInFileExplorer, openFileWithOs } from '../api';
 import { getPageZoom } from '../lib/pageZoom';
+import { lookupMarkdownGitFile } from '../lib/markdownGitFile';
+
+let latestChatFileClick = 0;
 import {
   isFilePathSnippet,
   isLikelyDirPath,
@@ -177,6 +180,10 @@ export function Markdown({
   onMatchCountChange?: (count: number) => void;
   targetContext?: 'main' | 'right' | 'chat';
 }) {
+  const lookupLifetime = useRef(0);
+  useEffect(() => {
+    return () => { lookupLifetime.current++; };
+  }, [cwd, basePath]);
   const { theme, effectiveTheme, lang, t } = useSettings();
   const isDark = effectiveTheme ? effectiveTheme === 'dark' : (theme === 'dark');
 
@@ -432,6 +439,7 @@ export function Markdown({
   }, [renderedHtml]);
 
   function onClick(e: MouseEvent) {
+    const clickId = ++latestChatFileClick;
     const targetEl = e.target as HTMLElement;
 
     // 1. 处理内部锚点平滑跳转（如 [中文更新日志](#-中文更新日志-chinese)）
@@ -555,13 +563,19 @@ export function Markdown({
             detail: { path: resolved, startLine, endLine }
           }));
         } else {
-          // AI 对话主画布中点击：默认在右侧区域预览出来，复用异地浏览文件能力，不遮盖AI对话！
-          window.dispatchEvent(new CustomEvent('jeikcode:preview:open_file', {
-            detail: { filePath: resolved, fileName, startLine, endLine }
-          }));
-          window.dispatchEvent(new CustomEvent('jeikcode:switch_right_tab', {
-            detail: 'preview'
-          }));
+          // 查询实时状态，未修改或查询失败时保留原有预览行为。
+          const lifetime = lookupLifetime.current;
+          void lookupMarkdownGitFile(resolved, cwd).catch(() => null).then((changed) => {
+            if (clickId !== latestChatFileClick || lifetime !== lookupLifetime.current) return;
+            if (changed) {
+              window.dispatchEvent(new CustomEvent('jeikcode:markdown_working_diff', { detail: changed }));
+            } else {
+              window.dispatchEvent(new CustomEvent('jeikcode:preview:open_file', {
+                detail: { filePath: resolved, fileName, startLine, endLine }
+              }));
+              window.dispatchEvent(new CustomEvent('jeikcode:switch_right_tab', { detail: 'preview' }));
+            }
+          });
         }
         return;
       }
