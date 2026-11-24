@@ -6654,6 +6654,10 @@ export function Chat({
       localStorage.setItem('jeikcode:right-panel-collapsed', String(val));
     } catch {}
   };
+  const rightPanelCollapsedRef = useRef(rightPanelCollapsed);
+  rightPanelCollapsedRef.current = rightPanelCollapsed;
+  // 欢迎页语义只看会话是否为空，不受当前主标签影响；landing 的显示条件另行计算。
+  const isWelcomeSessionRef = useRef(true);
 
   // 桌面缩到手机宽度时，面板从双列退化为底部弹层：必须先收起，
   // 否则弹层会直接盖住整个对话。手机用户主动点开面板不受影响。
@@ -6680,6 +6684,42 @@ export function Chat({
     };
     window.addEventListener('jeikcode:switch_right_tab', handleSwitchRightTab as EventListener);
     return () => window.removeEventListener('jeikcode:switch_right_tab', handleSwitchRightTab as EventListener);
+  }, []);
+
+  // 资源管理器打开路由：
+  // - 欢迎页、或桌面端右侧真正折叠时 -> 主编辑器；
+  // - 会话中右侧展开 -> 右侧预览；
+  // - 移动端顶部常驻面板始终可见，不参与折叠判断。
+  useEffect(() => {
+    const handleExplorerOpen = (event: Event) => {
+      const detail = (event as CustomEvent).detail || {};
+      const filePath = detail.filePath;
+      if (!filePath) return;
+      const mobileDocked =
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
+      const useMain = isWelcomeSessionRef.current || (!mobileDocked && rightPanelCollapsedRef.current);
+      if (useMain) {
+        window.dispatchEvent(
+          new CustomEvent('jeikcode:open_file', {
+            detail: { path: filePath, startLine: detail.line, endLine: detail.endLine },
+          }),
+        );
+        return;
+      }
+      window.dispatchEvent(
+        new CustomEvent('jeikcode:preview:open_file', {
+          detail: {
+            filePath,
+            fileName: detail.fileName,
+            startLine: detail.line,
+            endLine: detail.endLine,
+          },
+        }),
+      );
+      window.dispatchEvent(new CustomEvent('jeikcode:switch_right_tab', { detail: 'preview' }));
+    };
+    window.addEventListener('jeikcode:explorer_open_file', handleExplorerOpen);
+    return () => window.removeEventListener('jeikcode:explorer_open_file', handleExplorerOpen);
   }, []);
 
   const [rightPanelWidth, setRightPanelWidthState] = useState<number>(() => {
@@ -13751,7 +13791,10 @@ export function Chat({
     localTurnSessionsRef.current.has(activeIdRef.current) ||
     backgroundRunningSessionsRef.current.has(activeIdRef.current)
   ) : false);
-  const landing = messages.length === 0 && !isExecuting && !historyHint && !restoring && !loading && activeMainTabId === 'chat';
+  const isWelcomeSession =
+    messages.length === 0 && !isExecuting && !historyHint && !restoring && !loading;
+  isWelcomeSessionRef.current = isWelcomeSession;
+  const landing = isWelcomeSession && activeMainTabId === 'chat';
 
   // 上报落地态给 App（决定是否显示会话标题头）。
   useEffect(() => {

@@ -640,10 +640,35 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
       }
     }
 
-    // 普通左键单击：选中单项，文件则打开预览，目录则展开/折叠
+    // Alt + 左键：显式主编辑器入口，绕过智能路由。
+    if (e.altKey && !node.is_dir) {
+      e.preventDefault();
+      e.stopPropagation();
+      setSelectedPaths(new Set([node.path]));
+      setLastSelectedPath(node.path);
+      onOpenFile?.(node.path);
+      return;
+    }
+
+    // 普通左键单击：选中单项；文件交给全局智能路由，目录则展开/折叠
     setSelectedPaths(new Set([node.path]));
     setLastSelectedPath(node.path);
-    void toggleNode(node);
+    if (node.is_dir) {
+      void toggleNode(node);
+    } else {
+      // Chat 根据欢迎页/右侧折叠/移动端常驻面板决定打开到主编辑器还是右侧预览。
+      window.dispatchEvent(new CustomEvent('jeikcode:explorer_open_file', {
+        detail: { filePath: node.path, fileName: node.name },
+      }));
+    }
+  };
+
+  // 双击文件始终进主编辑器；单击已经打开智能预览，双击再定位到可编辑标签。
+  const handleRowDoubleClick = (node: TreeNode, e: MouseEvent) => {
+    if (node.is_dir) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onOpenFile?.(node.path);
   };
 
   const handleContextMenu = (node: TreeNode, e: MouseEvent) => {
@@ -808,6 +833,7 @@ export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerPr
             (window as any).__jeikcode_dragged_tab = null;
           }}
           onClick={(e) => handleRowClick(node, e)}
+          onDblClick={(e) => handleRowDoubleClick(node, e)}
           onContextMenu={(e) => handleContextMenu(node, e)}
           title={isIgnored ? `${node.path} (git-ignored)` : node.path}
         >

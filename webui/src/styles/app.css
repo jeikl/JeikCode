@@ -5649,7 +5649,12 @@ body {
   max-width: 100%;
 }
 .markdown-root .katex { font-size: 1.05em; }
-.markdown-root .katex-display { margin: 0.4em 0; }
+.markdown-root .katex-display {
+  margin: 0.4em 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
 .markdown-root .md-math-fallback {
   font-family: var(--app-monospace-font-family);
   white-space: pre-wrap;
@@ -16160,7 +16165,10 @@ select option {
 .hl-operator { color: #d4d4d4 !important; }
 .editor-markdown-preview {
   flex: 1;
-  overflow: auto;
+  /* 文件预览只保留纵向滚动；宽表格/公式/图表各自内部横向滚动。 */
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
   padding: 24px 32px;
   background: var(--app-background, #1a1a1e);
   color: var(--app-primary-foreground, #f0f0f2);
@@ -16182,6 +16190,8 @@ select option {
 .editor-markdown-preview .markdown-root {
   max-width: 100% !important;
   width: 100% !important;
+  /* 文件预览里的长 URL / inline code 直接换行，不制造外层横向滚动条。 */
+  overflow-wrap: anywhere;
 }
 .editor-markdown-preview .markdown-root p {
   white-space: normal !important;
