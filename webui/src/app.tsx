@@ -8,7 +8,6 @@ import { Chat } from './components/Chat';
 import { Sidebar } from './components/Sidebar';
 import { RenameDialog, DeleteDialog } from './components/SessionDialogs';
 import { CwdPicker } from './components/CwdPicker';
-import { LegacyMigrationModal } from './components/LegacyMigrationModal';
 import { DesktopClosePromptDialog } from './components/DesktopClosePromptDialog';
 import { onboardingDone } from './lib/onboarding';
 import { LiveReviewState, NotificationDock } from './components/NotificationDock';
@@ -2187,7 +2186,6 @@ export function App() {
           />
         </LazyBoundary>
       )}
-      <LegacyMigrationModal />
       <DesktopClosePromptDialog />
       <ConfirmModalHost />
       <ToastHost />

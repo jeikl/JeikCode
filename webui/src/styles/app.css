@@ -21004,6 +21004,255 @@ select option {
   .model-card-id { max-width: 100% !important; }
 }
 
+/* === Terminal CLI check (Desktop system settings) === */
+.terminal-check-card { position: relative; }
+.terminal-check-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.terminal-check-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--app-primary-foreground);
+}
+.terminal-check-title-icon { display: inline-flex; color: var(--app-secondary-foreground); }
+.terminal-check-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.terminal-check-state { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.terminal-check-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--app-secondary-foreground);
+}
+.terminal-check-dot.is-ok { background: #10b981; }
+.terminal-check-dot.is-warn { background: #f59e0b; }
+.terminal-check-dot.is-danger { background: #ef4444; }
+.terminal-check-dot.is-neutral { background: var(--app-secondary-foreground); }
+.terminal-check-dot.is-muted {
+  background: color-mix(in srgb, var(--app-secondary-foreground) 45%, transparent);
+}
+.terminal-check-state-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--app-primary-foreground);
+}
+.terminal-check-version {
+  margin-inline-start: auto;
+  font-family: var(--app-monospace-font-family);
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+}
+.terminal-check-path-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.terminal-check-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--app-monospace-font-family);
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+  overflow-wrap: anywhere;
+}
+.terminal-check-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--app-menu-border);
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+}
+.terminal-check-copy:hover { background: color-mix(in srgb, var(--app-primary-foreground) 6%, transparent); }
+.terminal-check-meta {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 6px 12px;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.terminal-check-meta-label { color: var(--app-secondary-foreground); }
+.terminal-check-meta-value { color: var(--app-primary-foreground); overflow-wrap: anywhere; }
+.terminal-check-meta-hint { color: var(--app-secondary-foreground); }
+.terminal-check-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+.terminal-check-last { margin-inline-start: auto; font-size: 11.5px; color: var(--app-secondary-foreground); }
+.terminal-check-skeleton { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.terminal-check-skeleton span {
+  display: block;
+  height: 10px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--app-primary-foreground) 7%, transparent);
+}
+.terminal-check-skeleton span:nth-child(1) { width: 46%; }
+.terminal-check-skeleton span:nth-child(2) { width: 72%; }
+.terminal-check-skeleton span:nth-child(3) { width: 58%; }
+.terminal-check-error { margin-top: 12px; }
+.terminal-check-note { margin-top: 12px; }
+
+.terminal-install-overlay { z-index: 100002 !important; }
+.terminal-install-dialog {
+  width: min(520px, 94vw);
+  max-height: 86dvh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border-radius: 16px;
+}
+.terminal-install-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px; }
+.terminal-install-head h3 { flex: 1 1 auto; font-size: 15px; font-weight: 600; }
+.terminal-install-head-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--app-menu-border);
+  color: var(--app-primary-foreground);
+  background: color-mix(in srgb, var(--app-primary-foreground) 3%, transparent);
+}
+.terminal-install-body { padding: 18px 20px 4px; overflow-y: auto; }
+.terminal-install-lead {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--app-secondary-foreground);
+}
+.terminal-install-status {
+  border: 1px solid var(--app-menu-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--app-primary-foreground) 3%, transparent);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.terminal-install-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) 24px;
+  gap: 8px 12px;
+  align-items: baseline;
+  font-size: 12.5px;
+}
+.terminal-install-label { color: var(--app-secondary-foreground); }
+.terminal-install-value { color: var(--app-primary-foreground); overflow-wrap: anywhere; }
+.terminal-install-mono {
+  font-family: var(--app-monospace-font-family);
+  font-size: 12px;
+  direction: ltr;
+  text-align: left;
+}
+.terminal-install-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.terminal-install-copy:hover { background: color-mix(in srgb, var(--app-primary-foreground) 6%, transparent); }
+.terminal-install-notice {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.terminal-install-notice.is-info {
+  border: 1px solid var(--app-menu-border);
+  color: var(--app-secondary-foreground);
+  background: color-mix(in srgb, var(--app-primary-foreground) 3%, transparent);
+}
+.terminal-install-notice.is-warn {
+  border: 1px solid color-mix(in srgb, #f59e0b 35%, transparent);
+  color: #fbbf24;
+  background: color-mix(in srgb, #f59e0b 8%, transparent);
+}
+.terminal-install-notice.is-danger {
+  border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
+  color: #fca5a5;
+  background: color-mix(in srgb, #ef4444 8%, transparent);
+}
+:root[data-theme='light'] .terminal-install-notice.is-warn { color: #92400e; }
+:root[data-theme='light'] .terminal-install-notice.is-danger { color: #b91c1c; }
+:root[data-theme='light'] .terminal-install-danger { color: #b91c1c; }
+.terminal-install-command {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--app-menu-border);
+  font-family: var(--app-monospace-font-family);
+  font-size: 12.5px;
+  color: var(--app-primary-foreground);
+  background: color-mix(in srgb, var(--app-primary-foreground) 3%, transparent);
+}
+.terminal-install-command-prompt { color: var(--app-secondary-foreground); margin-inline-end: 6px; }
+.terminal-install-footer { padding: 14px 20px 18px; border-top: 1px solid var(--app-menu-border); flex-shrink: 0; }
+.terminal-install-actions { display: flex; align-items: center; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+.terminal-install-danger {
+  margin-inline-end: auto;
+  border: 0;
+  background: transparent;
+  color: #f87171;
+  font-size: 12.5px;
+  padding: 6px 2px;
+  cursor: pointer;
+}
+.terminal-install-danger:hover { text-decoration: underline; }
+.terminal-install-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+.terminal-install-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: currentColor;
+  animation: terminal-install-spin 0.8s linear infinite;
+  display: inline-block;
+}
+@keyframes terminal-install-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 768px) {
+  .terminal-check-head { align-items: flex-start; flex-direction: column; }
+  .terminal-check-refresh { width: 100%; justify-content: center; }
+  .terminal-check-meta { grid-template-columns: 1fr; gap: 4px; }
+  .terminal-check-meta-label { margin-top: 6px; }
+  .terminal-check-last { width: 100%; margin-inline-start: 0; }
+  .terminal-install-dialog {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 92dvh;
+    border-radius: 16px 16px 0 0;
+  }
+  .terminal-install-row { grid-template-columns: 1fr 24px; gap: 4px 8px; }
+  .terminal-install-label { grid-column: 1 / -1; }
+  .terminal-install-actions { flex-direction: column; align-items: stretch; }
+  .terminal-install-actions .btn { width: 100%; justify-content: center; }
+  .terminal-install-danger { margin-inline-end: 0; text-align: center; }
+}
+
 
 
 

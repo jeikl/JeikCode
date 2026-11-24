@@ -1011,6 +1011,9 @@ fn main() {
         .manage(PendingDesktopUpdate(tokio::sync::Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             desktop_shell_info,
+            terminal_check_status,
+            terminal_install_cli,
+            terminal_uninstall_cli,
             start_desktop_shell_update,
             install_desktop_shell_update,
         ])
@@ -1522,6 +1525,93 @@ fn desktop_shell_info(
     })
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalInstallOptions {
+    #[serde(default)]
+    replace: bool,
+    #[serde(default = "default_true")]
+    ensure_path: bool,
+    #[serde(default)]
+    path_only: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn run_bundle_cli_json(cli: &Path, args: &[&str]) -> Result<serde_json::Value, String> {
+    let mut cmd = Command::new(cli);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    suppress_console(&mut cmd);
+    let output = cmd.output().map_err(|e| format!("无法运行内置 CLI: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        return Ok(value);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "内置 CLI 返回异常（{}）：{}{}",
+        output.status,
+        stdout.trim(),
+        stderr.trim()
+    ))
+}
+
+#[tauri::command]
+async fn terminal_check_status(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<serde_json::Value, String> {
+    ensure_authorized_webview(&webview, &app)?;
+    let cli = bundled_cli(&app).ok_or_else(|| "安装包中缺少内置 CLI".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        run_bundle_cli_json(&cli, &["self", "status", "--json"])
+    })
+    .await
+    .map_err(|e| format!("终端检查任务失败: {e}"))?
+}
+
+#[tauri::command]
+async fn terminal_install_cli(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    options: TerminalInstallOptions,
+) -> Result<serde_json::Value, String> {
+    ensure_authorized_webview(&webview, &app)?;
+    let cli = bundled_cli(&app).ok_or_else(|| "安装包中缺少内置 CLI".to_string())?;
+    let mut args: Vec<&str> = vec!["self", "install-cli", "--json"];
+    if options.replace {
+        args.push("--replace");
+    }
+    if !options.ensure_path {
+        args.push("--no-ensure-path");
+    }
+    if options.path_only {
+        args.push("--path-only");
+    }
+    tauri::async_runtime::spawn_blocking(move || run_bundle_cli_json(&cli, &args))
+        .await
+        .map_err(|e| format!("终端安装任务失败: {e}"))?
+}
+
+#[tauri::command]
+async fn terminal_uninstall_cli(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<serde_json::Value, String> {
+    ensure_authorized_webview(&webview, &app)?;
+    let cli = bundled_cli(&app).ok_or_else(|| "安装包中缺少内置 CLI".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        run_bundle_cli_json(&cli, &["self", "uninstall-cli", "--json"])
+    })
+    .await
+    .map_err(|e| format!("终端卸载任务失败: {e}"))?
+}
+
 #[tauri::command]
 async fn start_desktop_shell_update(
     app: tauri::AppHandle,
@@ -1693,7 +1783,7 @@ fn start_webui(
     String,
 > {
     let bundled = bundled_cli(app);
-    let bin = resolve_desktop_cli(bundled.as_deref());
+    let bin = resolve_desktop_cli(bundled.as_deref())?;
     let home = home_dir();
     let (host, port, saved_token) = saved_webui_listen();
     let token = saved_token.unwrap_or_else(|| mint_desktop_token(&host, port));
@@ -1952,7 +2042,11 @@ fn supervise_webui(
                 launch.port
             };
             let effective_token = latest_token.unwrap_or_else(|| launch.token.clone());
-            launch.bin = resolve_desktop_cli(launch.bundled.as_deref());
+            match resolve_desktop_cli(launch.bundled.as_deref()) {
+                Ok(bin) => launch.bin = bin,
+                // 解析失败时保留上一次可用路径再试一次；真正失效会在 spawn 处报错并结束监管循环。
+                Err(err) => eprintln!("[desktop] {err}"),
+            }
             launch.host = latest_host;
             launch.port = effective_port;
             launch.token = effective_token;
@@ -2191,16 +2285,17 @@ fn mint_desktop_token(host: &str, port: u16) -> String {
     token
 }
 
-fn resolve_desktop_cli(bundled: Option<&Path>) -> PathBuf {
-    // 同步执行老版本残留迁移清理（立即清理 ~/.local/bin 并注册当前安装目录到 PATH）
-    cleanup_legacy_dropper_install();
-
+/// 只解析要启动的 CLI 路径，不做任何文件删除或 PATH 修改。
+///
+/// 安装位置的所有权归安装器所有：`~/.local/bin` 是 install.sh / install.ps1
+/// 的官方目标，Desktop 无权把它当成“遗留目录”清理。
+fn resolve_desktop_cli(bundled: Option<&Path>) -> Result<PathBuf, String> {
     if let Some(src) = bundled {
         set_executable(src);
-        return src.to_path_buf();
+        return Ok(src.to_path_buf());
     }
 
-    // 开发环境或 fallback：尝试同级可执行文件、resources 子目录或 PATH
+    // 便携布局 / 开发环境：优先使用桌面壳自身目录内的 CLI，仍不触碰用户安装目录。
     let name = cli_file_name();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
@@ -2212,134 +2307,20 @@ fn resolve_desktop_cli(bundled: Option<&Path>) -> PathBuf {
             ] {
                 if candidate.is_file() {
                     set_executable(&candidate);
-                    return candidate;
+                    return Ok(candidate);
                 }
             }
         }
     }
-    PathBuf::from(name)
-}
 
-#[cfg(windows)]
-fn cleanup_legacy_dropper_install() {
-    let local_bin = home_dir().join(".local").join("bin");
-    if let Ok(entries) = std::fs::read_dir(&local_bin) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if name.starts_with("jeikcode") || name.starts_with("atomcode") {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-        }
-    }
-    let _ = std::fs::remove_dir(&local_bin);
-
-    use winreg::enums::*;
-    use winreg::RegKey;
-    let Ok(env) = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
-    else {
-        return;
-    };
-    let current: String = env.get_value("Path").unwrap_or_default();
-    let install_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-
-    let mut parts: Vec<String> = current
-        .split(';')
-        .filter(|p| {
-            let trimmed = p.trim();
-            if trimmed.is_empty() {
-                return false;
-            }
-            let lower = trimmed.to_ascii_lowercase();
-            if lower.contains(".local\\bin")
-                || lower.contains(".local/bin")
-                || lower.contains("atomcode")
-            {
-                return false;
-            }
-            true
-        })
-        .map(|s| s.to_string())
-        .collect();
-
-    if let Some(dir) = install_dir {
-        let dir_str = dir.display().to_string();
-        let res_dir = dir.join("resources");
-        if res_dir.is_dir() {
-            let res_str = res_dir.display().to_string();
-            if !parts
-                .iter()
-                .any(|p| p.trim().eq_ignore_ascii_case(&res_str))
-            {
-                parts.insert(0, res_str);
-            }
-        }
-        if !parts
-            .iter()
-            .any(|p| p.trim().eq_ignore_ascii_case(&dir_str))
-        {
-            parts.insert(0, dir_str);
-        }
-    }
-
-    let new_path = parts.join(";");
-    if new_path != current {
-        let _ = env.set_value("Path", &new_path);
-        broadcast_env_change();
-    }
-}
-
-#[cfg(windows)]
-fn broadcast_env_change() {
-    #[link(name = "user32")]
-    extern "system" {
-        fn SendMessageTimeoutW(
-            hwnd: *mut std::ffi::c_void,
-            msg: u32,
-            wparam: usize,
-            lparam: *const u16,
-            flags: u32,
-            timeout: u32,
-            result: *mut usize,
-        ) -> isize;
-    }
-    use std::os::windows::ffi::OsStrExt;
-    let env_wide: Vec<u16> = std::ffi::OsStr::new("Environment")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let hwnd_broadcast = 0xffff as *mut std::ffi::c_void;
-    const WM_SETTINGCHANGE: u32 = 0x001A;
-    const SMTO_ABORTIFHUNG: u32 = 0x0002;
-    let mut res = 0;
-    unsafe {
-        SendMessageTimeoutW(
-            hwnd_broadcast,
-            WM_SETTINGCHANGE,
-            0,
-            env_wide.as_ptr(),
-            SMTO_ABORTIFHUNG,
-            5000,
-            &mut res,
-        );
-    }
-}
-
-#[cfg(not(windows))]
-fn cleanup_legacy_dropper_install() {
-    let legacy_bin = home_dir().join(".local").join("bin").join("jeikcode");
-    if legacy_bin.is_file() {
-        // 如果是孤儿残留且非当前运行程序，移除避免旧版本优先命中
-        let _ = std::fs::remove_file(&legacy_bin);
+    // release 安装包必须带内置 CLI。静默落到 PATH 可能启动到用户旧版 CLI，
+    // 造成版本错配（Desktop 传的新参数/环境变量旧 CLI 不认）；debug 构建保留 PATH 兜底便于开发。
+    if cfg!(debug_assertions) {
+        Ok(PathBuf::from(name))
+    } else {
+        Err(format!(
+            "安装包中缺少内置 CLI（{name}），请重新安装 JeikCode Desktop"
+        ))
     }
 }
 
@@ -2443,7 +2424,7 @@ mod tests {
     #[test]
     fn resolve_desktop_cli_prefers_bundled() {
         let dummy = std::path::Path::new("dummy-bundled-path");
-        let resolved = resolve_desktop_cli(Some(dummy));
+        let resolved = resolve_desktop_cli(Some(dummy)).expect("bundled CLI should resolve");
         assert_eq!(resolved, dummy);
     }
 

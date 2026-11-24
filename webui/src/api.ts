@@ -420,7 +420,6 @@ function parseTokenInput(raw: string): string {
 }
 
 const DEFAULT_API_TIMEOUT_MS = 15_000;
-const LEGACY_API_TIMEOUT_MS = 25_000;
 const inFlightGets = new Map<string, Promise<Response>>();
 const projectSessionsEtagCache = new Map<
   string,
@@ -484,9 +483,6 @@ function resolveAutoTimeoutMs(input: RequestInfo | URL): number {
     path.startsWith('/api/git/')
   ) {
     return 0;
-  }
-  if (path === '/api/system/legacy-status' || path === '/api/system/migrate-legacy') {
-    return LEGACY_API_TIMEOUT_MS;
   }
   return DEFAULT_API_TIMEOUT_MS;
 }
@@ -2209,42 +2205,6 @@ export async function postRemoteAccess(
     }
     throw new Error(detail || `remote access failed: ${resp.status}`);
   }
-  return resp.json();
-}
-
-export interface ZombieProcessInfo {
-  pid: number;
-  name: string;
-  path?: string | null;
-  reason: string;
-}
-
-export interface LegacyStatusResponse {
-  has_legacy_files: boolean;
-  legacy_files: string[];
-  has_dirty_path: boolean;
-  zombie_count: number;
-  zombies: ZombieProcessInfo[];
-  needs_migration: boolean;
-}
-
-export async function getLegacyStatus(): Promise<LegacyStatusResponse> {
-  const resp = await apiFetch('/api/system/legacy-status', { headers: authHeaders() });
-  if (!resp.ok) throw new Error(`failed to get legacy status: ${resp.status}`);
-  return resp.json();
-}
-
-export async function postMigrateLegacy(killZombies: boolean): Promise<{
-  success: boolean;
-  cleaned_files_count: number;
-  killed_zombies_count: number;
-}> {
-  const resp = await apiFetch('/api/system/migrate-legacy', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ kill_zombies: killZombies }),
-  });
-  if (!resp.ok) throw new Error(`failed to migrate legacy: ${resp.status}`);
   return resp.json();
 }
 

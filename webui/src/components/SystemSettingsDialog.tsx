@@ -13,6 +13,7 @@ import { useBackdropDismiss } from '../lib/backdropDismiss';
 import { useSettings } from '../settings';
 import { ModelConfigView } from './SettingsDialogs';
 import { ShortcutRecorder } from './ShortcutRecorder';
+import { TerminalCheckCard } from './TerminalCheckCard';
 
 interface SystemSettingsDialogProps {
   onClose: () => void;
@@ -234,6 +235,8 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
                 <h4 class="system-settings-pane-title">
                   {t('settings.tabDesktop') || '系统设置'}
                 </h4>
+
+                <TerminalCheckCard />
 
                 <div class="system-settings-card-box">
                   <div class="system-settings-box-title">

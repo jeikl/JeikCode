@@ -23813,10 +23813,16 @@ async fn bind_scanning_ports(
     u16,
 )> {
     if reclaim_stale && start_port > 0 {
-        // 桌面端启动时，若存在之前脱离桌面壳的孤儿子进程占用持久化端口，先行清理回收，
+        // 桌面端启动时，若存在之前脱离桌面壳托管的孤儿子进程，先行回收，
         // 避免新启动的桌面端因旧孤儿进程霸占端口而被迫将端口 +1 顺延覆盖用户配置。
+        // 回收判定基于桌面壳写入的托管标记与宿主 PID，绝不按安装路径判断。
         if std::env::var_os("JEIKCODE_DESKTOP").is_some() {
-            if api_config::kill_zombie_processes_all() > 0 {
+            // 全机进程枚举是阻塞操作，放入 blocking 线程池，避免饿死 Tokio worker。
+            let reclaimed =
+                tokio::task::spawn_blocking(api_config::reclaim_orphaned_desktop_children)
+                    .await
+                    .unwrap_or(0);
+            if reclaimed > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
@@ -25592,14 +25598,6 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route(
             "/api/remote-access",
             get(api_config::get_remote_access).post(api_config::post_remote_access),
-        )
-        .route(
-            "/api/system/legacy-status",
-            get(api_config::get_legacy_status),
-        )
-        .route(
-            "/api/system/migrate-legacy",
-            post(api_config::post_migrate_legacy),
         )
         .route(
             "/api/system/desktop-settings",

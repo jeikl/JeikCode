@@ -1733,6 +1733,13 @@ fn main() {
         return;
     }
 
+    // Hidden `jeikcode self ...` commands back the desktop terminal-check UI.
+    // They must stay free of config/telemetry/heavy startup: the desktop calls
+    // them on a UI thread and expects a JSON reply on stdout.
+    if let Some(code) = jeikcode::self_cli::try_run() {
+        std::process::exit(code);
+    }
+
     let argv: Vec<String> = std::env::args().collect();
     if jeikcode_config::config::runtime_state::is_dead() && argv_is_update_invocation(&argv) {
         std::process::exit(0);
@@ -1774,11 +1781,6 @@ fn main() {
 }
 
 fn real_main() {
-    // 异步执行老版本残留环境清理与迁移（不阻塞主流程）
-    std::thread::spawn(|| {
-        jeikcode_updater::migrate_legacy_environment();
-    });
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         // Worker threads (for `tokio::spawn`ed tasks) get a generous stack

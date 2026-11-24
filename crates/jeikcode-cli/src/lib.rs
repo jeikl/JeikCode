@@ -17,6 +17,7 @@ pub mod askpass;
 pub mod config_sync;
 pub mod host_service;
 pub mod procd;
+pub mod self_cli;
 pub mod systemd;
 pub mod uninstall;
 

@@ -408,160 +408,10 @@ pub fn normalize_live_exe_path(exe: PathBuf) -> PathBuf {
     exe
 }
 
-fn same_exe(a: &Path, b: &Path) -> bool {
-    if a == b {
-        return true;
-    }
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => false,
-    }
-}
-
-/// Returns true if `path` has the product binary name.
-fn looks_like_jeikcode_binary(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return false;
-    };
-    let lower = name.to_ascii_lowercase();
-    lower == "jeikcode" || lower == "jeikcode.exe"
-}
-
 /// Single authoritative install target: the running process binary.
 /// Replaces the legacy multi-candidate traversal across PATH and ProgramFiles.
 pub fn discover_install_exes(running: &Path) -> Vec<PathBuf> {
     vec![running.to_path_buf()]
-}
-
-/// Clean up orphaned legacy copies in `~/.local/bin` left by older dropper versions.
-pub fn cleanup_legacy_dropper_file(running: &Path) {
-    if let Some(home) = jeikcode_config::util::real_home_dir() {
-        let local_bin = home.join(".local").join("bin");
-        if let Ok(entries) = std::fs::read_dir(&local_bin) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    if (name.starts_with("jeikcode") || name.starts_with("atomcode"))
-                        && !same_exe(&path, running)
-                    {
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
-            }
-        }
-        let _ = std::fs::remove_dir(&local_bin);
-    }
-}
-
-/// Migrate legacy installations on Windows/Unix for direct binary update users:
-/// 1. Remove legacy `~/.local/bin/jeikcode(.exe)` if not the running executable.
-/// 2. On Windows, clean legacy `.local\bin` from `HKCU\Environment\Path` and
-///    ensure the running binary's directory is registered in `Path`.
-pub fn migrate_legacy_environment() {
-    #[cfg(windows)]
-    {
-        let Ok(running) = current_exe_path() else {
-            return;
-        };
-        cleanup_legacy_dropper_file(&running);
-
-        use winreg::enums::*;
-        use winreg::RegKey;
-        let Ok(env) = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
-        else {
-            return;
-        };
-        let current: String = env.get_value("Path").unwrap_or_default();
-        let home = jeikcode_config::util::real_home_dir();
-        let legacy_dir = home
-            .as_ref()
-            .map(|h| h.join(".local").join("bin").display().to_string());
-        let install_dir = running.parent().map(|d| d.display().to_string());
-
-        let mut parts: Vec<String> = current
-            .split(';')
-            .filter(|p| {
-                let trimmed = p.trim();
-                if trimmed.is_empty() {
-                    return false;
-                }
-                let lower = trimmed.to_ascii_lowercase();
-                if lower.contains(".local\\bin")
-                    || lower.contains(".local/bin")
-                    || lower.contains("atomcode")
-                {
-                    return false;
-                }
-                true
-            })
-            .map(|s| s.to_string())
-            .collect();
-
-        // 仅在当前运行目录包含有效可执行文件且非临时目录时加入 PATH
-        if let Some(ref dir_str) = install_dir {
-            let lower = dir_str.to_ascii_lowercase();
-            if !lower.contains("temp") && !lower.contains("staged") && !lower.contains("target\\") {
-                if !parts.iter().any(|p| p.trim().eq_ignore_ascii_case(dir_str)) {
-                    parts.insert(0, dir_str.clone());
-                }
-            }
-        }
-
-        let new_path = parts.join(";");
-        if new_path != current {
-            let _ = env.set_value("Path", &new_path);
-            broadcast_setting_change();
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        if let Ok(running) = current_exe_path() {
-            cleanup_legacy_dropper_file(&running);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn broadcast_setting_change() {
-    #[link(name = "user32")]
-    extern "system" {
-        fn SendMessageTimeoutW(
-            hwnd: *mut std::ffi::c_void,
-            msg: u32,
-            wparam: usize,
-            lparam: *const u16,
-            flags: u32,
-            timeout: u32,
-            result: *mut usize,
-        ) -> isize;
-    }
-    use std::os::windows::ffi::OsStrExt;
-    let env_wide: Vec<u16> = std::ffi::OsStr::new("Environment")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let hwnd_broadcast = 0xffff as *mut std::ffi::c_void;
-    const WM_SETTINGCHANGE: u32 = 0x001A;
-    const SMTO_ABORTIFHUNG: u32 = 0x0002;
-    let mut res = 0;
-    unsafe {
-        SendMessageTimeoutW(
-            hwnd_broadcast,
-            WM_SETTINGCHANGE,
-            0,
-            env_wide.as_ptr(),
-            SMTO_ABORTIFHUNG,
-            5000,
-            &mut res,
-        );
-    }
 }
 
 fn file_sha256_hex(path: &Path) -> Result<String> {
@@ -3142,8 +2992,7 @@ pub async fn run_upgrade_with_manifest(
             ),
         ));
     }
-    // 顺带清理可能遗留的历史老版本 ~/.local/bin/jeikcode 孤儿副本
-    cleanup_legacy_dropper_file(&exe);
+    // 手动 `/upgrade` 只替换当前运行的二进制，不触碰其他安装位置。
 
     // Manual `/upgrade` just installed whatever the current manifest
     // advertises. Any staged upgrade sitting in `staged_dir()` is now
@@ -4085,20 +3934,12 @@ mod tests {
     }
 
     #[test]
-    fn looks_like_jeikcode_binary_accepts_product_name() {
-        assert!(looks_like_jeikcode_binary(Path::new("jeikcode")));
-        assert!(looks_like_jeikcode_binary(Path::new("jeikcode.exe")));
-        assert!(!looks_like_jeikcode_binary(Path::new("jeikcode.cmd")));
-        assert!(!looks_like_jeikcode_binary(Path::new("other.exe")));
-    }
-
-    #[test]
     fn discover_install_exes_includes_running_path() {
         let tmp = tempfile::tempdir().unwrap();
         let running = tmp.path().join("jeikcode");
         std::fs::write(&running, b"x").unwrap();
         let found = discover_install_exes(&running);
-        assert!(found.iter().any(|p| same_exe(p, &running)));
+        assert_eq!(found, vec![running.clone()]);
     }
 
     #[test]
