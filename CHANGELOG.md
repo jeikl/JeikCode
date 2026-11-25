@@ -21,6 +21,44 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.4-beta.2 (2026-11-25)
+
+- **[WebUI] Soft-wrapped editing and preview with stable navigation**:
+  - The code editor and file preview now soft-wrap; line numbers, caret, selection, target lines, Ctrl+F jumps, and the bottom of large files stay aligned.
+  - The inspector keeps its collapse button visible, respects the available stage width, and preserves a readable main column.
+  - File previews keep a single vertical scrollbar; code wraps, while wide tables and formulas scroll locally without adding an outer horizontal scrollbar.
+
+- **[WebUI] Smart file opening and configurable changed-file diffs**:
+  - Explorer and model-answer file links follow the current workspace: right preview when the inspector is open, main editor on the welcome page or when the inspector is collapsed, and the right side on mobile.
+  - A system setting chooses Preview (default) or View diff for modified files in model answers; diffs follow the same routing and previews keep line targets.
+  - The right inspector gains a per-tab preview/edit/diff mode with an explicit D action, while the main working diff remains available when the inspector is collapsed.
+
+- **[Desktop & CLI] Terminal CLI check and ownership**:
+  - System Settings now reports the bundled CLI, external and package-managed copies, PATH state, and offers install, replace, and repair actions.
+  - The desktop shell allows these commands from the local daemon WebUI on Windows, macOS, and Linux; administrator rights are not required for the check.
+
+- **[Capabilities] Presentation diff on file-creating writes**:
+  - Capability writes that create a file now include the presentation diff in the response.
+
+---
+
+- **[WebUI] 软换行编辑与预览，导航/滚动稳定**：
+  - 编辑器与文件预览支持软换行；行号、光标、选区、目标行、Ctrl+F 与超大文件底部保持对齐。
+  - 检查器折叠按钮始终可见，宽度受可用舞台约束，并保留可读主列。
+  - 文件预览保持单一纵向滚动；代码自动换行，宽表格与公式仅在自身容器内横向滚动，不再产生外层横向滚动条。
+
+- **[WebUI] 智能打开与可配置的修改文件 diff**：
+  - 资源管理器与模型回答文件链接按当前工作现场打开：检查器展开时进右侧预览，欢迎页/检查器折叠时进主编辑器，移动端进右侧。
+  - 系统设置可选择模型回答中修改文件的默认动作：预览（默认）/ 查看 diff；diff 跟随同一路由，预览保留行定位。
+  - 右侧检查器新增每标签独立的预览/编辑/diff 模式与显式 D 操作；检查器折叠时仍可在主舞台查看 working diff。
+
+- **[桌面与 CLI] 终端 CLI 检查与归属管理**：
+  - 系统设置现在展示内置 CLI、外部/包管理器副本、PATH 状态，并提供安装、替换、修复路径操作。
+  - 桌面壳在 Windows、macOS、Linux 上允许本机 daemon WebUI 调用这些命令；检查无需管理员权限。
+
+- **[Capabilities] 创建文件的写入响应携带展示 diff**：
+  - 能力写操作创建文件时，响应中会包含展示 diff。
+
 ## v7.5.4-beta.1 (2026-11-23)
 
 **This beta builds on the v7.5.3 stable consolidation. Its first model-reasoning performance change is the new `<command_execution>` block that cuts useless existence preflight and repeated confirmation; it also adds the platform convergence pass, unified session activity timestamps, WebUI editor/tool-row fixes, YAML-only prompt defaults, DeepSeek V4 protocol support, and a substantially faster CI/test pipeline.**
