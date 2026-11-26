@@ -334,13 +334,14 @@ import {
   type ChatRecoveryState,
 } from '../lib/chatTerminal';
 import {
+  collectTurnAssistantEnds,
   formatTurnElapsed,
   isSteerUserMessage,
+  resolveDoneTurnElapsedMs,
   resumeTurnClockEpoch,
   rootTurnUserTs,
   stampLastAssistantElapsed,
   turnDurationMs,
-  turnTotalElapsedMs,
 } from '../lib/turnTimer';
 import { resolveLiveElapsedAnchor, standaloneStatusMode } from '../lib/compactionPhase';
 import {
@@ -14466,10 +14467,9 @@ export function Chat({
   });
 
   // 按轮次一次性缓存复制正文映射与最后助手位置索引（O(N) 一次扫描），避免流式分片或状态变化时重复全量拼接
-  const { turnLastTexts, turnAllTexts, lastInTurnSet } = useMemo(() => {
+  const { turnLastTexts, turnAllTexts, lastInTurnSet, lastNonSystemIdx } = useMemo(() => {
     const lastTexts = new Map<number, string>();
     const allTexts = new Map<number, string>();
-    const lastInTurn = new Set<number>();
 
     let start = -1;
     let textParts: string[] = [];
@@ -14529,19 +14529,14 @@ export function Chat({
       }
     }
 
-    let seenNonSystemAfter: string | undefined = undefined;
-    for (let k = messages.length - 1; k >= 0; k--) {
-      if (messages[k].role === 'assistant') {
-        if (seenNonSystemAfter === undefined || seenNonSystemAfter === 'user') {
-          lastInTurn.add(k);
-        }
-      }
-      if (messages[k].role !== 'system') {
-        seenNonSystemAfter = messages[k].role;
-      }
-    }
+    const { lastInTurnSet: lastInTurn, lastNonSystemIdx } = collectTurnAssistantEnds(messages);
 
-    return { turnLastTexts: lastTexts, turnAllTexts: allTexts, lastInTurnSet: lastInTurn };
+    return {
+      turnLastTexts: lastTexts,
+      turnAllTexts: allTexts,
+      lastInTurnSet: lastInTurn,
+      lastNonSystemIdx,
+    };
   }, [messages]);
 
   return (
@@ -14745,9 +14740,14 @@ export function Chat({
                     userTs,
                   })
                 : undefined;
-            const doneTotal = isLastInTurn && !busy
-              ? turnTotalElapsedMs(userTs, msg.ts, msg.elapsedMs)
-              : undefined;
+            const doneTotal = resolveDoneTurnElapsedMs({
+              isLastInTurn,
+              isTailNonSystem: origIdx === lastNonSystemIdx,
+              busy,
+              userTs,
+              endTs: msg.ts,
+              elapsedMs: msg.elapsedMs,
+            });
 
             return (
               <AssistantMessageView

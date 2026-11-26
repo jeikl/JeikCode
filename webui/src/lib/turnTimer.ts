@@ -53,6 +53,50 @@ export function turnTotalElapsedMs(
   return elapsedMs;
 }
 
+/**
+ * 扫描消息序列，找出每个回合的最后一条助手消息下标（跳过末尾 system 通知），
+ * 同时返回整条时间线上最后一条非 system 消息的下标，用于区分历史已结束回合与当前活跃尾部回合。
+ */
+export function collectTurnAssistantEnds(
+  msgs: ReadonlyArray<{ role: string }>,
+): { lastInTurnSet: Set<number>; lastNonSystemIdx: number } {
+  const lastInTurnSet = new Set<number>();
+  let seenNonSystemAfter: string | undefined = undefined;
+  let lastNonSystemIdx = -1;
+  for (let k = msgs.length - 1; k >= 0; k--) {
+    const role = msgs[k]!.role;
+    if (role === 'assistant') {
+      if (seenNonSystemAfter === undefined || seenNonSystemAfter === 'user') {
+        lastInTurnSet.add(k);
+      }
+    }
+    if (role !== 'system') {
+      if (lastNonSystemIdx < 0) lastNonSystemIdx = k;
+      seenNonSystemAfter = role;
+    }
+  }
+  return { lastInTurnSet, lastNonSystemIdx };
+}
+
+/**
+ * 解析单条助手消息的完成态总耗时：
+ * 只有当前正在执行中的尾部非 system 行（`busy && isTailNonSystem`）才隐藏完成态耗时，
+ * 已经结束的历史回合在发起新回合期间必须保留原有耗时展示。
+ */
+export function resolveDoneTurnElapsedMs(input: {
+  isLastInTurn: boolean;
+  isTailNonSystem: boolean;
+  busy: boolean;
+  userTs?: number;
+  endTs?: number;
+  elapsedMs?: number;
+}): number | undefined {
+  const { isLastInTurn, isTailNonSystem, busy, userTs, endTs, elapsedMs } = input;
+  if (!isLastInTurn) return undefined;
+  if (busy && isTailNonSystem) return undefined;
+  return turnTotalElapsedMs(userTs, endTs, elapsedMs);
+}
+
 /** Stamp `elapsedMs` (and optional completion time) onto the latest assistant
  *  message that does not already have a duration (or overwrite with cumulative duration when `opts.overwrite` is true). */
 export function stampLastAssistantElapsed<T extends { role: string; elapsedMs?: number; ts?: number }>(
