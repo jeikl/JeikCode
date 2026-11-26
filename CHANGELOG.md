@@ -21,6 +21,26 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.4-beta.5 (2026-11-26)
+
+- **[Daemon] Workspace-independent file explorer directory listing**:
+  - Fixes a backend crash when browsing workspaces outside the daemon's `--dir` startup directory by resolving ignore rules from each browsed workspace's own repository root or directory instead of the default bound root.
+  - Prevents host connection failures and empty file trees across secondary workspaces in remote daemon deployments.
+
+- **[WebUI] Reliable native folder selection without spurious timeouts**:
+  - Removes the 15-second automatic request timeout when waiting for the OS native directory picker dialog and blocks duplicate re-entrant picker triggers while selection is in progress.
+  - Falls back to the web directory browser only on remote hosts or unexpected errors, instead of interrupting local folder selection.
+
+---
+
+- **[服务端] 修复切换非启动绑定工作区时文件树加载异常**：
+  - 修复 daemon 使用 `--dir` 绑定默认目录后，在资源管理器浏览其他工作区时因跨根目录匹配忽略规则触发崩溃并导致“连接宿主机后端失败”的问题。
+  - 每个工作区改用自身所属仓库或目录基准解析忽略规则，确保所有多工作区目录列表与文件打开均可正常使用。
+
+- **[WebUI] 优化原生文件夹选择器超时与防重入保护**：
+  - 取消调用本地系统文件夹选择器时的 15 秒前端自动超时限制，并在选框打开期间拦截重复触发，避免选择尚未结束时误弹网页版目录选择器。
+  - 仅在远端浏览器访问或调用报错时回退到网页版目录浏览器，用户主动取消选择不再误触发回退。
+
 ## v7.5.4-beta.4 (2026-11-26)
 
 - **[Session & Context] Compaction-protected session ID injection**:

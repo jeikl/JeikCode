@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-desktop"
-version = "7.5.4-beta.4"
+version = "7.5.4-beta.5"
 dependencies = [
  "reqwest",
  "serde",
