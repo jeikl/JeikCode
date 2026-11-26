@@ -781,9 +781,11 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // date (NO context-usage gauge — pressure is handled silently by auto-compaction).
     // Appended on `turn_start` to the BOTTOM of the current real user block, so every
     // provider sees one user message instead of a synthetic-user/query pair.
-    hooks.push(Arc::new(StatusReminderHook::with_runtime_state(
-        Arc::clone(&bash_runtime),
-    )));
+    let mut status_reminder = StatusReminderHook::with_runtime_state(Arc::clone(&bash_runtime));
+    if let Some(b) = &session {
+        status_reminder = status_reminder.with_session_id(b.id.as_str());
+    }
+    hooks.push(Arc::new(status_reminder));
     hooks.push(turn_execution_policy.clone());
     hooks.push(Arc::new(
         jeikcode_capabilities::session::WriteStateHook::new(),

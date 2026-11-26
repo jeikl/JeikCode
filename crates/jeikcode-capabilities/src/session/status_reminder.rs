@@ -30,10 +30,20 @@ use crate::tools::bash_runtime::{
     legacy_bash_runtime_state, ActiveBackgroundTask, BashRuntimeState,
 };
 
+pub(crate) const SESSION_ID_PREFIX: &str = "Current session ID: ";
+
+/// 构建单次注入的会话 ID 提示行，严格约束仅在排查配置目录会话文件或传递工具/技能参数时才读取磁盘会话。
+fn format_session_id_line(session_id: &str) -> String {
+    format!(
+        "{SESSION_ID_PREFIX}{session_id} — Use this ONLY when the user reports session-data anomalies, when invoking a skill or tool that accepts a session ID, or when troubleshooting programmatic bugs such as frontend rendering misalignment or backend message persistence accuracy in the config directory's session files. Otherwise, when the user asks what was discussed earlier or whether you forgot prior conversation, always answer directly from the active conversation context. Inspect the current session file in the config directory if and only if the user explicitly asks to inspect or troubleshoot it."
+    )
+}
+
 /// Injects a `<system-reminder>` status tail from round 2 of each turn onward.
 pub struct StatusReminderHook {
     #[cfg(feature = "tools")]
     bash_runtime: Arc<BashRuntimeState>,
+    session_id: Option<String>,
 }
 
 impl StatusReminderHook {
@@ -41,12 +51,57 @@ impl StatusReminderHook {
         Self {
             #[cfg(feature = "tools")]
             bash_runtime: legacy_bash_runtime_state(),
+            session_id: None,
         }
+    }
+
+    /// 绑定当前会话 ID，供首轮或缺少该标记的旧会话在发送前于最新用户提问尾部补注一次。
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        let id = session_id.into();
+        let trimmed = id.trim();
+        self.session_id = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        self
     }
 
     #[cfg(feature = "tools")]
     pub fn with_runtime_state(bash_runtime: Arc<BashRuntimeState>) -> Self {
-        Self { bash_runtime }
+        Self {
+            bash_runtime,
+            session_id: None,
+        }
+    }
+
+    fn effective_session_id(&self) -> Option<String> {
+        if let Some(id) = self
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(id.to_string());
+        }
+        #[cfg(feature = "tools")]
+        {
+            self.bash_runtime
+                .session_id()
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+        }
+        #[cfg(not(feature = "tools"))]
+        {
+            None
+        }
+    }
+
+    /// 快速扫描全部后端上下文：仅当上下文中尚未包含当前会话 ID 标记时才返回待注入的 ID。
+    fn pending_session_id_for_turn(&self, convo: &Conversation) -> Option<String> {
+        let sid = self.effective_session_id()?;
+        let needle = format!("{SESSION_ID_PREFIX}{sid}");
+        let already_injected = convo
+            .messages
+            .iter()
+            .any(|message| message.text.contains(&needle));
+        (!already_injected).then_some(sid)
     }
 
     /// Build the `<system-reminder>` body from wall-clock `now` and the turn context. Pure
@@ -92,18 +147,23 @@ impl StatusReminderHook {
         crate::reminder::system_reminder(&lines.join("\n"))
     }
 
-    fn render_turn_start(&self, now: DateTime<Local>) -> String {
-        crate::reminder::system_reminder(&self.date_and_session_keywords(now))
+    fn render_turn_start(&self, now: DateTime<Local>, session_id: Option<&str>) -> String {
+        crate::reminder::system_reminder(&self.date_and_session_keywords(now, session_id))
     }
 
-    /// One reminder body: date, then the session long-bash list only when
-    /// that overlay has entries. Never a second `<system-reminder>` wrap.
-    fn date_and_session_keywords(&self, now: DateTime<Local>) -> String {
+    /// One reminder body: date, optional one-shot session-id notice, then the
+    /// session long-bash list only when that overlay has entries. Never a second
+    /// `<system-reminder>` wrap.
+    fn date_and_session_keywords(&self, now: DateTime<Local>, session_id: Option<&str>) -> String {
         let mut lines = vec![format!(
             "Current date: {} ({})",
             now.format("%Y-%m-%d"),
             now.format("%a")
         )];
+        if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            lines.push(String::new());
+            lines.push(format_session_id_line(sid));
+        }
         #[cfg(feature = "tools")]
         append_session_long_keyword_lines(self.bash_runtime.as_ref(), &mut lines);
         #[cfg(feature = "tools")]
@@ -188,21 +248,68 @@ impl Default for StatusReminderHook {
     }
 }
 
+/// 将会话 ID 提示补注到既有用户提问（通常为受 `sacred_floor` 压缩保护的首轮提问）尾部。
+fn inject_session_id_into_existing_prompt(text: &mut String, session_id: &str) {
+    let needle = format!("{SESSION_ID_PREFIX}{session_id}");
+    if text.contains(&needle) {
+        return;
+    }
+    let sid_line = format_session_id_line(session_id);
+    const DATE_MARKER: &str = "<system-reminder>\nCurrent date:";
+    if let Some(marker_start) = text.rfind(DATE_MARKER) {
+        let after_marker = marker_start + "<system-reminder>\n".len();
+        if let Some(rel_nl) = text[after_marker..].find('\n') {
+            let line_end = after_marker + rel_nl;
+            if text[line_end..].contains("</system-reminder>") {
+                text.insert_str(line_end, &format!("\n\n{sid_line}"));
+                return;
+            }
+        }
+    }
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(&crate::reminder::system_reminder(&sid_line));
+}
+
 #[async_trait]
 impl LifecycleHooks for StatusReminderHook {
     async fn turn_start(&self, convo: &mut Conversation) {
-        let Some(query) = convo
+        let pending_session_id = self.pending_session_id_for_turn(convo);
+        let first_real_idx = convo
             .messages
-            .iter_mut()
-            .rfind(|m| m.role == Role::User && !m.synthetic)
-        else {
+            .iter()
+            .position(|m| m.role == Role::User && !m.synthetic);
+        let last_real_idx = convo
+            .messages
+            .iter()
+            .rposition(|m| m.role == Role::User && !m.synthetic);
+        let (Some(first_idx), Some(last_idx)) = (first_real_idx, last_real_idx) else {
             return;
         };
+
+        // 旧会话（首轮提问与当前提问不是同一条）统一补注到受 `sacred_floor` 保护的首轮提问尾部，
+        // 避免落到后续轮次后在上下文压缩时被摘要裁掉。
+        let session_id_for_query = if first_idx < last_idx {
+            if let Some(sid) = pending_session_id.as_deref() {
+                inject_session_id_into_existing_prompt(&mut convo.messages[first_idx].text, sid);
+            }
+            None
+        } else {
+            pending_session_id
+        };
+
+        let query = &mut convo.messages[last_idx];
         if query.text.contains("<system-reminder>\nCurrent date:") {
+            if let Some(sid) = session_id_for_query.as_deref() {
+                inject_session_id_into_existing_prompt(&mut query.text, sid);
+            }
             return;
         }
         query.text.push_str("\n\n");
-        query.text.push_str(&self.render_turn_start(Local::now()));
+        query
+            .text
+            .push_str(&self.render_turn_start(Local::now(), session_id_for_query.as_deref()));
     }
 }
 
@@ -457,5 +564,139 @@ mod tests {
         assert!(!a_text.contains("webpack"));
         assert!(b_text.contains("webpack"));
         assert!(!b_text.contains("ninja"));
+    }
+
+    #[tokio::test]
+    async fn turn_start_injects_session_id_once_below_date_and_skips_later_turns() {
+        let hook = StatusReminderHook::new().with_session_id("sess-abc-123");
+        let mut convo = Conversation::default();
+        convo.messages = vec![Message::system("sys"), Message::user("第一轮提问")];
+        hook.turn_start(&mut convo).await;
+
+        let first = &convo.messages[1].text;
+        assert!(first.starts_with("第一轮提问\n\n<system-reminder>\nCurrent date:"));
+        assert!(
+            first.contains("\n\nCurrent session ID: sess-abc-123 — "),
+            "session-id must sit right below the date separated by a blank line: {first}"
+        );
+        assert_eq!(
+            crate::session::user_text_for_display(std::path::Path::new(""), first),
+            "第一轮提问",
+            "display stripping must still hide the entire reminder block"
+        );
+
+        // 第二轮提问：后端上下文中已包含当前会话 ID，不再重复注入。
+        convo
+            .messages
+            .push(Message::assistant("第一轮回答", Vec::new()));
+        convo.messages.push(Message::user("第二轮提问"));
+        hook.turn_start(&mut convo).await;
+
+        let second = &convo.messages[3].text;
+        assert!(second.starts_with("第二轮提问\n\n<system-reminder>\nCurrent date:"));
+        assert!(
+            !second.contains(SESSION_ID_PREFIX),
+            "second turn must not repeat session-id injection: {second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_start_backfills_session_id_once_into_protected_first_user_turn() {
+        let hook = StatusReminderHook::new().with_session_id("sess-legacy-999");
+        let mut convo = Conversation::default();
+        // 旧版本上下文里只有普通对话（哪怕聊到过 sessionid 字样），没有结构化注入标记。
+        convo.messages = vec![
+            Message::system("sys"),
+            Message::user(
+                "之前讨论过 sessionid 是啥\n\n<system-reminder>\nCurrent date: 2026-10-01 (Thu)\n</system-reminder>",
+            ),
+            Message::assistant("是会话标识", Vec::new()),
+            Message::user("帮我查一下会话数据"),
+        ];
+        hook.turn_start(&mut convo).await;
+
+        assert!(
+            convo.messages[1].text.contains(
+                "Current date: 2026-10-01 (Thu)\n\nCurrent session ID: sess-legacy-999 — "
+            ),
+            "first real user turn (inside sacred_floor) must receive one-time backfill below its date: {}",
+            convo.messages[1].text
+        );
+        assert_eq!(
+            convo.messages[1].text.matches("<system-reminder>").count(),
+            1,
+            "must reuse the existing <system-reminder> wrapper on the first turn"
+        );
+        assert!(
+            !convo.messages[3].text.contains(SESSION_ID_PREFIX),
+            "latest turn must not carry duplicate session-id when backfilled at the opening: {}",
+            convo.messages[3].text
+        );
+        assert!(
+            convo.sacred_floor() > 1
+                && convo.messages[..convo.sacred_floor()]
+                    .iter()
+                    .any(|m| m.text.contains("Current session ID: sess-legacy-999 — ")),
+            "session-id must sit inside sacred_floor so compaction never drops it"
+        );
+
+        // 之后的新轮次已检测到上述标记，首轮与新轮次均不再重复注入。
+        let frozen_first = convo.messages[1].text.clone();
+        convo.messages.push(Message::assistant("好的", Vec::new()));
+        convo.messages.push(Message::user("继续聊"));
+        hook.turn_start(&mut convo).await;
+        assert_eq!(convo.messages[1].text, frozen_first);
+        assert!(
+            !convo.messages[5].text.contains(SESSION_ID_PREFIX),
+            "subsequent turn after backfill must not inject again: {}",
+            convo.messages[5].text
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_start_backfills_ultra_old_first_turn_without_existing_reminder() {
+        let hook = StatusReminderHook::new().with_session_id("sess-ancient-1");
+        let mut convo = Conversation::default();
+        convo.messages = vec![
+            Message::user("很早以前的提问"),
+            Message::assistant("早期回答", Vec::new()),
+            Message::user("新提问"),
+        ];
+        hook.turn_start(&mut convo).await;
+
+        assert!(
+            convo.messages[0].text.starts_with(
+                "很早以前的提问\n\n<system-reminder>\nCurrent session ID: sess-ancient-1 — "
+            ),
+            "first turn without prior reminder must get wrapped session-id tail: {}",
+            convo.messages[0].text
+        );
+        assert_eq!(
+            crate::session::user_text_for_display(
+                std::path::Path::new(""),
+                &convo.messages[0].text
+            ),
+            "很早以前的提问"
+        );
+        assert!(!convo.messages[2].text.contains(SESSION_ID_PREFIX));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tools")]
+    async fn turn_start_picks_up_session_id_from_bound_bash_runtime() {
+        let runtime = Arc::new(BashRuntimeState::new());
+        runtime.bind_session("sess-from-bash-runtime");
+        let hook = StatusReminderHook::with_runtime_state(runtime);
+        let mut convo = Conversation::default();
+        convo.messages = vec![Message::user("hello")];
+        hook.turn_start(&mut convo).await;
+
+        assert!(
+            convo.messages[0]
+                .text
+                .contains("\n\nCurrent session ID: sess-from-bash-runtime — "),
+            "bound bash_runtime session_id should be injected: {}",
+            convo.messages[0].text
+        );
     }
 }
