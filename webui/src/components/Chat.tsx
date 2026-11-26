@@ -328,8 +328,8 @@ import {
   mergeAuthoritativeTail,
   findCausalGap,
   isTerminalNoticeAlreadyExplained,
-  noticeAlreadyPresentInMessages,
   filterUnpersistedLocalNotices,
+  mergeUnpersistedLocalNotices,
   type ChatRecoveryEvent,
   type ChatRecoveryState,
 } from '../lib/chatTerminal';
@@ -3282,18 +3282,15 @@ export function Chat({
       return undefined;
     })();
 
-    // 保全本地尚未在磁盘落盘的系统命令通知（如压缩完成提示通知），按 id/eventId/归一化文本兜底去重
+    // 保全本地尚未在磁盘落盘的系统命令通知（如 /compact 本地回退或尚在当前窗口的实时通知）：
+    // 按锚点归位，历史窗口外的旧通知绝不追加到对话结尾。
     const unpersistedLocalNotices = filterUnpersistedLocalNotices(canvas, diskTail);
 
     let clean = merged;
     if (unpersistedLocalUser && !clean.some((m) => m.id === unpersistedLocalUser.id)) {
       clean = [...clean, unpersistedLocalUser];
     }
-    for (const note of unpersistedLocalNotices) {
-      if (!noticeAlreadyPresentInMessages(clean, note)) {
-        clean = [...clean, note];
-      }
-    }
+    clean = mergeUnpersistedLocalNotices(clean, unpersistedLocalNotices);
     messageCacheRef.current.set(sid, clean);
     noteCacheRevision(sid, meta.revision);
     // The disk/catch-up outline may predate the current turn's pending steer.

@@ -1238,6 +1238,7 @@ export function isStackedTurnBillingUsage(
 
 export interface TerminalNoticePartLike {
   kind: string;
+  id?: string;
   text?: string;
   eventId?: string;
   severity?: string;
@@ -1249,6 +1250,11 @@ export interface TerminalNoticeMessageLike {
   id?: string;
   role: string;
   parts: TerminalNoticePartLike[];
+  clientInputId?: string;
+  serverSeq?: number;
+  sourceIndexAuthority?: 'disk' | 'outline';
+  transient?: boolean;
+  turnId?: number;
 }
 
 function matchesTerminalEventPrefix(stopReason: string | undefined, eventId: string): boolean {
@@ -1358,11 +1364,90 @@ export function noticeAlreadyPresentInMessages(
   });
 }
 
+function noticeAnchorId(message: TerminalNoticeMessageLike): string | undefined {
+  for (const part of message.parts) {
+    if (part.kind === 'notice' && part.anchorMessageId) {
+      return part.anchorMessageId;
+    }
+  }
+  return undefined;
+}
+
+function rowMatchesNoticeAnchor(
+  row: TerminalNoticeMessageLike,
+  anchorId: string,
+): boolean {
+  if (row.id === anchorId || row.clientInputId === anchorId) return true;
+  if (row.role !== 'assistant') return false;
+  return row.parts.some((p) => typeof p.id === 'string' && p.id.startsWith(`${anchorId}:`));
+}
+
+function findNoticeAnchorInsertionIndex(
+  rows: TerminalNoticeMessageLike[],
+  anchorId: string,
+): number {
+  const anchorIdx = rows.findIndex((row) => rowMatchesNoticeAnchor(row, anchorId));
+  if (anchorIdx < 0) return -1;
+  let at = anchorIdx + 1;
+  while (
+    at < rows.length
+    && rows[at]?.role === 'system'
+    && rows[at]!.parts.some((p) => p.kind === 'notice' && p.anchorMessageId === anchorId)
+  ) {
+    at += 1;
+  }
+  return at;
+}
+
+function minimumTurnId(rows: TerminalNoticeMessageLike[]): number | undefined {
+  let minTurn: number | undefined;
+  for (const row of rows) {
+    if (typeof row.turnId !== 'number') continue;
+    if (minTurn === undefined || row.turnId < minTurn) {
+      minTurn = row.turnId;
+    }
+  }
+  return minTurn;
+}
+
 export function filterUnpersistedLocalNotices<T extends TerminalNoticeMessageLike>(
   canvas: T[],
   diskTail: TerminalNoticeMessageLike[],
 ): T[] {
-  return canvas.filter(
-    (m) => m.role === 'system' && Boolean(m.id) && !noticeAlreadyPresentInMessages(diskTail, m),
-  );
+  return canvas.filter((m) => {
+    if (m.role !== 'system' || !m.id || m.transient === true) return false;
+    // 已经由磁盘或分页游标确认过的系统通知属于历史账本页；
+    // 当窗口发生裁剪或 revision 跃迁时绝不能冒充“本地未落盘通知”被拖拽到会话尾部。
+    if (typeof m.serverSeq === 'number' || m.sourceIndexAuthority === 'disk') return false;
+    return !noticeAlreadyPresentInMessages(diskTail, m);
+  });
+}
+
+/**
+ * 将本地尚未落盘的系统通知合并回权威尾切片：
+ * - 带 `anchorMessageId` 的通知严格插回锚点之后；锚点不在当前窗口则丢弃，绝不堆到结尾。
+ * - 无锚点但带有早于当前窗口最小 `turnId` 的旧通知同样丢弃，避免历史提醒漂移到末轮末尾。
+ */
+export function mergeUnpersistedLocalNotices<T extends TerminalNoticeMessageLike>(
+  clean: T[],
+  candidates: T[],
+): T[] {
+  if (candidates.length === 0) return clean;
+  let next = clean;
+  const minTurn = minimumTurnId(clean);
+  for (const note of candidates) {
+    if (noticeAlreadyPresentInMessages(next, note)) continue;
+    const anchorId = noticeAnchorId(note);
+    if (anchorId) {
+      const insertionAt = findNoticeAnchorInsertionIndex(next, anchorId);
+      if (insertionAt < 0) continue;
+      next = [...next.slice(0, insertionAt), note, ...next.slice(insertionAt)];
+      continue;
+    }
+    if (typeof note.turnId === 'number' && minTurn !== undefined && note.turnId < minTurn) {
+      continue;
+    }
+    next = [...next, note];
+  }
+  return next;
 }
