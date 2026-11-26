@@ -354,6 +354,10 @@ impl LlmProvider for OpenAiCompatProvider {
         self.cfg.context_window
     }
 
+    fn excludes_reasoning_history(&self) -> bool {
+        self.policy == ReasoningPolicy::Exclude
+    }
+
     fn bind_session_id(&self, session_id: &str) {
         // One-shot: the kernel binds exactly once at spawn. Ignore a redundant
         // re-bind (OnceLock keeps the first value) rather than panicking.

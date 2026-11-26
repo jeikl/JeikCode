@@ -1425,8 +1425,60 @@ impl RunningAgent {
     /// otherwise overflow the new small window instead of compacting to fit first).
     /// `None` if no threshold (default → never), no assistant turn yet, or below the
     /// threshold. Pure read — never mutates the conversation.
+    /// 按发包口径估算当前请求的 prompt token 数，用于中回合水位与预发送紧急压缩判断：
+    /// 1. 遵循 `provider.excludes_reasoning_history()`，避免把不回传的历史思考算进上下文压力；
+    /// 2. 当存在同窗口且有效的上游 `last_context_tokens()` 时，以 `上游实测基线 + 尾部新增消息` 为锚点
+    ///    （并用无思考的字节估算兜底），避免中文 1:1 保守估算虚高导致误触发；
+    /// 3. 无上游实测基线或刚切换不同窗口模型时，退回带发包策略过滤的保守估算。
+    fn estimate_wire_prompt_tokens(
+        &self,
+        convo: &Conversation,
+        messages: &[Message],
+        tool_defs_est: u64,
+        window: u32,
+    ) -> u32 {
+        let include_reasoning = !self.provider.excludes_reasoning_history();
+        let full_bytes = messages
+            .iter()
+            .map(|m| m.estimate_tokens_for_wire(include_reasoning) as u64)
+            .sum::<u64>()
+            .saturating_add(tool_defs_est);
+        let anchored = convo
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::message::Role::Assistant)
+            .and_then(|m| m.meta.as_ref())
+            .and_then(|meta| {
+                let base = if meta.tokens.prompt > 0 {
+                    meta.tokens.prompt.saturating_add(meta.tokens.completion)
+                } else {
+                    meta.used_tokens
+                };
+                if base == 0 || (window > 0 && meta.ctx_window > 0 && meta.ctx_window != window) {
+                    return None;
+                }
+                let tail: u64 = messages
+                    .iter()
+                    .rev()
+                    .take_while(|m| m.role != crate::message::Role::Assistant)
+                    .map(|m| m.estimate_tokens_conservative_for_wire(include_reasoning) as u64)
+                    .sum();
+                Some((base as u64).saturating_add(tail).max(full_bytes))
+            });
+        let est = anchored.unwrap_or_else(|| {
+            messages
+                .iter()
+                .map(|m| m.estimate_tokens_conservative_for_wire(include_reasoning) as u64)
+                .sum::<u64>()
+                .saturating_add(tool_defs_est)
+        });
+        est.min(u32::MAX as u64) as u32
+    }
+
     fn should_compact(&self, convo: &Conversation) -> Option<CompactTrigger> {
         let thresh = self.compact_threshold?;
+        let include_reasoning = !self.provider.excludes_reasoning_history();
         // Measure the context the NEXT request will carry: the provider's prompt
         // PLUS that response's completion (the assistant output is now part of the
         // history). `meta.used_tokens` alone is the prompt side, so a 20K response
@@ -1447,7 +1499,7 @@ impl RunningAgent {
                     convo
                         .messages
                         .iter()
-                        .map(|m| m.estimate_tokens_conservative())
+                        .map(|m| m.estimate_tokens_conservative_for_wire(include_reasoning))
                         .sum()
                 };
                 (meta.ctx_window, used)
@@ -1469,6 +1521,50 @@ impl RunningAgent {
     /// At most one attempt is made per POLICY STAGE (cheap rewrite vs slow summary)
     /// per accepted turn. This prevents no-op thrashing without letting an early
     /// threshold rewrite suppress a later high-pressure summary.
+    /// 统一解析压缩视图的 `(ctx_window, used_tokens, utilization)`。
+    /// 若 `Auto` 触发器带有更高的实时估算水位，同步抬升 `utilization` 与 `used_tokens`，
+    /// 保证 `will_summarize` 与 `run_compaction` 内部策略看到完全一致的压力口径。
+    fn resolve_compaction_pressure(
+        &self,
+        convo: &Conversation,
+        trigger: &CompactTrigger,
+    ) -> (u32, u32, f32) {
+        let (recorded_window, mut used_tokens) = convo
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::message::Role::Assistant)
+            .and_then(|m| m.meta.as_ref())
+            .map(|meta| (meta.ctx_window, meta.used_tokens))
+            .unwrap_or((0, 0));
+        let live_window = self.provider.context_window();
+        let window = if live_window > 0 {
+            live_window
+        } else {
+            recorded_window
+        };
+        let ctx_window = input_watermark_budget(window);
+        let mut utilization = if ctx_window > 0 {
+            used_tokens as f32 / ctx_window as f32
+        } else {
+            0.0
+        };
+        if let CompactTrigger::Auto {
+            utilization: trigger_util,
+        } = trigger
+        {
+            if trigger_util.is_finite() && *trigger_util > utilization {
+                utilization = *trigger_util;
+                if ctx_window > 0 {
+                    used_tokens = ((*trigger_util as f64) * (ctx_window as f64))
+                        .round()
+                        .clamp(0.0, u32::MAX as f64) as u32;
+                }
+            }
+        }
+        (ctx_window, used_tokens, utilization)
+    }
+
     async fn compact_before_internal_continuation(
         &self,
         convo: &mut Conversation,
@@ -1479,29 +1575,8 @@ impl RunningAgent {
             return;
         };
         let floor = convo.sacred_floor();
-        let (recorded_window, used_tokens) = convo
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role == crate::message::Role::Assistant)
-            .and_then(|message| message.meta.as_ref())
-            .map(|meta| (meta.ctx_window, meta.used_tokens))
-            .unwrap_or((0, 0));
-        let live_window = self.provider.context_window();
-        let window = if live_window > 0 {
-            live_window
-        } else {
-            recorded_window
-        };
-        // Pressure math runs against the WATERMARK budget (window − the fixed watermark), NOT
-        // the raw window and NOT the declared output budget — so the strategy's keep-budget /
-        // drain marks / auto escalation use the exact denominator the trigger used.
-        let ctx_window = input_watermark_budget(window);
-        let utilization = if ctx_window > 0 {
-            used_tokens as f32 / ctx_window as f32
-        } else {
-            0.0
-        };
+        let (ctx_window, used_tokens, utilization) =
+            self.resolve_compaction_pressure(convo, &trigger);
         let stage = usize::from(self.compaction.will_summarize(&CompactionView {
             messages: &convo.messages,
             trigger: trigger.clone(),
@@ -1540,33 +1615,8 @@ impl RunningAgent {
     ) -> Option<CompactReport> {
         let trigger_for_event = trigger.clone(); // `trigger` is moved into the view below
         let floor = convo.sacred_floor();
-        // Raw prompt tokens from the most recent assistant meta (default 0 if none yet).
-        let (recorded_window, used_tokens) = convo
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == crate::message::Role::Assistant)
-            .and_then(|m| m.meta.as_ref())
-            .map(|meta| (meta.ctx_window, meta.used_tokens))
-            .unwrap_or((0, 0));
-        // Size this compaction to the CURRENT model's WATERMARK budget (fall back to the
-        // recorded window only when the live window is unknown), and recompute pressure
-        // against it. A compaction running after a model switch must use the NEW window —
-        // otherwise the keep-budget / drain math would be sized to the previous model's
-        // window. The budget — not the raw window, and never the declared output budget —
-        // is what the strategy's pressure math is sized against.
-        let live_window = self.provider.context_window();
-        let window = if live_window > 0 {
-            live_window
-        } else {
-            recorded_window
-        };
-        let ctx_window = input_watermark_budget(window);
-        let utilization = if ctx_window > 0 {
-            used_tokens as f32 / ctx_window as f32
-        } else {
-            0.0
-        };
+        let (ctx_window, used_tokens, utilization) =
+            self.resolve_compaction_pressure(convo, &trigger);
         // The view borrows `&convo.messages`; confine that borrow to this block so
         // it is released before the &mut apply below.
         let plan = {
@@ -2971,13 +3021,8 @@ impl RunningAgent {
             // owns the hard backstop.
             if !midturn_auto_attempted {
                 let window = self.provider.context_window();
-                let messages_tokens: u64 = messages
-                    .iter()
-                    .map(|m| m.estimate_tokens_conservative() as u64)
-                    .sum();
-                let estimated_prompt = messages_tokens
-                    .saturating_add(tool_defs_est)
-                    .min(u32::MAX as u64) as u32;
+                let estimated_prompt =
+                    self.estimate_wire_prompt_tokens(convo, &messages, tool_defs_est, window);
                 if let Some(utilization) =
                     midturn_auto_utilization(window, self.compact_threshold, estimated_prompt)
                 {
@@ -3027,19 +3072,10 @@ impl RunningAgent {
             // answers over-window with a content-free 200 never returns the overflow error
             // that would otherwise trigger the hard-overflow recovery below. Bounded by
             // MAX_OVERFLOW_ATTEMPTS; re-projects (clone + pre_request) after each pass and
-            // stops early when a pass drains nothing (single oversized input at the sacred
-            // floor — unrecoverable, so fall through to the advisory).
+            // allows escalation through tier 0 (stub) -> tier 1 (truncate) -> tier 2 (drain).
             {
                 let window = self.provider.context_window();
                 let limit = input_watermark_budget(window);
-                // CONSERVATIVE estimate (CJK chars count as full tokens): the
-                // byte/4 estimate undercounts Chinese ~2×, which used to let a
-                // CJK-heavy turn slide past the watermark without compacting.
-                let est = |msgs: &[Message]| -> u64 {
-                    msgs.iter()
-                        .map(|m| m.estimate_tokens_conservative() as u64)
-                        .sum()
-                };
                 // Only worth compacting if a COMPLETED exchange exists to drain. On the
                 // very first request an over-window prompt is a single oversized input that
                 // compaction can't shrink (it IS the active turn) — skip to the advisory.
@@ -3050,11 +3086,11 @@ impl RunningAgent {
                 let mut attempts: u8 = 0;
                 while has_drainable
                     && window > 0
-                    && est(&messages).saturating_add(tool_defs_est) >= limit as u64
+                    && self.estimate_wire_prompt_tokens(convo, &messages, tool_defs_est, window)
+                        >= limit
                     && attempts < MAX_OVERFLOW_ATTEMPTS
                 {
-                    let before = est(&convo.messages);
-                    let _ = self
+                    let report = self
                         .run_compaction(
                             convo,
                             CompactTrigger::Overflow { attempt: attempts },
@@ -3062,8 +3098,12 @@ impl RunningAgent {
                         )
                         .await;
                     attempts += 1;
-                    if est(&convo.messages) >= before {
-                        break; // nothing drained (sacred floor / single huge input) — warn below
+                    if !report.is_some_and(|r| r.committed) {
+                        // tier 0/1 无收益时仍要升级到 tier 2（drain + 摘要），避免在 tier 1 提前 break 导致每轮死循环重折。
+                        if attempts > 2 {
+                            break;
+                        }
+                        continue;
                     }
                     messages = convo.model_history();
                     self.hooks.pre_request(&mut messages, &turn_ctx).await;
@@ -3080,16 +3120,9 @@ impl RunningAgent {
             // request under the window (single input too large), so the user gets the
             // actionable advice instead of a silent doomed request.
             if !over_window_warned {
-                // Same conservative estimator as the emergency compaction above, so
-                // the advisory and the compaction verdict agree for CJK content.
-                let est: u32 = messages
-                    .iter()
-                    .map(|m| m.estimate_tokens_conservative() as u64)
-                    .sum::<u64>()
-                    .saturating_add(tool_defs_est)
-                    .min(u32::MAX as u64) as u32;
                 let window = self.provider.context_window();
                 let limit = input_watermark_budget(window);
+                let est = self.estimate_wire_prompt_tokens(convo, &messages, tool_defs_est, window);
                 if let Some(advisory) = over_window_advisory(est, window, limit) {
                     over_window_warned = true;
                     self.emit_system_notice(
@@ -3161,12 +3194,11 @@ impl RunningAgent {
                 // Anchor the prompt size on the provider's last reported context
                 // (`prompt + completion` — the response is now part of the next
                 // prompt) plus a CONSERVATIVE estimate of the messages appended
-                // after it. `estimate_tokens_conservative` counts each CJK char as
-                // a full token, so the anchor errs HIGH; the 4K guard in the
-                // helper on top means we never under-reserve the prompt.
+                // after it. Exclude reasoning when the provider drops it on the wire.
+                let include_reasoning = !self.provider.excludes_reasoning_history();
                 let full_estimate: u32 = messages
                     .iter()
-                    .map(|m| m.estimate_tokens_conservative())
+                    .map(|m| m.estimate_tokens_conservative_for_wire(include_reasoning))
                     .sum();
                 let provider_context = convo.last_context_tokens();
                 let prompt_anchor = if provider_context > 0 {
@@ -3174,7 +3206,7 @@ impl RunningAgent {
                         .iter()
                         .rev()
                         .take_while(|m| m.role != crate::message::Role::Assistant)
-                        .map(|m| m.estimate_tokens_conservative())
+                        .map(|m| m.estimate_tokens_conservative_for_wire(include_reasoning))
                         .sum();
                     provider_context.saturating_add(tail).max(full_estimate)
                 } else {
@@ -4515,7 +4547,11 @@ impl RunningAgent {
                 // compare to the model window. An empty 200 at/over the window is
                 // very likely a too-large request, so don't assert it's
                 // context-independent — point at /compact instead.
-                let est_prompt: u32 = messages.iter().map(|m| m.estimate_tokens()).sum();
+                let include_reasoning = !self.provider.excludes_reasoning_history();
+                let est_prompt: u32 = messages
+                    .iter()
+                    .map(|m| m.estimate_tokens_for_wire(include_reasoning))
+                    .sum();
                 let msg = empty_exhaustion_message(
                     saw_malformed,
                     thinking_only,
@@ -4579,10 +4615,14 @@ impl RunningAgent {
             // task-boundary auto-compaction trigger NEVER fires and context grows unbounded
             // until a hard overflow or a manual /compact. (`tokens` below keeps the raw
             // provider report as-is; only the DERIVED pressure is estimated.)
+            let include_reasoning = !self.provider.excludes_reasoning_history();
             let used_tokens = if usage.prompt > 0 {
                 usage.prompt
             } else {
-                messages.iter().map(|m| m.estimate_tokens()).sum()
+                messages
+                    .iter()
+                    .map(|m| m.estimate_tokens_for_wire(include_reasoning))
+                    .sum()
             };
             let utilization = if ctx_window > 0 {
                 used_tokens as f32 / ctx_window as f32
@@ -8020,7 +8060,7 @@ mod synthetic_send_tests {
     //! the conversation message is pushed via `Message::synthetic_user`, so it never
     //! anchors `sacred_floor` and a host can hide it from user-facing projections.
     use super::*;
-    use crate::message::Role;
+    use crate::message::{CompactionPlan, Role};
     use crate::testkit::{
         DeferredCommands, EchoTool, InjectCommandTool, MockProvider, RecordingProvider,
         RewritePromptHook,
@@ -8297,5 +8337,214 @@ mod synthetic_send_tests {
         convo.push(goal_turn);
         // frozen_prefix_end stops before autonomous_turn even before the first real user.
         assert_eq!(convo.frozen_prefix_end(), 2);
+    }
+
+    #[tokio::test]
+    async fn excluded_reasoning_does_not_trigger_midturn_compaction_or_over_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ExcludeReasoningProvider {
+            max_tokens_seen: Mutex<Vec<Option<u32>>>,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmProvider for ExcludeReasoningProvider {
+            fn model_name(&self) -> &str {
+                "exclude-reasoner"
+            }
+            fn context_window(&self) -> u32 {
+                10_000
+            }
+            fn excludes_reasoning_history(&self) -> bool {
+                true
+            }
+            async fn chat_stream(
+                &self,
+                _: &[Message],
+                _: &[crate::tool::ToolDef],
+                options: &ChatOptions,
+            ) -> Result<
+                futures::stream::BoxStream<'static, crate::stream::StreamEvent>,
+                crate::stream::ProviderError,
+            > {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.max_tokens_seen
+                    .lock()
+                    .unwrap()
+                    .push(options.max_tokens);
+                Ok(Box::pin(futures::stream::iter(vec![
+                    crate::stream::StreamEvent::TextDelta("ok".into()),
+                    crate::stream::StreamEvent::Usage(crate::stream::TokenUsage {
+                        prompt: 2_500,
+                        completion: 20,
+                        cached: 0,
+                    }),
+                    crate::stream::StreamEvent::Done { truncated: false },
+                ])))
+            }
+        }
+
+        struct FailIfCompactedStrategy {
+            compacted: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl CompactionStrategy for FailIfCompactedStrategy {
+            async fn plan(&self, _view: &CompactionView<'_>) -> CompactionPlan {
+                self.compacted.fetch_add(1, Ordering::Relaxed);
+                CompactionPlan::noop()
+            }
+            fn will_summarize(&self, view: &CompactionView<'_>) -> bool {
+                view.utilization >= 0.78
+            }
+        }
+
+        let mut prior_asst = Message::assistant("done", vec![]);
+        // 超过 10K 窗口的巨大历史思考（在 reasoning_history=exclude 下不应计入 prompt）。
+        prior_asst.reasoning = Some("历史思考内容".repeat(12_000));
+        prior_asst.meta = Some(MessageMeta {
+            tokens: crate::stream::TokenUsage {
+                prompt: 2_400,
+                completion: 20,
+                cached: 0,
+            },
+            ctx_window: 10_000,
+            used_tokens: 2_400,
+            utilization: 0.24,
+            ..Default::default()
+        });
+        let snapshot = SessionSnapshot::new(vec![
+            Message::system("sys"),
+            Message::user("old q"),
+            prior_asst,
+        ]);
+
+        let provider = Arc::new(ExcludeReasoningProvider {
+            max_tokens_seen: Mutex::new(Vec::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let strategy = Arc::new(FailIfCompactedStrategy {
+            compacted: AtomicUsize::new(0),
+        });
+        let mut handle = Agent::builder()
+            .provider(provider.clone())
+            .tools(ToolRegistry::new().mount(&[]))
+            .resume(snapshot)
+            .compaction(strategy.clone())
+            .compact_threshold(0.9)
+            .build()
+            .spawn();
+
+        handle
+            .commands
+            .send(AgentCommand::SendMessage {
+                text: "next question".into(),
+                images: vec![],
+            })
+            .unwrap();
+        let mut warnings = Vec::new();
+        while let Some(ev) = handle.events.recv().await {
+            match ev {
+                AgentEvent::Warning(w) => warnings.push(w),
+                AgentEvent::SystemNotice(n) if n.kind == NoticeKind::Warning => {
+                    warnings.push(n.text);
+                }
+                AgentEvent::TurnComplete { .. } => break,
+                _ => {}
+            }
+        }
+        handle.commands.send(AgentCommand::Shutdown).unwrap();
+        let _ = handle.task.await;
+
+        assert_eq!(
+            strategy.compacted.load(Ordering::Relaxed),
+            0,
+            "excluded historical reasoning must not trigger compaction"
+        );
+        assert!(
+            warnings.is_empty(),
+            "excluded reasoning must not trigger over-window warning: {warnings:?}"
+        );
+        // window=10_000 -> soft_cap=1_250; prompt_anchor ~2_425 leaves >3_000 room, so max_tokens stays 1_250.
+        assert_eq!(provider.max_tokens_seen.lock().unwrap()[0], Some(1_250));
+    }
+
+    #[tokio::test]
+    async fn presend_emergency_compaction_escalates_past_noop_tier1_to_tier2() {
+        let provider = Arc::new(
+            MockProvider::new(vec![vec![
+                StreamEvent::TextDelta("recovered".into()),
+                StreamEvent::Done { truncated: false },
+            ]])
+            .with_ctx_window(1_000),
+        );
+
+        struct Tier2DrainOnlyStrategy {
+            attempts_seen: Mutex<Vec<u8>>,
+        }
+
+        #[async_trait::async_trait]
+        impl CompactionStrategy for Tier2DrainOnlyStrategy {
+            async fn plan(&self, view: &CompactionView<'_>) -> CompactionPlan {
+                if let CompactTrigger::Overflow { attempt } = view.trigger {
+                    self.attempts_seen.lock().unwrap().push(attempt);
+                    if attempt >= 2 && view.messages.len() > view.sacred_floor + 1 {
+                        return CompactionPlan {
+                            drain_from: view.sacred_floor,
+                            drain_to: view.messages.len() - 1,
+                            summary: Some("<!-- jeikcode:anchor v1 -->\nsummary".into()),
+                            rewrites: vec![],
+                            resume_note: None,
+                        };
+                    }
+                }
+                CompactionPlan::noop()
+            }
+        }
+
+        let strategy = Arc::new(Tier2DrainOnlyStrategy {
+            attempts_seen: Mutex::new(Vec::new()),
+        });
+        let big_turn = "x".repeat(4_000);
+        let snapshot = SessionSnapshot::new(vec![
+            Message::system("sys"),
+            Message::user("first"),
+            Message::assistant(big_turn.as_str(), vec![]),
+        ]);
+        let mut handle = Agent::builder()
+            .provider(provider)
+            .tools(ToolRegistry::new().mount(&[]))
+            .resume(snapshot)
+            .compaction(strategy.clone())
+            .build()
+            .spawn();
+
+        handle
+            .commands
+            .send(AgentCommand::SendMessage {
+                text: "go".into(),
+                images: vec![],
+            })
+            .unwrap();
+        let mut committed_epochs = 0usize;
+        while let Some(ev) = handle.events.recv().await {
+            match ev {
+                AgentEvent::Compacted {
+                    committed: true, ..
+                } => committed_epochs += 1,
+                AgentEvent::TurnComplete { .. } => break,
+                _ => {}
+            }
+        }
+        handle.commands.send(AgentCommand::Shutdown).unwrap();
+        let _ = handle.task.await;
+
+        assert_eq!(
+            *strategy.attempts_seen.lock().unwrap(),
+            vec![0, 1, 2],
+            "noop on tier 0/1 must escalate through tier 2 instead of aborting early"
+        );
+        assert_eq!(committed_epochs, 1);
     }
 }

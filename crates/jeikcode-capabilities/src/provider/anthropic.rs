@@ -180,6 +180,10 @@ impl LlmProvider for AnthropicProvider {
         self.cfg.context_window
     }
 
+    fn excludes_reasoning_history(&self) -> bool {
+        self.policy == ReasoningPolicy::Exclude
+    }
+
     fn bind_session_id(&self, session_id: &str) {
         let _ = self.session_id.set(session_id.to_string());
     }
