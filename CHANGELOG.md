@@ -21,6 +21,36 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.4-beta.4 (2026-11-26)
+
+- **[Session & Context] Compaction-protected session ID injection**:
+  - Injects the current session ID once into the compaction-protected first user turn below the current date, and performs a one-time backfill onto the opening turn for legacy or forked sessions missing it.
+  - Instructs the model to read on-disk session files only when explicitly troubleshooting session data, passing session IDs to tools/skills, or investigating rendering/persistence bugs, while answering ordinary recall questions directly from active context.
+  - Keeps UI message bubbles, session titles, and wrapped user prompts clean without exposing the injected reminder.
+
+- **[Kernel & Compaction] Accurate wire token estimation and overflow escalation**:
+  - Excludes unsent historical reasoning text from prompt token and utilization estimates when `reasoning_history` excludes history, preventing false compaction thrashing well below the true context window.
+  - Fixes automatic compaction pressure propagation, raises the stub rewrite floor to avoid negative-savings nested stubs, and ensures pre-send overflow recovery escalates cleanly through all compaction stages.
+
+- **[WebUI] Stable turn elapsed badges and system notice placement**:
+  - Keeps completed elapsed-duration badges visible on prior historical turns while a new turn is running.
+  - Anchors unpersisted local system notices to their associated turns and prunes out-of-window historical notices during tail reconciliation so compaction markers no longer pile up at the end of the timeline.
+
+---
+
+- **[会话与上下文] 受压缩保护的会话 ID 单次注入**：
+  - 在受压缩保护的首轮用户提问日期下方一次性注入当前会话 ID；对于缺少该标记的旧版本会话或分叉会话，自动检测后在首轮提问尾部一次性补全，后续轮次不再重复注入。
+  - 明确约束模型仅在排查会话数据异常、向支持会话 ID 的技能或工具传参，或排查渲染与落盘 BUG 时才查阅配置目录中的会话文件，普通对话回顾仍直接基于当前上下文作答。
+  - UI 消息气泡、自动标题生成及自定义提问包装剥离均自动过滤该注入块，不影响用户界面展示。
+
+- **[内核与上下文压缩] 修复排除思考历史时的 Token 估算与压缩升级抖动**：
+  - 当配置排除历史思考文本时，出站提示词 Token 与水位估算不再计入未发送的历史思考内容，避免远未达窗口上限即频繁误触发压缩。
+  - 修复自动压缩压力传递、提高存根最小改写阈值并保障发送前溢出压缩逐级升级，防止长会话在同一压缩阶段反复空转。
+
+- **[WebUI] 修复回合完成耗时徽章与系统通知尾部堆叠**：
+  - 新回合运行期间继续保留先前已完成历史回合的蓝色耗时徽章，不再因全局运行态而整体隐藏。
+  - 对齐磁盘尾部记录时将本地系统通知精确插回对应锚点并裁剪越窗历史通知，解决压缩分割线等历史系统通知堆叠到对话最末尾的问题。
+
 ## v7.5.4-beta.3 (2026-11-26)
 
 - **[Code Intelligence] Minimal, fact-only `code_explore` results**:
