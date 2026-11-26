@@ -21,6 +21,20 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.4-beta.3 (2026-11-26)
+
+- **[Code Intelligence] Minimal, fact-only `code_explore` results**:
+  - The `NEXT` work order and every command-style hint are removed; results now keep evidence spans, candidates, the flow spine, identifier sites, one coverage line, and one "ranked is not exhaustive" boundary statement.
+  - Performance timing and Cache HIT lines no longer enter the model context; Index Status appears only for incremental or full rebuilds.
+  - Folded spans point to the real `read` arguments (`offset`/`limit`), while low-hit retry, contract lookup, and directory-first path guidance moved into the tool description.
+
+---
+
+- **[代码智能] `code_explore` 结果精简为纯事实**：
+  - 删除 `NEXT` 工作单及结果中的全部命令式提示；输出仅保留证据片段、候选、调用链、标识符站点、一行 Coverage 与一条“ranked 不等于穷尽”的边界声明。
+  - 性能耗时与 Cache HIT 行不再进入模型上下文；Index Status 仅在增量或全量重建时出现。
+  - 折叠片段改用 `read` 真实支持的 `offset`/`limit` 参数；低命中重试、contract 查找、path 优先目录三条策略迁入工具描述。
+
 ## v7.5.4-beta.2 (2026-11-25)
 
 - **[WebUI] Soft-wrapped editing and preview with stable navigation**:
