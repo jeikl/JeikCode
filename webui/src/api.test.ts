@@ -887,3 +887,87 @@ test('getActiveChatSessions bypasses TTL cache on sequential calls', async () =>
     globalThis.fetch = originalFetch;
   }
 });
+
+test('pickNativeDirectory does not attach an auto-timeout abort signal', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedSignal: AbortSignal | null | undefined;
+  globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+    capturedSignal = init?.signal;
+    return new Response(JSON.stringify({ path: 'E:\\projects\\demo', canceled: false }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  try {
+    const { pickNativeDirectory, resolveAutoTimeoutMs } = await import('./api.ts');
+    assert.equal(resolveAutoTimeoutMs('/fs/pick_dir'), 0);
+    assert.equal(resolveAutoTimeoutMs('/projects'), 15_000);
+    const res = await pickNativeDirectory();
+    assert.equal(capturedSignal, undefined);
+    assert.deepEqual(res, { path: 'E:\\projects\\demo', canceled: false });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('pickDirectoryWithFallback prevents re-entrant opens and only falls back on error or remote host', async () => {
+  const { pickDirectoryWithFallback } = await import('./api.ts');
+
+  // 1. 远端主机直接回退到网页版目录浏览器
+  let fallbackCalls = 0;
+  const remoteRef = { current: false };
+  await pickDirectoryWithFallback({
+    isLoopback: false,
+    inFlightRef: remoteRef,
+    onPicked: () => {},
+    onFallback: () => { fallbackCalls += 1; },
+    pickNative: async () => { throw new Error('must not call native on remote'); },
+  });
+  assert.equal(fallbackCalls, 1);
+
+  // 2. 进行中的原生选框拦截重复触发，且用户取消时不弹网页版目录浏览器
+  const inFlightRef = { current: false };
+  let releaseNative!: (res: { path: string | null; canceled: boolean }) => void;
+  let nativeCalls = 0;
+  let pickedPath: string | null = null;
+  let errorFallback = 0;
+  const firstPick = pickDirectoryWithFallback({
+    isLoopback: true,
+    inFlightRef,
+    onPicked: (p) => { pickedPath = p; },
+    onFallback: () => { errorFallback += 1; },
+    pickNative: () => {
+      nativeCalls += 1;
+      return new Promise((resolve) => { releaseNative = resolve; });
+    },
+  });
+  // 重入点击直接忽略
+  await pickDirectoryWithFallback({
+    isLoopback: true,
+    inFlightRef,
+    onPicked: () => {},
+    onFallback: () => { errorFallback += 1; },
+    pickNative: async () => {
+      nativeCalls += 1;
+      return { path: null, canceled: true };
+    },
+  });
+  assert.equal(nativeCalls, 1);
+  releaseNative({ path: null, canceled: true });
+  await firstPick;
+  assert.equal(pickedPath, null);
+  assert.equal(errorFallback, 0);
+  assert.equal(inFlightRef.current, false);
+
+  // 3. 原生接口抛错时回退到网页版浏览器
+  await pickDirectoryWithFallback({
+    isLoopback: true,
+    inFlightRef,
+    onPicked: () => {},
+    onFallback: () => { errorFallback += 1; },
+    pickNative: async () => { throw new Error('HTTP 500'); },
+  });
+  assert.equal(errorFallback, 1);
+  assert.equal(inFlightRef.current, false);
+});

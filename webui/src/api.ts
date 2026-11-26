@@ -471,13 +471,19 @@ function requestPathname(input: RequestInfo | URL): string {
   }
 }
 
-function resolveAutoTimeoutMs(input: RequestInfo | URL): number {
+/**
+ * 解析各接口的自动超时时长（毫秒）。返回 `0` 表示不启用前端自动超时中止。
+ * `/fs/pick_dir` 会阻塞等待用户在系统原生目录对话框中完成选择，绝不能按普通 RPC 15 秒超时掐断，
+ * 否则原生弹窗尚未关闭时前端就会误判失败并叠弹出网页版目录浏览器。
+ */
+export function resolveAutoTimeoutMs(input: RequestInfo | URL): number {
   const path = requestPathname(input);
   if (
     path === '/events' ||
     path === '/chat' ||
     path === '/chat/watch' ||
     path === '/files/upload' ||
+    path === '/fs/pick_dir' ||
     path === '/api/update/execute' ||
     path === '/api/remote-access' ||
     path.startsWith('/api/git/')
@@ -2780,6 +2786,36 @@ export async function pickNativeDirectory(): Promise<{ path: string | null; canc
     throw new Error((e as any).error || `HTTP ${r.status}`);
   }
   return r.json();
+}
+
+/**
+ * 统一的目录选择入口：本机回环呼起系统原生文件夹对话框，远端访问或原生接口报错时回退到网页端目录浏览器。
+ * 通过 `inFlightRef` 防止用户重复点击导致原生弹窗叠开。
+ */
+export async function pickDirectoryWithFallback(opts: {
+  isLoopback: boolean;
+  inFlightRef: { current: boolean };
+  onPicked: (path: string) => void | Promise<void>;
+  onFallback: () => void;
+  pickNative?: () => Promise<{ path: string | null; canceled: boolean }>;
+}): Promise<void> {
+  if (!opts.isLoopback) {
+    opts.onFallback();
+    return;
+  }
+  if (opts.inFlightRef.current) return;
+  opts.inFlightRef.current = true;
+  try {
+    const res = await (opts.pickNative ?? pickNativeDirectory)();
+    if (!res.canceled && res.path) {
+      await opts.onPicked(res.path);
+    }
+  } catch (err) {
+    console.warn('Native folder pick failed:', err);
+    opts.onFallback();
+  } finally {
+    opts.inFlightRef.current = false;
+  }
 }
 
 export type UploadProgress = {
