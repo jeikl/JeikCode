@@ -493,7 +493,7 @@ fn open_in_external_browser(url: &str) {
 }
 
 #[cfg(target_os = "windows")]
-fn ensure_single_instance_windows() -> bool {
+fn ensure_single_instance_windows(start_minimized: bool) -> bool {
     use std::os::windows::ffi::OsStrExt;
 
     #[link(name = "kernel32")]
@@ -532,7 +532,11 @@ fn ensure_single_instance_windows() -> bool {
     const ASFW_ANY: u32 = 0xFFFF_FFFF;
 
     let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 1, mutex_name.as_ptr()) };
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+    if !handle.is_null() && unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        if start_minimized {
+            unsafe { CloseHandle(handle) };
+            return true;
+        }
         unsafe {
             AllowSetForegroundWindow(ASFW_ANY);
             // 触发激活命名事件，由主实例主线程规范执行窗口还原与激活，
@@ -542,6 +546,7 @@ fn ensure_single_instance_windows() -> bool {
                 SetEvent(ev);
                 CloseHandle(ev);
             }
+            CloseHandle(handle);
         }
         return true;
     }
@@ -767,6 +772,8 @@ fn apply_autostart_windows(enabled: bool) -> Result<(), String> {
 
     let subkey = wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let value_name = wide("JeikCode Desktop");
+    // 旧版自启项与当前项同时存在时会在登录时启动两个实例。
+    let legacy_value_name = wide("JeikCodeDesktop");
 
     if !enabled {
         let mut hkey: isize = 0;
@@ -786,11 +793,15 @@ fn apply_autostart_windows(enabled: bool) -> Result<(), String> {
             return Err(format!("RegOpenKeyExW failed ({rc})"));
         }
         let del_rc = unsafe { RegDeleteValueW(hkey, value_name.as_ptr()) };
+        let legacy_rc = unsafe { RegDeleteValueW(hkey, legacy_value_name.as_ptr()) };
         unsafe {
             RegCloseKey(hkey);
         }
         if del_rc != ERROR_SUCCESS && del_rc != ERROR_FILE_NOT_FOUND {
             return Err(format!("RegDeleteValueW failed ({del_rc})"));
+        }
+        if legacy_rc != ERROR_SUCCESS && legacy_rc != ERROR_FILE_NOT_FOUND {
+            return Err(format!("RegDeleteValueW legacy failed ({legacy_rc})"));
         }
         return Ok(());
     }
@@ -857,30 +868,29 @@ fn apply_autostart_windows(enabled: bool) -> Result<(), String> {
         false
     };
 
-    if already_matches {
-        unsafe {
-            RegCloseKey(hkey);
+    if !already_matches {
+        let data = wide(&expected);
+        let data_bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let s_rc = unsafe {
+            RegSetValueExW(
+                hkey,
+                value_name.as_ptr(),
+                0,
+                REG_SZ,
+                data_bytes.as_ptr(),
+                data_bytes.len() as u32,
+            )
+        };
+        if s_rc != ERROR_SUCCESS {
+            unsafe { RegCloseKey(hkey) };
+            return Err(format!("RegSetValueExW failed ({s_rc})"));
         }
-        return Ok(());
     }
-
-    let data = wide(&expected);
-    let data_bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let s_rc = unsafe {
-        RegSetValueExW(
-            hkey,
-            value_name.as_ptr(),
-            0,
-            REG_SZ,
-            data_bytes.as_ptr(),
-            data_bytes.len() as u32,
-        )
-    };
-    unsafe {
-        RegCloseKey(hkey);
-    }
-    if s_rc != ERROR_SUCCESS {
-        return Err(format!("RegSetValueExW failed ({s_rc})"));
+    // 先确保新项有效，再删除旧项，避免迁移失败导致自启丢失。
+    let legacy_rc = unsafe { RegDeleteValueW(hkey, legacy_value_name.as_ptr()) };
+    unsafe { RegCloseKey(hkey) };
+    if legacy_rc != ERROR_SUCCESS && legacy_rc != ERROR_FILE_NOT_FOUND {
+        return Err(format!("RegDeleteValueW legacy failed ({legacy_rc})"));
     }
     Ok(())
 }
@@ -981,15 +991,20 @@ fn watch_desktop_shell_settings(app: tauri::AppHandle, mut applied: ShellSetting
     });
 }
 
+fn is_silent_start(args: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
+    args.into_iter()
+        .any(|arg| matches!(arg.as_ref(), "--minimized" | "--autostart"))
+}
+
 fn main() {
+    let start_minimized = is_silent_start(std::env::args().skip(1));
     #[cfg(target_os = "windows")]
-    if ensure_single_instance_windows() {
+    if ensure_single_instance_windows(start_minimized) {
         return;
     }
 
     let child = Mutex::new(None);
     let webui_origin_slot = Arc::new(Mutex::new(None));
-    let start_minimized = std::env::args().any(|arg| arg == "--minimized");
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -2412,9 +2427,9 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        external_browser_url, extract_webui_url, host_window_away, navigation_action,
-        new_window_action, parse_webui_listen, remember_webui_origin, resolve_desktop_cli,
-        window_url, windows_autostart_command_line, LinkAction, WebuiOrigin,
+        external_browser_url, extract_webui_url, host_window_away, is_silent_start,
+        navigation_action, new_window_action, parse_webui_listen, remember_webui_origin,
+        resolve_desktop_cli, window_url, windows_autostart_command_line, LinkAction, WebuiOrigin,
     };
 
     fn parse_url(raw: &str) -> tauri::Url {
@@ -2433,6 +2448,14 @@ mod tests {
             host: host.to_string(),
             port,
         }
+    }
+
+    #[test]
+    fn recognizes_current_and_legacy_silent_start_arguments() {
+        assert!(is_silent_start(["--minimized"]));
+        assert!(is_silent_start(["--autostart"]));
+        assert!(!is_silent_start(std::iter::empty::<&str>()));
+        assert!(!is_silent_start(["--other"]));
     }
 
     #[test]
