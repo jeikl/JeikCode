@@ -86,11 +86,11 @@ struct QueryCacheKey {
     candidates_enabled: bool,
 }
 
-const QUERY_CACHE_SCHEMA: u16 = 2;
+const QUERY_CACHE_SCHEMA: u16 = 3;
 
 /// Process-wide query-result cache, keyed by [`QueryCacheKey`]. Stores the
-/// **body only** — never Performance / Index Status. Those two lines are
-/// rewritten on every call from this request's wall-clock and `last_stats`.
+/// **body only** — never the Index Status line. That line is rewritten on
+/// every call from this request's `last_stats`.
 static QUERY_RESULT_CACHE: std::sync::LazyLock<RwLock<HashMap<QueryCacheKey, String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 const QUERY_CACHE_MAX_ENTRIES: usize = 128;
@@ -118,7 +118,7 @@ fn is_diagnostic_header(line: &str) -> bool {
         || t.starts_with("> 🔄 **Index Status**")
 }
 
-/// Drop Cost Time / Index Status so the query cache never freezes them.
+/// Drop index-diagnostic headers so the query cache never freezes them.
 fn strip_diagnostic_headers(output: &str) -> String {
     let mut out = String::with_capacity(output.len());
     for line in output.lines() {
@@ -134,38 +134,20 @@ fn strip_diagnostic_headers(output: &str) -> String {
     out
 }
 
-fn format_perf_header(
-    total: Duration,
-    index_t: Duration,
-    ret_t: Duration,
-    ren_t: Duration,
-) -> String {
-    format!(
-        "> ⚡ **Performance**: ⏱️ **Cost Time**: {}ms (Index: {}ms | Retrieval: {}ms | Render: {}ms)\n",
-        total.as_millis(),
-        index_t.as_millis(),
-        ret_t.as_millis(),
-        ren_t.as_millis()
-    )
-}
-
 fn format_index_status_header(stats: Option<&super::index::RefreshStats>) -> String {
-    match stats {
-        Some(stats) => index_status_line(stats),
-        None => "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪\n".to_string(),
-    }
+    stats.map(index_status_line).unwrap_or_default()
 }
 
 /// Label from actual index work, not a reparsed-count threshold.
 ///
 /// `reparsed > 8` used to be printed as `[Cache MISS]` even when 1万+ units were
 /// reused (`kept` huge). That was a 64-file discover cap looking like a cold miss.
+///
+/// A cache hit emits nothing: it carries no decision-relevant information and
+/// repeating it on every call only burns context.
 fn index_status_line(stats: &super::index::RefreshStats) -> String {
     if stats.cache_hit {
-        format!(
-            "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪（复用 {} 个文件单元，0 重建）\n",
-            stats.kept
-        )
+        String::new()
     } else if stats.kept == 0 {
         format!(
             "> 🔄 **Index Status**: [Cache MISS] 全量重建（解析 {} 个文件，移除 {} 个）\n",
@@ -179,21 +161,23 @@ fn index_status_line(stats: &super::index::RefreshStats) -> String {
     }
 }
 
-/// Prepend this-request diagnostic headers onto a cached (header-less) body.
+/// Prepend this-request Index Status onto a cached (header-less) body.
+///
+/// Only a non-cached refresh carries information the model needs (results may
+/// be incomplete). Timing and Cache HIT lines are telemetry, not context.
 fn with_fresh_diagnostic_headers(
     body: &str,
-    cost: (Duration, Duration, Duration, Duration),
+    _cost: (Duration, Duration, Duration, Duration),
     stats: Option<&super::index::RefreshStats>,
 ) -> String {
-    let (total, index_t, ret_t, ren_t) = cost;
-    let mut out = String::with_capacity(body.len() + 256);
-    out.push_str(&format_perf_header(total, index_t, ret_t, ren_t));
-    out.push('\n');
-    out.push_str(&format_index_status_header(stats));
-    if !body.is_empty() {
-        out.push('\n');
-        out.push_str(body);
+    let header = format_index_status_header(stats);
+    if header.is_empty() {
+        return body.to_string();
     }
+    let mut out = String::with_capacity(body.len() + header.len() + 2);
+    out.push_str(&header);
+    out.push('\n');
+    out.push_str(body);
     out
 }
 
@@ -482,7 +466,10 @@ impl Tool for CodeExploreTool {
     fn description(&self) -> &str {
         "Retrieve code call relationships and business flows using a semantic code graph, supporting natural-language queries in Chinese and English. \
          Use to trace how business keywords, comments, or symbols operate across the codebase, as well as tracking call chains, variable references, and logic flows. \
-         For a field or identifier (e.g. `turn_cached_tokens`), lists definition and likely write/use sites before the call graph."
+         For a field or identifier (e.g. `turn_cached_tokens`), lists definition and likely write/use sites before the call graph. \
+         Strategy: a ranked result is not exhaustive — if the hit count is low, retry with synonyms, English terms, or a wider path before concluding absence. \
+         Trait/interface/type-alias hits are declarations, not behavior; query `impl <name>` for implementations. \
+         Prefer a directory or module as `path`; use `read` to inspect a single file."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -854,11 +841,7 @@ impl CodeExploreTool {
                  - Diagnostic Assessment:\n\
                  {}  * Scope file(s) contained {} AST symbols in memory.\n\
                    * None of the symbols/comments matched query tokens with threshold >= 12.0.\n\
-                 👉 Suggested follow-ups (do at least one before concluding absence):\n\
-                    1. Retry with synonyms / English terms / a shorter keyword (thesaurus pairs).\n\
-                    2. Drop `path:`/`kind:`/`name:` filters or widen the scope.\n\
-                    3. `read` the directory for the real file list, then `grep` likely names.\n\
-                    4. Grep the workspace for likely identifiers.",
+                 👉 Before concluding absence: retry with synonyms / English / a wider path, or grep likely identifiers.",
                 a.query,
                 scope_desc,
                 files_in_scope.len(),
@@ -2839,22 +2822,6 @@ fn collect_identifier_hits(
     hits
 }
 
-fn grep_query_terms(tokens: &SearchTokens) -> Vec<String> {
-    let mut terms: Vec<String> = Vec::new();
-    for id in &tokens.code_identifiers {
-        if id.len() >= 3 && !terms.contains(id) {
-            terms.push(id.clone());
-        }
-    }
-    for w in &tokens.words {
-        if w.len() >= 4 && !terms.contains(w) {
-            terms.push(w.clone());
-        }
-    }
-    terms.truncate(6);
-    terms
-}
-
 fn fold_snippet(
     lines: &[&str],
     start_line: usize,
@@ -2874,9 +2841,9 @@ fn fold_snippet(
         let folded_count = tail_start.saturating_sub(head_end + 1);
         if folded_count > 0 {
             snippet.push(format!(
-                "...\t// ... [{folded_count} lines folded; use read(\"{rel_path}\", start_line={}, end_line={}) to view full body] ...",
+                "...\t// ... [{folded_count} lines folded; read {rel_path} offset={} limit={} for the full body] ...",
                 head_end + 1,
-                tail_start.saturating_sub(1)
+                folded_count
             ));
         }
         for l in tail_start..=end_line {
@@ -2943,7 +2910,7 @@ fn render_explore_output(
     tokens: &SearchTokens,
     dirindex: Option<&super::retrieval::DirIndex>,
     cache_status: Option<super::index::RefreshStats>,
-    cost_breakdown: Option<(Duration, Duration, Duration, Duration)>,
+    _cost_breakdown: Option<(Duration, Duration, Duration, Duration)>,
 ) -> String {
     let mut out = Vec::new();
     let top_files = &candidates[..candidates.len().min(max_files)];
@@ -2951,41 +2918,12 @@ fn render_explore_output(
     let evidence_file_set: HashSet<&Path> = evidence.iter().map(|e| e.fc.file.as_path()).collect();
     let hit_paths: Vec<&Path> = top_files.iter().map(|fc| fc.file.as_path()).collect();
 
-    if let Some((total, index_t, ret_t, ren_t)) = cost_breakdown {
-        out.push(format!(
-            "> ⚡ **Performance**: ⏱️ **Cost Time**: {}ms (Index: {}ms | Retrieval: {}ms | Render: {}ms)\n",
-            total.as_millis(),
-            index_t.as_millis(),
-            ret_t.as_millis(),
-            ren_t.as_millis()
-        ));
-    }
-
     if let Some(stats) = cache_status {
-        out.push(index_status_line(&stats));
-    } else {
-        out.push("> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪\n".to_string());
+        let status = index_status_line(&stats);
+        if !status.is_empty() {
+            out.push(status);
+        }
     }
-
-    let has_contract = top_files.iter().take(4).any(|fc| {
-        fc.symbols.iter().take(4).any(|s| {
-            matches!(
-                s.node.kind,
-                SymbolKind::Trait | SymbolKind::Interface | SymbolKind::TypeAlias
-            )
-        })
-    });
-    let low_hit = !candidates.is_empty() && candidates.len() < 3;
-    let grep_terms = grep_query_terms(tokens);
-    let grep_pat = if grep_terms.is_empty() {
-        query.split_whitespace().next().unwrap_or(query).to_string()
-    } else {
-        grep_terms.join("|")
-    };
-    let scope_disp = scope
-        .map(|sc| rel_disp(sc, root))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| ".".to_string());
 
     let workspace_files = graph.file_symbols.len();
     let workspace_syms = graph.nodes.len();
@@ -3042,109 +2980,13 @@ fn render_explore_output(
     let spine_shown = business_hops.len();
     let spine_total = flow_spine.len();
 
-    let mut warn: Vec<String> = Vec::new();
-    warn.push("⛔ DO NOT conclude absence. Ranked ≠ exhaustive.".to_string());
-    if let Some(sc) = scope {
-        let scope_disp_warn = rel_disp(sc, root);
-        let outside_syms = workspace_syms.saturating_sub(scope_syms);
-        warn.push(format!(
-            "🔭 scope `{scope_disp_warn}`: in-scope {scope_files} of {workspace_files} indexed files · {scope_syms}/{workspace_syms} symbols — {outside_syms} OUTSIDE not ranked (SIBLING layers)"
-        ));
-    }
-    if has_contract {
-        warn.push("🧩 Contract hit (trait/interface/type-alias) = DECLARATION, not behavior. Query `impl <name>` / grep `impl <name>`.".to_string());
-    }
-    if low_hit {
-        warn.push("🎯 Low hit count (<3 files): WEAK signal. Retry with synonyms / English / wider path before judging.".to_string());
-    }
-
-    let mut next: Vec<String> = Vec::new();
-    let mut n = 1usize;
-    if let Some(first) = evidence.first() {
-        let rel = rel_disp(&first.fc.file, root);
-        let parent = first
-            .fc
-            .file
-            .parent()
-            .map(|p| rel_disp(p, root))
-            .unwrap_or_else(|| scope_disp.clone());
-        next.push(format!(
-            "{n}. code_explore  path={parent}  query={}",
-            first.sym.node.name
-        ));
-        n += 1;
-        if first
-            .sym
-            .node
-            .end_line
-            .saturating_sub(first.sym.node.start_line)
-            + 1
-            > FOLD_AFTER_LINES
-        {
-            next.push(format!(
-                "{n}. read  {rel}  offset={}  limit=100 (inspect targeted slice around symbol)",
-                first.sym.node.start_line
-            ));
-            n += 1;
-        }
-    } else if !candidates.is_empty() {
-        next.push(format!(
-            "{n}. code_explore  path={scope_disp}  query={query}  (retry synonyms / broader path — CATALOG is not absence)"
-        ));
-        n += 1;
-    }
-    if has_contract {
-        if let Some(name) = top_files.iter().find_map(|fc| {
-            fc.symbols.iter().find_map(|s| {
-                matches!(
-                    s.node.kind,
-                    SymbolKind::Trait | SymbolKind::Interface | SymbolKind::TypeAlias
-                )
-                .then_some(s.node.name.as_str())
-            })
-        }) {
-            next.push(format!(
-                "{n}. code_explore  path={scope_disp}  query=impl {name}"
-            ));
-            n += 1;
-        }
-    }
-    let _ = n;
-
     let mut card = Vec::new();
     card.push(format!(
-        "> 📊 **Coverage** evidence {}/{} files · catalog {}/{} · omitted-sym {omitted_symbols} · spine {spine_shown}/{spine_total} hops",
+        "> 📊 **Coverage** evidence {}/{} files",
         evidence_file_set.len(),
         candidates.len(),
-        candidates.len().min(max_files.saturating_add(MAX_CATALOG_REMAINING)),
-        candidates.len(),
     ));
-    if let Some(sc) = scope {
-        let sd = rel_disp(sc, root);
-        card.push(format!(
-            ">    scope `{sd}`: in-scope {scope_files} of {workspace_files} indexed files · {scope_syms}/{workspace_syms} symbols"
-        ));
-    } else {
-        card.push(format!(
-            ">    workspace: {workspace_files} indexed files · {workspace_syms} symbols"
-        ));
-    }
-    for w in &warn {
-        card.push(format!("> {w}"));
-    }
-    card.push("> **NEXT** (copy as tool calls, in order):".to_string());
-    if next.is_empty() {
-        card.push(format!(
-            "> 1. code_explore  path={scope_disp}  query={query}  (retry synonyms / English / broader path)"
-        ));
-        card.push(format!(
-            "> 2. grep  pattern={grep_pat}  path={scope_disp}  (literals only)"
-        ));
-    } else {
-        for step in &next {
-            card.push(format!("> {step}"));
-        }
-    }
+    card.push("> Ranked ≠ exhaustive — do not conclude absence.".to_string());
     let coverage_idx = out.len();
     out.extend(card);
     out.push("".to_string());
@@ -3175,13 +3017,7 @@ fn render_explore_output(
                 h.line
             ));
         }
-        out.push(format!(
-            "> Next: grep  pattern={}  path={}  (literal occurrences, including assignments)\n",
-            idents.first().copied().unwrap_or(query),
-            scope
-                .map(|s| rel_disp(s, root))
-                .unwrap_or_else(|| ".".to_string())
-        ));
+        out.push(String::new());
     }
 
     out.push(format!("### 🔗 LAYERS: \"{query}\""));
@@ -3276,7 +3112,7 @@ fn render_explore_output(
         if evidence_chars >= EVIDENCE_BUDGET_CHARS {
             let rel = rel_disp(&e.fc.file, root);
             out.push(format!(
-                "> budget full — skipped `{}` in `{rel}`. NEXT: read  {rel}  offset={}",
+                "> budget full — omitted `{}` in `{rel}` (L{})",
                 e.sym.node.name, e.sym.node.start_line
             ));
             continue;
@@ -3306,7 +3142,7 @@ fn render_explore_output(
             let already_sent = sent_list.iter().any(|(s, en)| *s <= start && end <= *en);
             if already_sent {
                 out.push(format!(
-                    "> `[Same range already returned earlier this session (dedup): {rel_path} L{start}-L{end} (`{}`) — use read  {rel_path}  offset={start}]`\n",
+                    "> `[Same range already returned earlier this session (dedup): {rel_path} L{start}-L{end} (`{}`)]`\n",
                     e.sym.node.name
                 ));
             } else {
@@ -3332,7 +3168,7 @@ fn render_explore_output(
         .filter(|c| !evidence_file_set.contains(c.file.as_path()))
         .collect();
     if !catalog_rest.is_empty() {
-        out.push("\n**CATALOG (not rendered — `read` a listed FILE; `code_explore` the PARENT DIRECTORY with the symbol as query, never the file path):**".to_string());
+        out.push("\n**CATALOG (files not rendered — prefer a directory/module as `path`; use `read` for a single file):**".to_string());
         for (i, c) in catalog_rest.iter().take(MAX_CATALOG_REMAINING).enumerate() {
             let rel = rel_disp(&c.file, root);
             let layer = c
@@ -3460,14 +3296,24 @@ fn render_explore_output(
         }
         if skipped_foreign > 0 {
             out.push(format!(
-                ">   SIBLING/foreign graph-links ignored (same-name noise): {skipped_foreign} dirs — do not treat as searched"
+                ">   foreign graph-links skipped (same-name noise): {skipped_foreign} dirs"
             ));
         }
     }
 
     let remaining_listed = catalog_rest.len().min(MAX_CATALOG_REMAINING);
+    let scope_part = match scope {
+        Some(sc) => {
+            let sd = rel_disp(sc, root);
+            let outside_syms = workspace_syms.saturating_sub(scope_syms);
+            format!(
+                "  scope `{sd}`: in-scope {scope_files} of {workspace_files} indexed files · {scope_syms}/{workspace_syms} symbols — {outside_syms} OUTSIDE not ranked"
+            )
+        }
+        None => format!("  workspace: {workspace_files} indexed files · {workspace_syms} symbols"),
+    };
     let coverage = format!(
-        "> 📊 **Coverage** evidence {ev}/{total} files · catalog listed {listed} remaining · omitted-sym {omitted_symbols} · {folded} span(s) folded ({folded_lines} lines) · spine {spine_shown}/{spine_total} hops · {adjacent} adjacent dir(s) in 📁",
+        "> 📊 **Coverage** evidence {ev}/{total} files{scope_part} · catalog listed {listed} remaining · omitted-sym {omitted_symbols} · {folded} span(s) folded ({folded_lines} lines) · spine {spine_shown}/{spine_total} hops · {adjacent} adjacent dir(s) in 📁",
         ev = evidence_file_set.len(),
         total = candidates.len(),
         listed = remaining_listed,
@@ -3627,7 +3473,14 @@ mod tests {
             out.contains("spine 0/0 hops"),
             "spine counts missing:\n{out}"
         );
-        assert!(out.contains("**NEXT**"), "work-order NEXT missing:\n{out}");
+        assert!(
+            !out.contains("**NEXT**"),
+            "work-order NEXT must stay out of the result:\n{out}"
+        );
+        assert!(
+            out.contains("Ranked ≠ exhaustive"),
+            "boundary statement missing:\n{out}"
+        );
         assert!(out.contains("EVIDENCE"), "evidence section missing:\n{out}");
     }
 
@@ -3690,8 +3543,9 @@ mod tests {
         );
         assert!(out.contains("CATALOG"), "catalog section missing:\n{out}");
         assert!(
-            out.contains("PARENT DIRECTORY") && !out.contains("copy path into read / code_explore"),
-            "catalog must not tell the model to pass a file path to code_explore:\n{out}"
+            out.contains("prefer a directory/module as `path`")
+                && !out.contains("copy path into read / code_explore"),
+            "catalog must steer `path` to a directory, not a raw file path:\n{out}"
         );
         assert!(
             out.contains("hidden_8.rs"),
@@ -3909,7 +3763,7 @@ mod tests {
     }
 
     #[test]
-    fn render_explore_output_surfaces_scope_contract_and_low_hit_hints() {
+    fn render_explore_output_keeps_facts_and_drops_work_orders() {
         use super::super::graph::{SymbolKind, Visibility};
 
         let mut graph = CodeGraph::new();
@@ -3956,26 +3810,35 @@ mod tests {
             None,
             None,
         );
-        assert!(out.contains("🔭 scope"), "scope hint missing:\n{out}");
         assert!(
-            out.contains("SIBLING layers"),
-            "sibling-layers hint missing:\n{out}"
+            out.contains("scope `crates/kernel/src`"),
+            "scope coverage missing:\n{out}"
         );
         assert!(
-            out.contains("🧩 Contract hit"),
-            "contract hint missing:\n{out}"
+            out.contains("OUTSIDE not ranked"),
+            "outside-scope boundary missing:\n{out}"
         );
         assert!(
-            out.contains("`impl <name>`"),
-            "impl-follow-up hint missing:\n{out}"
+            !out.contains("🧩 Contract hit"),
+            "contract work-order must stay out:\n{out}"
         );
         assert!(
-            out.contains("🎯 Low hit count"),
-            "low-hit hint missing:\n{out}"
+            !out.contains("`impl <name>`"),
+            "impl work-order must stay out:\n{out}"
         );
-        assert!(out.contains("**NEXT**"), "work-order NEXT missing:\n{out}");
-        // Contract hint must NOT fire when the top symbol is not a contract (function here),
-        // while the low-hit hint still fires (1 candidate).
+        assert!(
+            !out.contains("🎯 Low hit count"),
+            "low-hit work-order must stay out:\n{out}"
+        );
+        assert!(
+            !out.contains("**NEXT**"),
+            "work-order NEXT must stay out:\n{out}"
+        );
+        assert!(
+            out.contains("Ranked ≠ exhaustive"),
+            "boundary statement missing:\n{out}"
+        );
+        // A non-contract top symbol still renders the same facts; only behavior differs.
         let func_node = SymbolNode {
             id: 2,
             name: "run_turn".into(),
@@ -4017,11 +3880,11 @@ mod tests {
         );
         assert!(
             !no_contract.contains("🧩 Contract hit"),
-            "contract hint should not fire for a function:\n{no_contract}"
+            "contract work-order should not fire for a function:\n{no_contract}"
         );
         assert!(
-            no_contract.contains("🎯 Low hit count"),
-            "low-hit should still fire:\n{no_contract}"
+            !no_contract.contains("🎯 Low hit count"),
+            "low-hit work-order should not fire either:\n{no_contract}"
         );
     }
 
@@ -4267,7 +4130,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_headers_use_this_request_stats_not_cached_snapshot() {
+    fn fresh_headers_emit_only_a_non_cached_index_status() {
         let body = "cached body\n";
         let hit = super::super::index::RefreshStats {
             reparsed: 0,
@@ -4276,7 +4139,7 @@ mod tests {
             cache_hit: true,
             ..Default::default()
         };
-        let out = with_fresh_diagnostic_headers(
+        let hit_out = with_fresh_diagnostic_headers(
             body,
             (
                 Duration::from_millis(40),
@@ -4286,13 +4149,35 @@ mod tests {
             ),
             Some(&hit),
         );
-        assert!(out.contains("Cost Time**: 40ms"), "{out}");
-        assert!(out.contains("Index: 30ms"), "{out}");
-        assert!(out.contains("Retrieval: 0ms"), "{out}");
-        assert!(out.contains("[Cache HIT]"), "{out}");
-        assert!(out.contains("复用 12168 个文件单元"), "{out}");
-        assert!(!out.contains("增量补丁"), "{out}");
-        assert!(out.contains("cached body"), "{out}");
+        assert_eq!(hit_out, body, "cache hits must not prepend any header");
+
+        let incremental = super::super::index::RefreshStats {
+            reparsed: 2,
+            removed: 0,
+            kept: 12166,
+            cache_hit: false,
+            ..Default::default()
+        };
+        let incremental_out = with_fresh_diagnostic_headers(
+            body,
+            (
+                Duration::from_millis(40),
+                Duration::from_millis(30),
+                Duration::from_millis(0),
+                Duration::from_millis(0),
+            ),
+            Some(&incremental),
+        );
+        assert!(
+            incremental_out.contains("[Incremental]"),
+            "{incremental_out}"
+        );
+        assert!(
+            !incremental_out.contains("Performance"),
+            "{incremental_out}"
+        );
+        assert!(!incremental_out.contains("Cost Time"), "{incremental_out}");
+        assert!(incremental_out.contains("cached body"), "{incremental_out}");
     }
 
     #[test]
@@ -4325,7 +4210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identical_query_rewrites_frozen_incremental_headers() {
+    async fn identical_query_reuses_cached_body_without_frozen_headers() {
         use jeikcode_kernel::tool::{ProgressSink, Tool, ToolContext};
         use tokio_util::sync::CancellationToken;
 
@@ -4354,8 +4239,8 @@ mod tests {
         let second = tool.execute(args, &ctx).await;
         assert!(!second.is_error, "{}", second.content);
         assert!(
-            second.content.contains("[Cache HIT]"),
-            "second identical query must rewrite Index Status from this restat, not freeze 增量补丁:\n{}",
+            !second.content.contains("Index Status"),
+            "cached body must not carry a frozen index header:\n{}",
             second.content
         );
         assert!(
@@ -4364,8 +4249,13 @@ mod tests {
             second.content
         );
         assert!(
-            second.content.contains("Retrieval: 0ms"),
-            "query-cache HIT must skip scoring:\n{}",
+            !second.content.contains("Performance"),
+            "timing telemetry must stay out of the result:\n{}",
+            second.content
+        );
+        assert!(
+            second.content.contains("cached_symbol"),
+            "cached body must still carry the evidence:\n{}",
             second.content
         );
         query_cache_clear();
@@ -4721,8 +4611,7 @@ mod tests {
             "foreign same-name graph dir must not be listed as searched:\n{out}"
         );
         assert!(
-            out.contains("SIBLING/foreign graph-links ignored")
-                || out.contains("foreign graph-links ignored"),
+            out.contains("foreign graph-links skipped"),
             "foreign skip must be explicit:\n{out}"
         );
         let _ = Visibility::Public;
