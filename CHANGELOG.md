@@ -21,6 +21,66 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.4 (2026-11-27)
+
+**v7.5.4 consolidates the entire beta.1 through beta.5 line on top of v7.5.3. It streamlines model reasoning and code search with YAML-only prompt defaults, the `<command_execution>` tuning block, and fact-only `code_explore` output; stabilizes long agentic sessions with reasoning-aware compaction and compaction-protected session ID injection; enforces reversible desktop CLI ownership (#114); upgrades the WebUI editor, right preview/diff routing, elapsed badges, notice reconciliation, and folder pickers; and fixes multi-workspace file browsing on `--dir`-bound remote daemons.**
+
+- **[Prompts & Code Intelligence] Faster model reasoning and minimal search results**:
+  - `assets/prompts/*.yaml` is now the single default prompt source (with user `rules.yaml` override), removing compiled-in prompt fallbacks and legacy `<asking_user>` instructions.
+  - Added the `<command_execution>` system block with tool-execution tuning examples to cut unnecessary existence probes, whole-workspace scans, and repeated confirmations.
+  - Simplified `code_explore` results to pure facts and boundaries (evidence spans, call spine, identifier sites, coverage line, and boundary notice), moving workflow strategy into the tool description and fixing folded-span `read` offsets.
+
+- **[Kernel & Compaction] Accurate wire token budgeting and stable escalation**:
+  - Excluded unsent historical reasoning from prompt token and utilization estimates whenever `reasoning_history` excludes history, preventing false compaction thrashing far below the context window.
+  - Synchronized automatic compaction pressure between continuation checks and compaction planning, raised the stub rewrite minimum size to eliminate nested stubs, and ensured pre-send overflow recovery escalates cleanly across all tiers.
+  - File-creating `write` tool responses now attach presentation-only unified diffs while stripping them before reaching model prompts.
+
+- **[Session & Daemon] Multi-workspace explorer fix, session ID injection, and unified activity clock**:
+  - Resolved per-workspace ignore roots and prefix boundaries in `/fs/tree` and `/fs/list` so browsing any workspace outside a daemon's `--dir` startup directory works reliably without backend panics or host-connection errors.
+  - Injected the current session ID once into the compaction-protected opening user turn (with one-time backfill for legacy/forked sessions) while filtering it out of UI bubbles, titles, and prompt unwrapping.
+  - Unified `SessionMeta.updated_at` as the single user-perceived activity timestamp across the WebUI sidebar, `/sessions`, OpenAI/Anthropic-compatible endpoints, and TUI `/session` history.
+
+- **[Desktop & CLI] Reversible CLI ownership and local WebView authorization (#114)**:
+  - Stopped deleting or killing `~/.local/bin/jeikcode` by path; desktop launches now strictly use the bundled CLI engine, and `jeikcode self status|install-cli|uninstall-cli` manages terminal CLI installation with explicit user confirmation, SHA-256 verification, atomic swaps, and safe PATH integration.
+  - Authorized desktop application commands for the loopback daemon WebUI origin in Tauri ACL permissions, and replaced the obsolete legacy migration flow.
+
+- **[WebUI] Soft-wrapped editor, smart diff/preview routing, and timeline stability**:
+  - Added soft wrapping with line-anchor alignment, WebView2 bottom scroll/selection parity, single-vertical-scrollbar Markdown previews, and configurable Preview vs. Diff opening in the center stage and right inspector (#112).
+  - Kept completed turn elapsed-duration badges visible during active runs, anchored unpersisted local system notices while pruning out-of-window historical markers, disabled spurious 15-second timeouts and re-entry on native folder selection, and rebalanced tool-row accents.
+
+- **[Providers, Platform & CI] DeepSeek V4 protocol and single-source build matrix**:
+  - Updated `deepseek-flash` and model documentation to the V4 protocol, consolidated multi-platform CI/release matrices under `scripts/platforms.json` with `setup-qemu` Linux arm64 smoke verification, and accelerated Rust CI checks.
+
+---
+
+**v7.5.4 正式版完整汇总了 v7.5.3 之后的 beta.1 至 beta.5 迭代成果：提示词收敛为纯 YAML 默认源并加入 `<command_execution>` 推理调优，简化 `code_explore` 为纯事实输出；修复排除思考历史时的 Token 估算与上下文压缩抖动，并加入受压缩保护的会话 ID 单次注入；彻底重写桌面与终端 CLI 归属管理（#114）；带来编辑器软换行与智能差异预览路由、耗时徽章与通知防堆叠修复、原生目录选框优化，以及 `--dir` 远程守护进程跨工作区文件浏览崩溃修复。**
+
+- **[提示词与代码检索] 精简思考开销与纯事实检索结果**：
+  - 提示词统一改由 `assets/prompts/*.yaml` 作为唯一默认源（保留用户 `rules.yaml` 覆盖），移除编译期兜底文案及冗余提问规则。
+  - 新增 `<command_execution>` 系统块与工具调用调优指引，减少无意义的前置存在性探测、全盘扫描与重复确认。
+  - `code_explore` 输出收敛为纯事实与边界声明，将工作流策略迁入工具描述，并修正折叠代码段的 `read` 分页参数。
+
+- **[内核与上下文压缩] 精准出站 Token 估算与逐级压缩收敛**：
+  - 当模型配置排除思考历史时，出站提示词估算与水位判定自动扣除未发送的历史思考内容，杜绝远未达窗口上限时的假性反复压缩。
+  - 统一自动压缩与继跑检查的压力口径，提升存根改写最小体积阈值以防嵌套重折，并打通发送前溢出恢复的逐级升级链路。
+  - 新建文件的 `write` 工具响应同步附带人类可读的展示 diff，并在送入模型上下文前自动剥离。
+
+- **[会话与服务端] 跨工作区文件树修复、会话 ID 注入与统一活跃时钟**：
+  - 修复 `--dir` 绑定默认目录后在资源管理器切换浏览其他工作区触发跨根目录 panic 导致“连接宿主机后端失败”的问题，为每个工作区独立解析自身仓库或目录基准。
+  - 在受压缩保护的首轮提问日期下方一次性注入当前会话 ID（兼容旧会话/分叉会话自动补全），同时在界面气泡、自动命名与提示剥离中保持无感隐藏。
+  - 统一 `SessionMeta.updated_at` 作为 WebUI 侧栏、`/sessions`、兼容 API 与 TUI `/session` 列表的唯一用户活跃时间戳。
+
+- **[桌面与 CLI] 可逆的终端 CLI 归属管理与桌面 ACL 授权（#114）**：
+  - 彻底移除按 `~/.local/bin/jeikcode` 路径删除或强杀用户二进制的逻辑；桌面端严格运行应用内置引擎，并通过独立设置卡片与原子安装/卸载/SHA-256 校验与显式确认安全管理终端 CLI。
+  - 授权 Tauri 桌面外壳访问回环 daemon WebUI 的应用命令权限，移除旧版遗留迁移弹窗。
+
+- **[WebUI] 编辑器软换行、智能差异预览与时间线稳定**：
+  - 为主编辑器与右侧预览面板引入软换行、WebView2 选区/滚动底部对齐、单向纵向滚动预览，以及可配置的新修改文件预览/diff 智能打开路由（#112）。
+  - 运行新回合期间保留已完成历史回合的耗时徽章，按锚点就位并裁剪越窗系统通知以防底部堆叠，解除原生文件夹选择器的 15 秒误超时并支持防重入，同步优化工具行参数配色。
+
+- **[Provider、平台与 CI] DeepSeek V4 协议与单一平台矩阵**：
+  - `deepseek-flash` 与对应配置文档同步更新至 V4 协议；全平台构建与发布矩阵收敛至单一配置源并修复 arm64 qemu 发布冒烟测试，大幅提升 CI 验证速度。
+
 ## v7.5.4-beta.5 (2026-11-26)
 
 - **[Daemon] Workspace-independent file explorer directory listing**:
