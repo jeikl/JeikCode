@@ -127,7 +127,7 @@ impl AddForm {
     /// api key (only for keyed presets).
     fn fields(&self) -> Vec<FormField> {
         let mut v = vec![FormField::Name, FormField::Preset, FormField::BaseUrl];
-        if !matches!(self.preset().auth_kind, provider_preset::AuthKind::None) {
+        if matches!(self.preset().auth_kind, provider_preset::AuthKind::ApiKey) {
             v.push(FormField::ApiKey);
         }
         v
@@ -214,7 +214,7 @@ impl EditForm {
             v.push(FormField::Preset);
         }
         v.push(FormField::BaseUrl);
-        if !matches!(self.preset().auth_kind, provider_preset::AuthKind::None) {
+        if matches!(self.preset().auth_kind, provider_preset::AuthKind::ApiKey) {
             v.push(FormField::ApiKey);
         }
         v
@@ -264,9 +264,9 @@ fn account_needs_key(config: &Config, account_id: &str) -> bool {
         Some(a) => a.api_key.as_deref().unwrap_or("").trim().is_empty(),
         // Not yet configured (a preset-vendor quick-add) — needs a key iff the
         // preset is keyed (account_id == preset id).
-        None => !matches!(
+        None => matches!(
             provider_preset::preset_or_compatible(account_id).auth_kind,
-            provider_preset::AuthKind::None
+            provider_preset::AuthKind::ApiKey
         ),
     }
 }
