@@ -18343,18 +18343,43 @@ fn merge_background_only_sessions(sessions: &mut Vec<crate::session::SessionMeta
             continue;
         }
         let session = &slot.session;
+        // 与 WebUI / 目录扫描同一真相：优先读磁盘 meta。内存投影会在 agent
+        // 中途被 `touch()`，不能作为历史列表的时间来源；仅当会话尚未落盘时
+        // （新建、尚未 flush）才退回内存值。
+        let disk_meta =
+            jeikcode_capabilities::session::SessionManager::for_project(&slot.working_dir)
+                .read_meta(&session.id)
+                .ok();
         sessions.push(crate::session::SessionMeta {
             id: session.id.clone(),
-            name: session.name.clone(),
+            name: disk_meta
+                .as_ref()
+                .map(|meta| meta.name.clone())
+                .unwrap_or_else(|| session.name.clone()),
             project_bucket: bucket.clone(),
             working_dir: slot.working_dir.clone(),
-            created_at: session.created_at,
-            updated_at: session.updated_at,
-            message_count: session.messages.len(),
+            created_at: disk_meta
+                .as_ref()
+                .map(|meta| meta.created_at)
+                .unwrap_or(session.created_at),
+            updated_at: disk_meta
+                .as_ref()
+                .map(|meta| meta.updated_at)
+                .unwrap_or(session.updated_at),
+            message_count: disk_meta
+                .as_ref()
+                .map(|meta| meta.message_count as usize)
+                .unwrap_or(session.messages.len()),
             file_size: 0,
             fork_root_id: None,
         });
     }
+    // 同一真相字段排序：最近活跃在前（目录扫描已排序，这里只归位内存补充行）。
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 fn install_pending_session_picker(app: &mut App, ctx: &mut LoopCtx, renderer: &mut dyn Renderer) {

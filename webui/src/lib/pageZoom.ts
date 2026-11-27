@@ -86,6 +86,10 @@ export function changeEditorFontSize(delta: number): number {
   } catch {}
   document.documentElement.style.setProperty('--app-editor-font-size', `${next}px`);
   document.documentElement.style.setProperty('--app-editor-line-height', `${Math.round(next * 1.54)}px`);
+  // 行高是全局共享的：广播给所有已挂载的编辑器，让目标行高亮带等定位同步重算。
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('jeikcode:editor_font_change', { detail: next }));
+  }
   return next;
 }
 

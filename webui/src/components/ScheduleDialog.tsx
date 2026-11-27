@@ -13,7 +13,7 @@ import {
   toggleSchedule,
   runScheduleNow,
   sendScheduleAiDialog,
-  pickNativeDirectory,
+  pickDirectoryWithFallback,
 } from '../api';
 import { useT } from '../settings';
 import { Select, SelectOption } from './Select';
@@ -210,6 +210,7 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
   const [runningNow, setRunningNow] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ScheduleTask | null>(null);
   const [cwdPickerOpen, setCwdPickerOpen] = useState(false);
+  const nativePickPendingRef = useRef(false);
 
   const defaultWorkspace = useMemo(() => {
     if (currentCwd && currentCwd.trim()) return currentCwd.trim();
@@ -435,20 +436,15 @@ export function ScheduleDialog({ projects, currentCwd, onClose }: ScheduleDialog
   ], [t]);
 
   // 弹出工作区选择器：本地回环直接呼起原生目录选择器，异地/失败时呼起 CwdPicker (仅赋值给任务本身，绝不写入侧栏)
-  const handlePickIsolatedWorkspace = async () => {
-    if (!isLoopbackHost(window.location.hostname)) {
-      setCwdPickerOpen(true);
-      return;
-    }
-    try {
-      const res = await pickNativeDirectory();
-      if (!res.canceled && res.path) {
-        setForm((prev) => ({ ...prev, cwd: stripExtendedPathPrefix(res.path!) }));
-      }
-    } catch {
-      setCwdPickerOpen(true);
-    }
-  };
+  const handlePickIsolatedWorkspace = () =>
+    pickDirectoryWithFallback({
+      isLoopback: isLoopbackHost(window.location.hostname),
+      inFlightRef: nativePickPendingRef,
+      onPicked: (path) => {
+        setForm((prev) => ({ ...prev, cwd: stripExtendedPathPrefix(path) }));
+      },
+      onFallback: () => setCwdPickerOpen(true),
+    });
 
   const handleAddTimePoint = () => {
     const clean = newTimeInput.trim();

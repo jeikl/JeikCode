@@ -512,6 +512,9 @@ impl LlmProvider for MeteredProvider {
     fn context_window(&self) -> u32 {
         self.inner.context_window()
     }
+    fn excludes_reasoning_history(&self) -> bool {
+        self.inner.excludes_reasoning_history()
+    }
     fn bind_session_id(&self, session_id: &str) {
         self.inner.bind_session_id(session_id);
     }

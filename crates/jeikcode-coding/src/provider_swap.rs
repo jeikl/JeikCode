@@ -189,6 +189,10 @@ impl LlmProvider for SwappableProvider {
         self.current().context_window()
     }
 
+    fn excludes_reasoning_history(&self) -> bool {
+        self.current().excludes_reasoning_history()
+    }
+
     fn bind_session_id(&self, session_id: &str) {
         // A rebuild re-binds on the same parts; only the first id is canonical,
         // but the current inner provider must still receive it every time.

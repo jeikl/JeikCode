@@ -227,8 +227,10 @@ async fn full_assembly_lifecycle() {
         // independent synthetic user message is created.
         let tail = &first.last().unwrap().text;
         assert!(
-            tail.starts_with("the first task") && tail.contains("Current date"),
-            "date reminder belongs to the real query block: {:?}",
+            tail.starts_with("the first task")
+                && tail.contains("Current date")
+                && tail.contains(&format!("Current session ID: {session_id} — ")),
+            "date and one-shot session-id reminder belong to the real query block: {:?}",
             shape()
         );
     }
@@ -299,6 +301,15 @@ async fn full_assembly_lifecycle() {
             "incl. the respawned turn"
         );
         assert!(first.iter().any(|m| m.text.starts_with("the second task")));
+        let sid_needle = format!("Current session ID: {session_id} — ");
+        let sid_hits = first
+            .iter()
+            .filter(|m| m.text.contains(&sid_needle))
+            .count();
+        assert_eq!(
+            sid_hits, 1,
+            "session-id reminder must appear exactly once across the resumed history"
+        );
         // Each REQUIRED System block is injected exactly once on resume (reconcile in
         // place — no duplication). Assert by uniqueness of the block markers instead of
         // a magic total: the block set grows as new discipline blocks land.

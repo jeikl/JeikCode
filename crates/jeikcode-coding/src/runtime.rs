@@ -808,7 +808,7 @@ fn try_spawn_ai_session_title(
                     }
                     let old_name = std::mem::replace(&mut meta.name, generated_name.clone());
                     meta.ai_named = true;
-                    meta.updated_at = jeikcode_capabilities::session::now_ms();
+                    // 自动命名属于助手侧活动，不得刷新侧栏活跃时间。
                     Some(old_name)
                 });
             }
@@ -3130,7 +3130,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                     }
                                     let old_name = std::mem::replace(&mut meta.name, name.clone());
                                     meta.ai_named = true;
-                                    meta.updated_at = jeikcode_capabilities::session::now_ms();
+                                    // 自动命名属于助手侧活动，不得刷新侧栏活跃时间。
                                     Some(old_name)
                                 });
                                 applied = matches!(update_res, Ok(Some(_)));

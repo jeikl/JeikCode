@@ -10,6 +10,7 @@
     "core:default",
     "core:webview:default",
     "core:window:default",
-    "core:window:allow-set-theme"
+    "core:window:allow-set-theme",
+    "allow-app-commands"
   ]
 }

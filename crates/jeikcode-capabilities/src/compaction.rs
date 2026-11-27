@@ -80,27 +80,13 @@ impl CompactionStrategy for StubCompaction {
         if boundary <= view.sacred_floor {
             return CompactionPlan::noop(); // nothing older than the kept window
         }
-        let id_to_tool = call_id_to_tool(msgs);
-        let mut rewrites: Vec<(usize, String)> = Vec::new();
-        for (i, m) in msgs.iter().enumerate().take(boundary) {
-            if i < view.sacred_floor {
-                continue; // protected prefix (kernel re-enforces; skip early)
-            }
-            if m.role != Role::Tool || m.text.len() <= MIN_COLLAPSE_SIZE {
-                continue; // not a (big enough) tool result; already-small = idempotent
-            }
-            let tool = m
-                .tool_call_id
-                .as_deref()
-                .and_then(|id| id_to_tool.get(id))
-                .map(String::as_str)
-                .unwrap_or("tool");
-            if self.exempt_read_file && is_file_read_tool(tool) {
-                continue;
-            }
-            // Tool RESULT success = NOT is_error.
-            rewrites.push((i, build_compact_stub(tool, &m.text, !m.is_error)));
-        }
+        let rewrites = stub_rewrites(
+            msgs,
+            view.sacred_floor,
+            boundary,
+            MIN_COLLAPSE_SIZE,
+            self.exempt_read_file,
+        );
         if rewrites.is_empty() {
             return CompactionPlan::noop();
         }
@@ -115,10 +101,56 @@ impl CompactionStrategy for StubCompaction {
     }
 }
 
+/// 判定文本是否已是 `build_compact_stub` 生成的折叠摘要，避免多轮触发时套娃重折。
+fn is_compact_stub(text: &str) -> bool {
+    let t = text.trim();
+    if !(t.starts_with('[') && t.ends_with(']')) {
+        return false;
+    }
+    if t.starts_with("[task ok:") || t.starts_with("[task FAILED:") {
+        return true;
+    }
+    (t.contains(" ok: ") || t.contains(" FAILED: "))
+        && (t.ends_with(
+            " | full output compacted from history; re-run the original tool if you need every row]",
+        ) || (t.contains(" | artifact=") && t.ends_with(") to read more]")))
+}
+
+/// 统一扫描 `[from, to)` 内的工具结果并生成幂等折叠改写（只折大于 `min_bytes`、尚未折叠且确实变短的条目）。
+fn stub_rewrites(
+    msgs: &[Message],
+    from: usize,
+    to: usize,
+    min_bytes: usize,
+    exempt_read_file: bool,
+) -> Vec<(usize, String)> {
+    let id_to_tool = call_id_to_tool(msgs);
+    let mut out = Vec::new();
+    for (i, m) in msgs.iter().enumerate().take(to).skip(from) {
+        if m.role != Role::Tool || m.text.len() <= min_bytes || is_compact_stub(&m.text) {
+            continue;
+        }
+        let tool = m
+            .tool_call_id
+            .as_deref()
+            .and_then(|id| id_to_tool.get(id))
+            .map(String::as_str)
+            .unwrap_or("tool");
+        if exempt_read_file && is_file_read_tool(tool) {
+            continue;
+        }
+        let stub = build_compact_stub(tool, &m.text, !m.is_error);
+        if stub.len() < m.text.len() {
+            out.push((i, stub));
+        }
+    }
+    out
+}
+
 /// Tool results below this size are left alone under OVERFLOW (smaller than the normal
-/// `MIN_COLLAPSE_SIZE` — overflow is more aggressive). A produced stub is well under this,
-/// so re-running never re-stubs a stub (monotonic / idempotent).
-const AGGRESSIVE_STUB_MIN: usize = 160;
+/// `MIN_COLLAPSE_SIZE` — overflow is more aggressive). 必须高于单行 stub 自身长度（~195B），
+/// 配合 `is_compact_stub` 守卫保证幂等且不再为省几字节破坏短输出。
+const AGGRESSIVE_STUB_MIN: usize = 256;
 
 /// Marker appended to a hard-truncated message body. Presence of this substring makes
 /// truncation idempotent (a re-run skips an already-truncated message).
@@ -281,21 +313,7 @@ impl OverflowCompaction {
     /// Aggressive stub of every tool result in `[from, to)` over `AGGRESSIVE_STUB_MIN`
     /// (no read_file exemption). Monotonic: an already-stubbed result is left alone.
     fn aggressive_stub_rewrites(msgs: &[Message], from: usize, to: usize) -> Vec<(usize, String)> {
-        let id_to_tool = call_id_to_tool(msgs);
-        let mut out = Vec::new();
-        for (i, m) in msgs.iter().enumerate().take(to).skip(from) {
-            if m.role != Role::Tool || m.text.len() <= AGGRESSIVE_STUB_MIN {
-                continue;
-            }
-            let tool = m
-                .tool_call_id
-                .as_deref()
-                .and_then(|id| id_to_tool.get(id))
-                .map(String::as_str)
-                .unwrap_or("tool");
-            out.push((i, build_compact_stub(tool, &m.text, !m.is_error)));
-        }
-        out
+        stub_rewrites(msgs, from, to, AGGRESSIVE_STUB_MIN, false)
     }
 
     /// Hard-truncate any single message in `[from, len)` whose text exceeds `budget_chars`.
@@ -1110,6 +1128,9 @@ fn call_id_to_tool(msgs: &[Message]) -> HashMap<String, String> {
 /// When the original already carried an artifact marker, its id is preserved.
 /// For a bash result whose first line is `[elapsed: …]`, head/tail skip that banner.
 pub fn build_compact_stub(tool_name: &str, output: &str, success: bool) -> String {
+    if is_compact_stub(output) {
+        return output.trim().to_string();
+    }
     let line_count = output.lines().count();
     let status = if success { "ok" } else { "FAILED" };
 
@@ -2807,6 +2828,43 @@ Dependencies verified.
             plan.drain_to > floor,
             "multi-round /goal history must drain older synthetic rounds instead of clamping to floor={floor}, got {:?}",
             plan
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_tier0_is_idempotent_and_skips_short_outputs() {
+        let msgs = vec![
+            Message::system("persona"),
+            Message::user("u1"),
+            asst_call("c1", "run_command").also(asst_call("c2", "run_command")),
+            Message::tool_result("c1", &"line\n".repeat(120), false),
+            Message::tool_result("c2", &"x".repeat(200), false),
+        ];
+        let mut conv = Conversation::new();
+        conv.messages = msgs;
+        let floor = conv.sacred_floor();
+
+        let p1 = OverflowCompaction::new(StubCompaction::default(), None)
+            .plan(&overflow_view(&conv.messages, floor, 0, 8000))
+            .await;
+        let r1 = conv.apply_plan(p1, floor);
+        assert!(r1.committed);
+        let first_stub = conv.messages[3].text.clone();
+        assert!(is_compact_stub(&first_stub), "{first_stub}");
+        // <= AGGRESSIVE_STUB_MIN 的短结果（200B）不应被折成 195B stub。
+        assert_eq!(conv.messages[4].text.len(), 200);
+
+        // 即使历史里包含 >160B 的已折叠 stub，再次运行也必须返回 noop，绝不嵌套套娃。
+        assert_eq!(
+            build_compact_stub("run_command", &first_stub, true),
+            first_stub
+        );
+        let p2 = OverflowCompaction::new(StubCompaction::default(), None)
+            .plan(&overflow_view(&conv.messages, floor, 0, 8000))
+            .await;
+        assert!(
+            p2.is_noop(),
+            "already-stubbed history must produce noop: {p2:?}"
         );
     }
 }

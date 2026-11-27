@@ -1,4 +1,5 @@
 import { useMemo } from 'preact/hooks';
+import { pairDiffLines, parseUnifiedDiff, type ParsedDiffLine } from '../lib/diff';
 
 interface DiffViewerProps {
   diffText: string;
@@ -7,71 +8,8 @@ interface DiffViewerProps {
   commitMessage: string;
 }
 
-interface ParsedDiffLine {
-  type: 'header' | 'hunk' | 'add' | 'del' | 'context';
-  text: string;
-  oldLineNumber?: number;
-  newLineNumber?: number;
-}
-
-export function parseUnifiedDiff(diff: string): ParsedDiffLine[] {
-  const lines = diff.split('\n');
-  const result: ParsedDiffLine[] = [];
-
-  let oldLine = 0;
-  let newLine = 0;
-
-  for (const line of lines) {
-    if (
-      line.startsWith('diff --git') ||
-      line.startsWith('index ') ||
-      line.startsWith('--- ') ||
-      line.startsWith('+++ ')
-    ) {
-      result.push({ type: 'header', text: line });
-      continue;
-    }
-
-    if (line.startsWith('@@ ')) {
-      // Parse hunk header like @@ -15,7 +15,9 @@
-      const match = line.match(/@@\s*-(\d+)(?:,\d+)?\s*\+(\d+)(?:,\d+)?\s*@@/);
-      if (match) {
-        oldLine = parseInt(match[1]!, 10);
-        newLine = parseInt(match[2]!, 10);
-      }
-      result.push({ type: 'hunk', text: line });
-      continue;
-    }
-
-    if (line.startsWith('+')) {
-      result.push({
-        type: 'add',
-        text: line.slice(1),
-        newLineNumber: newLine++,
-      });
-    } else if (line.startsWith('-')) {
-      result.push({
-        type: 'del',
-        text: line.slice(1),
-        oldLineNumber: oldLine++,
-      });
-    } else if (line.startsWith(' ') || line === '') {
-      result.push({
-        type: 'context',
-        text: line.startsWith(' ') ? line.slice(1) : line,
-        oldLineNumber: oldLine++,
-        newLineNumber: newLine++,
-      });
-    } else {
-      result.push({ type: 'header', text: line });
-    }
-  }
-
-  return result;
-}
-
 export function DiffViewer({ diffText, filePath, commitHash, commitMessage }: DiffViewerProps) {
-  const parsedLines = useMemo(() => parseUnifiedDiff(diffText), [diffText]);
+  const rows = useMemo(() => pairDiffLines(parseUnifiedDiff(diffText)), [diffText]);
 
   // 清理可能包含旧格式冗余文件名的 commitMessage (如 "Working Tree: xxx")
   const displayMsg = useMemo(() => {
@@ -95,60 +33,30 @@ export function DiffViewer({ diffText, filePath, commitHash, commitMessage }: Di
       </div>
 
       <div class="diff-code-table-wrap">
-        <table class="diff-code-table">
+        <table class="diff-code-table" style="table-layout: fixed; min-width: 700px">
+          <colgroup>
+            <col style="width: 48px" /><col style="width: 16px" /><col style="width: calc(50% - 64px)" />
+            <col style="width: 48px" /><col style="width: 16px" /><col style="width: calc(50% - 64px)" />
+          </colgroup>
           <tbody>
-            {parsedLines.map((line, idx) => {
-              if (line.type === 'hunk') {
+            {rows.map((row, idx) => {
+              if (row.full) {
+                const isHunk = row.full.type === 'hunk';
                 return (
-                  <tr key={idx} class="diff-row diff-row-hunk">
-                    <td class="diff-gutter-num old-num">...</td>
-                    <td class="diff-gutter-num new-num">...</td>
-                    <td class="diff-gutter-marker"></td>
-                    <td class="diff-line-content hunk-header">{line.text}</td>
+                  <tr key={idx} class={`diff-row ${isHunk ? 'diff-row-hunk' : 'diff-row-header'}`}>
+                    <td colspan={6} class={`diff-line-content ${isHunk ? 'hunk-header' : 'file-header'}`}>{row.full.text}</td>
                   </tr>
                 );
               }
-
-              if (line.type === 'header') {
-                return (
-                  <tr key={idx} class="diff-row diff-row-header">
-                    <td class="diff-gutter-num old-num"></td>
-                    <td class="diff-gutter-num new-num"></td>
-                    <td class="diff-gutter-marker"></td>
-                    <td class="diff-line-content file-header">{line.text}</td>
-                  </tr>
-                );
-              }
-
-              const isAdd = line.type === 'add';
-              const isDel = line.type === 'del';
-              let rowClass = 'diff-row';
-              let marker = ' ';
-
-              if (isAdd) {
-                rowClass += ' diff-row-add';
-                marker = '+';
-              } else if (isDel) {
-                rowClass += ' diff-row-del';
-                marker = '-';
-              } else {
-                rowClass += ' diff-row-context';
-              }
-
-              return (
-                <tr key={idx} class={rowClass}>
-                  <td class="diff-gutter-num old-num">
-                    {line.oldLineNumber != null ? line.oldLineNumber : ''}
-                  </td>
-                  <td class="diff-gutter-num new-num">
-                    {line.newLineNumber != null ? line.newLineNumber : ''}
-                  </td>
-                  <td class="diff-gutter-marker">{marker}</td>
-                  <td class="diff-line-content">
-                    <code>{line.text}</code>
-                  </td>
-                </tr>
-              );
+              const side = (line: ParsedDiffLine | undefined, old: boolean) => {
+                const color = line?.type === 'del' ? 'diff-row-del' : line?.type === 'add' ? 'diff-row-add' : '';
+                return [
+                  <td class={`diff-gutter-num ${color}`}>{old ? line?.oldLineNumber : line?.newLineNumber}</td>,
+                  <td class={`diff-gutter-marker ${color}`}>{line?.type === 'del' ? '-' : line?.type === 'add' ? '+' : ''}</td>,
+                  <td class={`diff-line-content ${color}`} style="white-space: pre-wrap; overflow-wrap: anywhere"><code>{line?.text}</code></td>,
+                ];
+              };
+              return <tr key={idx} class="diff-row diff-row-context">{side(row.old, true)}{side(row.new, false)}</tr>;
             })}
           </tbody>
         </table>

@@ -555,12 +555,10 @@ export function Markdown({
             detail: { path: resolved, startLine, endLine }
           }));
         } else {
-          // AI 对话主画布中点击：默认在右侧区域预览出来，复用异地浏览文件能力，不遮盖AI对话！
-          window.dispatchEvent(new CustomEvent('jeikcode:preview:open_file', {
+          // 聊天主画布：交给 Chat 统一按「智能路由 + 模型回答修改文件默认动作」决定
+          // 打开到右侧预览、右侧 diff、主编辑器或主舞台 working diff，并保留行定位。
+          window.dispatchEvent(new CustomEvent('jeikcode:chat_open_file', {
             detail: { filePath: resolved, fileName, startLine, endLine }
-          }));
-          window.dispatchEvent(new CustomEvent('jeikcode:switch_right_tab', {
-            detail: 'preview'
           }));
         }
         return;

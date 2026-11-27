@@ -159,7 +159,13 @@ fn strip_reminder_suffixes(text: &str) -> &str {
     let mut current = text.trim_end();
     loop {
         let trimmed = current;
-        if let Some(start) = trimmed.rfind("\n\n<system-reminder>\nCurrent date:") {
+        let sid_needle = format!(
+            "\n\n<system-reminder>\n{}",
+            super::status_reminder::SESSION_ID_PREFIX
+        );
+        let date_pos = trimmed.rfind("\n\n<system-reminder>\nCurrent date:");
+        let sid_pos = trimmed.rfind(&sid_needle);
+        if let Some(start) = [date_pos, sid_pos].into_iter().flatten().max() {
             if trimmed[start + 2..].ends_with("</system-reminder>") {
                 current = trimmed[..start].trim_end();
                 continue;

@@ -11,6 +11,10 @@ export interface PendingPreviewOpenDetail {
   fileStatus?: string;
   startLine?: number;
   endLine?: number;
+  /** 打开后直接进入右侧 diff 模式（用于聊天修改文件默认动作）。 */
+  viewMode?: 'preview' | 'edit' | 'diff';
+  /** 由 Chat 的 Git 改动查询带回，避免面板重复探测。 */
+  changed?: unknown;
 }
 
 export function getSavedPreviewCount(projectCwd?: string): number {

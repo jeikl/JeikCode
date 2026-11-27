@@ -1379,35 +1379,12 @@ pub(crate) async fn post_remote_access(
     Json(with_firewall(remote_status(&state, minted)).await).into_response()
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ZombieProcessInfo {
+#[derive(Debug, Clone)]
+pub(crate) struct OrphanProcessInfo {
     pub pid: u32,
     pub name: String,
     pub path: Option<String>,
     pub reason: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct LegacyStatusResponse {
-    pub has_legacy_files: bool,
-    pub legacy_files: Vec<String>,
-    pub has_dirty_path: bool,
-    pub zombie_count: usize,
-    pub zombies: Vec<ZombieProcessInfo>,
-    pub needs_migration: bool,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct MigrateLegacyRequest {
-    #[serde(default)]
-    pub kill_zombies: bool,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct MigrateLegacyResponse {
-    pub success: bool,
-    pub cleaned_files_count: usize,
-    pub killed_zombies_count: usize,
 }
 
 /// 判定某进程条目是否属于当前进程自身、当前线程组（TGID）或任意内核/用户态线程。
@@ -1460,7 +1437,15 @@ fn collect_self_task_pids(sys: &sysinfo::System) -> std::collections::HashSet<u3
     set
 }
 
-pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
+/// 只有“桌面壳亲自拉起、且宿主已消失”的进程才会被回收。
+///
+/// 安装路径、进程名、历史品牌名都不参与判定：`~/.local/bin` 是 install.sh /
+/// install.ps1 的官方安装目标，绝不能被当成“遗留目录”。
+fn orphan_reason(is_desktop_managed: bool, desktop_owner_alive: bool) -> Option<&'static str> {
+    (is_desktop_managed && !desktop_owner_alive).then_some("父级桌面壳已退出，脱离托管的孤儿子进程")
+}
+
+pub(crate) fn scan_orphaned_desktop_children() -> Vec<OrphanProcessInfo> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     let mut sys = System::new();
     sys.refresh_processes_specifics(
@@ -1472,18 +1457,6 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
     let self_task_pids = collect_self_task_pids(&sys);
     let current_exe_canon = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
     let mut out = Vec::new();
-
-    // 收集所有当前活跃的桌面壳 PID (jeikcode-desktop)，仅统计主进程，不把线程计入
-    let mut active_desktop_pids = std::collections::HashSet::new();
-    for (pid, proc_) in sys.processes() {
-        if proc_.thread_kind().is_some() {
-            continue;
-        }
-        let name = proc_.name().to_string_lossy().to_ascii_lowercase();
-        if name.contains("desktop") || name.contains("tauri") {
-            active_desktop_pids.insert(pid.as_u32());
-        }
-    }
 
     for (pid, proc_) in sys.processes() {
         let pid_u32 = pid.as_u32();
@@ -1514,62 +1487,53 @@ pub fn scan_zombie_processes() -> Vec<ZombieProcessInfo> {
             .exe()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let exe_path_lower = exe_path_str.to_ascii_lowercase();
 
-        // 1. 判定是否为老旧 Dropper 目录残存
-        let is_legacy_path = exe_path_lower.contains(".local\\bin")
-            || exe_path_lower.contains(".local/bin")
-            || exe_path_lower.contains("atomcode");
-
-        // 2. 检查环境变量是否包含 JEIKCODE_DESKTOP=1
-        let is_desktop_env = proc_.environ().iter().any(|env_str| {
-            let s = env_str.to_string_lossy();
-            s.starts_with("JEIKCODE_DESKTOP=")
-                || s.starts_with("JEIKCODE_DESKTOP_CLI_BIN=")
-                || s.starts_with("JEIKCODE_DESKTOP_PID=")
-        });
-
+        // 所有权证明：桌面壳在 spawn 时写入托管标记与宿主 PID。
+        // 仅凭 JEIKCODE_DESKTOP=1 而没有宿主 PID 不足以证明归属，避免误杀用户手动导出的会话。
         let declared_desktop_pid = proc_.environ().iter().find_map(|env_str| {
             let s = env_str.to_string_lossy();
             s.strip_prefix("JEIKCODE_DESKTOP_PID=")
                 .and_then(|val| val.trim().parse::<u32>().ok())
                 .filter(|pid| *pid > 0)
         });
+        let is_desktop_managed = proc_.environ().iter().any(|env_str| {
+            let s = env_str.to_string_lossy();
+            s.starts_with("JEIKCODE_DESKTOP_MANAGED=1")
+                || (s.starts_with("JEIKCODE_DESKTOP=1") && declared_desktop_pid.is_some())
+        });
 
-        // 3. 检查父进程与绑定的桌面壳状态
-        let desktop_owner_alive = parent_pid
-            .is_some_and(|ppid| active_desktop_pids.contains(&ppid))
-            || declared_desktop_pid.is_some_and(|dpid| active_desktop_pids.contains(&dpid));
+        // 宿主存活判定优先使用桌面壳显式写入的 PID：
+        // - PID 仍存在 -> 认为宿主存活，绝不误杀；
+        // - PID 已消失 -> 孤儿，可回收；
+        // - 老版本未写入 PID 时，才回退到父进程名判定（避免被 reparent 到 init 后误判存活）。
+        let desktop_owner_alive = match declared_desktop_pid {
+            Some(dpid) => sys.process(sysinfo::Pid::from_u32(dpid)).is_some(),
+            None => parent_pid.is_some_and(|ppid| {
+                sys.process(sysinfo::Pid::from_u32(ppid))
+                    .map(|p| p.name().to_string_lossy().to_ascii_lowercase())
+                    .is_some_and(|name| name.contains("desktop") || name.contains("tauri"))
+            }),
+        };
 
-        // 判定准则（严格保护普通终端/开发/TUI 实例）：
-        // - 如果是运行在旧目录 .local\bin 下的实例 -> 100% 历史遗留僵尸
-        // - 如果原本是桌面端子进程 (is_desktop_env)，但绑定的父级桌面壳已不再存活 -> 100% 孤儿僵尸
-        let mut zombie_reason = None;
-        if is_legacy_path {
-            zombie_reason = Some("旧版 ~/.local/bin 遗留运行实例".to_string());
-        } else if is_desktop_env && !desktop_owner_alive {
-            zombie_reason = Some("父级桌面壳已退出，脱离托管的孤儿子进程".to_string());
-        }
-
-        if let Some(reason) = zombie_reason {
-            out.push(ZombieProcessInfo {
+        if let Some(reason) = orphan_reason(is_desktop_managed, desktop_owner_alive) {
+            out.push(OrphanProcessInfo {
                 pid: pid_u32,
-                name: name.clone(),
+                name,
                 path: if exe_path_str.is_empty() {
                     None
                 } else {
                     Some(exe_path_str)
                 },
-                reason,
+                reason: reason.to_string(),
             });
         }
     }
     out
 }
 
-pub fn kill_zombie_processes_all() -> usize {
-    let zombies = scan_zombie_processes();
-    if zombies.is_empty() {
+pub(crate) fn reclaim_orphaned_desktop_children() -> usize {
+    let orphans = scan_orphaned_desktop_children();
+    if orphans.is_empty() {
         return 0;
     }
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
@@ -1583,13 +1547,13 @@ pub fn kill_zombie_processes_all() -> usize {
     let self_task_pids = collect_self_task_pids(&sys);
     let current_exe_canon = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
     let mut killed = 0;
-    for z in zombies {
-        if let Some(proc_) = sys.process(Pid::from_u32(z.pid)) {
+    for orphan in orphans {
+        if let Some(proc_) = sys.process(Pid::from_u32(orphan.pid)) {
             let exe_canon = canonical_exe_or_raw(proc_.exe());
             let parent_pid = proc_.parent().map(|p| p.as_u32());
             // 二次硬守卫：发信号前再次核对非自身/非线程/非同可执行文件
             if is_protected_process_entry(
-                z.pid,
+                orphan.pid,
                 proc_.thread_kind().is_some(),
                 exe_canon.as_deref(),
                 parent_pid,
@@ -1600,141 +1564,18 @@ pub fn kill_zombie_processes_all() -> usize {
                 continue;
             }
             if proc_.kill() {
+                tracing::info!(
+                    pid = orphan.pid,
+                    name = %orphan.name,
+                    path = ?orphan.path,
+                    reason = %orphan.reason,
+                    "reclaimed orphaned desktop child"
+                );
                 killed += 1;
             }
         }
     }
     killed
-}
-
-fn collect_legacy_status_blocking() -> LegacyStatusResponse {
-    let mut legacy_files = Vec::new();
-    let current_exe = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
-    if let Some(home) = jeikcode_config::util::real_home_dir() {
-        let local_bin = home.join(".local").join("bin");
-        if let Ok(entries) = std::fs::read_dir(&local_bin) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    let path_canon = canonical_exe_or_raw(Some(&path));
-                    let is_current = current_exe.is_some() && current_exe == path_canon;
-                    if (name.starts_with("jeikcode") || name.starts_with("atomcode")) && !is_current
-                    {
-                        legacy_files.push(path.display().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    let mut has_dirty_path = false;
-    #[cfg(windows)]
-    {
-        use winreg::enums::*;
-        use winreg::RegKey;
-        if let Ok(env) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment") {
-            let path_val: String = env.get_value("Path").unwrap_or_default();
-            for item in path_val.split(';') {
-                let lower = item.trim().to_ascii_lowercase();
-                if lower.contains(".local\\bin")
-                    || lower.contains(".local/bin")
-                    || lower.contains("atomcode")
-                {
-                    has_dirty_path = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    let zombies = scan_zombie_processes();
-    let zombie_count = zombies.len();
-    let has_legacy_files = !legacy_files.is_empty();
-    let needs_migration = has_legacy_files || has_dirty_path || zombie_count > 0;
-
-    LegacyStatusResponse {
-        has_legacy_files,
-        legacy_files,
-        has_dirty_path,
-        zombie_count,
-        zombies,
-        needs_migration,
-    }
-}
-
-fn migrate_legacy_blocking(kill_zombies: bool) -> MigrateLegacyResponse {
-    let mut cleaned_files_count = 0;
-    let current_exe = canonical_exe_or_raw(std::env::current_exe().ok().as_deref());
-    if let Some(home) = jeikcode_config::util::real_home_dir() {
-        let local_bin = home.join(".local").join("bin");
-        if let Ok(entries) = std::fs::read_dir(&local_bin) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    let path_canon = canonical_exe_or_raw(Some(&path));
-                    let is_current = current_exe.is_some() && current_exe == path_canon;
-                    if (name.starts_with("jeikcode") || name.starts_with("atomcode")) && !is_current
-                    {
-                        if std::fs::remove_file(&path).is_ok() {
-                            cleaned_files_count += 1;
-                        }
-                    }
-                }
-            }
-        }
-        let _ = std::fs::remove_dir(&local_bin);
-    }
-
-    jeikcode_updater::migrate_legacy_environment();
-
-    let mut killed_zombies_count = 0;
-    if kill_zombies {
-        killed_zombies_count = kill_zombie_processes_all();
-    }
-
-    MigrateLegacyResponse {
-        success: true,
-        cleaned_files_count,
-        killed_zombies_count,
-    }
-}
-
-pub(crate) async fn get_legacy_status() -> impl IntoResponse {
-    let status = tokio::task::spawn_blocking(collect_legacy_status_blocking)
-        .await
-        .unwrap_or(LegacyStatusResponse {
-            has_legacy_files: false,
-            legacy_files: Vec::new(),
-            has_dirty_path: false,
-            zombie_count: 0,
-            zombies: Vec::new(),
-            needs_migration: false,
-        });
-    Json(status)
-}
-
-pub(crate) async fn post_migrate_legacy(
-    Json(payload): Json<MigrateLegacyRequest>,
-) -> impl IntoResponse {
-    let kill_zombies = payload.kill_zombies;
-    let res = tokio::task::spawn_blocking(move || migrate_legacy_blocking(kill_zombies))
-        .await
-        .unwrap_or(MigrateLegacyResponse {
-            success: false,
-            cleaned_files_count: 0,
-            killed_zombies_count: 0,
-        });
-    Json(res)
 }
 
 fn default_close_action() -> String {
@@ -2559,18 +2400,35 @@ mod tests {
     }
 
     #[test]
-    fn zombie_guard_protects_self_threads_children_and_same_exe() {
+    fn orphan_reason_requires_desktop_ownership() {
+        // 签名里没有路径参数：安装位置（包括 ~/.local/bin）不可能参与回收判定。
+        // 普通终端 CLI、TUI、开发实例都没有桌面托管标记，永远不回收。
+        assert_eq!(orphan_reason(false, false), None);
+        assert_eq!(orphan_reason(false, true), None);
+    }
+
+    #[test]
+    fn orphan_reason_reclaims_only_after_owner_is_gone() {
+        assert_eq!(orphan_reason(true, true), None);
+        assert_eq!(
+            orphan_reason(true, false),
+            Some("父级桌面壳已退出，脱离托管的孤儿子进程")
+        );
+    }
+
+    #[test]
+    fn reclaim_guard_protects_self_threads_children_and_same_exe() {
         let mut self_tasks = std::collections::HashSet::new();
         self_tasks.insert(226712);
         self_tasks.insert(226717);
         let self_exe = std::path::Path::new("/usr/local/bin/jeikcode");
-        let legacy_exe = std::path::Path::new("/home/u/.local/bin/jeikcode");
+        let other_exe = std::path::Path::new("/home/u/.local/bin/jeikcode");
 
         // 1. 主进程自身
         assert!(is_protected_process_entry(
             226712,
             false,
-            Some(legacy_exe),
+            Some(other_exe),
             Some(1),
             Some(226712),
             &self_tasks,
@@ -2580,7 +2438,7 @@ mod tests {
         assert!(is_protected_process_entry(
             226717,
             false,
-            Some(legacy_exe),
+            Some(other_exe),
             Some(226712),
             Some(226712),
             &self_tasks,
@@ -2590,7 +2448,7 @@ mod tests {
         assert!(is_protected_process_entry(
             999001,
             true,
-            Some(legacy_exe),
+            Some(other_exe),
             Some(999000),
             Some(226712),
             &self_tasks,
@@ -2606,11 +2464,11 @@ mod tests {
             &self_tasks,
             Some(self_exe),
         ));
-        // 5. 真正异路径、非线程、非本进程/子进程的遗留实例才允许判定
+        // 5. 真正异路径、非线程、非本进程/子进程的外部实例不享受守卫（是否回收仍由所有权判定决定）
         assert!(!is_protected_process_entry(
             400001,
             false,
-            Some(legacy_exe),
+            Some(other_exe),
             Some(1),
             Some(226712),
             &self_tasks,

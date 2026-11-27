@@ -10,6 +10,7 @@
 pub fn strip_jeikcode_path_block(content: &str, prefix: &str) -> Option<String> {
     let comment = "# Added by JeikCode installer";
     let target_export = format!("export PATH=\"{prefix}:$PATH\"");
+    let target_fish = format!("fish_add_path --prepend \"{prefix}\"");
 
     let lines: Vec<&str> = content.lines().collect();
     let mut keep = vec![true; lines.len()];
@@ -23,7 +24,10 @@ pub fn strip_jeikcode_path_block(content: &str, prefix: &str) -> Option<String> 
             while j < lines.len() && lines[j].trim().is_empty() {
                 j += 1;
             }
-            if j < lines.len() && lines[j].trim() == target_export.trim() {
+            if j < lines.len()
+                && (lines[j].trim() == target_export.trim()
+                    || lines[j].trim() == target_fish.trim())
+            {
                 // Drop comment + intervening blanks + export line.
                 for flag in keep.iter_mut().take(j + 1).skip(i) {
                     *flag = false;
@@ -342,6 +346,14 @@ mod path_line_tests {
     use super::strip_jeikcode_path_block;
 
     const PREFIX: &str = "/Users/test/.local/bin";
+
+    #[test]
+    fn strips_fish_path_block() {
+        let input =
+            "# Added by JeikCode installer\nfish_add_path --prepend \"/Users/test/.local/bin\"\n";
+        let out = strip_jeikcode_path_block(input, PREFIX).unwrap();
+        assert!(out.trim().is_empty(), "{out:?}");
+    }
 
     #[test]
     fn strips_canonical_block() {

@@ -36,6 +36,7 @@ pub fn uninstall_manifest() -> UninstallManifest {
             "codingplan_sync.json",
             "device_id",
             "config_teachs.md",
+            "cli-install.json",
         ],
         state_dirs: &[
             "staged",

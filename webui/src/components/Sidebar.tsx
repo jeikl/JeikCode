@@ -5,7 +5,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { useBackdropDismiss } from '../lib/backdropDismiss';
-import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getConfig, getDesktopSettings, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getBootstrap, invalidateBootstrapCache, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, listSchedules, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getConfig, getDesktopSettings, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getBootstrap, invalidateBootstrapCache, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickDirectoryWithFallback, revealInFileExplorer, listSchedules, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo, SidebarProjects } from '../api';
 import { mergeSessionRow, onGlobalEvent, removeSessionRows } from '../lib/globalEvents';
 import { deleteSessionCache } from '../lib/sessionCache';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
@@ -551,6 +551,15 @@ export function Sidebar({
     () => initialSidebarSnapshot?.sessions ?? [],
   );
   const [loading, setLoading] = useState(() => !initialSidebarSnapshot);
+  // 相对时间自走：仅可见时每 30s 触发一次重渲染。时间戳本身仍由后端
+  // `session_upsert` 驱动；这里只解决长时间无事件时“1 分钟前”被冻住的问题。
+  const [, setClockTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (!document.hidden) setClockTick((n) => n + 1);
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
   // 活跃（正在运行 turn）的会话 id，来自 GET /chat/active；配合 5s 轮询，
   // 让「哪个会话正在执行」实时显示在侧栏行右侧的圈圈里。
   const [activeIds, setActiveIds] = useState<string[]>([]);
@@ -612,6 +621,8 @@ export function Sidebar({
   const [activeScheduleCount, setActiveScheduleCount] = useState(0);
   const [collapsedScheduleGroups, setCollapsedScheduleGroups] = useState<Set<string>>(() => new Set());
   const [webPickerOpen, setWebPickerOpen] = useState(false);
+  const [pickingNativeDir, setPickingNativeDir] = useState(false);
+  const nativePickPendingRef = useRef(false);
   const pendingHideRef = useRef<Set<string>>(new Set());
   const pendingRevealRef = useRef<Set<string>>(new Set());
   const revealingRef = useRef<Set<string>>(new Set());
@@ -1268,20 +1279,18 @@ export function Sidebar({
   }
 
   async function handleOpenNativeDirectory() {
-    // A remote browser must not call /fs/pick_dir: that opens a native dialog
-    // on the instance and the HTTP request stays open until someone closes it.
-    if (!isLoopbackHost(window.location.hostname)) {
-      setWebPickerOpen(true);
-      return;
-    }
+    // 远端浏览器不调用 /fs/pick_dir（避免在服务端宿主机弹原生框）
+    if (nativePickPendingRef.current) return;
+    setPickingNativeDir(true);
     try {
-      const res = await pickNativeDirectory();
-      if (!res.canceled && res.path) {
-        await adoptProjectDirectory(res.path);
-      }
-    } catch (err) {
-      console.warn('Native folder pick failed:', err);
-      setWebPickerOpen(true);
+      await pickDirectoryWithFallback({
+        isLoopback: isLoopbackHost(window.location.hostname),
+        inFlightRef: nativePickPendingRef,
+        onPicked: (path) => adoptProjectDirectory(path),
+        onFallback: () => setWebPickerOpen(true),
+      });
+    } finally {
+      setPickingNativeDir(false);
     }
   }
 
@@ -2915,6 +2924,7 @@ export function Sidebar({
                   type="button"
                   class="sidebar-section-action-btn"
                   onClick={handleOpenNativeDirectory}
+                  disabled={pickingNativeDir}
                   title={isLoopbackHost(window.location.hostname) ? t('sidebar.addProjectFolder') : t('sidebar.addProjectFolderRemote')}
                   aria-label={isLoopbackHost(window.location.hostname) ? t('sidebar.addProjectFolder') : t('sidebar.addProjectFolderRemote')}
                 >

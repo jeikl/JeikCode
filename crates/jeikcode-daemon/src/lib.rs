@@ -17182,6 +17182,13 @@ fn persist_admitted_user_fields(
     }
     let manager =
         NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(&bucket));
+    // 提问采纳 = 用户可感知活跃：在服务端唯一的 send 边界刷新时间戳。
+    // 新建会话此时 meta 尚未创建（`publish_chat_session_assignment` 会以当前
+    // 时间创建），NotFound 静默跳过；随后的 `session_assigned` upsert 会推送
+    // 这份权威行（已存在会话），所有实例据此立即上浮侧栏时间。
+    let _ = manager.update_meta(session_id, |meta| {
+        meta.updated_at = jeikcode_capabilities::session::now_ms();
+    });
     let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = images
         .iter()
         .map(|image| jeikcode_capabilities::session::DisplayImage {
@@ -20701,6 +20708,26 @@ struct FsEntryDto {
     is_ignored: bool,
 }
 
+/// 为 `/fs/tree` 的目标目录解析 `.gitignore` 匹配基准根目录。
+/// 当 daemon 以 `--dir` 绑定默认工作区而前端切换浏览其他工作区时，
+/// 必须使用目标目录自身的仓库根或目录本身，避免将域外路径传给 `Gitignore` 引发 panic。
+fn resolve_fs_tree_gitignore_root(
+    bind_root: &std::path::Path,
+    active_root: Option<&std::path::Path>,
+    abs_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    if abs_dir.starts_with(bind_root) {
+        return bind_root.to_path_buf();
+    }
+    if let Some(git_root) = abs_dir.ancestors().find(|dir| dir.join(".git").exists()) {
+        return git_root.to_path_buf();
+    }
+    if let Some(active) = active_root.filter(|p| abs_dir.starts_with(p)) {
+        return active.to_path_buf();
+    }
+    abs_dir.to_path_buf()
+}
+
 fn load_fs_tree_gitignore(
     root: &std::path::Path,
     current_dir: &std::path::Path,
@@ -20772,7 +20799,16 @@ async fn fs_tree(State(state): State<AppState>, Query(q): Query<FsTreeQuery>) ->
         );
     }
 
-    let gitignore = load_fs_tree_gitignore(&root, &abs_dir);
+    let active_root = {
+        let project = state.project.read().await;
+        let canon = project
+            .working_dir
+            .canonicalize()
+            .unwrap_or_else(|_| project.working_dir.clone());
+        jeikcode_capabilities::pathnorm::strip_verbatim_path(&canon)
+    };
+    let gitignore_root = resolve_fs_tree_gitignore_root(&root, Some(&active_root), &abs_dir);
+    let gitignore = load_fs_tree_gitignore(&gitignore_root, &abs_dir);
 
     let mut entries_res: Vec<FsEntryDto> = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
@@ -20790,11 +20826,11 @@ async fn fs_tree(State(state): State<AppState>, Query(q): Query<FsTreeQuery>) ->
             let full_p = entry_path.to_string_lossy().replace('\\', "/");
 
             let is_ignored = {
-                let rel_opt = entry_path.strip_prefix(&root).ok();
-                let matched = if let Some(rel) = rel_opt {
+                let matched = if let Ok(rel) = entry_path.strip_prefix(&gitignore_root) {
                     gitignore.matched_path_or_any_parents(rel, is_dir)
                 } else {
-                    gitignore.matched_path_or_any_parents(&entry_path, is_dir)
+                    // 安全降级：绝不向 Gitignore 传入不属于 gitignore_root 的路径，否则 crate 会 panic
+                    ignore::Match::None
                 };
                 match matched {
                     ignore::Match::Ignore(_) => true,
@@ -23806,10 +23842,16 @@ async fn bind_scanning_ports(
     u16,
 )> {
     if reclaim_stale && start_port > 0 {
-        // 桌面端启动时，若存在之前脱离桌面壳的孤儿子进程占用持久化端口，先行清理回收，
+        // 桌面端启动时，若存在之前脱离桌面壳托管的孤儿子进程，先行回收，
         // 避免新启动的桌面端因旧孤儿进程霸占端口而被迫将端口 +1 顺延覆盖用户配置。
+        // 回收判定基于桌面壳写入的托管标记与宿主 PID，绝不按安装路径判断。
         if std::env::var_os("JEIKCODE_DESKTOP").is_some() {
-            if api_config::kill_zombie_processes_all() > 0 {
+            // 全机进程枚举是阻塞操作，放入 blocking 线程池，避免饿死 Tokio worker。
+            let reclaimed =
+                tokio::task::spawn_blocking(api_config::reclaim_orphaned_desktop_children)
+                    .await
+                    .unwrap_or(0);
+            if reclaimed > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
@@ -25080,7 +25122,36 @@ fn decode_native_picked_path(raw: &[u8]) -> Option<String> {
     None
 }
 
+static PICK_DIR_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct PickDirFlightGuard;
+
+impl Drop for PickDirFlightGuard {
+    fn drop(&mut self) {
+        PICK_DIR_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 async fn fs_pick_dir() -> impl IntoResponse {
+    if PICK_DIR_IN_FLIGHT
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        tracing::info!(
+            "fs/pick_dir: native directory picker already open; ignoring duplicate request"
+        );
+        return Json(serde_json::json!({
+            "path": null,
+            "canceled": true
+        }));
+    }
+    let _guard = PickDirFlightGuard;
     let result = tokio::task::spawn_blocking(pick_directory_native)
         .await
         .unwrap_or(None);
@@ -25585,14 +25656,6 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route(
             "/api/remote-access",
             get(api_config::get_remote_access).post(api_config::post_remote_access),
-        )
-        .route(
-            "/api/system/legacy-status",
-            get(api_config::get_legacy_status),
-        )
-        .route(
-            "/api/system/migrate-legacy",
-            post(api_config::post_migrate_legacy),
         )
         .route(
             "/api/system/desktop-settings",
@@ -26672,6 +26735,135 @@ mod tests {
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
     }
 
+    #[tokio::test]
+    async fn fs_tree_supports_workspaces_outside_bound_working_dir() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        fn encode_query_val(s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            for b in s.as_bytes() {
+                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                    out.push(*b as char);
+                } else {
+                    out.push_str(&format!("%{:02X}", b));
+                }
+            }
+            out
+        }
+
+        let home = ScopedChatHome::new();
+        let bound_dir = home._dir.path().join("source");
+        let other_repo = home._dir.path().join("other-repo");
+        let other_repo_sub = other_repo.join("sub");
+        let other_plain = home._dir.path().join("skills");
+        std::fs::create_dir_all(&bound_dir).unwrap();
+        std::fs::create_dir_all(other_repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&other_repo_sub).unwrap();
+        std::fs::create_dir_all(&other_plain).unwrap();
+        std::fs::write(other_repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(other_repo.join("README.md"), "ok").unwrap();
+        std::fs::write(other_repo_sub.join("visible.txt"), "ok").unwrap();
+        std::fs::write(other_repo_sub.join("ignored.txt"), "skip").unwrap();
+        std::fs::write(other_plain.join("AGENTS.md"), "ok").unwrap();
+
+        let mut state = chat_test_state(&home);
+        state.bind_working_dir = bound_dir.clone();
+        {
+            let mut project = state.project.write().await;
+            project.working_dir = bound_dir.clone();
+        }
+        let app = Router::new()
+            .route("/fs/tree", axum::routing::get(crate::fs_tree))
+            .with_state(state);
+
+        // 1. 绑定目录之外的 Git 仓库根目录与子目录不应因 strip_prefix 失败 panic，且应加载该仓库自身的 .gitignore
+        let repo_uri = format!(
+            "/fs/tree?path={}",
+            encode_query_val(&other_repo.to_string_lossy())
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(repo_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["success"], true);
+        assert!(body["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "README.md"));
+
+        let sub_uri = format!(
+            "/fs/tree?path={}",
+            encode_query_val(&other_repo_sub.to_string_lossy())
+        );
+        let sub_resp = app
+            .clone()
+            .oneshot(Request::builder().uri(sub_uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(sub_resp.status(), StatusCode::OK);
+        let sub_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(sub_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let entries = sub_body["entries"].as_array().unwrap();
+        let visible = entries
+            .iter()
+            .find(|e| e["name"] == "visible.txt")
+            .expect("visible.txt present");
+        let ignored = entries
+            .iter()
+            .find(|e| e["name"] == "ignored.txt")
+            .expect("ignored.txt present");
+        assert_eq!(visible["is_ignored"], false);
+        assert_eq!(ignored["is_ignored"], true);
+
+        // 2. 绑定目录之外的无 .git 普通工作区目录同样应正常列出文件
+        let plain_uri = format!(
+            "/fs/tree?path={}",
+            encode_query_val(&other_plain.to_string_lossy())
+        );
+        let plain_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(plain_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(plain_resp.status(), StatusCode::OK);
+        let plain_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(plain_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(plain_body["success"], true);
+        assert!(plain_body["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "AGENTS.md"));
+    }
+
     #[test]
     fn new_chat_assignment_is_sent_only_after_the_native_aggregate_is_durable() {
         let home = ScopedChatHome::new();
@@ -27279,6 +27471,29 @@ mod tests {
                 "request_id": 41,
             }));
         assert!(missing_runtime_instance.is_err());
+    }
+
+    #[test]
+    fn chat_admission_stamps_existing_session_activity() {
+        let home = ScopedChatHome::new();
+        let working_dir = home._dir.path().join("project");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let session_id = "44444444-4444-4444-8444-444444444444";
+        let manager = NativeSessionManager::for_project(&working_dir);
+        let mut meta = jeikcode_capabilities::session::SessionMeta::new(
+            session_id,
+            working_dir.to_string_lossy(),
+            1,
+        );
+        meta.owner = jeikcode_capabilities::session::StorageOwner::Native;
+        manager.write_meta(&meta).unwrap();
+
+        persist_admitted_user_fields("hello", &[], Some(&working_dir), session_id, "input-1");
+
+        assert!(
+            manager.read_meta(session_id).unwrap().updated_at > 1,
+            "the admitted prompt must stamp the sidebar activity clock"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

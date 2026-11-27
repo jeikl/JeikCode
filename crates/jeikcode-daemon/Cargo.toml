@@ -82,7 +82,6 @@ ctor = "0.2"
 tempfile = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winreg = "0.55"
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 windows = { version = "0.57", features = [
     "Win32_Foundation",

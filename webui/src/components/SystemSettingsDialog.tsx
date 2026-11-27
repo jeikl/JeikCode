@@ -13,6 +13,7 @@ import { useBackdropDismiss } from '../lib/backdropDismiss';
 import { useSettings } from '../settings';
 import { ModelConfigView } from './SettingsDialogs';
 import { ShortcutRecorder } from './ShortcutRecorder';
+import { TerminalCheckCard } from './TerminalCheckCard';
 
 interface SystemSettingsDialogProps {
   onClose: () => void;
@@ -30,7 +31,7 @@ interface ModuleTab {
 }
 
 export function SystemSettingsDialog({ onClose, initialTab, focusSection }: SystemSettingsDialogProps) {
-  const { t, escUndoEnabled, setEscUndoEnabled } = useSettings();
+  const { t, escUndoEnabled, setEscUndoEnabled, chatModifiedFileAction, setChatModifiedFileAction } = useSettings();
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab || 'models');
   const [closeAction, setCloseAction] = useState<'ask' | 'tray' | 'quit'>('ask');
   const [agentModePolicy, setAgentModePolicy] = useState<'memory' | 'global'>('memory');
@@ -235,6 +236,8 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
                   {t('settings.tabDesktop') || '系统设置'}
                 </h4>
 
+                <TerminalCheckCard />
+
                 <div class="system-settings-card-box">
                   <div class="system-settings-box-title">
                     {t('settings.startupTitle')}
@@ -386,6 +389,39 @@ export function SystemSettingsDialog({ onClose, initialTab, focusSection }: Syst
                         <option value="accept_edits">{t('mode.accept_edits')}</option>
                         <option value="bypass">{t('mode.auto')}</option>
                       </select>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="system-settings-card-box">
+                  <div class="system-settings-box-title">
+                    {t('settings.chatModifiedFileTitle')}
+                  </div>
+                  <div class="system-settings-box-desc">
+                    {t('settings.chatModifiedFileDesc')}
+                  </div>
+
+                  <div class="system-settings-radio-group">
+                    <label class="system-settings-radio-label">
+                      <input
+                        type="radio"
+                        name="chat_modified_file_action"
+                        value="preview"
+                        checked={chatModifiedFileAction === 'preview'}
+                        onChange={() => setChatModifiedFileAction('preview')}
+                      />
+                      <span>{t('settings.chatModifiedFilePreview')}</span>
+                    </label>
+
+                    <label class="system-settings-radio-label">
+                      <input
+                        type="radio"
+                        name="chat_modified_file_action"
+                        value="diff"
+                        checked={chatModifiedFileAction === 'diff'}
+                        onChange={() => setChatModifiedFileAction('diff')}
+                      />
+                      <span>{t('settings.chatModifiedFileDiff')}</span>
                     </label>
                   </div>
                 </div>

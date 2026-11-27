@@ -171,27 +171,32 @@ pub(crate) fn push_system_coalesced(out: &mut Vec<Value>, text: &str) {
 /// - Model context layer receives only the concise success acknowledgement, preventing
 ///   diff-marker context degradation, token bloating, and prompt-cache invalidation.
 pub(crate) fn strip_tool_result_diff_for_model(text: &str) -> std::borrow::Cow<'_, str> {
-    // Only strip if it looks like a successful file edit/write result
-    let is_edit_success = (text.contains("has been updated successfully")
-        || text.contains("has been created")
-        || text.contains("Edited ")
-        || text.contains("Created ")
-        || text.contains("Overwrote "))
-        && !text.contains("failed")
-        && !text.contains("error:")
-        && !text.contains("Error:");
-
-    if !is_edit_success {
-        return std::borrow::Cow::Borrowed(text);
-    }
-
-    // Look for unified diff start markers
+    // Locate the diff section FIRST. Success/failure is decided from the PREAMBLE
+    // only: a created/edited file may legitimately contain `failed` / `error:` in
+    // its own content (inside the diff), which must not be mistaken for a failed
+    // tool call — otherwise the presentation-only diff would leak into the model
+    // context and bloat the prompt.
     let diff_markers = ["\n--- a/", "\n--- ", "\n@@ -", "\ndiff --git "];
     let mut cut_idx = None;
     for marker in &diff_markers {
         if let Some(idx) = text.find(marker) {
             cut_idx = Some(cut_idx.map_or(idx, |cur: usize| cur.min(idx)));
         }
+    }
+    let preamble = cut_idx.map_or(text, |idx| &text[..idx]);
+
+    // Only strip if the preamble looks like a successful file edit/write result
+    let is_edit_success = (preamble.contains("has been updated successfully")
+        || preamble.contains("has been created")
+        || preamble.contains("Edited ")
+        || preamble.contains("Created ")
+        || preamble.contains("Overwrote "))
+        && !preamble.contains("failed")
+        && !preamble.contains("error:")
+        && !preamble.contains("Error:");
+
+    if !is_edit_success {
+        return std::borrow::Cow::Borrowed(text);
     }
 
     if let Some(idx) = cut_idx {
@@ -510,5 +515,14 @@ mod wire_dump_tests {
         // 4. Non-edit output: preserved entirely
         let read_output = "Line 1\nLine 2\nLine 3";
         assert_eq!(strip_tool_result_diff_for_model(read_output), read_output);
+
+        // 5. A created file whose CONTENT (inside the diff) contains `failed` /
+        //    `error:` must still be stripped: the failure heuristic reads the
+        //    preamble only, never the presentation diff.
+        let created_with_failure_words = "Created src/x.rs (42 bytes, 2 lines)\n--- a/src/x.rs\n+++ b/src/x.rs\n@@ -0,0 +1,2 @@\n+fn failed() {}\n+// error: keep this out of the model view";
+        assert_eq!(
+            strip_tool_result_diff_for_model(created_with_failure_words),
+            "Created src/x.rs (42 bytes, 2 lines)"
+        );
     }
 }

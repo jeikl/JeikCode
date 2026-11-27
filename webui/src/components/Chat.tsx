@@ -187,6 +187,7 @@ import {
   type GitCommitFile,
   type GitStatusItem,
 } from '../api';
+import { lookupMarkdownGitFile } from '../lib/markdownGitFile';
 import { useSettings } from '../settings';
 import type { MsgKey } from '../i18n';
 import {
@@ -327,19 +328,20 @@ import {
   mergeAuthoritativeTail,
   findCausalGap,
   isTerminalNoticeAlreadyExplained,
-  noticeAlreadyPresentInMessages,
   filterUnpersistedLocalNotices,
+  mergeUnpersistedLocalNotices,
   type ChatRecoveryEvent,
   type ChatRecoveryState,
 } from '../lib/chatTerminal';
 import {
+  collectTurnAssistantEnds,
   formatTurnElapsed,
   isSteerUserMessage,
+  resolveDoneTurnElapsedMs,
   resumeTurnClockEpoch,
   rootTurnUserTs,
   stampLastAssistantElapsed,
   turnDurationMs,
-  turnTotalElapsedMs,
 } from '../lib/turnTimer';
 import { resolveLiveElapsedAnchor, standaloneStatusMode } from '../lib/compactionPhase';
 import {
@@ -542,7 +544,7 @@ export function Chat({
   onLiveReview,
   onBindReviewDismiss,
 }: ChatProps) {
-  const { t, escUndoEnabled } = useSettings();
+  const { t, escUndoEnabled, chatModifiedFileAction } = useSettings();
   // Read by window-level keydown handlers that intentionally keep a stable
   // listener instead of re-subscribing on every settings change.
   const escUndoEnabledRef = useRef(escUndoEnabled);
@@ -3280,18 +3282,15 @@ export function Chat({
       return undefined;
     })();
 
-    // 保全本地尚未在磁盘落盘的系统命令通知（如压缩完成提示通知），按 id/eventId/归一化文本兜底去重
+    // 保全本地尚未在磁盘落盘的系统命令通知（如 /compact 本地回退或尚在当前窗口的实时通知）：
+    // 按锚点归位，历史窗口外的旧通知绝不追加到对话结尾。
     const unpersistedLocalNotices = filterUnpersistedLocalNotices(canvas, diskTail);
 
     let clean = merged;
     if (unpersistedLocalUser && !clean.some((m) => m.id === unpersistedLocalUser.id)) {
       clean = [...clean, unpersistedLocalUser];
     }
-    for (const note of unpersistedLocalNotices) {
-      if (!noticeAlreadyPresentInMessages(clean, note)) {
-        clean = [...clean, note];
-      }
-    }
+    clean = mergeUnpersistedLocalNotices(clean, unpersistedLocalNotices);
     messageCacheRef.current.set(sid, clean);
     noteCacheRevision(sid, meta.revision);
     // The disk/catch-up outline may predate the current turn's pending steer.
@@ -6654,6 +6653,17 @@ export function Chat({
       localStorage.setItem('jeikcode:right-panel-collapsed', String(val));
     } catch {}
   };
+  const rightPanelCollapsedRef = useRef(rightPanelCollapsed);
+  rightPanelCollapsedRef.current = rightPanelCollapsed;
+  // 欢迎页语义只看会话是否为空，不受当前主标签影响；landing 的显示条件另行计算。
+  const isWelcomeSessionRef = useRef(true);
+  const chatModifiedFileActionRef = useRef(chatModifiedFileAction);
+  chatModifiedFileActionRef.current = chatModifiedFileAction;
+  const chatOpenCwdRef = useRef('');
+  chatOpenCwdRef.current = effectiveWorkingDir || cwd || '';
+  const chatOpenSeqRef = useRef(0);
+  const workingDiffRequests = useRef(new Map<string, object>());
+  const handleOpenWorkingDiffRef = useRef<(file: GitStatusItem, staged: boolean, repoRoot?: string) => void>(() => {});
 
   // 桌面缩到手机宽度时，面板从双列退化为底部弹层：必须先收起，
   // 否则弹层会直接盖住整个对话。手机用户主动点开面板不受影响。
@@ -6680,6 +6690,104 @@ export function Chat({
     };
     window.addEventListener('jeikcode:switch_right_tab', handleSwitchRightTab as EventListener);
     return () => window.removeEventListener('jeikcode:switch_right_tab', handleSwitchRightTab as EventListener);
+  }, []);
+
+  // 资源管理器打开路由：
+  // - 欢迎页、或桌面端右侧真正折叠时 -> 主编辑器；
+  // - 会话中右侧展开 -> 右侧预览；
+  // - 移动端顶部常驻面板始终可见，不参与折叠判断。
+  useEffect(() => {
+    const handleExplorerOpen = (event: Event) => {
+      const detail = (event as CustomEvent).detail || {};
+      const filePath = detail.filePath;
+      if (!filePath) return;
+      const mobileDocked =
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
+      const useMain = isWelcomeSessionRef.current || (!mobileDocked && rightPanelCollapsedRef.current);
+      if (useMain) {
+        window.dispatchEvent(
+          new CustomEvent('jeikcode:open_file', {
+            detail: { path: filePath, startLine: detail.line, endLine: detail.endLine },
+          }),
+        );
+        return;
+      }
+      window.dispatchEvent(
+        new CustomEvent('jeikcode:preview:open_file', {
+          detail: {
+            filePath,
+            fileName: detail.fileName,
+            startLine: detail.line,
+            endLine: detail.endLine,
+          },
+        }),
+      );
+      window.dispatchEvent(new CustomEvent('jeikcode:switch_right_tab', { detail: 'preview' }));
+    };
+    window.addEventListener('jeikcode:explorer_open_file', handleExplorerOpen);
+    return () => window.removeEventListener('jeikcode:explorer_open_file', handleExplorerOpen);
+  }, []);
+
+  // 聊天文件链接路由：默认预览遵循智能位置；模型回答中的已修改文件默认动作由系统设置决定。
+  // 选择「查看 diff」时，右侧可见则在右侧 diff 打开，否则才落到主舞台 working diff。
+  useEffect(() => {
+    const handleChatOpen = async (event: Event) => {
+      const detail = (event as CustomEvent).detail || {};
+      const filePath = detail.filePath;
+      if (!filePath) return;
+      const fileName = detail.fileName;
+      const startLine = detail.startLine ?? detail.line;
+      const endLine = detail.endLine;
+      const requestId = ++chatOpenSeqRef.current;
+      const mobileDocked =
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
+      const useMain = isWelcomeSessionRef.current || (!mobileDocked && rightPanelCollapsedRef.current);
+      const openPreview = () => {
+        if (requestId !== chatOpenSeqRef.current) return;
+        if (useMain) {
+          window.dispatchEvent(
+            new CustomEvent('jeikcode:open_file', {
+              detail: { path: filePath, startLine, endLine },
+            }),
+          );
+          return;
+        }
+        window.dispatchEvent(
+          new CustomEvent('jeikcode:preview:open_file', {
+            detail: { filePath, fileName, startLine, endLine },
+          }),
+        );
+        window.dispatchEvent(new CustomEvent('jeikcode:switch_right_tab', { detail: 'preview' }));
+      };
+
+      if (chatModifiedFileActionRef.current !== 'diff') {
+        openPreview();
+        return;
+      }
+
+      try {
+        const changed = await lookupMarkdownGitFile(filePath, chatOpenCwdRef.current);
+        if (requestId !== chatOpenSeqRef.current) return;
+        if (!changed) {
+          openPreview();
+          return;
+        }
+        if (useMain) {
+          handleOpenWorkingDiffRef.current(changed.file, changed.staged, changed.repoRoot);
+          return;
+        }
+        window.dispatchEvent(
+          new CustomEvent('jeikcode:preview:open_file', {
+            detail: { filePath, fileName, startLine, endLine, viewMode: 'diff', changed },
+          }),
+        );
+        window.dispatchEvent(new CustomEvent('jeikcode:switch_right_tab', { detail: 'preview' }));
+      } catch {
+        openPreview();
+      }
+    };
+    window.addEventListener('jeikcode:chat_open_file', handleChatOpen);
+    return () => window.removeEventListener('jeikcode:chat_open_file', handleChatOpen);
   }, []);
 
   const [rightPanelWidth, setRightPanelWidthState] = useState<number>(() => {
@@ -6988,11 +7096,8 @@ export function Chat({
     const fullRelativePath = getRelativePathToProject(file.path, repoRoot, projectRoot);
     const tabId = `working:${staged ? 'staged' : 'unstaged'}:${fullRelativePath}`;
     const targetCwd = repoRoot || cwd;
-    const existing = diffTabs.find((t) => t.id === tabId);
-    if (existing) {
-      setActiveMainTabId(tabId);
-      return;
-    }
+    const request = {};
+    workingDiffRequests.current.set(tabId, request);
 
     const fileName = file.path.split('/').pop() || file.path;
     const newTab: OpenDiffTab = {
@@ -7007,15 +7112,21 @@ export function Chat({
       loading: true,
     };
 
-    setDiffTabs((prev: OpenDiffTab[]) => [...prev, newTab]);
+    setDiffTabs((prev: OpenDiffTab[]) =>
+      prev.some((tab) => tab.id === tabId)
+        ? prev.map((tab) => (tab.id === tabId ? newTab : tab))
+        : [...prev, newTab],
+    );
     setActiveMainTabId(tabId);
 
     try {
       const res = await fetchGitWorkingDiff(file.path, staged, targetCwd);
+      if (workingDiffRequests.current.get(tabId) !== request) return;
       setDiffTabs((prev: OpenDiffTab[]) =>
         prev.map((t: OpenDiffTab) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
       );
     } catch (err: any) {
+      if (workingDiffRequests.current.get(tabId) !== request) return;
       setDiffTabs((prev: OpenDiffTab[]) =>
         prev.map((t: OpenDiffTab) =>
           t.id === tabId ? { ...t, diffText: `Error: ${err?.message || 'Failed to load diff'}`, loading: false } : t
@@ -7023,8 +7134,10 @@ export function Chat({
       );
     }
   };
+  handleOpenWorkingDiffRef.current = handleOpenWorkingDiff;
 
   const handleCloseDiffTab = (tabId: string) => {
+    workingDiffRequests.current.delete(tabId);
     const closing = diffTabs.find((t: OpenDiffTab) => t.id === tabId);
     if (closing?.type === 'editor' && closing.filePath) {
       dropEditorTabSnapshot(mainEditorStateKey(closing.filePath));
@@ -13751,7 +13864,10 @@ export function Chat({
     localTurnSessionsRef.current.has(activeIdRef.current) ||
     backgroundRunningSessionsRef.current.has(activeIdRef.current)
   ) : false);
-  const landing = messages.length === 0 && !isExecuting && !historyHint && !restoring && !loading && activeMainTabId === 'chat';
+  const isWelcomeSession =
+    messages.length === 0 && !isExecuting && !historyHint && !restoring && !loading;
+  isWelcomeSessionRef.current = isWelcomeSession;
+  const landing = isWelcomeSession && activeMainTabId === 'chat';
 
   // 上报落地态给 App（决定是否显示会话标题头）。
   useEffect(() => {
@@ -14348,10 +14464,9 @@ export function Chat({
   });
 
   // 按轮次一次性缓存复制正文映射与最后助手位置索引（O(N) 一次扫描），避免流式分片或状态变化时重复全量拼接
-  const { turnLastTexts, turnAllTexts, lastInTurnSet } = useMemo(() => {
+  const { turnLastTexts, turnAllTexts, lastInTurnSet, lastNonSystemIdx } = useMemo(() => {
     const lastTexts = new Map<number, string>();
     const allTexts = new Map<number, string>();
-    const lastInTurn = new Set<number>();
 
     let start = -1;
     let textParts: string[] = [];
@@ -14411,19 +14526,14 @@ export function Chat({
       }
     }
 
-    let seenNonSystemAfter: string | undefined = undefined;
-    for (let k = messages.length - 1; k >= 0; k--) {
-      if (messages[k].role === 'assistant') {
-        if (seenNonSystemAfter === undefined || seenNonSystemAfter === 'user') {
-          lastInTurn.add(k);
-        }
-      }
-      if (messages[k].role !== 'system') {
-        seenNonSystemAfter = messages[k].role;
-      }
-    }
+    const { lastInTurnSet: lastInTurn, lastNonSystemIdx } = collectTurnAssistantEnds(messages);
 
-    return { turnLastTexts: lastTexts, turnAllTexts: allTexts, lastInTurnSet: lastInTurn };
+    return {
+      turnLastTexts: lastTexts,
+      turnAllTexts: allTexts,
+      lastInTurnSet: lastInTurn,
+      lastNonSystemIdx,
+    };
   }, [messages]);
 
   return (
@@ -14627,9 +14737,14 @@ export function Chat({
                     userTs,
                   })
                 : undefined;
-            const doneTotal = isLastInTurn && !busy
-              ? turnTotalElapsedMs(userTs, msg.ts, msg.elapsedMs)
-              : undefined;
+            const doneTotal = resolveDoneTurnElapsedMs({
+              isLastInTurn,
+              isTailNonSystem: origIdx === lastNonSystemIdx,
+              busy,
+              userTs,
+              endTs: msg.ts,
+              elapsedMs: msg.elapsedMs,
+            });
 
             return (
               <AssistantMessageView

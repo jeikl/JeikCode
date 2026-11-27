@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  collectTurnAssistantEnds,
   composeSteerWireText,
   formatTurnElapsed,
   isSteerUserMessage,
+  resolveDoneTurnElapsedMs,
   resumeTurnClockEpoch,
   rootTurnUserTs,
   stampLastAssistantElapsed,
@@ -261,6 +263,115 @@ test('rootTurnUserTs stops penetrating across an intervening assistant with a di
 
   // Must penetrate Turn 11's mid-turn steer back to tSteerStart, and stop at asst(turnId=10).
   assert.equal(rootTurnUserTs(msgs, 5), tSteerStart);
+});
+
+test('collectTurnAssistantEnds 与 resolveDoneTurnElapsedMs 在新回合运行期间保留所有历史回合耗时', () => {
+  // 场景 1：已有两轮已完成的对话，用户刚发出第 3 轮提问（尚未吐出第 3 轮 assistant），此时 busy=true
+  const waitingFirstFrame = [
+    { role: 'user', ts: 1_000_000 },
+    { role: 'assistant', ts: 1_012_000, elapsedMs: 12_000 },
+    { role: 'system' }, // 例如压缩分割线或命令通知
+    { role: 'user', ts: 2_000_000 },
+    { role: 'assistant', ts: 2_035_000, elapsedMs: 35_000 },
+    { role: 'user', ts: 3_000_000 },
+  ];
+  const ends1 = collectTurnAssistantEnds(waitingFirstFrame);
+  assert.deepEqual([...ends1.lastInTurnSet].sort((a, b) => a - b), [1, 4]);
+  assert.equal(ends1.lastNonSystemIdx, 5);
+  assert.equal(
+    resolveDoneTurnElapsedMs({
+      isLastInTurn: ends1.lastInTurnSet.has(1),
+      isTailNonSystem: 1 === ends1.lastNonSystemIdx,
+      busy: true,
+      userTs: 1_000_000,
+      endTs: 1_012_000,
+      elapsedMs: 12_000,
+    }),
+    12_000,
+  );
+  assert.equal(
+    resolveDoneTurnElapsedMs({
+      isLastInTurn: ends1.lastInTurnSet.has(4),
+      isTailNonSystem: 4 === ends1.lastNonSystemIdx,
+      busy: true,
+      userTs: 2_000_000,
+      endTs: 2_035_000,
+      elapsedMs: 35_000,
+    }),
+    35_000,
+  );
+
+  // 场景 2：第 3 轮有多段助手输出（工具轮 + 正在流式输出的末尾气泡），且末尾伴随一条 system 通知
+  const streamingWithTrailingNotice = [
+    { role: 'user', ts: 1_000_000 },
+    { role: 'assistant', ts: 1_012_000, elapsedMs: 12_000 },
+    { role: 'user', ts: 2_000_000 },
+    { role: 'assistant', ts: 2_035_000, elapsedMs: 35_000 },
+    { role: 'user', ts: 3_000_000 },
+    { role: 'assistant', ts: 3_005_000 },
+    { role: 'assistant', ts: 3_010_000 },
+    { role: 'system' },
+  ];
+  const ends2 = collectTurnAssistantEnds(streamingWithTrailingNotice);
+  assert.deepEqual([...ends2.lastInTurnSet].sort((a, b) => a - b), [1, 3, 6]);
+  assert.equal(ends2.lastNonSystemIdx, 6);
+  // 历史回合仍然保留
+  assert.equal(
+    resolveDoneTurnElapsedMs({
+      isLastInTurn: ends2.lastInTurnSet.has(1),
+      isTailNonSystem: 1 === ends2.lastNonSystemIdx,
+      busy: true,
+      userTs: 1_000_000,
+      endTs: 1_012_000,
+      elapsedMs: 12_000,
+    }),
+    12_000,
+  );
+  assert.equal(
+    resolveDoneTurnElapsedMs({
+      isLastInTurn: ends2.lastInTurnSet.has(3),
+      isTailNonSystem: 3 === ends2.lastNonSystemIdx,
+      busy: true,
+      userTs: 2_000_000,
+      endTs: 2_035_000,
+      elapsedMs: 35_000,
+    }),
+    35_000,
+  );
+  // 当前回合的中间助手轮不显示耗时
+  assert.equal(
+    resolveDoneTurnElapsedMs({
+      isLastInTurn: ends2.lastInTurnSet.has(5),
+      isTailNonSystem: 5 === ends2.lastNonSystemIdx,
+      busy: true,
+      userTs: 3_000_000,
+      endTs: 3_005_000,
+    }),
+    undefined,
+  );
+  // 当前活跃尾部回合在 busy=true 时不显示完成态耗时（即使末尾有 system 通知）
+  assert.equal(
+    resolveDoneTurnElapsedMs({
+      isLastInTurn: ends2.lastInTurnSet.has(6),
+      isTailNonSystem: 6 === ends2.lastNonSystemIdx,
+      busy: true,
+      userTs: 3_000_000,
+      endTs: 3_010_000,
+    }),
+    undefined,
+  );
+  // stop / 完成后（busy=false），尾部回合立即算出完成态耗时
+  assert.equal(
+    resolveDoneTurnElapsedMs({
+      isLastInTurn: ends2.lastInTurnSet.has(6),
+      isTailNonSystem: 6 === ends2.lastNonSystemIdx,
+      busy: false,
+      userTs: 3_000_000,
+      endTs: 3_025_000,
+      elapsedMs: 25_000,
+    }),
+    25_000,
+  );
 });
 
 

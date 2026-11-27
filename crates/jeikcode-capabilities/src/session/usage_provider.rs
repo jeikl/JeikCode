@@ -33,6 +33,10 @@ impl LlmProvider for UsageRecordingProvider {
         self.inner.context_window()
     }
 
+    fn excludes_reasoning_history(&self) -> bool {
+        self.inner.excludes_reasoning_history()
+    }
+
     fn bind_session_id(&self, session_id: &str) {
         self.inner.bind_session_id(session_id);
     }

@@ -462,10 +462,20 @@ impl Message {
     /// reporting provider records utilization 0.0 forever and never compacts).
     /// Mirrors the legacy estimate heuristic (see `jeikcode-coding`'s telemetry copy).
     pub fn estimate_tokens(&self) -> u32 {
+        self.estimate_tokens_for_wire(true)
+    }
+
+    /// 按发包策略估算当前消息的 token 数；`include_reasoning = false` 时剔除不上线的 `reasoning`。
+    pub fn estimate_tokens_for_wire(&self, include_reasoning: bool) -> u32 {
         // Images dominate when present (vision ≈ 1600 tok each).
         if !self.images.is_empty() {
             return ((self.text.len() / 4).max(1) + self.images.len() * 1600 + 4) as u32;
         }
+        let reasoning_len = if include_reasoning {
+            self.reasoning.as_ref().map_or(0, |r| r.len())
+        } else {
+            0
+        };
         let byte_count = if self.role == Role::Tool {
             self.text.len() + 10 // tool result + small wrapper overhead
         } else if !self.tool_calls.is_empty() {
@@ -474,7 +484,7 @@ impl Message {
                 .iter()
                 .map(|tc| tc.name.len() + tc.arguments.len() + 20)
                 .sum();
-            self.text.len() + calls + self.reasoning.as_ref().map_or(0, |r| r.len())
+            self.text.len() + calls + reasoning_len
         } else {
             self.text.len()
         };
@@ -490,6 +500,11 @@ impl Message {
     /// underestimate would let `prompt + max_tokens` exceed the gateway window and
     /// produce an opaque HTTP 400. So this is the safe direction to be wrong in.
     pub fn estimate_tokens_conservative(&self) -> u32 {
+        self.estimate_tokens_conservative_for_wire(true)
+    }
+
+    /// 按发包策略做保守 token 估算；`include_reasoning = false` 时跳过不回传的 `reasoning`。
+    pub fn estimate_tokens_conservative_for_wire(&self, include_reasoning: bool) -> u32 {
         // Images dominate when present (vision ≈ 1600 tok each).
         if !self.images.is_empty() {
             return ((self.text.len() / 4).max(1) + self.images.len() * 1600 + 4) as u32;
@@ -511,8 +526,10 @@ impl Message {
                 add(&call.name);
                 add(&call.arguments);
             }
-            if let Some(reasoning) = &self.reasoning {
-                add(reasoning);
+            if include_reasoning {
+                if let Some(reasoning) = &self.reasoning {
+                    add(reasoning);
+                }
             }
         }
         // Mirror `estimate_tokens`' small per-shape overheads.
@@ -856,6 +873,12 @@ fn system_block_order(text: &str) -> u8 {
         || text.starts_with("<workflow_and_execution_discipline>")
     {
         20
+    } else if text.starts_with("<todo_rules>") {
+        24
+    } else if text.starts_with("<command_execution>") {
+        25
+    } else if text.starts_with("<explore_strategy>") {
+        26
     } else if text.starts_with("<available_skills>") || text.starts_with("=== AVAILABLE SKILLS") {
         30
     } else if text.starts_with("<mcp_server_instructions>")
@@ -1534,6 +1557,26 @@ mod tests {
             conservative > cjk.estimate_tokens(),
             "the byte estimate must be the smaller one for CJK"
         );
+    }
+
+    #[test]
+    fn wire_estimates_omit_reasoning_when_excluded() {
+        let mut msg = Message::assistant(
+            "ok",
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            }],
+        );
+        msg.reasoning = Some("思考过程".repeat(200));
+
+        assert!(msg.estimate_tokens_for_wire(true) > msg.estimate_tokens_for_wire(false) + 400);
+        assert!(
+            msg.estimate_tokens_conservative_for_wire(true)
+                > msg.estimate_tokens_conservative_for_wire(false) + 700
+        );
+        assert!(msg.estimate_tokens_conservative_for_wire(false) < 50);
     }
 
     /// Regression: one admitted prompt must stay ONE row. The `/chat` driver used to

@@ -21,6 +21,170 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.5.4-beta.5 (2026-11-26)
+
+- **[Daemon] Workspace-independent file explorer directory listing**:
+  - Fixes a backend crash when browsing workspaces outside the daemon's `--dir` startup directory by resolving ignore rules from each browsed workspace's own repository root or directory instead of the default bound root.
+  - Prevents host connection failures and empty file trees across secondary workspaces in remote daemon deployments.
+
+- **[WebUI] Reliable native folder selection without spurious timeouts**:
+  - Removes the 15-second automatic request timeout when waiting for the OS native directory picker dialog and blocks duplicate re-entrant picker triggers while selection is in progress.
+  - Falls back to the web directory browser only on remote hosts or unexpected errors, instead of interrupting local folder selection.
+
+---
+
+- **[服务端] 修复切换非启动绑定工作区时文件树加载异常**：
+  - 修复 daemon 使用 `--dir` 绑定默认目录后，在资源管理器浏览其他工作区时因跨根目录匹配忽略规则触发崩溃并导致“连接宿主机后端失败”的问题。
+  - 每个工作区改用自身所属仓库或目录基准解析忽略规则，确保所有多工作区目录列表与文件打开均可正常使用。
+
+- **[WebUI] 优化原生文件夹选择器超时与防重入保护**：
+  - 取消调用本地系统文件夹选择器时的 15 秒前端自动超时限制，并在选框打开期间拦截重复触发，避免选择尚未结束时误弹网页版目录选择器。
+  - 仅在远端浏览器访问或调用报错时回退到网页版目录浏览器，用户主动取消选择不再误触发回退。
+
+## v7.5.4-beta.4 (2026-11-26)
+
+- **[Session & Context] Compaction-protected session ID injection**:
+  - Injects the current session ID once into the compaction-protected first user turn below the current date, and performs a one-time backfill onto the opening turn for legacy or forked sessions missing it.
+  - Instructs the model to read on-disk session files only when explicitly troubleshooting session data, passing session IDs to tools/skills, or investigating rendering/persistence bugs, while answering ordinary recall questions directly from active context.
+  - Keeps UI message bubbles, session titles, and wrapped user prompts clean without exposing the injected reminder.
+
+- **[Kernel & Compaction] Accurate wire token estimation and overflow escalation**:
+  - Excludes unsent historical reasoning text from prompt token and utilization estimates when `reasoning_history` excludes history, preventing false compaction thrashing well below the true context window.
+  - Fixes automatic compaction pressure propagation, raises the stub rewrite floor to avoid negative-savings nested stubs, and ensures pre-send overflow recovery escalates cleanly through all compaction stages.
+
+- **[WebUI] Stable turn elapsed badges and system notice placement**:
+  - Keeps completed elapsed-duration badges visible on prior historical turns while a new turn is running.
+  - Anchors unpersisted local system notices to their associated turns and prunes out-of-window historical notices during tail reconciliation so compaction markers no longer pile up at the end of the timeline.
+
+---
+
+- **[会话与上下文] 受压缩保护的会话 ID 单次注入**：
+  - 在受压缩保护的首轮用户提问日期下方一次性注入当前会话 ID；对于缺少该标记的旧版本会话或分叉会话，自动检测后在首轮提问尾部一次性补全，后续轮次不再重复注入。
+  - 明确约束模型仅在排查会话数据异常、向支持会话 ID 的技能或工具传参，或排查渲染与落盘 BUG 时才查阅配置目录中的会话文件，普通对话回顾仍直接基于当前上下文作答。
+  - UI 消息气泡、自动标题生成及自定义提问包装剥离均自动过滤该注入块，不影响用户界面展示。
+
+- **[内核与上下文压缩] 修复排除思考历史时的 Token 估算与压缩升级抖动**：
+  - 当配置排除历史思考文本时，出站提示词 Token 与水位估算不再计入未发送的历史思考内容，避免远未达窗口上限即频繁误触发压缩。
+  - 修复自动压缩压力传递、提高存根最小改写阈值并保障发送前溢出压缩逐级升级，防止长会话在同一压缩阶段反复空转。
+
+- **[WebUI] 修复回合完成耗时徽章与系统通知尾部堆叠**：
+  - 新回合运行期间继续保留先前已完成历史回合的蓝色耗时徽章，不再因全局运行态而整体隐藏。
+  - 对齐磁盘尾部记录时将本地系统通知精确插回对应锚点并裁剪越窗历史通知，解决压缩分割线等历史系统通知堆叠到对话最末尾的问题。
+
+## v7.5.4-beta.3 (2026-11-26)
+
+- **[Code Intelligence] Minimal, fact-only `code_explore` results**:
+  - The `NEXT` work order and every command-style hint are removed; results now keep evidence spans, candidates, the flow spine, identifier sites, one coverage line, and one "ranked is not exhaustive" boundary statement.
+  - Performance timing and Cache HIT lines no longer enter the model context; Index Status appears only for incremental or full rebuilds.
+  - Folded spans point to the real `read` arguments (`offset`/`limit`), while low-hit retry, contract lookup, and directory-first path guidance moved into the tool description.
+
+---
+
+- **[代码智能] `code_explore` 结果精简为纯事实**：
+  - 删除 `NEXT` 工作单及结果中的全部命令式提示；输出仅保留证据片段、候选、调用链、标识符站点、一行 Coverage 与一条“ranked 不等于穷尽”的边界声明。
+  - 性能耗时与 Cache HIT 行不再进入模型上下文；Index Status 仅在增量或全量重建时出现。
+  - 折叠片段改用 `read` 真实支持的 `offset`/`limit` 参数；低命中重试、contract 查找、path 优先目录三条策略迁入工具描述。
+
+## v7.5.4-beta.2 (2026-11-25)
+
+- **[WebUI] Soft-wrapped editing and preview with stable navigation**:
+  - The code editor and file preview now soft-wrap; line numbers, caret, selection, target lines, Ctrl+F jumps, and the bottom of large files stay aligned.
+  - The inspector keeps its collapse button visible, respects the available stage width, and preserves a readable main column.
+  - File previews keep a single vertical scrollbar; code wraps, while wide tables and formulas scroll locally without adding an outer horizontal scrollbar.
+
+- **[WebUI] Smart file opening and configurable changed-file diffs**:
+  - Explorer and model-answer file links follow the current workspace: right preview when the inspector is open, main editor on the welcome page or when the inspector is collapsed, and the right side on mobile.
+  - A system setting chooses Preview (default) or View diff for modified files in model answers; diffs follow the same routing and previews keep line targets.
+  - The right inspector gains a per-tab preview/edit/diff mode with an explicit D action, while the main working diff remains available when the inspector is collapsed.
+
+- **[Desktop & CLI] Terminal CLI check and ownership**:
+  - System Settings now reports the bundled CLI, external and package-managed copies, PATH state, and offers install, replace, and repair actions.
+  - The desktop shell allows these commands from the local daemon WebUI on Windows, macOS, and Linux; administrator rights are not required for the check.
+
+- **[Capabilities] Presentation diff on file-creating writes**:
+  - Capability writes that create a file now include the presentation diff in the response.
+
+---
+
+- **[WebUI] 软换行编辑与预览，导航/滚动稳定**：
+  - 编辑器与文件预览支持软换行；行号、光标、选区、目标行、Ctrl+F 与超大文件底部保持对齐。
+  - 检查器折叠按钮始终可见，宽度受可用舞台约束，并保留可读主列。
+  - 文件预览保持单一纵向滚动；代码自动换行，宽表格与公式仅在自身容器内横向滚动，不再产生外层横向滚动条。
+
+- **[WebUI] 智能打开与可配置的修改文件 diff**：
+  - 资源管理器与模型回答文件链接按当前工作现场打开：检查器展开时进右侧预览，欢迎页/检查器折叠时进主编辑器，移动端进右侧。
+  - 系统设置可选择模型回答中修改文件的默认动作：预览（默认）/ 查看 diff；diff 跟随同一路由，预览保留行定位。
+  - 右侧检查器新增每标签独立的预览/编辑/diff 模式与显式 D 操作；检查器折叠时仍可在主舞台查看 working diff。
+
+- **[桌面与 CLI] 终端 CLI 检查与归属管理**：
+  - 系统设置现在展示内置 CLI、外部/包管理器副本、PATH 状态，并提供安装、替换、修复路径操作。
+  - 桌面壳在 Windows、macOS、Linux 上允许本机 daemon WebUI 调用这些命令；检查无需管理员权限。
+
+- **[Capabilities] 创建文件的写入响应携带展示 diff**：
+  - 能力写操作创建文件时，响应中会包含展示 diff。
+
+## v7.5.4-beta.1 (2026-11-23)
+
+**This beta builds on the v7.5.3 stable consolidation. Its first model-reasoning performance change is the new `<command_execution>` block that cuts useless existence preflight and repeated confirmation; it also adds the platform convergence pass, unified session activity timestamps, WebUI editor/tool-row fixes, YAML-only prompt defaults, DeepSeek V4 protocol support, and a substantially faster CI/test pipeline.**
+
+- **[Prompts & Agent] Model reasoning performance: YAML-only defaults and the sys-3 command-execution block**:
+  - `assets/prompts/*.yaml` is now the single default prompt source; user `rules.yaml` remains the override. The compiled-in RULES/prompt_sections fallbacks and the ASKING THE USER block were removed.
+  - Added a dedicated sys-3 `<command_execution>` block between `<system_rules>` and `<explore_strategy>`: it reduces useless pre-execution existence probes and repeated confirmation by running the expected command first, trusting successful simple state changes, and reserving tests/build/type-checks for real code fixes and milestone verification.
+  - The block also makes retrieval directional and workspace-first, with correct/incorrect examples: it avoids whole-disk or whole-database scans when the target is outside the current workspace, treats full-folder search as a fallback, and uses short gaps for genuinely expensive queries. Legacy `<todo_rules>` are reconciled on resume.
+
+- **[Platform & Release] Single-source platform matrix and stricter artifact gates**:
+  - Release platforms are now generated from one manifest for CLI, desktop, npm, installer, and updater, with dynamic matrices, generated manifests, artifact format/static-link/16K page checks, qemu `/health` smoke, native arm64 tests, and a beta-only Windows x64 NSIS build.
+  - WebUI capability toggles stay stable when an older refresh response arrives late; the daemon now uses physical catalog buckets for project/session navigation and normalizes Windows upload separators on Unix.
+  - Release smoke tests now register arm64 binfmt via `docker/setup-qemu-action` and run the published linux-arm64 binary directly, removing the Ubuntu `qemu-user-static` apt dependency that blocked the beta.1 publish gate.
+
+- **[Sessions] One activity timestamp for WebUI, APIs, and TUI**:
+  - `SessionMeta.updated_at` is now the single user-perceived activity clock for the WebUI sidebar, `/sessions`, the OpenAI/Anthropic-compatible endpoints, and the TUI session history.
+  - Activity is stamped when a real prompt is admitted and on every non-cancelled terminal; manual stop and AI-assisted naming no longer move the clock. The sidebar gets a visible-only 30-second clock tick so relative labels age in place.
+
+- **[WebUI] Editor, tool-row, and tool-status polish**:
+  - Fixed the desktop WebView2 editor selection drifting half a line above the text; selection and viewport now stay stable when switching between Markdown preview and source editing, and target-line/Ctrl+F positioning uses the measured line height.
+  - Bash summaries now stop before the fixed status/time/chevron group on desktop and mobile, so status never gets pushed off-screen.
+  - Rebalanced tool-row parameter accents: search patterns use a content mauve instead of error-like rose, and repetition counts use a calm sage badge in both themes.
+
+- **[Providers] DeepSeek V4 protocol**:
+  - `deepseek-flash` now follows the V4 protocol with refreshed model documentation.
+
+- **[CI & Testing] Much faster feedback**:
+  - Rust quality is split into parallel static/contracts, daemon, and lib-suite jobs. CI feedback dropped from about 14.35m to 3m40s, and the daemon suite from about 285s to 7s after removing a 278s idle wait in the image-preprocessing test.
+  - The arm64 job dropped from about 9.1m to 2.6m; cache saves are scoped to push runs, tag builds no longer write beta-unusable cache scopes, and the Rust toolchain is sourced from `rust-toolchain.toml`.
+  - Ubuntu x64 now runs the full default-feature capabilities unit suite on push.
+
+---
+
+**本 beta 基于 v7.5.3 稳定汇总版。第一个模型思考性能改动是新增 `<command_execution>` 块，减少无用的前置存在性探测和重复确认；同时包含平台收敛、统一会话活跃时间、WebUI 编辑器/工具行修复、提示词 YAML 单一默认源、DeepSeek V4 协议支持，以及显著加速的 CI/测试流水线。**
+
+- **[提示词与 Agent] 模型思考性能：YAML 单一默认源与 sys-3 命令执行块**：
+  - `assets/prompts/*.yaml` 成为唯一默认提示词来源，用户 `rules.yaml` 作为覆盖；删除编译期 RULES/prompt_sections fallback 与 ASKING THE USER 块。
+  - 新增位于 `<system_rules>` 与 `<explore_strategy>` 之间的 sys-3 `<command_execution>` 块：先运行预期命令，成功即继续；简单状态变更不重复核对；测试/构建/类型检查只用于真正的代码修复和阶段性验证，从而减少无用的前置存在性探测与重复确认。
+  - 该块同时约束检索方向并提供正确/错误案例：目标不在当前工作区时避免全盘 / 全库扫描；全文件夹检索仅作兜底；确实高耗时的查询保留短间隙。恢复会话时清理旧 `<todo_rules>`。
+
+- **[平台与发布] 平台矩阵单一事实源与更严格的产物校验**：
+  - CLI、桌面、npm、安装器与更新器的发布平台统一由一份清单生成，包含动态矩阵、生成清单、产物格式/静态链接/16K 页校验、qemu `/health` 冒烟、原生 arm64 测试，以及 beta 专用的 Windows x64 NSIS 构建。
+  - WebUI 能力开关在旧刷新响应晚到时保持稳定；daemon 的项目/会话导航改用物理 catalog 桶，并在 Unix 上归一化 Windows 上传路径分隔符。
+  - 发布 smoke 测试改用 `docker/setup-qemu-action` 注册 arm64 binfmt，并直接运行发布出的 linux-arm64 二进制，移除 Ubuntu `qemu-user-static` apt 依赖，修复 beta.1 发布门禁被阻断的问题。
+
+- **[会话] WebUI、API 与 TUI 共用同一活跃时间**：
+  - `SessionMeta.updated_at` 成为 WebUI 侧栏、`/sessions`、OpenAI/Anthropic 兼容端点与 TUI 会话历史的唯一“用户可感知活跃时间”。
+  - 真实提问被采纳时刷新，所有非 cancelled 终态刷新；手动停止与助手侧 AI 命名不再改变时间；侧栏增加仅可见时运行的 30 秒时钟 tick，相对时间文案会自行老化。
+
+- **[WebUI] 编辑器、工具行与工具状态细节**：
+  - 修复桌面 WebView2 下编辑器选区比文字高半行的问题；Markdown 预览与源码编辑互切时保持选区与视口稳定，目标行/Ctrl+F 定位改用实测行高。
+  - Bash 说明在桌面和手机上都会在固定状态/耗时/箭头之前停止，不再把状态顶出屏幕。
+  - 重新平衡工具行参数配色：搜索 pattern 使用内容语义的 mauve，重复次数使用克制的 sage 徽标，深色与浅色主题同步。
+
+- **[Provider] DeepSeek V4 协议**：
+  - `deepseek-flash` 按 V4 协议处理，并同步更新模型文档。
+
+- **[CI 与测试] 反馈速度显著提升**：
+  - Rust quality 拆分为 static/contracts、daemon 与 lib 套件并行 job。CI 反馈从约 14.35m 降到 3m40s；daemon 套件在移除图片预处理测试的 278s 空等后，从约 285s 降到 7s。
+  - arm64 job 从约 9.1m 降到 2.6m；缓存仅 push 写入，tag 构建不再写入 beta 不可复用的缓存作用域；Rust 工具链统一从 `rust-toolchain.toml` 读取。
+  - Ubuntu x64 在 push 时新增 capabilities 默认 feature 全量单测。
+
 ## v7.5.3 (2026-11-22)
 
 **v7.5.3 is the stable consolidation of beta.0 through beta.6. It adds full-stack scheduled tasks with an isolated AI assistant, unbounded main-session rounds with soft landing, runtime model swapping, startup Auto/Bypass and persistent mode policy, full desktop updates with two-hop shell upgrades, desktop theme/autostart/hotkey improvements, a denser WebUI, configurable compaction thresholds, accurate context reporting, major connection and performance work, and console noindex hardening. Follow-up fixes cover tool rows, model cards, image lightbox navigation, F5 refresh, mobile Bash summaries, scheduled-task workspaces, and English settings labels. This release also removes the duplicate desktop CLI sidecar, cutting DMG/deb installer sizes by about 44–45% in validation.**

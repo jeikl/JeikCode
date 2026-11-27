@@ -127,6 +127,11 @@ pub trait LlmProvider: Send + Sync {
     fn context_window(&self) -> u32 {
         0
     }
+    /// 发包时是否剔除历史思考内容（例如 `reasoning_history = "exclude"`）。
+    /// 内核用它避免把不上线的 `reasoning` 计入 prompt 水位估算。
+    fn excludes_reasoning_history(&self) -> bool {
+        false
+    }
     /// Bind this provider to its owning Agent's session id, ONCE. The kernel calls
     /// this at spawn — the single point where the session id (allocated by the coding
     /// layer's `prepare`, threaded in via `AgentBuilder::session_id`) meets the

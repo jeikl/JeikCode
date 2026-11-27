@@ -98,17 +98,6 @@ FunctionEnd
   ${If} $2 == 1
     System::Call 'user32::SendMessageTimeoutW(p 0xFFFF, i 0x001A, p 0, w "Environment", i 0x0002, i 1000, *p 0)'
   ${EndIf}
-
-  ; Clean up legacy ~/.local/bin files if left by older dropper versions
-  IfFileExists "$PROFILE\.local\bin\jeikcode.exe" 0 +2
-    Delete "$PROFILE\.local\bin\jeikcode.exe"
-  IfFileExists "$PROFILE\.local\bin\jeikcode.bak.exe" 0 +2
-    Delete "$PROFILE\.local\bin\jeikcode.bak.exe"
-  IfFileExists "$PROFILE\.local\bin\atomcode.exe" 0 +2
-    Delete "$PROFILE\.local\bin\atomcode.exe"
-  IfFileExists "$PROFILE\.local\bin\atomcode.bak.exe" 0 +2
-    Delete "$PROFILE\.local\bin\atomcode.bak.exe"
-  RMDir "$PROFILE\.local\bin"
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

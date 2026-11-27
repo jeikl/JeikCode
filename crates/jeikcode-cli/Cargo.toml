@@ -52,6 +52,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 toml_edit = "0.22"
 serde_json = "1"
+sha2 = "0.10"
+which = "7"
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 is-terminal = "0.4"
@@ -98,7 +100,6 @@ jeikcode-kernel = { path = "../jeikcode-kernel", features = ["test-support"] }
 ctor = "0.2"
 predicates = "3"
 tempfile = "3"
-which = "7"
 # Serialize env-var-mutating uninstall tests (moved from jeikcode-core).
 serial_test = "3"
 

@@ -1,0 +1,15 @@
+# The desktop window loads the WebUI from the local daemon origin (a remote URL
+# from Tauri's perspective). Application commands therefore need an explicit
+# capability permission; otherwise Tauri rejects them with
+# "Command ... not allowed by ACL" regardless of OS or administrator rights.
+[[permission]]
+identifier = "allow-app-commands"
+description = "Allow the local daemon WebUI to call desktop shell application commands."
+commands.allow = [
+  "desktop_shell_info",
+  "terminal_check_status",
+  "terminal_install_cli",
+  "terminal_uninstall_cli",
+  "start_desktop_shell_update",
+  "install_desktop_shell_update"
+]

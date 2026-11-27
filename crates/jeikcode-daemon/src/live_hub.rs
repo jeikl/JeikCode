@@ -1694,7 +1694,8 @@ impl LiveViewHub {
         // (WebUI watching another session_id) see InputAccepted / Steered / etc.
         if let Some(view) = session_view_from_live(&event) {
             let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
-            let _ = reg.open_or_attach(session_id.clone(), working_dir);
+            // clone：下面的全局广播分支还要用 working_dir 读权威行。
+            let _ = reg.open_or_attach(session_id.clone(), working_dir.clone());
             let _ = reg.push_view_event(&session_id, view);
         }
         state.next_cursor += 1;
@@ -1712,6 +1713,15 @@ impl LiveViewHub {
                     approval_id: None,
                     request_id: Some(*request_id),
                 });
+            }
+            // 真实提问入队：kernel 的 `user_prompt_submit` 已刷新 meta.updated_at，
+            // 这里推权威行，让绑定 live 的 TUI/CLI 也能跨实例同步侧栏时间。
+            // steer 走 `AgentEvent::Steered`，不会命中；`InputAccepted` 是 hub 的
+            // 乐观事件，可能早于 hook 落盘，故不在此使用。
+            LiveViewEvent::Runtime(CodingRuntimeEvent::Agent(AgentEvent::UserMessage {
+                ..
+            })) => {
+                crate::publish_session_upsert(&working_dir, &session_id);
             }
             LiveViewEvent::InputAccepted { .. } | LiveViewEvent::Steered { .. } => {
                 crate::publish_global(crate::GlobalWireEvent::Activity {
@@ -1917,6 +1927,60 @@ mod tests {
 
     fn snapshot(text: &str) -> SessionSnapshot {
         SessionSnapshot::new(vec![Message::user(text)])
+    }
+
+    #[test]
+    fn user_message_publishes_a_session_upsert() {
+        let working_dir =
+            std::env::temp_dir().join(format!("live-hub-upsert-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let session_id = format!("s-{}", uuid::Uuid::new_v4().simple());
+        let manager = jeikcode_capabilities::session::SessionManager::for_project(&working_dir);
+        let mut meta = jeikcode_capabilities::session::SessionMeta::new(
+            &session_id,
+            working_dir.to_string_lossy(),
+            1,
+        );
+        meta.owner = jeikcode_capabilities::session::StorageOwner::Native;
+        meta.updated_at = 42;
+        manager.write_meta(&meta).unwrap();
+
+        let mut rx = crate::global_events().subscribe();
+        let hub = LiveViewHub::new();
+        let (control, _) = control();
+        let binding = hub
+            .bind(
+                session_id.clone(),
+                working_dir.clone(),
+                snapshot("old"),
+                control,
+            )
+            .unwrap();
+        hub.publish(
+            &binding,
+            SequencedRuntimeEvent {
+                generation: 1,
+                sequence: 1,
+                event: CodingRuntimeEvent::Agent(AgentEvent::UserMessage {
+                    message_id: "m-user".into(),
+                    turn_ordinal: 1,
+                    message_index: 0,
+                }),
+            },
+        )
+        .unwrap();
+
+        let mut upserted = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::GlobalWireEvent::SessionUpsert { session } = event {
+                if session.id == session_id {
+                    assert_eq!(session.updated_at, 42);
+                    upserted = true;
+                    break;
+                }
+            }
+        }
+        assert!(upserted, "a real user prompt must publish a session upsert");
     }
 
     #[test]

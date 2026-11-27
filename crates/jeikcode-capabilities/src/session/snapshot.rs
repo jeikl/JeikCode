@@ -914,17 +914,38 @@ pub(crate) fn stop_reason_slug(reason: StopReason) -> &'static str {
 #[async_trait]
 impl LifecycleHooks for SnapshotHook {
     /// Mark the turn's wall-clock start (for `duration_ms`) and reset per-turn counters.
+    ///
+    /// This is also the single "user asked" seam for the sidebar activity clock:
+    /// a real prompt refreshes `SessionMeta.updated_at`, while a mid-turn steer does
+    /// not (it belongs to the turn that is already running).
     async fn user_prompt_submit(&self, text: &mut String) -> Result<(), String> {
-        let mut a = self.lock();
-        let started_ms = if is_steer_message_text(text) && a.started_ms > 0 {
-            a.started_ms
-        } else {
-            now_ms()
-        };
-        *a = TurnAccum {
-            started_ms,
-            ..Default::default()
-        };
+        let steer = is_steer_message_text(text);
+        {
+            // 独立的块让 MutexGuard 在 await 前明确离开作用域（future 必须 Send）。
+            let mut a = self.lock();
+            let started_ms = if steer && a.started_ms > 0 {
+                a.started_ms
+            } else {
+                now_ms()
+            };
+            *a = TurnAccum {
+                started_ms,
+                ..Default::default()
+            };
+        }
+        if !steer {
+            let mgr = Arc::clone(&self.mgr);
+            let session_id = self.session_id.clone();
+            // 必须 await：daemon 的 `ChatEvent::User` 广播会立刻读取 meta，
+            // detach 会让它推送到旧时间。NotFound 表示 TUI 全新会话的 meta
+            // 尚未创建，创建/turn_complete 会补上时间，静默跳过即可。
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = mgr.update_meta(&session_id, |meta| {
+                    meta.updated_at = now_ms();
+                });
+            })
+            .await;
+        }
         Ok(())
     }
 
@@ -1120,6 +1141,9 @@ impl LifecycleHooks for SnapshotHook {
         let msg_count = convo.messages.len();
         let reason_slug = stop_reason_slug(*reason).to_string();
         let reason_errored = *reason != StopReason::Stopped;
+        // 侧栏活跃时间：手动停止（cancelled）不算一次有意义的会话推进，
+        // 保留提问时写入的时间；其余终态（完成/上限/错误/超时）都刷新。
+        let stamp_activity = *reason != StopReason::Cancelled;
         let turn_id = ctx.turn_id;
 
         let (checkpoint, candidate_points, has_rewind) = if let Some(point) = completed_rewind {
@@ -1149,7 +1173,9 @@ impl LifecycleHooks for SnapshotHook {
         let commit_outcome = tokio::task::spawn_blocking(move || {
             let update_meta = |meta: &mut SessionMeta| {
                 meta.auto_name_from_messages(&snap.messages);
-                meta.updated_at = now;
+                if stamp_activity {
+                    meta.updated_at = now;
+                }
                 meta.turn_count = meta.turn_count.saturating_add(1);
                 meta.message_count = msg_count as u32;
                 // 真实 usage 入场：压缩估算的占用到此作废，后续以本次 turn stat 为准。
@@ -1842,6 +1868,53 @@ mod tests {
         assert_eq!(meta.name, "修复恢复会话名称");
         assert!(!meta.user_renamed);
         assert!(!meta.ai_named);
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_stamps_activity_but_steer_does_not() {
+        let (h, mgr, _d) = hook("activity-prompt");
+        let mut meta = SessionMeta::new("activity-prompt", "/proj", 1);
+        meta.owner = StorageOwner::Native;
+        mgr.write_meta(&meta).unwrap();
+
+        h.user_prompt_submit(&mut "question".to_string())
+            .await
+            .unwrap();
+        let after_prompt = mgr.read_meta("activity-prompt").unwrap().updated_at;
+        assert!(after_prompt > 1, "a real prompt must stamp activity");
+
+        let mut steer =
+            "<user-query>\nchange course\n</user-query>\n\n[jeikcode-steer]\n".to_string();
+        h.user_prompt_submit(&mut steer).await.unwrap();
+        assert_eq!(
+            mgr.read_meta("activity-prompt").unwrap().updated_at,
+            after_prompt,
+            "a mid-turn steer must not move the activity clock"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_keeps_activity_but_normal_terminal_stamps() {
+        let (h, mgr, _d) = hook("activity-stop");
+        let mut meta = SessionMeta::new("activity-stop", "/proj", 1);
+        meta.owner = StorageOwner::Native;
+        mgr.write_meta(&meta).unwrap();
+
+        let convo = convo_with(1);
+        h.turn_complete(&convo, &StopReason::Cancelled, &TurnCtx::default())
+            .await;
+        assert_eq!(
+            mgr.read_meta("activity-stop").unwrap().updated_at,
+            1,
+            "a manual stop must keep the last prompt/terminal time"
+        );
+
+        h.turn_complete(&convo, &StopReason::Stopped, &TurnCtx::default())
+            .await;
+        assert!(
+            mgr.read_meta("activity-stop").unwrap().updated_at > 1,
+            "a completed turn must stamp activity"
+        );
     }
 
     #[tokio::test]

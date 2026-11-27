@@ -49,6 +49,7 @@ import {
   isTerminalNoticeAlreadyExplained,
   noticeAlreadyPresentInMessages,
   filterUnpersistedLocalNotices,
+  mergeUnpersistedLocalNotices,
 } from './chatTerminal.ts';
 import { spliceAuthoritativeDiskTail } from './sessionProjection.ts';
 
@@ -1320,6 +1321,93 @@ test('adoptAuthoritativeDiskTail 兜底去重：按 eventId 与归一化文案�
   assert.equal(noticeAlreadyPresentInMessages(diskTail, localNotes[0]), true);
   assert.equal(noticeAlreadyPresentInMessages(diskTail, localNotes[1]), true);
   assert.equal(noticeAlreadyPresentInMessages(diskTail, localNotes[2]), false);
+});
+
+test('filterUnpersistedLocalNotices 不将磁盘历史页或瞬时系统通知拖到尾切片结尾', () => {
+  const canvas = [
+    {
+      id: 'compact:epoch:8',
+      role: 'system',
+      serverSeq: 512,
+      sourceIndexAuthority: 'disk' as const,
+      parts: [{ kind: 'notice', eventId: 'compact:epoch:8', text: '已折叠工具输出 · 节省 ~10.9K tok' }],
+    },
+    {
+      id: 'compact:epoch:9',
+      role: 'system',
+      sourceIndexAuthority: 'disk' as const,
+      parts: [{ kind: 'notice', eventId: 'compact:epoch:9', text: '已折叠工具输出 · 节省 ~9.4K tok' }],
+    },
+    {
+      id: 'live-transient-1',
+      role: 'system',
+      transient: true,
+      parts: [{ kind: 'notice', eventId: 'live:transient', text: '正在压缩…' }],
+    },
+    {
+      id: 'compact:local:unpersisted',
+      role: 'system',
+      parts: [{ kind: 'notice', eventId: 'compact:local:unpersisted', text: '本地压缩完成' }],
+    },
+  ];
+  const diskTail = [
+    { id: 'm-tail-1', role: 'assistant', serverSeq: 920, parts: [{ kind: 'text', text: 'tail' }] },
+  ];
+  const filtered = filterUnpersistedLocalNotices(canvas, diskTail);
+  assert.deepEqual(filtered.map((n) => n.id), ['compact:local:unpersisted']);
+});
+
+test('mergeUnpersistedLocalNotices 按锚点就位并丢弃窗口外历史通知，绝不堆在结尾', () => {
+  const clean = [
+    { id: 'u-14', role: 'user', turnId: 14, parts: [{ kind: 'text', text: '继续' }] },
+    {
+      id: 'a-14-msg',
+      role: 'assistant',
+      turnId: 14,
+      parts: [{ kind: 'tool', id: 'a-14-anchor:1', text: 'ok' }],
+    },
+    { id: 'a-14-tail', role: 'assistant', turnId: 14, parts: [{ kind: 'text', text: '后续回复' }] },
+  ];
+  const candidates = [
+    {
+      id: 'compact:epoch:10',
+      role: 'system',
+      turnId: 10,
+      parts: [{
+        kind: 'notice',
+        eventId: 'compact:epoch:10',
+        anchorMessageId: 'a-10-missing',
+        text: '已折叠工具输出 · 节省 ~1.1K tok',
+      }],
+    },
+    {
+      id: 'old-unanchored-notice',
+      role: 'system',
+      turnId: 12,
+      parts: [{ kind: 'notice', eventId: 'warn:12', text: '历史轮次提示' }],
+    },
+    {
+      id: 'compact:epoch:16',
+      role: 'system',
+      turnId: 14,
+      parts: [{
+        kind: 'notice',
+        eventId: 'compact:epoch:16',
+        anchorMessageId: 'a-14-anchor',
+        text: '已折叠工具输出 · 节省 ~14.8K tok',
+      }],
+    },
+    {
+      id: 'compact:local:current',
+      role: 'system',
+      parts: [{ kind: 'notice', eventId: 'compact:local:current', text: '本地压缩完成' }],
+    },
+  ];
+  const merged = mergeUnpersistedLocalNotices(clean, candidates);
+  assert.deepEqual(
+    merged.map((m) => m.id),
+    ['u-14', 'a-14-msg', 'compact:epoch:16', 'a-14-tail', 'compact:local:current'],
+  );
 });
 
 

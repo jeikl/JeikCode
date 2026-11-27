@@ -31,6 +31,3 @@ tokio = { version = "1", features = ["test-util"] }
 # Mock HTTP server for the manifest/download tests.
 wiremock = "0.6"
 serial_test = "3"
-
-[target.'cfg(windows)'.dependencies]
-winreg = "0.55"

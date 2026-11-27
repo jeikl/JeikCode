@@ -5,6 +5,9 @@ import { CodeEditorTab } from './CodeEditorTab';
 import { showToast } from './Toast';
 import { parseFilePathAndLines } from '../lib/displayPath';
 import { getSavedPreviewCount, registerPreviewOpenHandler } from '../lib/previewStorage';
+import { fetchGitWorkingDiff } from '../api';
+import { lookupMarkdownGitFile } from '../lib/markdownGitFile';
+import { DiffViewer } from './DiffViewer';
 export { getSavedPreviewCount };
 import {
   bumpReloadToken,
@@ -32,6 +35,14 @@ export interface PreviewPanelProps {
 }
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp']);
+
+type PreviewViewMode = 'preview' | 'edit' | 'diff';
+type ChangedFileInfo = NonNullable<Awaited<ReturnType<typeof lookupMarkdownGitFile>>>;
+interface TabDiffState {
+  loading?: boolean;
+  text?: string;
+  error?: string;
+}
 
 /** 常驻保活的标签上限：超出后淘汰最久未激活的（脏标签有快照，可安全重挂载）。 */
 const MAX_VISITED_PREVIEW_TABS = 8;
@@ -71,9 +82,11 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
     return '';
   });
 
-  // 右侧面板当前激活标签的编辑/预览模式：新标签仍从预览进入（保持原有入口体验），
-  // 但每个标签此后各自记住最后一轮模式，不再随标签切换被写死回预览。
-  const [tabViewModes, setTabViewModes] = useState<Record<string, 'preview' | 'edit'>>({});
+  // 右侧面板当前激活标签的查看模式：预览 / 编辑 / 差异。
+  // 新标签仍从预览进入；每个标签独立记住最后一轮模式，切换标签不会重置。
+  const [tabViewModes, setTabViewModes] = useState<Record<string, PreviewViewMode>>({});
+  const [changedByTab, setChangedByTab] = useState<Record<string, ChangedFileInfo | null>>({});
+  const [diffByTab, setDiffByTab] = useState<Record<string, TabDiffState>>({});
   // 首次激活后才挂载并保活：未被访问过的标签不预加载文件内容。
   const [visitedTabIds, setVisitedTabIds] = useState<Record<string, true>>({});
   const [reloadTokens, setReloadTokens] = useState<Record<string, number>>({});
@@ -89,12 +102,12 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
     });
   }, []);
 
-  const activeViewMode: 'preview' | 'edit' =
+  const activeViewMode: PreviewViewMode =
     (activeTabId ? tabViewModes[activeTabId] : undefined) || 'preview';
 
   const handleViewModeChange = useCallback(
-    (tabId: string, m: 'edit' | 'preview' | 'image' | 'binary') => {
-      if (m !== 'edit' && m !== 'preview') return;
+    (tabId: string, m: PreviewViewMode) => {
+      if (m !== 'edit' && m !== 'preview' && m !== 'diff') return;
       setTabViewModes((prev) => withTabViewMode(prev, tabId, m));
     },
     [],
@@ -119,6 +132,8 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
     setVisitedTabIds((prev) => withoutTabEntry(prev, tabId));
     setReloadTokens((prev) => withoutTabEntry(prev, tabId));
     setDirtyTabIds((prev) => withoutTabEntry(prev, tabId));
+    setChangedByTab((prev) => withoutTabEntry(prev, tabId));
+    setDiffByTab((prev) => withoutTabEntry(prev, tabId));
   }, []);
 
   const hydratedKeyRef = useRef<string>('');
@@ -143,6 +158,8 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
         setVisitedTabIds({});
         setReloadTokens({});
         setDirtyTabIds({});
+        setChangedByTab({});
+        setDiffByTab({});
       }
     } catch {
       setTabs([]);
@@ -243,12 +260,63 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
   // 监听全局打开预览事件并消费懒加载前暂存的打开请求
   useEffect(() => {
     const unregister = registerPreviewOpenHandler((detail) => {
-      if (detail?.filePath) {
-        openTab(detail);
+      if (!detail?.filePath) return;
+      openTab(detail);
+      if (detail.viewMode === 'diff') {
+        const absPath = normalizeToAbsolute(detail.filePath, cwd);
+        const tabId = `preview_${absPath}`;
+        if (detail.changed) {
+          setChangedByTab((prev) => ({ ...prev, [tabId]: detail.changed as ChangedFileInfo }));
+        }
+        setTabViewModes((prev) => withTabViewMode(prev, tabId, 'diff'));
       }
     });
     return unregister;
-  }, [openTab]);
+  }, [openTab, cwd]);
+
+  // 当前右侧文件是否在 Git 工作区有改动：决定是否显示「查看差异」按钮。
+  useEffect(() => {
+    if (!activeTab) return;
+    const tabId = activeTab.id;
+    if (changedByTab[tabId] !== undefined) return;
+    let cancelled = false;
+    lookupMarkdownGitFile(activeTab.filePath, cwd)
+      .then((changed) => {
+        if (!cancelled) setChangedByTab((prev) => ({ ...prev, [tabId]: changed }));
+      })
+      .catch(() => {
+        if (!cancelled) setChangedByTab((prev) => ({ ...prev, [tabId]: null }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab?.id, activeTab?.filePath, cwd, changedByTab]);
+
+  const activeChanged = activeTab ? changedByTab[activeTab.id] : undefined;
+  const activeReload = activeTab ? reloadTokens[activeTab.id] ?? 0 : 0;
+
+  // 右侧 diff 模式：复用主舞台的 DiffViewer，并遵守「只读工作区 diff」语义。
+  useEffect(() => {
+    if (!activeTab || activeViewMode !== 'diff' || !activeChanged) return;
+    const tabId = activeTab.id;
+    let cancelled = false;
+    setDiffByTab((prev) => ({ ...prev, [tabId]: { loading: true } }));
+    fetchGitWorkingDiff(activeChanged.file.path, activeChanged.staged, activeChanged.repoRoot)
+      .then((res) => {
+        if (!cancelled) setDiffByTab((prev) => ({ ...prev, [tabId]: { loading: false, text: res.diff } }));
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          setDiffByTab((prev) => ({
+            ...prev,
+            [tabId]: { loading: false, error: err?.message || String(err) },
+          }));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab?.id, activeViewMode, activeChanged, activeReload]);
 
   // 关闭标签：有未保存修改时先确认，避免静默丢草稿。
   const closeTabNow = (tabId: string) => {
@@ -299,6 +367,8 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
     setVisitedTabIds({});
     setReloadTokens({});
     setDirtyTabIds({});
+    setChangedByTab({});
+    setDiffByTab({});
     setTabs([]);
     setActiveTabId('');
   };
@@ -586,7 +656,21 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
             </button>
           )}
 
-          {activeTab && (
+          {activeTab && activeChanged && (
+            <button
+              type="button"
+              class={'preview-action-btn' + (activeViewMode === 'diff' ? ' active' : '')}
+              onClick={() => handleViewModeChange(activeTab.id, activeViewMode === 'diff' ? 'preview' : 'diff')}
+              title={activeViewMode === 'diff' ? t('editor.switchToPreview') : t('preview.viewDiff')}
+              aria-label={t('preview.viewDiff')}
+            >
+              <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: '10px', letterSpacing: 0 }}>
+                D
+              </span>
+            </button>
+          )}
+
+          {activeTab && activeViewMode !== 'diff' && (
             <button
               type="button"
               class={'preview-action-btn' + (activeViewMode === 'edit' ? ' active' : '')}
@@ -692,30 +776,61 @@ export function PreviewPanel({ cwd, onTabsCountChange, surfaceActive = true }: P
             .filter((tab) => visitedTabIds[tab.id] || tab.id === activeTabId)
             .map((tab) => {
               const isActiveTab = tab.id === activeTabId;
+              const mode = tabViewModes[tab.id] ?? 'preview';
+              const isDiff = mode === 'diff';
+              const changed = changedByTab[tab.id];
+              const diffState = diffByTab[tab.id];
               return (
                 <div
                   key={tab.id}
                   class="preview-editor-slot"
                   style={{ display: isActiveTab ? 'flex' : 'none' }}
                 >
-                  <CodeEditorTab
-                    key={tab.id}
-                    filePath={tab.filePath}
-                    cwd={cwd}
-                    startLine={tab.startLine}
-                    endLine={tab.endLine}
-                    stateKey={previewEditorStateKey(tab.filePath)}
-                    defaultViewMode={tabViewModes[tab.id] ?? 'preview'}
-                    active={surfaceActive && isActiveTab}
-                    restoreFocusOnActivate={false}
-                    reloadToken={reloadTokens[tab.id] ?? 0}
-                    onViewModeChange={(mode) => handleViewModeChange(tab.id, mode)}
-                    onDirtyChange={(dirty) => markTabDirty(tab.id, dirty)}
-                    hideHeaderToolbar={true}
-                    onFileDrop={(path) => openTab({ filePath: path })}
-                    linkTargetContext="right"
-                    onClose={() => handleCloseTab(tab.id)}
-                  />
+                  <div class="preview-editor-pane" style={{ display: isDiff ? 'none' : 'flex' }}>
+                    <CodeEditorTab
+                      key={tab.id}
+                      filePath={tab.filePath}
+                      cwd={cwd}
+                      startLine={tab.startLine}
+                      endLine={tab.endLine}
+                      stateKey={previewEditorStateKey(tab.filePath)}
+                      defaultViewMode={mode === 'diff' ? 'preview' : mode}
+                      active={surfaceActive && isActiveTab && !isDiff}
+                      restoreFocusOnActivate={false}
+                      reloadToken={reloadTokens[tab.id] ?? 0}
+                      onViewModeChange={(m) => {
+                        // diff 模式属于面板级查看模式：编辑器挂载时上报的 preview
+                        // 不能把用户显式进入的 diff 覆盖回预览。
+                        setTabViewModes((prev) => {
+                          if (prev[tab.id] === 'diff' && m === 'preview') return prev;
+                          return withTabViewMode(prev, tab.id, m);
+                        });
+                      }}
+                      onDirtyChange={(dirty) => markTabDirty(tab.id, dirty)}
+                      hideHeaderToolbar={true}
+                      onFileDrop={(path) => openTab({ filePath: path })}
+                      linkTargetContext="right"
+                      onClose={() => handleCloseTab(tab.id)}
+                    />
+                  </div>
+                  {isDiff && (
+                    <div class="preview-diff-slot">
+                      {diffState?.loading || (changed && !diffState) ? (
+                        <div class="preview-diff-status">{t('preview.diffLoading')}</div>
+                      ) : diffState?.error ? (
+                        <div class="preview-diff-status preview-diff-status-error">{t('preview.diffError')}</div>
+                      ) : diffState?.text ? (
+                        <DiffViewer
+                          diffText={diffState.text}
+                          filePath={tab.filePath}
+                          commitHash={changed?.staged ? 'STAGED' : 'WORKING'}
+                          commitMessage={changed?.staged ? t('git.stagedChanges') : t('git.workingTree')}
+                        />
+                      ) : (
+                        <div class="preview-diff-status">{t('preview.diffEmpty')}</div>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })
