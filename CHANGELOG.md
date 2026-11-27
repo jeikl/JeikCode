@@ -21,9 +21,9 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
-## v7.5.4 (2026-11-27)
+## v7.5.5 (2026-11-27)
 
-**v7.5.4 consolidates the entire beta.1 through beta.5 line on top of v7.5.3. It streamlines model reasoning and code search with YAML-only prompt defaults, the `<command_execution>` tuning block, and fact-only `code_explore` output; stabilizes long agentic sessions with reasoning-aware compaction and compaction-protected session ID injection; enforces reversible desktop CLI ownership (#114); upgrades the WebUI editor, right preview/diff routing, elapsed badges, notice reconciliation, and folder pickers; and fixes multi-workspace file browsing on `--dir`-bound remote daemons.**
+**v7.5.5 consolidates the v7.5.4 stable line (beta.1 through beta.5) with follow-up automatic compaction stability fixes. It streamlines model reasoning and code search with YAML-only prompt defaults, the `<command_execution>` tuning block, and fact-only `code_explore` output; stabilizes long agentic sessions with reasoning-aware, bounce-free compaction and compaction-protected session ID injection; enforces reversible desktop CLI ownership (#114); upgrades the WebUI editor, right preview/diff routing, elapsed badges, notice reconciliation, and folder pickers; and fixes multi-workspace file browsing on `--dir`-bound remote daemons.**
 
 - **[Prompts & Code Intelligence] Faster model reasoning and minimal search results**:
   - `assets/prompts/*.yaml` is now the single default prompt source (with user `rules.yaml` override), removing compiled-in prompt fallbacks and legacy `<asking_user>` instructions.
@@ -33,6 +33,7 @@
 - **[Kernel & Compaction] Accurate wire token budgeting and stable escalation**:
   - Excluded unsent historical reasoning from prompt token and utilization estimates whenever `reasoning_history` excludes history, preventing false compaction thrashing far below the context window.
   - Synchronized automatic compaction pressure between continuation checks and compaction planning, raised the stub rewrite minimum size to eliminate nested stubs, and ensured pre-send overflow recovery escalates cleanly across all tiers.
+  - Synchronized stage-1 summary latching across task boundaries, continuation hooks, and mid-turn checks, prevented post-compaction stale usage anchors from triggering an immediate back-to-back second compaction before the next real model reply, and prevented default no-op compaction configurations from emitting spurious overflow compaction events.
   - File-creating `write` tool responses now attach presentation-only unified diffs while stripping them before reaching model prompts.
 
 - **[Session & Daemon] Multi-workspace explorer fix, session ID injection, and unified activity clock**:
@@ -53,7 +54,7 @@
 
 ---
 
-**v7.5.4 正式版完整汇总了 v7.5.3 之后的 beta.1 至 beta.5 迭代成果：提示词收敛为纯 YAML 默认源并加入 `<command_execution>` 推理调优，简化 `code_explore` 为纯事实输出；修复排除思考历史时的 Token 估算与上下文压缩抖动，并加入受压缩保护的会话 ID 单次注入；彻底重写桌面与终端 CLI 归属管理（#114）；带来编辑器软换行与智能差异预览路由、耗时徽章与通知防堆叠修复、原生目录选框优化，以及 `--dir` 远程守护进程跨工作区文件浏览崩溃修复。**
+**v7.5.5 正式版完整汇总了 v7.5.4（beta.1 至 beta.5）全部迭代成果并纳入上下文压缩防连环触发修复：提示词收敛为纯 YAML 默认源并加入 `<command_execution>` 推理调优，简化 `code_explore` 为纯事实输出；进一步完善排除思考历史时的 Token 估算、防压缩后连续重复触发及溢出逐级收敛机制，并加入受压缩保护的会话 ID 单次注入；彻底重写桌面与终端 CLI 归属管理（#114）；带来编辑器软换行与智能差异预览路由、耗时徽章与通知防堆叠修复、原生目录选框优化，以及 `--dir` 远程守护进程跨工作区文件浏览崩溃修复。**
 
 - **[提示词与代码检索] 精简思考开销与纯事实检索结果**：
   - 提示词统一改由 `assets/prompts/*.yaml` 作为唯一默认源（保留用户 `rules.yaml` 覆盖），移除编译期兜底文案及冗余提问规则。
@@ -63,6 +64,7 @@
 - **[内核与上下文压缩] 精准出站 Token 估算与逐级压缩收敛**：
   - 当模型配置排除思考历史时，出站提示词估算与水位判定自动扣除未发送的历史思考内容，杜绝远未达窗口上限时的假性反复压缩。
   - 统一自动压缩与继跑检查的压力口径，提升存根改写最小体积阈值以防嵌套重折，并打通发送前溢出恢复的逐级升级链路。
+  - 统一回合边界、自动续跑钩子与回合内摘要压缩的状态锁存，压缩提交后在收到下一条真实模型回复前改用实际出站消息估算以避免依据旧折算统计连环触发二次压缩，并防止未启用压缩策略的默认内核误触发发送前溢出压缩事件。
   - 新建文件的 `write` 工具响应同步附带人类可读的展示 diff，并在送入模型上下文前自动剥离。
 
 - **[会话与服务端] 跨工作区文件树修复、会话 ID 注入与统一活跃时钟**：
