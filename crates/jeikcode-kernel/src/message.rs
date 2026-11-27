@@ -1422,6 +1422,13 @@ impl CompactionPlan {
 /// compaction, return `CompactionPlan::noop()`; never panic.
 #[async_trait]
 pub trait CompactionStrategy: Send + Sync {
+    /// Whether automatic/emergency compaction passes should consult this strategy.
+    /// [`NoCompaction`] returns `false` so the neutral default kernel never triggers
+    /// automatic or overflow compaction passes (manual `Compact` commands still run).
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
     async fn plan(&self, view: &CompactionView<'_>) -> CompactionPlan;
 
     /// CHEAP, side-effect-free pre-check (NO LLM call): will `plan(view)` perform
@@ -1441,6 +1448,10 @@ pub struct NoCompaction;
 
 #[async_trait]
 impl CompactionStrategy for NoCompaction {
+    fn is_enabled(&self) -> bool {
+        false
+    }
+
     async fn plan(&self, _view: &CompactionView<'_>) -> CompactionPlan {
         CompactionPlan::noop()
     }

@@ -21,7 +21,7 @@ use crate::tool::{MountedTools, ProgressSink, ToolCall, ToolContext, ToolResult}
 use futures::StreamExt;
 use jeikcode_config::i18n;
 use serde_json::{Map, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -1273,6 +1273,7 @@ impl Agent {
             clock: self.clock,
             keep_interrupted_context: self.keep_interrupted_context,
             round_cap_checkpoint: self.round_cap_checkpoint,
+            anchor_stale: AtomicBool::new(false),
         };
         let task = tokio::spawn(running.session_loop(cmd_rx));
         AgentHandle {
@@ -1394,6 +1395,10 @@ struct RunningAgent {
     keep_interrupted_context: bool,
     /// See `AgentBuilder::round_cap_checkpoint`.
     round_cap_checkpoint: bool,
+    /// 提交一次压缩后，幸存助手消息上的 `meta.tokens.prompt` 仅是按字节比例缩放的
+    /// 估算值，不再代表当前前缀的真实上游计数；在收到下一次真实助手回复前保持置位，
+    /// 避免在边界压缩或 `midturn_auto` 刚提交后立即依据旧基线重复触发压缩。
+    anchor_stale: AtomicBool,
 }
 
 impl RunningAgent {
@@ -1443,29 +1448,34 @@ impl RunningAgent {
             .map(|m| m.estimate_tokens_for_wire(include_reasoning) as u64)
             .sum::<u64>()
             .saturating_add(tool_defs_est);
-        let anchored = convo
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == crate::message::Role::Assistant)
-            .and_then(|m| m.meta.as_ref())
-            .and_then(|meta| {
-                let base = if meta.tokens.prompt > 0 {
-                    meta.tokens.prompt.saturating_add(meta.tokens.completion)
-                } else {
-                    meta.used_tokens
-                };
-                if base == 0 || (window > 0 && meta.ctx_window > 0 && meta.ctx_window != window) {
-                    return None;
-                }
-                let tail: u64 = messages
-                    .iter()
-                    .rev()
-                    .take_while(|m| m.role != crate::message::Role::Assistant)
-                    .map(|m| m.estimate_tokens_conservative_for_wire(include_reasoning) as u64)
-                    .sum();
-                Some((base as u64).saturating_add(tail).max(full_bytes))
-            });
+        let anchored = if !self.anchor_stale.load(Ordering::Relaxed) {
+            convo
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == crate::message::Role::Assistant)
+                .and_then(|m| m.meta.as_ref())
+                .and_then(|meta| {
+                    let base = if meta.tokens.prompt > 0 {
+                        meta.tokens.prompt.saturating_add(meta.tokens.completion)
+                    } else {
+                        meta.used_tokens
+                    };
+                    if base == 0 || (window > 0 && meta.ctx_window > 0 && meta.ctx_window != window)
+                    {
+                        return None;
+                    }
+                    let tail: u64 = messages
+                        .iter()
+                        .rev()
+                        .take_while(|m| m.role != crate::message::Role::Assistant)
+                        .map(|m| m.estimate_tokens_conservative_for_wire(include_reasoning) as u64)
+                        .sum();
+                    Some((base as u64).saturating_add(tail).max(full_bytes))
+                })
+        } else {
+            None
+        };
         let est = anchored.unwrap_or_else(|| {
             messages
                 .iter()
@@ -1565,31 +1575,43 @@ impl RunningAgent {
         (ctx_window, used_tokens, utilization)
     }
 
-    async fn compact_before_internal_continuation(
-        &self,
-        convo: &mut Conversation,
-        attempted_stages: &mut [bool; 2],
-        ctx: Option<&TurnCtx>,
-    ) {
-        let Some(trigger) = self.should_compact(convo) else {
-            return;
-        };
+    /// 返回当前触发对应的策略阶段索引：0 = 非摘要阶段（如轻量存根），1 = 摘要阶段。
+    fn compaction_trigger_stage(&self, convo: &Conversation, trigger: &CompactTrigger) -> usize {
         let floor = convo.sacred_floor();
         let (ctx_window, used_tokens, utilization) =
-            self.resolve_compaction_pressure(convo, &trigger);
-        let stage = usize::from(self.compaction.will_summarize(&CompactionView {
+            self.resolve_compaction_pressure(convo, trigger);
+        usize::from(self.compaction.will_summarize(&CompactionView {
             messages: &convo.messages,
             trigger: trigger.clone(),
             ctx_window,
             used_tokens,
             utilization,
             sacred_floor: floor,
-        }));
+        }))
+    }
+
+    async fn compact_before_internal_continuation(
+        &self,
+        convo: &mut Conversation,
+        attempted_stages: &mut [bool; 2],
+        midturn_auto_attempted: &mut bool,
+        ctx: Option<&TurnCtx>,
+    ) {
+        let Some(trigger) = self.should_compact(convo) else {
+            return;
+        };
+        let stage = self.compaction_trigger_stage(convo, &trigger);
         if attempted_stages[stage] {
             return;
         }
         attempted_stages[stage] = true;
-        let _ = self.run_compaction(convo, trigger, ctx).await;
+        let report = self.run_compaction(convo, trigger, ctx).await;
+        // 内部续跑的 stage 1 本质上与回合内 mid-turn Auto 同一摘要阶段；
+        // 若该次尝试未实际移除历史（noop 或仅改写），同步锁存 midturn_auto，
+        // 避免下一轮请求前紧接着重复触发一次无意义的摘要规划。
+        if stage == 1 && !midturn_auto_should_rearm(report) {
+            *midturn_auto_attempted = true;
+        }
     }
 
     /// Run one compaction: build a read-only `CompactionView` over the current
@@ -1678,6 +1700,7 @@ impl RunningAgent {
         let report = convo.commit_prepared(prepared);
         let mut post_compact_notice = None;
         if report.committed {
+            self.anchor_stale.store(true, Ordering::Relaxed);
             let est_before = if used_tokens > 0 {
                 used_tokens as usize
             } else {
@@ -2036,9 +2059,13 @@ impl RunningAgent {
         // compaction opens a NEW epoch, then the fresh user message + turn run
         // append-only on the compacted history. NEVER fired inside run_turn's round
         // loop (that would reopen the within-turn cache break).
-        if let Some(trigger) = self.should_compact(convo) {
-            let _ = self.run_compaction(convo, trigger, None).await;
-        }
+        let boundary_summary_latched = if let Some(trigger) = self.should_compact(convo) {
+            let stage = self.compaction_trigger_stage(convo, &trigger);
+            let report = self.run_compaction(convo, trigger, None).await;
+            stage == 1 && !midturn_auto_should_rearm(report)
+        } else {
+            false
+        };
         // CANCEL = UNDO: remember the history length BEFORE this turn's user
         // message is pushed, so a cancelled turn can roll all the way back to here —
         // the prompt + any partial assistant/tool work leaves NO trace (the TUI
@@ -2099,6 +2126,7 @@ impl RunningAgent {
             rollback_len,
             steer.clone(),
             tool_loop_state.as_mut(),
+            boundary_summary_latched,
         ));
         let mut shutdown = false;
         loop {
@@ -2749,6 +2777,7 @@ impl RunningAgent {
         rollback_len: usize,
         steer: SteerBuf,
         mut tool_loop_state: Option<&mut ToolLoopState>,
+        boundary_summary_latched: bool,
     ) {
         self.hooks.turn_start(convo).await;
         self.rt.emit(AgentEvent::TurnStarted);
@@ -2779,7 +2808,7 @@ impl RunningAgent {
         // normal task-boundary auto-compaction check. Bound the equivalent in-turn
         // opportunity to one attempt per policy stage. A moderate-pressure stub
         // must not block the strategy's later high-pressure summary stage.
-        let mut internal_auto_compaction_attempted_stages = [false; 2];
+        let mut internal_auto_compaction_attempted_stages = [false, boundary_summary_latched];
         // OVERFLOW recovery counter for the CURRENT round: incremented each time a hard
         // context-overflow triggers a compact-and-retry; reset to 0 on a successful open.
         let mut overflow_attempt: u8 = 0;
@@ -2820,7 +2849,7 @@ impl RunningAgent {
         // agents check the context threshold before every model call; we do the
         // same, but at most ONCE per turn so a no-op pass cannot thrash. The
         // 100%-watermark emergency block below remains the hard backstop.
-        let mut midturn_auto_attempted = false;
+        let mut midturn_auto_attempted = boundary_summary_latched;
         // Per-turn state for the always-on coarse fuse. Unlike the exact guard's
         // session-owned streak, this only describes consecutive rounds of this
         // running turn.
@@ -3019,7 +3048,7 @@ impl RunningAgent {
             // turn (stub-only passes exist to protect the prefix cache). If it
             // cannot shrink (single huge input), the emergency block below still
             // owns the hard backstop.
-            if !midturn_auto_attempted {
+            if !midturn_auto_attempted && self.compaction.is_enabled() {
                 let window = self.provider.context_window();
                 let estimated_prompt =
                     self.estimate_wire_prompt_tokens(convo, &messages, tool_defs_est, window);
@@ -3054,6 +3083,7 @@ impl RunningAgent {
                         // prefix (and bust the provider cache) on every round.
                         if !midturn_auto_should_rearm(report) {
                             midturn_auto_attempted = true;
+                            internal_auto_compaction_attempted_stages[1] = true;
                         }
                         messages = convo.model_history();
                         self.hooks.pre_request(&mut messages, &turn_ctx).await;
@@ -3084,7 +3114,8 @@ impl RunningAgent {
                     .iter()
                     .any(|m| m.role == crate::message::Role::Assistant);
                 let mut attempts: u8 = 0;
-                while has_drainable
+                while self.compaction.is_enabled()
+                    && has_drainable
                     && window > 0
                     && self.estimate_wire_prompt_tokens(convo, &messages, tool_defs_est, window)
                         >= limit
@@ -3292,7 +3323,11 @@ impl RunningAgent {
                 // history (sacred floor alone over the window) still terminates by surfacing
                 // the error. This is the ONLY place compaction runs mid-turn, and only after
                 // a real provider rejection — pressure never triggers it.
-                Err(e) if e.is_context_overflow() && overflow_attempt < MAX_OVERFLOW_ATTEMPTS => {
+                Err(e)
+                    if self.compaction.is_enabled()
+                        && e.is_context_overflow()
+                        && overflow_attempt < MAX_OVERFLOW_ATTEMPTS =>
+                {
                     let ov_round = round as u32;
                     let ov_attempt = u32::from(overflow_attempt) + 1;
                     let overflow_event_id = format!("overflow:{}:r{round}", turn_ctx.turn_id);
@@ -4698,6 +4733,7 @@ impl RunningAgent {
             );
             assistant_msg.id = Some(assistant_message_id.clone());
             convo.push(assistant_msg);
+            self.anchor_stale.store(false, Ordering::Relaxed);
             // The initial prompt has now produced its first assistant/tool round.
             // From the next boundary on, parked steers fold normally.
             initial_prompt_round = false;
@@ -4743,6 +4779,7 @@ impl RunningAgent {
                     self.compact_before_internal_continuation(
                         convo,
                         &mut internal_auto_compaction_attempted_stages,
+                        &mut midturn_auto_attempted,
                         Some(&turn_ctx),
                     )
                     .await;
@@ -4787,6 +4824,7 @@ impl RunningAgent {
                     self.compact_before_internal_continuation(
                         convo,
                         &mut internal_auto_compaction_attempted_stages,
+                        &mut midturn_auto_attempted,
                         Some(&turn_ctx),
                     )
                     .await;
